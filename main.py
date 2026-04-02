@@ -55,6 +55,18 @@ def cmd_build_index(args: argparse.Namespace) -> None:
     logging.info("Index built successfully at %s", DB_PATH)
 
 
+def cmd_build_embeddings(args: argparse.Namespace) -> None:
+    from alpha_agents.data.embeddings import build_concept_embeddings
+    from alpha_agents.data.db import get_connection
+    logging.info("Building concept embeddings...")
+    conn = get_connection(DB_PATH)
+    try:
+        n = build_concept_embeddings(conn)
+        logging.info("Embedded %d concepts", n)
+    finally:
+        conn.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AlphaAgents — 新闻驱动的自主选股系统")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细日志输出")
@@ -73,6 +85,10 @@ def main() -> None:
     # build-index
     p_index = subparsers.add_parser("build-index", help="构建股票概念索引")
     p_index.set_defaults(func=cmd_build_index)
+
+    # build-embeddings
+    p_embed = subparsers.add_parser("build-embeddings", help="为概念板块构建语义搜索向量")
+    p_embed.set_defaults(func=cmd_build_embeddings)
 
     args = parser.parse_args()
     load_env()

@@ -192,6 +192,16 @@ def build_index(db_path: Path) -> None:
             "Stocks: %d, Concepts: %d, Constituents mapped: %d/%d",
             len(stock_info), total, concept_success, total,
         )
+
+        # 4. Build concept embeddings for semantic search
+        logger.info("Building concept embeddings...")
+        try:
+            from alpha_agents.data.embeddings import build_concept_embeddings
+            n = build_concept_embeddings(conn)
+            logger.info("Embedded %d concepts for semantic search", n)
+        except Exception as e:
+            logger.warning("Failed to build embeddings (non-fatal): %s", e)
+
     except Exception:
         conn.rollback()
         raise

@@ -37,11 +37,10 @@ def _mock_concept_cons(symbol):
 
 
 def _mock_stock_info():
+    """Mock baostock format: code is 'sh.688001' style, name is 'code_name'."""
     return pd.DataFrame({
-        "代码": ["688001", "688002", "300236"],
-        "名称": ["华兴源创", "睿创微纳", "上海新阳"],
-        "总市值": [10000000000.0, 5000000000.0, 8000000000.0],
-        "行业": ["半导体", "半导体", "化工"],
+        "code": ["sh.688001", "sh.688002", "sz.300236"],
+        "code_name": ["华兴源创", "睿创微纳", "上海新阳"],
     })
 
 

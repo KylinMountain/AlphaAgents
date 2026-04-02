@@ -4,11 +4,14 @@ import logging
 import akshare as ak
 import pandas as pd
 
+from alpha_agents.config import no_proxy
+
 logger = logging.getLogger(__name__)
 
 
 def _fetch_sector_fund_flow() -> pd.DataFrame:
-    return ak.stock_board_concept_fund_flow_ths()
+    with no_proxy():
+        return ak.stock_board_concept_fund_flow_ths()
 
 
 def get_sector_data_fn(sector_name: str) -> str:

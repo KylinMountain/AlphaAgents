@@ -4,11 +4,14 @@ import logging
 import akshare as ak
 import pandas as pd
 
+from alpha_agents.config import no_proxy
+
 logger = logging.getLogger(__name__)
 
 
 def _fetch_news(**kwargs) -> pd.DataFrame:
-    return ak.stock_news_em()
+    with no_proxy():
+        return ak.stock_news_em()
 
 
 def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:

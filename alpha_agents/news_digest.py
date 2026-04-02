@@ -1,6 +1,6 @@
 """Cheap-model news filtering and aggregation layer.
 
-Pre-filters hundreds of raw news items from 6 sources using a cheap LLM
+Pre-filters hundreds of raw news items from 11 sources using a cheap LLM
 before forwarding to the expensive strategist Agent.
 
 Uses OpenAI-compatible SDK so any provider works:
@@ -30,9 +30,17 @@ SYSTEM_PROMPT = """\
 3. 按重要性从高到低排序，重要性相同时按可信度排序（high > medium > low）
 4. 用中文输出
 
+事件分类(category)定义：
+- "政策" — 央行货币政策、财政政策、监管政策、产业政策等政府行为
+- "地缘" — 国际关系、战争冲突、制裁、关税博弈、外交事件
+- "宏观" — 经济数据、就业、通胀、GDP、PMI等宏观指标
+- "行业" — 具体行业/公司层面的重大事件、技术突破、并购重组
+- "市场" — 市场异动、资金流向、流动性事件、黑天鹅
+
 对每个事件，输出以下JSON格式：
 {
   "event": "事件标题",
+  "category": "政策/地缘/宏观/行业/市场",
   "summary": "综合多源信息的事件摘要",
   "importance": 4,
   "credibility": "high/medium/low",

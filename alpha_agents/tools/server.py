@@ -6,6 +6,11 @@ from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
 from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
 from alpha_agents.tools.whitehouse import get_whitehouse_fn
 from alpha_agents.tools.pboc import get_pboc_news_fn
+from alpha_agents.tools.jin10 import get_jin10_fn
+from alpha_agents.tools.xinhua import get_xinhua_fn
+from alpha_agents.tools.fed import get_fed_news_fn
+from alpha_agents.tools.sec import get_sec_news_fn
+from alpha_agents.tools.truthsocial import get_social_media_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
@@ -48,6 +53,36 @@ async def get_pboc_news(args):
     return {"content": [{"type": "text", "text": result}]}
 
 
+@tool("get_jin10", "获取金十数据实时快讯。覆盖全球宏观、外汇、商品。", {"limit": int, "keyword": str})
+async def get_jin10(args):
+    result = get_jin10_fn(limit=args.get("limit", 30), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
+@tool("get_xinhua", "获取新华社财经新闻。国内官方政策信号。", {"limit": int, "keyword": str})
+async def get_xinhua(args):
+    result = get_xinhua_fn(limit=args.get("limit", 20), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
+@tool("get_fed_news", "获取美联储新闻发布。追踪美国货币政策。", {"limit": int, "keyword": str})
+async def get_fed_news(args):
+    result = get_fed_news_fn(limit=args.get("limit", 20), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
+@tool("get_sec_news", "获取SEC新闻发布。追踪美国证券监管动态。", {"limit": int, "keyword": str})
+async def get_sec_news(args):
+    result = get_sec_news_fn(limit=args.get("limit", 20), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
+@tool("get_social_media", "获取特朗普(Truth Social)和马斯克(X)的最新动态。", {"limit": int, "keyword": str})
+async def get_social_media(args):
+    result = get_social_media_fn(limit=args.get("limit", 20), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
 @tool("search_stocks", "根据概念/板块关键词检索相关个股。从本地同花顺概念板块索引中模糊匹配。", {"keyword": str})
 async def search_stocks(args):
     result = search_stocks_fn(keyword=args["keyword"])
@@ -77,7 +112,8 @@ def create_tools_server():
         "alpha-agents-data",
         tools=[
             get_news, get_world_news, get_cls_telegraph, get_wallstreetcn,
-            get_whitehouse, get_pboc_news,
+            get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
+            get_fed_news, get_sec_news, get_social_media,
             search_stocks, get_sector_data, filter_stocks, get_watchlist,
         ],
     )

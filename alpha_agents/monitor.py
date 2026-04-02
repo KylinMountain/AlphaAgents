@@ -10,6 +10,11 @@ from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
 from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
 from alpha_agents.tools.whitehouse import get_whitehouse_fn
 from alpha_agents.tools.pboc import get_pboc_news_fn
+from alpha_agents.tools.jin10 import get_jin10_fn
+from alpha_agents.tools.xinhua import get_xinhua_fn
+from alpha_agents.tools.fed import get_fed_news_fn
+from alpha_agents.tools.sec import get_sec_news_fn
+from alpha_agents.tools.truthsocial import get_social_media_fn
 from alpha_agents.news_digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 
@@ -50,6 +55,11 @@ class NewsMonitor:
             ("华尔街见闻", lambda: get_wallstreetcn_fn(limit=NEWS_FETCH_LIMIT)),
             ("白宫", lambda: get_whitehouse_fn(limit=10)),
             ("人民银行", lambda: get_pboc_news_fn(limit=10)),
+            ("金十数据", lambda: get_jin10_fn(limit=NEWS_FETCH_LIMIT)),
+            ("新华社", lambda: get_xinhua_fn(limit=20)),
+            ("美联储", lambda: get_fed_news_fn(limit=10)),
+            ("SEC", lambda: get_sec_news_fn(limit=10)),
+            ("社交媒体", lambda: get_social_media_fn(limit=20)),
         ]
         for name, fetch in sources:
             try:

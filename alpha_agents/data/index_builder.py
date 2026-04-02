@@ -36,10 +36,12 @@ def _fetch_concept_names_akshare() -> pd.DataFrame:
 
 
 def _fetch_concept_constituents_akshare(symbol: str) -> pd.DataFrame:
-    """Fetch constituents of a THS concept board via akshare."""
+    """Fetch constituents of a concept board via akshare (eastmoney)."""
     import akshare as ak
     try:
-        return ak.stock_board_concept_cons_ths(symbol=symbol)
+        df = ak.stock_board_concept_cons_em(symbol=symbol)
+        # Normalize column names: EM uses "代码" for stock code
+        return df
     except Exception:
         logger.warning("Failed to fetch constituents for concept: %s", symbol)
         return pd.DataFrame({"代码": [], "名称": []})
@@ -80,8 +82,10 @@ def build_index(db_path: Path) -> None:
         logger.info("Fetching concept names via akshare...")
         concept_names_df = _fetch_concept_names()
 
+        # Column name varies by akshare version: "概念名称" or "name"
+        name_col = "name" if "name" in concept_names_df.columns else "概念名称"
         for _, row in concept_names_df.iterrows():
-            concept_name = str(row["概念名称"])
+            concept_name = str(row[name_col])
             conn.execute(
                 "INSERT OR REPLACE INTO concepts (name, source) VALUES (?, 'ths')",
                 (concept_name,),
@@ -93,8 +97,9 @@ def build_index(db_path: Path) -> None:
             # 3. Fetch constituents for each concept
             logger.info("Fetching constituents for: %s", concept_name)
             cons_df = _fetch_concept_constituents(concept_name)
+            code_col = "代码" if "代码" in cons_df.columns else "code"
             for _, stock_row in cons_df.iterrows():
-                stock_code = str(stock_row["代码"])
+                stock_code = str(stock_row[code_col])
                 conn.execute(
                     "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
                     (concept_id, stock_code),

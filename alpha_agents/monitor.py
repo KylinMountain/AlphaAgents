@@ -96,8 +96,9 @@ class NewsMonitor:
                     continue
 
                 logger.info(
-                    "Digest produced %d events (top: %s, importance=%d)",
+                    "Digest produced %d events (top: [%s] %s, importance=%d)",
                     len(events),
+                    events[0].get("category", "?"),
                     events[0].get("event", "?"),
                     events[0].get("importance", 0),
                 )

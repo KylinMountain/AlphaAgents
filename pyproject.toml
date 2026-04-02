@@ -1,0 +1,23 @@
+[project]
+name = "alpha-agents"
+version = "0.1.0"
+description = "News-driven autonomous stock screening system"
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk",
+    "akshare",
+    "baostock",
+    "anyio",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+alpha-agents = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["alpha_agents*"]

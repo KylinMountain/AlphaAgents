@@ -10,6 +10,7 @@ from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
 from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
 from alpha_agents.tools.whitehouse import get_whitehouse_fn
 from alpha_agents.tools.pboc import get_pboc_news_fn
+from alpha_agents.news_digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 
 logger = logging.getLogger(__name__)
@@ -39,45 +40,67 @@ class NewsMonitor:
 
         return new_items
 
+    def _fetch_all_sources(self) -> list[dict]:
+        """Fetch from all news sources, return combined list."""
+        news_items: list[dict] = []
+        sources = [
+            ("东方财富", lambda: get_news_fn(limit=NEWS_FETCH_LIMIT)),
+            ("国际RSS", lambda: get_world_news_fn(limit=NEWS_FETCH_LIMIT)),
+            ("财联社电报", lambda: get_cls_telegraph_fn(limit=NEWS_FETCH_LIMIT)),
+            ("华尔街见闻", lambda: get_wallstreetcn_fn(limit=NEWS_FETCH_LIMIT)),
+            ("白宫", lambda: get_whitehouse_fn(limit=10)),
+            ("人民银行", lambda: get_pboc_news_fn(limit=10)),
+        ]
+        for name, fetch in sources:
+            try:
+                data = json.loads(fetch())
+                items = data.get("news", [])
+                news_items.extend(items)
+                if items:
+                    logger.debug("Fetched %d items from %s", len(items), name)
+            except Exception:
+                logger.warning("Failed to fetch from %s", name, exc_info=True)
+        return news_items
+
     async def run(self) -> None:
         logger.info("News monitor started. Interval: %ds", self.interval)
         while True:
             try:
-                # Fetch from all news sources
-                news_items: list[dict] = []
-                sources = [
-                    ("东方财富", lambda: get_news_fn(limit=NEWS_FETCH_LIMIT)),
-                    ("国际RSS", lambda: get_world_news_fn(limit=NEWS_FETCH_LIMIT)),
-                    ("财联社电报", lambda: get_cls_telegraph_fn(limit=NEWS_FETCH_LIMIT)),
-                    ("华尔街见闻", lambda: get_wallstreetcn_fn(limit=NEWS_FETCH_LIMIT)),
-                    ("白宫", lambda: get_whitehouse_fn(limit=10)),
-                    ("人民银行", lambda: get_pboc_news_fn(limit=10)),
-                ]
-                for name, fetch in sources:
-                    try:
-                        data = json.loads(fetch())
-                        items = data.get("news", [])
-                        news_items.extend(items)
-                        if items:
-                            logger.debug("Fetched %d items from %s", len(items), name)
-                    except Exception:
-                        logger.warning("Failed to fetch from %s", name, exc_info=True)
+                # 1. Fetch from all sources
+                raw_items = self._fetch_all_sources()
+                new_items = self.deduplicate(raw_items)
 
-                new_items = self.deduplicate(news_items)
-                if new_items:
-                    logger.info("Found %d new news items", len(new_items))
-                    news_summary = "\n".join(
-                        f"- [{item['time']}] {item['title']}: {item['summary']}"
-                        for item in new_items
-                    )
-                    prompt = (
-                        f"以下是最新获取的{len(new_items)}条财经新闻，请分析是否有值得关注的事件，"
-                        f"如有，自主完成完整的分析流程并输出推荐报告：\n\n{news_summary}"
-                    )
-                    result = await run_analysis(prompt)
-                    print(result)
-                else:
+                if not new_items:
                     logger.debug("No new news items")
+                    await asyncio.sleep(self.interval)
+                    continue
+
+                logger.info("Found %d new news items, running digest...", len(new_items))
+
+                # 2. Cheap model pre-filters and aggregates into events
+                events = await digest_news(new_items)
+
+                if not events:
+                    logger.info("No significant events after digest filtering")
+                    await asyncio.sleep(self.interval)
+                    continue
+
+                logger.info(
+                    "Digest produced %d events (top: %s, importance=%d)",
+                    len(events),
+                    events[0].get("event", "?"),
+                    events[0].get("importance", 0),
+                )
+
+                # 3. Feed digested events to the expensive strategist Agent
+                events_json = json.dumps(events, ensure_ascii=False, indent=2)
+                prompt = (
+                    f"以下是经过预处理的{len(events)}条重要事件摘要，"
+                    f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
+                    f"{events_json}"
+                )
+                result = await run_analysis(prompt)
+                print(result)
 
             except Exception:
                 logger.exception("Error in monitor loop")

@@ -1,3 +1,5 @@
+import os
+
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock
 
 from alpha_agents.config import PROMPTS_DIR
@@ -9,11 +11,19 @@ def _build_options(system_prompt: str) -> ClaudeAgentOptions:
     tools_server = create_tools_server()
     agent_name, agent_def = get_geopolitical_agent()
 
+    # Pass API key and base URL to the agent SDK session
+    env = {}
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+    if os.environ.get("ANTHROPIC_BASE_URL"):
+        env["ANTHROPIC_BASE_URL"] = os.environ["ANTHROPIC_BASE_URL"]
+
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers={"alpha-data": tools_server},
         allowed_tools=["Agent", "WebSearch", "WebFetch"],
         agents={agent_name: agent_def},
+        env=env,
     )
 
 

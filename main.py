@@ -1,9 +1,24 @@
 import argparse
 import asyncio
 import logging
+import os
 import sys
+from pathlib import Path
 
 from alpha_agents.agents.strategist import run_analysis
+
+
+def load_env() -> None:
+    """Load .env file from project root if it exists."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
 from alpha_agents.monitor import NewsMonitor
 from alpha_agents.data.index_builder import build_index
 from alpha_agents.config import DB_PATH, MONITOR_INTERVAL_SECONDS
@@ -60,6 +75,7 @@ def main() -> None:
     p_index.set_defaults(func=cmd_build_index)
 
     args = parser.parse_args()
+    load_env()
     setup_logging(args.verbose)
     args.func(args)
 

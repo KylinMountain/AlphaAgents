@@ -1,6 +1,7 @@
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from alpha_agents.tools.news import get_news_fn
+from alpha_agents.tools.world_news import get_world_news_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
@@ -10,6 +11,12 @@ from alpha_agents.tools.watchlist import get_watchlist_fn
 @tool("get_news", "获取最新财经新闻。可按关键词过滤。", {"limit": int, "keyword": str})
 async def get_news(args):
     result = get_news_fn(limit=args.get("limit", 50), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
+@tool("get_world_news", "获取国际新闻（路透社、AP、BBC、CNBC等）。用于获取地缘政治、国际时事等信息。", {"limit": int, "keyword": str})
+async def get_world_news(args):
+    result = get_world_news_fn(limit=args.get("limit", 30), keyword=args.get("keyword"))
     return {"content": [{"type": "text", "text": result}]}
 
 
@@ -40,5 +47,5 @@ async def get_watchlist(args):
 def create_tools_server():
     return create_sdk_mcp_server(
         "alpha-agents-data",
-        tools=[get_news, search_stocks, get_sector_data, filter_stocks, get_watchlist],
+        tools=[get_news, get_world_news, search_stocks, get_sector_data, filter_stocks, get_watchlist],
     )

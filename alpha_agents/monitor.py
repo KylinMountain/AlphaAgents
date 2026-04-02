@@ -5,6 +5,7 @@ from collections import deque
 
 from alpha_agents.config import MONITOR_INTERVAL_SECONDS, NEWS_FETCH_LIMIT
 from alpha_agents.tools.news import get_news_fn
+from alpha_agents.tools.world_news import get_world_news_fn
 from alpha_agents.agents.strategist import run_analysis
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,14 @@ class NewsMonitor:
         logger.info("News monitor started. Interval: %ds", self.interval)
         while True:
             try:
-                raw = get_news_fn(limit=NEWS_FETCH_LIMIT)
-                news_data = json.loads(raw)
-                news_items = news_data.get("news", [])
+                # Fetch both domestic and international news
+                domestic_raw = get_news_fn(limit=NEWS_FETCH_LIMIT)
+                domestic_data = json.loads(domestic_raw)
+                news_items = domestic_data.get("news", [])
+
+                world_raw = get_world_news_fn(limit=NEWS_FETCH_LIMIT)
+                world_data = json.loads(world_raw)
+                news_items.extend(world_data.get("news", []))
 
                 new_items = self.deduplicate(news_items)
                 if new_items:

@@ -191,6 +191,9 @@ cython_debug/
 # SQLite databases
 *.db
 
+# ChromaDB local vector store
+alpha_agents/data/chroma/
+
 # Ruff stuff:
 .ruff_cache/
 

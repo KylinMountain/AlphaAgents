@@ -19,5 +19,12 @@ dev = [
 [project.scripts]
 alpha-agents = "main:main"
 
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["alpha_agents*"]
+
+[tool.uv]
+package = true

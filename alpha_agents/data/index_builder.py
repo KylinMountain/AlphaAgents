@@ -1,8 +1,14 @@
 import logging
+import time
 from pathlib import Path
 
 import baostock as bs
 import pandas as pd
+import py_mini_racer
+import requests
+from bs4 import BeautifulSoup
+
+from akshare.datasets import get_ths_js
 
 from alpha_agents.config import no_proxy
 from alpha_agents.data.db import get_connection, init_db
@@ -45,32 +51,62 @@ def _fetch_industry_baostock() -> pd.DataFrame:
         bs.logout()
 
 
-def _fetch_concept_names_akshare() -> pd.DataFrame:
-    """Fetch THS concept board names via akshare."""
+def _get_ths_headers() -> dict:
+    """Generate THS auth headers with v cookie (same method akshare uses)."""
+    js_code = py_mini_racer.MiniRacer()
+    with open(get_ths_js("ths.js"), encoding="utf-8") as f:
+        js_content = f.read()
+    js_code.eval(js_content)
+    v_code = js_code.call("v")
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Cookie": f"v={v_code}",
+        "Referer": "https://q.10jqka.com.cn/gn/",
+    }
+
+
+def _fetch_concept_names_ths() -> pd.DataFrame:
+    """Fetch THS concept board names via akshare (10jqka.com, works through proxy)."""
     import akshare as ak
     with no_proxy():
         return ak.stock_board_concept_name_ths()
 
 
-def _fetch_concept_constituents_akshare(symbol: str) -> pd.DataFrame:
-    """Fetch constituents of a concept board via akshare (eastmoney).
+def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
+    """Scrape concept constituents from THS detail page (10jqka.com).
 
-    NOTE: This requires eastmoney.com to be accessible (may need Clash DIRECT rule).
-    If it fails, concept names are still indexed but without stock mappings.
+    Returns top stocks from the first page (usually 10-20).
+    THS blocks ajax pagination but the first page with auth cookie works.
     """
-    import akshare as ak
-    try:
-        with no_proxy():
-            df = ak.stock_board_concept_cons_em(symbol=symbol)
-        return df
-    except Exception:
-        return pd.DataFrame()
+    headers = _get_ths_headers()
+    url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
+
+    with no_proxy():
+        r = requests.get(url, headers=headers, timeout=10)
+
+    if r.status_code != 200:
+        return []
+
+    soup = BeautifulSoup(r.text, "lxml")
+    table = soup.find("table", class_="m-table")
+    if not table:
+        return []
+
+    stocks = []
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) >= 3:
+            stocks.append({
+                "code": cells[1].text.strip(),
+                "name": cells[2].text.strip(),
+            })
+    return stocks
 
 
 # Module-level aliases for easy mocking in tests
 _fetch_stock_info = _fetch_stock_info_baostock
-_fetch_concept_names = _fetch_concept_names_akshare
-_fetch_concept_constituents = _fetch_concept_constituents_akshare
+_fetch_concept_names = _fetch_concept_names_ths
+_fetch_concept_constituents = _fetch_concept_constituents_ths
 
 
 def build_index(db_path: Path) -> None:
@@ -109,15 +145,20 @@ def build_index(db_path: Path) -> None:
                     (industry, code),
                 )
 
-        # 3. THS concept names (works via 10jqka.com)
-        logger.info("Fetching concept names via akshare (THS)...")
+        # 3. THS concept names + constituents (all via 10jqka.com, no eastmoney)
+        logger.info("Fetching concept names via THS...")
         concept_names_df = _fetch_concept_names()
         name_col = "name" if "name" in concept_names_df.columns else "概念名称"
+        code_col = "code" if "code" in concept_names_df.columns else "概念代码"
 
         concept_success = 0
         concept_fail = 0
-        for _, row in concept_names_df.iterrows():
+        total = len(concept_names_df)
+
+        for i, (_, row) in enumerate(concept_names_df.iterrows()):
             concept_name = str(row[name_col])
+            concept_code = str(row[code_col])
+
             conn.execute(
                 "INSERT OR REPLACE INTO concepts (name, source) VALUES (?, 'ths')",
                 (concept_name,),
@@ -126,35 +167,31 @@ def build_index(db_path: Path) -> None:
                 "SELECT id FROM concepts WHERE name = ?", (concept_name,)
             ).fetchone()["id"]
 
-            # 4. Concept constituents via eastmoney (may fail if proxy blocks it)
-            cons_df = _fetch_concept_constituents(concept_name)
-            if cons_df.empty:
+            # Scrape constituents from THS detail page
+            stocks = _fetch_concept_constituents(concept_code)
+            if not stocks:
                 concept_fail += 1
-                continue
+            else:
+                concept_success += 1
+                for stock in stocks:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
+                        (concept_id, stock["code"]),
+                    )
 
-            concept_success += 1
-            code_col = "代码" if "代码" in cons_df.columns else "code"
-            for _, stock_row in cons_df.iterrows():
-                stock_code = str(stock_row[code_col])
-                conn.execute(
-                    "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
-                    (concept_id, stock_code),
-                )
+            if (i + 1) % 50 == 0:
+                logger.info("Progress: %d/%d concepts processed", i + 1, total)
+                conn.commit()  # Intermediate commit
+
+            time.sleep(0.3)  # Be nice to THS servers
 
         conn.commit()
 
-        total = concept_success + concept_fail
         logger.info("Index build complete.")
         logger.info(
             "Stocks: %d, Concepts: %d, Constituents mapped: %d/%d",
             len(stock_info), total, concept_success, total,
         )
-        if concept_fail > 0 and concept_success == 0:
-            logger.warning(
-                "No concept constituents were fetched. "
-                "If you're behind a proxy, add DIRECT rule for eastmoney.com in Clash, "
-                "then re-run build-index."
-            )
     except Exception:
         conn.rollback()
         raise

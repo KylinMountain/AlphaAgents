@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-import akshare as ak
+import baostock as bs
 import pandas as pd
 
 from alpha_agents.data.db import get_connection, init_db
@@ -9,11 +9,35 @@ from alpha_agents.data.db import get_connection, init_db
 logger = logging.getLogger(__name__)
 
 
-def _fetch_concept_names() -> pd.DataFrame:
+def _fetch_stock_info_baostock() -> pd.DataFrame:
+    """Fetch all A-share stock basic info via baostock (TCP, no HTTP proxy issues)."""
+    lg = bs.login()
+    if lg.error_code != "0":
+        raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+
+    try:
+        rs = bs.query_stock_basic(code_name="", code="")
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+        df = pd.DataFrame(rows, columns=rs.fields)
+        # Filter to A-shares that are currently listed (status=1)
+        df = df[df["type"] == "1"]  # type 1 = stock
+        df = df[df["status"] == "1"]  # status 1 = listed
+        return df
+    finally:
+        bs.logout()
+
+
+def _fetch_concept_names_akshare() -> pd.DataFrame:
+    """Fetch THS concept board names via akshare."""
+    import akshare as ak
     return ak.stock_board_concept_name_ths()
 
 
-def _fetch_concept_constituents(symbol: str) -> pd.DataFrame:
+def _fetch_concept_constituents_akshare(symbol: str) -> pd.DataFrame:
+    """Fetch constituents of a THS concept board via akshare."""
+    import akshare as ak
     try:
         return ak.stock_board_concept_cons_ths(symbol=symbol)
     except Exception:
@@ -21,8 +45,10 @@ def _fetch_concept_constituents(symbol: str) -> pd.DataFrame:
         return pd.DataFrame({"代码": [], "名称": []})
 
 
-def _fetch_stock_info() -> pd.DataFrame:
-    return ak.stock_zh_a_spot_em()
+# Module-level aliases for easy mocking in tests
+_fetch_stock_info = _fetch_stock_info_baostock
+_fetch_concept_names = _fetch_concept_names_akshare
+_fetch_concept_constituents = _fetch_concept_constituents_akshare
 
 
 def build_index(db_path: Path) -> None:
@@ -35,23 +61,23 @@ def build_index(db_path: Path) -> None:
         conn.execute("DELETE FROM concepts")
         conn.execute("DELETE FROM stocks")
 
-        # 1. Fetch and insert stock info
-        logger.info("Fetching stock info...")
+        # 1. Fetch and insert stock info via baostock
+        logger.info("Fetching stock info via baostock...")
         stock_info = _fetch_stock_info()
         for _, row in stock_info.iterrows():
-            code = str(row.get("代码", ""))
-            name = str(row.get("名称", ""))
-            market_cap = float(row["总市值"]) if pd.notna(row.get("总市值")) else None
-            industry = str(row.get("行业", "")) if pd.notna(row.get("行业")) else None
+            # baostock code format: sh.600519 / sz.000001
+            raw_code = str(row.get("code", ""))
+            code = raw_code.split(".")[-1] if "." in raw_code else raw_code
+            name = str(row.get("code_name", ""))
             is_st = 1 if "ST" in name or "st" in name else 0
             conn.execute(
                 "INSERT OR REPLACE INTO stocks (code, name, market_cap, industry, is_st, is_suspended) "
-                "VALUES (?, ?, ?, ?, ?, 0)",
-                (code, name, market_cap, industry, is_st),
+                "VALUES (?, ?, NULL, NULL, ?, 0)",
+                (code, name, is_st),
             )
 
-        # 2. Fetch concept names
-        logger.info("Fetching concept names...")
+        # 2. Fetch concept names via akshare
+        logger.info("Fetching concept names via akshare...")
         concept_names_df = _fetch_concept_names()
 
         for _, row in concept_names_df.iterrows():

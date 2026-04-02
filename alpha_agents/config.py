@@ -8,7 +8,13 @@ DATA_DIR = PROJECT_ROOT / "alpha_agents" / "data"
 PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"
+CHROMA_PATH = DATA_DIR / "chroma"
 WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
+
+# Embedding settings (SiliconFlow free BGE model)
+SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+EMBEDDING_MODEL = "BAAI/bge-m3"
 
 # News monitor settings
 MONITOR_INTERVAL_SECONDS = 300

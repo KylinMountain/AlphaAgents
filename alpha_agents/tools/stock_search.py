@@ -51,24 +51,14 @@ def _search_like(conn, keyword: str) -> list[dict]:
 
 
 def _search_semantic(conn, keyword: str, top_k: int = 10) -> list[dict]:
-    """Semantic search using embeddings (if available)."""
+    """Semantic search using ChromaDB embeddings (if available)."""
     try:
         from alpha_agents.data.embeddings import search_concepts_semantic
-    except ImportError:
-        logger.debug("Embedding module not available, skipping semantic search")
-        return []
-
-    # Check if embedding column exists and has data
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) as cnt FROM concepts WHERE embedding IS NOT NULL"
-        ).fetchone()
-        if row["cnt"] == 0:
-            return []
+        concept_matches = search_concepts_semantic(conn, keyword, top_k=top_k)
     except Exception:
+        logger.debug("Semantic search unavailable, skipping", exc_info=True)
         return []
 
-    concept_matches = search_concepts_semantic(conn, keyword, top_k=top_k)
     matches = []
     for cm in concept_matches:
         stocks = _fetch_stocks_for_concept(conn, cm["id"])

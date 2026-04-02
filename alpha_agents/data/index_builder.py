@@ -4,6 +4,7 @@ from pathlib import Path
 import baostock as bs
 import pandas as pd
 
+from alpha_agents.config import no_proxy
 from alpha_agents.data.db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
@@ -32,15 +33,16 @@ def _fetch_stock_info_baostock() -> pd.DataFrame:
 def _fetch_concept_names_akshare() -> pd.DataFrame:
     """Fetch THS concept board names via akshare."""
     import akshare as ak
-    return ak.stock_board_concept_name_ths()
+    with no_proxy():
+        return ak.stock_board_concept_name_ths()
 
 
 def _fetch_concept_constituents_akshare(symbol: str) -> pd.DataFrame:
     """Fetch constituents of a concept board via akshare (eastmoney)."""
     import akshare as ak
     try:
-        df = ak.stock_board_concept_cons_em(symbol=symbol)
-        # Normalize column names: EM uses "代码" for stock code
+        with no_proxy():
+            df = ak.stock_board_concept_cons_em(symbol=symbol)
         return df
     except Exception:
         logger.warning("Failed to fetch constituents for concept: %s", symbol)

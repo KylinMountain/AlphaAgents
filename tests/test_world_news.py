@@ -41,45 +41,34 @@ def test_parse_rss_invalid_xml():
     assert items == []
 
 
-def test_get_world_news_returns_json():
+def _mock_client_session():
+    mock_client = MagicMock()
     mock_resp = MagicMock()
     mock_resp.text = SAMPLE_RSS
     mock_resp.raise_for_status = MagicMock()
+    mock_client.get.return_value = mock_resp
 
-    with patch("alpha_agents.tools.world_news.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
+    cm = MagicMock()
+    cm.__enter__ = lambda s: mock_client
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
 
+
+def test_get_world_news_returns_json():
+    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(limit=10))
         assert result["count"] > 0
         assert result["news"][0]["title"] == "Trump announces new tariffs on China"
 
 
 def test_get_world_news_keyword_filter():
-    mock_resp = MagicMock()
-    mock_resp.text = SAMPLE_RSS
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.world_news.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(keyword="trump"))
         assert result["count"] > 0
         assert all("trump" in n["title"].lower() for n in result["news"])
 
 
 def test_get_world_news_respects_limit():
-    mock_resp = MagicMock()
-    mock_resp.text = SAMPLE_RSS
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.world_news.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(limit=1))
         assert result["count"] == 1

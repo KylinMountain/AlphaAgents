@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime
 
-import httpx
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +18,13 @@ DEFAULT_PARAMS = {
     "os": "web",
     "sv": "8.4.6",
 }
-TIMEOUT = 15
 
 
 def _fetch_telegraph(limit: int = 30) -> list[dict]:
     """Fetch raw telegraph items from CLS API."""
     params = {**DEFAULT_PARAMS, "rn": str(limit)}
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-        resp = client.get(API_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = fetch(API_URL, params=params)
+    data = resp.json()
     return data.get("data", {}).get("roll_data", [])
 
 

@@ -5,12 +5,12 @@ from pathlib import Path
 import baostock as bs
 import pandas as pd
 import py_mini_racer
-import requests
 from bs4 import BeautifulSoup
 
 from akshare.datasets import get_ths_js
 
 from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch as http_fetch, get_headers
 from alpha_agents.data.db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
@@ -78,14 +78,14 @@ def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
     Returns top stocks from the first page (usually 10-20).
     THS blocks ajax pagination but the first page with auth cookie works.
     """
-    headers = _get_ths_headers()
+    ths_headers = _get_ths_headers()
     url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
 
     with no_proxy():
-        r = requests.get(url, headers=headers, timeout=10)
-
-    if r.status_code != 200:
-        return []
+        try:
+            r = http_fetch(url, headers=ths_headers)
+        except Exception:
+            return []
 
     soup = BeautifulSoup(r.text, "lxml")
     table = soup.find("table", class_="m-table")

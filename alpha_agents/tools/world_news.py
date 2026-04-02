@@ -8,7 +8,7 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-import httpx
+from alpha_agents.http_client import client_session
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,6 @@ RSS_FEEDS = [
     ("Google News World", "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en"),
     ("Google News Business", "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en"),
 ]
-
-TIMEOUT = 15
-
 
 def _parse_rss(xml_text: str, source: str) -> list[dict]:
     """Parse RSS 2.0 or Atom feed into a list of news items."""
@@ -77,7 +74,7 @@ def get_world_news_fn(limit: int = 30, keyword: str | None = None) -> str:
     """
     all_news: list[dict] = []
 
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
+    with client_session() as client:
         for source_name, url in RSS_FEEDS:
             try:
                 resp = client.get(url)

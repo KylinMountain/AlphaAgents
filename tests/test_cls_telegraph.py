@@ -55,16 +55,14 @@ def test_parse_item_missing_fields():
     assert item["tags"] == []
 
 
-def test_get_cls_telegraph_returns_json():
+def _mock_fetch(response_json):
     mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_API_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = response_json
+    return mock_resp
 
-    with patch("alpha_agents.tools.cls_telegraph.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
 
+def test_get_cls_telegraph_returns_json():
+    with patch("alpha_agents.tools.cls_telegraph.fetch", return_value=_mock_fetch(SAMPLE_API_RESPONSE)):
         result = json.loads(get_cls_telegraph_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "央行宣布降准50个基点"
@@ -72,45 +70,21 @@ def test_get_cls_telegraph_returns_json():
 
 
 def test_get_cls_telegraph_keyword_filter():
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_API_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.cls_telegraph.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.cls_telegraph.fetch", return_value=_mock_fetch(SAMPLE_API_RESPONSE)):
         result = json.loads(get_cls_telegraph_fn(keyword="茅台"))
         assert result["count"] == 1
         assert "茅台" in result["news"][0]["title"]
 
 
 def test_get_cls_telegraph_respects_limit():
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_API_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.cls_telegraph.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.cls_telegraph.fetch", return_value=_mock_fetch(SAMPLE_API_RESPONSE)):
         result = json.loads(get_cls_telegraph_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_cls_telegraph_handles_error():
-    with patch("alpha_agents.tools.cls_telegraph.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.side_effect = httpx.ConnectError("connection failed")
-
+    with patch("alpha_agents.tools.cls_telegraph.fetch", side_effect=Exception("connection failed")):
         result = json.loads(get_cls_telegraph_fn())
         assert result["count"] == 0
         assert result["news"] == []
         assert "error" in result
-
-
-# Need httpx imported for the error test
-import httpx

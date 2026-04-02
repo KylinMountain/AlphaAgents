@@ -7,12 +7,11 @@ import json
 import logging
 from datetime import datetime, timezone
 
-import httpx
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api-one-wscn.awtmt.com/apiv1/content/lives"
-TIMEOUT = 15
 
 
 def _parse_items(data: dict) -> list[dict]:
@@ -53,13 +52,11 @@ def get_wallstreetcn_fn(limit: int = 30, keyword: str | None = None) -> str:
     all_news: list[dict] = []
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-            resp = client.get(API_URL, params={"channel": "global-channel", "limit": 20})
-            resp.raise_for_status()
-            data = resp.json()
-            items = _parse_items(data)
-            all_news.extend(items)
-            logger.debug("Fetched %d items from 华尔街见闻", len(items))
+        resp = fetch(API_URL, params={"channel": "global-channel", "limit": 20})
+        data = resp.json()
+        items = _parse_items(data)
+        all_news.extend(items)
+        logger.debug("Fetched %d items from 华尔街见闻", len(items))
     except Exception as e:
         logger.warning("Failed to fetch 华尔街见闻: %s", e)
 

@@ -1,25 +1,24 @@
 """Cheap-model news filtering and aggregation layer.
 
-Pre-filters hundreds of raw news items from 6 sources (domestic finance,
-international RSS, CLS telegraph, WallStreetCN, White House, PBOC) using
-a cheap LLM (Haiku) before forwarding to the expensive Agent.
+Pre-filters hundreds of raw news items from 6 sources using a cheap LLM
+before forwarding to the expensive strategist Agent.
 
-Deduplicates, merges related stories into events, scores importance,
-and classifies market impact dimensions.
+Uses OpenAI-compatible SDK so any provider works:
+- SiliconFlow (default, free tier Qwen)
+- OpenAI, Anthropic, DeepSeek, Ollama, vLLM, etc.
+
+Configure via env vars: DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 """
 
 import json
 import logging
-import os
 
-import httpx
+from openai import AsyncOpenAI
+
+from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
-ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
-DEFAULT_BASE_URL = "https://api.anthropic.com"
-MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 4096
 
 SYSTEM_PROMPT = """\
@@ -73,10 +72,8 @@ def _parse_response(text: str) -> list[dict]:
     text = text.strip()
     # Strip markdown code fences if present
     if text.startswith("```"):
-        # Remove opening fence (possibly ```json)
         first_newline = text.index("\n")
         text = text[first_newline + 1:]
-        # Remove closing fence
         if text.endswith("```"):
             text = text[:-3].strip()
 
@@ -85,7 +82,7 @@ def _parse_response(text: str) -> list[dict]:
         logger.warning("LLM returned non-list JSON, wrapping: %s", type(events))
         events = [events]
 
-    # Filter importance >= 3 (belt-and-suspenders, prompt already asks for this)
+    # Filter importance >= 3
     events = [e for e in events if e.get("importance", 0) >= 3]
 
     # Sort by importance desc, then credibility (high > medium > low)
@@ -97,52 +94,48 @@ def _parse_response(text: str) -> list[dict]:
     return events
 
 
+def _get_client() -> AsyncOpenAI:
+    """Create an OpenAI-compatible async client."""
+    return AsyncOpenAI(
+        api_key=DIGEST_API_KEY,
+        base_url=DIGEST_BASE_URL,
+    )
+
+
 async def digest_news(news_items: list[dict]) -> list[dict]:
     """Filter, aggregate and score raw news using cheap LLM.
+
+    Uses OpenAI-compatible API so any provider works (SiliconFlow, OpenAI,
+    DeepSeek, Ollama, etc.). Configure via DIGEST_* env vars.
 
     Returns list of event dicts sorted by importance.
     """
     if not news_items:
         return []
 
-    api_key = os.environ.get(ANTHROPIC_API_KEY_ENV, "")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set, cannot digest news")
+    if not DIGEST_API_KEY:
+        logger.error(
+            "DIGEST_API_KEY not set. Set it to use any OpenAI-compatible provider. "
+            "Default: SiliconFlow free tier (https://siliconflow.cn)"
+        )
         return []
-
-    base_url = os.environ.get(ANTHROPIC_BASE_URL_ENV, DEFAULT_BASE_URL)
-    url = f"{base_url}/v1/messages"
 
     user_message = _build_user_message(news_items)
 
-    payload = {
-        "model": MODEL,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "messages": [
-            {"role": "user", "content": user_message},
-        ],
-    }
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
+        client = _get_client()
+        response = await client.chat.completions.create(
+            model=DIGEST_MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
 
-        data = resp.json()
-        # Extract text from Anthropic messages API response
-        text = data["content"][0]["text"]
+        text = response.choices[0].message.content or ""
         return _parse_response(text)
 
-    except httpx.HTTPStatusError as e:
-        logger.error("Anthropic API HTTP error %d: %s", e.response.status_code, e.response.text)
-        return []
-    except (httpx.RequestError, KeyError, json.JSONDecodeError) as e:
+    except Exception as e:
         logger.error("News digest failed: %s: %s", type(e).__name__, e)
         return []

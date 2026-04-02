@@ -1,9 +1,8 @@
 """Tests for the news digest cheap-model filtering layer."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
-import httpx
 import pytest
 
 from alpha_agents.news_digest import (
@@ -90,13 +89,16 @@ SAMPLE_LLM_RESPONSE = [
 ]
 
 
-def _make_anthropic_response(events: list[dict]) -> dict:
-    """Build a mock Anthropic messages API response."""
-    return {
-        "content": [{"type": "text", "text": json.dumps(events, ensure_ascii=False)}],
-        "model": "claude-haiku-4-5-20251001",
-        "role": "assistant",
-    }
+def _mock_completion(events: list[dict]):
+    """Build a mock OpenAI ChatCompletion response object."""
+    text = json.dumps(events, ensure_ascii=False)
+    message = MagicMock()
+    message.content = text
+    choice = MagicMock()
+    choice.message = message
+    completion = MagicMock()
+    completion.choices = [choice]
+    return completion
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +148,7 @@ class TestParseResponse:
         ]
         result = _parse_response(json.dumps(events))
         assert result[0]["event"] == "A"
-        assert result[1]["event"] == "C"  # same importance, higher cred
+        assert result[1]["event"] == "C"
         assert result[2]["event"] == "B"
 
     def test_wraps_single_object(self):
@@ -160,99 +162,52 @@ class TestParseResponse:
 
 
 # ---------------------------------------------------------------------------
-# Async integration tests (mocked API)
+# Async integration tests (mocked OpenAI SDK)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_digest_news_calls_api_with_all_items():
-    """Verify the prompt sent to the API includes all news items."""
-    mock_response = httpx.Response(
-        200,
-        json=_make_anthropic_response(SAMPLE_LLM_RESPONSE),
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
-
-    captured_kwargs = {}
-
-    async def mock_post(self, url, **kwargs):
-        captured_kwargs.update(kwargs)
-        return mock_response
-
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
-        result = await digest_news(SAMPLE_NEWS)
-
-    # Check all titles appear in the prompt
-    payload = captured_kwargs["json"]
-    user_content = payload["messages"][0]["content"]
-    for item in SAMPLE_NEWS:
-        assert item["title"] in user_content
-
-    assert payload["model"] == "claude-haiku-4-5-20251001"
-    assert payload["max_tokens"] == 4096
-
-
-@pytest.mark.asyncio
 async def test_digest_news_parses_response():
-    """Verify the function correctly parses the LLM JSON response."""
-    mock_response = httpx.Response(
-        200,
-        json=_make_anthropic_response(SAMPLE_LLM_RESPONSE),
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    mock_create = AsyncMock(return_value=_mock_completion(SAMPLE_LLM_RESPONSE))
 
-    async def mock_post(self, url, **kwargs):
-        return mock_response
-
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.news_digest._get_client") as mock_client:
+        mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
     assert len(result) == 2
     assert result[0]["importance"] == 5
     assert result[0]["event"] == "特朗普对华加征25%关税"
     assert result[1]["importance"] == 4
-    assert "market_impact" in result[0]
     assert result[0]["market_impact"]["a_share"]["direction"] == "bearish"
 
 
 @pytest.mark.asyncio
-async def test_digest_news_handles_api_http_error():
-    """Verify graceful handling of HTTP errors (returns empty list)."""
-    mock_response = httpx.Response(
-        500,
-        text="Internal Server Error",
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+async def test_digest_news_calls_api_correctly():
+    mock_create = AsyncMock(return_value=_mock_completion(SAMPLE_LLM_RESPONSE))
 
-    async def mock_post(self, url, **kwargs):
-        return mock_response
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.news_digest.DIGEST_MODEL", "test-model"), \
+         patch("alpha_agents.news_digest._get_client") as mock_client:
+        mock_client.return_value.chat.completions.create = mock_create
+        await digest_news(SAMPLE_NEWS)
 
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
-        result = await digest_news(SAMPLE_NEWS)
-
-    assert result == []
+    call_kwargs = mock_create.call_args.kwargs
+    assert call_kwargs["model"] == "test-model"
+    assert call_kwargs["max_tokens"] == 4096
+    # User message should contain all titles
+    user_msg = call_kwargs["messages"][1]["content"]
+    for item in SAMPLE_NEWS:
+        assert item["title"] in user_msg
 
 
 @pytest.mark.asyncio
-async def test_digest_news_handles_connection_error():
-    """Verify graceful handling of connection errors (returns empty list)."""
+async def test_digest_news_handles_api_error():
+    mock_create = AsyncMock(side_effect=Exception("API error"))
 
-    async def mock_post(self, url, **kwargs):
-        raise httpx.ConnectError("Connection refused")
-
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.news_digest._get_client") as mock_client:
+        mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
     assert result == []
@@ -260,20 +215,13 @@ async def test_digest_news_handles_connection_error():
 
 @pytest.mark.asyncio
 async def test_digest_news_handles_malformed_json():
-    """Verify graceful handling of malformed LLM output."""
-    mock_response = httpx.Response(
-        200,
-        json={"content": [{"type": "text", "text": "not valid json [[["}]},
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    bad_completion = _mock_completion([])
+    bad_completion.choices[0].message.content = "not valid json [[["
+    mock_create = AsyncMock(return_value=bad_completion)
 
-    async def mock_post(self, url, **kwargs):
-        return mock_response
-
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.news_digest._get_client") as mock_client:
+        mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
     assert result == []
@@ -281,69 +229,30 @@ async def test_digest_news_handles_malformed_json():
 
 @pytest.mark.asyncio
 async def test_digest_news_empty_input():
-    """Verify empty input returns empty list without API call."""
     result = await digest_news([])
     assert result == []
 
 
 @pytest.mark.asyncio
 async def test_digest_news_missing_api_key():
-    """Verify missing API key returns empty list without API call."""
-    with patch.dict("os.environ", {}, clear=True):
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", ""):
         result = await digest_news(SAMPLE_NEWS)
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_digest_news_custom_base_url():
-    """Verify custom base URL is used when set."""
-    mock_response = httpx.Response(
-        200,
-        json=_make_anthropic_response([]),
-        request=httpx.Request("POST", "https://custom.api.com/v1/messages"),
-    )
-
-    captured_url = None
-
-    async def mock_post(self, url, **kwargs):
-        nonlocal captured_url
-        captured_url = url
-        return mock_response
-
-    with (
-        patch.dict(
-            "os.environ",
-            {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_BASE_URL": "https://custom.api.com"},
-        ),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
-        await digest_news(SAMPLE_NEWS)
-
-    assert captured_url == "https://custom.api.com/v1/messages"
-
-
-@pytest.mark.asyncio
 async def test_digest_news_importance_sorting():
-    """Verify results are sorted by importance desc, then credibility."""
     events = [
         {"event": "低重要性", "importance": 3, "credibility": "low"},
         {"event": "高重要性", "importance": 5, "credibility": "high"},
         {"event": "中重要性高可信", "importance": 4, "credibility": "high"},
         {"event": "中重要性低可信", "importance": 4, "credibility": "medium"},
     ]
-    mock_response = httpx.Response(
-        200,
-        json=_make_anthropic_response(events),
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    mock_create = AsyncMock(return_value=_mock_completion(events))
 
-    async def mock_post(self, url, **kwargs):
-        return mock_response
-
-    with (
-        patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}),
-        patch.object(httpx.AsyncClient, "post", mock_post),
-    ):
+    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.news_digest._get_client") as mock_client:
+        mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
     assert [e["importance"] for e in result] == [5, 4, 4, 3]

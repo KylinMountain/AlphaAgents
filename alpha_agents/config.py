@@ -16,6 +16,11 @@ SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 EMBEDDING_MODEL = "BAAI/bge-m3"
 
+# News digest LLM settings (OpenAI-compatible, defaults to SiliconFlow free tier)
+DIGEST_API_KEY = os.environ.get("DIGEST_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
+DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "https://api.siliconflow.cn/v1")
+DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+
 # News monitor settings
 MONITOR_INTERVAL_SECONDS = 300
 NEWS_FETCH_LIMIT = 50

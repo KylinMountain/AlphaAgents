@@ -1,25 +1,26 @@
 """Concept embedding management for semantic stock search.
 
-Uses SiliconFlow's free BGE embedding API + ChromaDB for local vector storage.
+Uses OpenAI-compatible embedding API + ChromaDB for local vector storage.
+Default: SiliconFlow free BGE-M3. Configurable to any provider.
 """
 
 import logging
 import sqlite3
 
 import chromadb
-import httpx
+from openai import OpenAI
 
 from alpha_agents.config import (
     CHROMA_PATH,
-    SILICONFLOW_API_KEY,
-    SILICONFLOW_BASE_URL,
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
 )
 
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "concepts"
-BATCH_SIZE = 64  # SiliconFlow API batch limit
+BATCH_SIZE = 64
 
 
 def _get_chroma_client() -> chromadb.ClientAPI:
@@ -36,8 +37,13 @@ def _get_collection(client: chromadb.ClientAPI) -> chromadb.Collection:
     )
 
 
+def _get_openai_client() -> OpenAI:
+    """Create OpenAI-compatible client for embeddings."""
+    return OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
+
+
 def _call_embedding_api(texts: list[str]) -> list[list[float]]:
-    """Call SiliconFlow embedding API.
+    """Call OpenAI-compatible embedding API.
 
     Args:
         texts: List of texts to embed (max BATCH_SIZE per call).
@@ -45,34 +51,24 @@ def _call_embedding_api(texts: list[str]) -> list[list[float]]:
     Returns:
         List of embedding vectors.
     """
-    if not SILICONFLOW_API_KEY:
+    if not EMBEDDING_API_KEY:
         raise RuntimeError(
-            "SILICONFLOW_API_KEY not set. Get a free key at https://siliconflow.cn"
+            "EMBEDDING_API_KEY not set. Set it or SILICONFLOW_API_KEY for free BGE embeddings."
         )
 
-    with httpx.Client(timeout=30) as client:
-        resp = client.post(
-            f"{SILICONFLOW_BASE_URL}/embeddings",
-            headers={
-                "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": EMBEDDING_MODEL,
-                "input": texts,
-                "encoding_format": "float",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = _get_openai_client()
+    response = client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+    )
 
     # Sort by index to maintain order
-    embeddings = sorted(data["data"], key=lambda x: x["index"])
-    return [e["embedding"] for e in embeddings]
+    sorted_data = sorted(response.data, key=lambda x: x.index)
+    return [item.embedding for item in sorted_data]
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed texts in batches via SiliconFlow API.
+    """Embed texts in batches via API.
 
     Handles batching for large input lists.
     """
@@ -86,9 +82,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def build_concept_embeddings(conn: sqlite3.Connection) -> int:
     """Generate and store embeddings for all concepts in ChromaDB.
-
-    Reads concept names from SQLite, embeds them via SiliconFlow,
-    and stores in ChromaDB for fast similarity search.
 
     Returns:
         Number of concepts embedded.
@@ -119,7 +112,7 @@ def build_concept_embeddings(conn: sqlite3.Connection) -> int:
         logger.info("All %d concepts already embedded in ChromaDB", len(ids))
         return 0
 
-    logger.info("Embedding %d new concepts via SiliconFlow %s...", len(new_ids), EMBEDDING_MODEL)
+    logger.info("Embedding %d concepts via %s (%s)...", len(new_ids), EMBEDDING_MODEL, EMBEDDING_BASE_URL)
     embeddings = embed_texts(new_names)
 
     # Upsert into ChromaDB in batches

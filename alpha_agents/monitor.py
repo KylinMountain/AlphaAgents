@@ -6,6 +6,10 @@ from collections import deque
 from alpha_agents.config import MONITOR_INTERVAL_SECONDS, NEWS_FETCH_LIMIT
 from alpha_agents.tools.news import get_news_fn
 from alpha_agents.tools.world_news import get_world_news_fn
+from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
+from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
+from alpha_agents.tools.whitehouse import get_whitehouse_fn
+from alpha_agents.tools.pboc import get_pboc_news_fn
 from alpha_agents.agents.strategist import run_analysis
 
 logger = logging.getLogger(__name__)
@@ -39,14 +43,25 @@ class NewsMonitor:
         logger.info("News monitor started. Interval: %ds", self.interval)
         while True:
             try:
-                # Fetch both domestic and international news
-                domestic_raw = get_news_fn(limit=NEWS_FETCH_LIMIT)
-                domestic_data = json.loads(domestic_raw)
-                news_items = domestic_data.get("news", [])
-
-                world_raw = get_world_news_fn(limit=NEWS_FETCH_LIMIT)
-                world_data = json.loads(world_raw)
-                news_items.extend(world_data.get("news", []))
+                # Fetch from all news sources
+                news_items: list[dict] = []
+                sources = [
+                    ("东方财富", lambda: get_news_fn(limit=NEWS_FETCH_LIMIT)),
+                    ("国际RSS", lambda: get_world_news_fn(limit=NEWS_FETCH_LIMIT)),
+                    ("财联社电报", lambda: get_cls_telegraph_fn(limit=NEWS_FETCH_LIMIT)),
+                    ("华尔街见闻", lambda: get_wallstreetcn_fn(limit=NEWS_FETCH_LIMIT)),
+                    ("白宫", lambda: get_whitehouse_fn(limit=10)),
+                    ("人民银行", lambda: get_pboc_news_fn(limit=10)),
+                ]
+                for name, fetch in sources:
+                    try:
+                        data = json.loads(fetch())
+                        items = data.get("news", [])
+                        news_items.extend(items)
+                        if items:
+                            logger.debug("Fetched %d items from %s", len(items), name)
+                    except Exception:
+                        logger.warning("Failed to fetch from %s", name, exc_info=True)
 
                 new_items = self.deduplicate(news_items)
                 if new_items:

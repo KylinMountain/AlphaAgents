@@ -8,13 +8,12 @@ import logging
 import re
 from html.parser import HTMLParser
 
-import httpx
+from alpha_agents.http_client import fetch as http_fetch
 
 logger = logging.getLogger(__name__)
 
 PBOC_URL = "http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"
 PBOC_BASE = "http://www.pbc.gov.cn"
-TIMEOUT = 15
 
 
 class _PBOCHTMLParser(HTMLParser):
@@ -143,17 +142,14 @@ def get_pboc_news_fn(limit: int = 20, keyword: str | None = None) -> str:
     all_news: list[dict] = []
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-            resp = client.get(PBOC_URL)
-            resp.raise_for_status()
-            # PBOC pages are typically encoded in UTF-8 or GBK
-            content = resp.text
-            if not content or "charset" in resp.headers.get("content-type", ""):
-                # Try to decode with the declared encoding
-                encoding = resp.encoding or "utf-8"
-                content = resp.content.decode(encoding, errors="replace")
-            all_news = _parse_pboc_html(content)
-            logger.debug("Fetched %d items from PBOC", len(all_news))
+        resp = http_fetch(PBOC_URL)
+        # PBOC pages are typically encoded in UTF-8 or GBK
+        content = resp.text
+        if not content or "charset" in resp.headers.get("content-type", ""):
+            encoding = resp.encoding or "utf-8"
+            content = resp.content.decode(encoding, errors="replace")
+        all_news = _parse_pboc_html(content)
+        logger.debug("Fetched %d items from PBOC", len(all_news))
     except Exception as e:
         logger.warning("Failed to fetch PBOC news: %s", e)
 

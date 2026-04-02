@@ -48,16 +48,14 @@ def test_parse_rss_empty_feed():
     assert items == []
 
 
-def test_get_whitehouse_returns_json():
+def _mock_fetch(text):
     mock_resp = MagicMock()
-    mock_resp.text = SAMPLE_RSS
-    mock_resp.raise_for_status = MagicMock()
+    mock_resp.text = text
+    return mock_resp
 
-    with patch("alpha_agents.tools.whitehouse.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
 
+def test_get_whitehouse_returns_json():
+    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "Executive Order on Protecting American Industry"
@@ -65,43 +63,20 @@ def test_get_whitehouse_returns_json():
 
 
 def test_get_whitehouse_keyword_filter():
-    mock_resp = MagicMock()
-    mock_resp.text = SAMPLE_RSS
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.whitehouse.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(keyword="infrastructure"))
         assert result["count"] == 1
         assert "infrastructure" in result["news"][0]["title"].lower()
 
 
 def test_get_whitehouse_respects_limit():
-    mock_resp = MagicMock()
-    mock_resp.text = SAMPLE_RSS
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.whitehouse.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_whitehouse_handles_fetch_error():
-    with patch("alpha_agents.tools.whitehouse.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.side_effect = httpx.ConnectError("Connection refused")
-
+    with patch("alpha_agents.tools.whitehouse.fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_whitehouse_fn())
         assert result["count"] == 0
         assert result["news"] == []
-
-
-import httpx

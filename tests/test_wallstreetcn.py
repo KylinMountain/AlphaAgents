@@ -40,7 +40,6 @@ def test_parse_items():
 
 def test_parse_items_empty_title_uses_summary():
     items = _parse_items(SAMPLE_RESPONSE)
-    # Third item has empty title, should fall back to summary[:80]
     assert items[2]["title"] == "A股三大指数集体高开，沪指涨0.5%。"
 
 
@@ -67,61 +66,34 @@ def test_parse_items_missing_display_time():
     assert items[0]["time"] == ""
 
 
-def test_get_wallstreetcn_returns_json():
+def _mock_fetch(response_json):
     mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = response_json
+    return mock_resp
 
-    with patch("alpha_agents.tools.wallstreetcn.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
 
+def test_get_wallstreetcn_returns_json():
+    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "美联储维持利率不变"
 
 
 def test_get_wallstreetcn_keyword_filter():
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.wallstreetcn.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(keyword="美联储"))
         assert result["count"] == 1
         assert "美联储" in result["news"][0]["title"]
 
 
 def test_get_wallstreetcn_respects_limit():
-    mock_resp = MagicMock()
-    mock_resp.json.return_value = SAMPLE_RESPONSE
-    mock_resp.raise_for_status = MagicMock()
-
-    with patch("alpha_agents.tools.wallstreetcn.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.return_value = mock_resp
-
+    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_wallstreetcn_handles_api_error():
-    with patch("alpha_agents.tools.wallstreetcn.httpx.Client") as MockClient:
-        MockClient.return_value.__enter__ = lambda s: s
-        MockClient.return_value.__exit__ = MagicMock(return_value=False)
-        MockClient.return_value.get.side_effect = httpx.HTTPStatusError(
-            "500", request=MagicMock(), response=MagicMock()
-        )
-
+    with patch("alpha_agents.tools.wallstreetcn.fetch", side_effect=Exception("500 error")):
         result = json.loads(get_wallstreetcn_fn())
         assert result["count"] == 0
         assert result["news"] == []
-
-
-import httpx

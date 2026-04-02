@@ -7,12 +7,11 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 
-import httpx
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
 RSS_URL = "https://www.whitehouse.gov/feed/"
-TIMEOUT = 15
 
 
 def _parse_rss(xml_text: str) -> list[dict]:
@@ -51,11 +50,9 @@ def get_whitehouse_fn(limit: int = 20, keyword: str | None = None) -> str:
     all_news: list[dict] = []
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
-            resp = client.get(RSS_URL)
-            resp.raise_for_status()
-            all_news = _parse_rss(resp.text)
-            logger.debug("Fetched %d items from White House RSS", len(all_news))
+        resp = fetch(RSS_URL)
+        all_news = _parse_rss(resp.text)
+        logger.debug("Fetched %d items from White House RSS", len(all_news))
     except Exception as e:
         logger.warning("Failed to fetch White House RSS: %s", e)
 

@@ -15,6 +15,7 @@ from alpha_agents.tools.sec import get_sec_news_fn
 from alpha_agents.tools.truthsocial import get_social_media_fn
 from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
+from alpha_agents.tools.web_search import web_search_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
@@ -104,6 +105,16 @@ def search_stocks(keyword: str) -> str:
 
 
 @function_tool
+def web_search(query: str, max_results: int = 10) -> str:
+    """通用网页搜索（DuckDuckGo）。用于搜索最新新闻、验证信息、获取其他工具未覆盖的数据。
+
+    支持中英文搜索。英文搜索效果更好，建议对国际事件使用英文查询。
+    例如："Trump tariff China 2026" 或 "特朗普关税最新消息"
+    """
+    return web_search_fn(query=query, max_results=max_results)
+
+
+@function_tool
 def get_sector_data(sector_name: str) -> str:
     """获取板块行情数据，包括涨跌幅和资金流向。"""
     return get_sector_data_fn(sector_name=sector_name)
@@ -127,5 +138,5 @@ ALL_TOOLS = [
     get_cls_telegraph, get_wallstreetcn,
     get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
     get_fed_news, get_sec_news, get_social_media,
-    search_stocks, get_sector_data, filter_stocks, get_watchlist,
+    search_stocks, web_search, get_sector_data, filter_stocks, get_watchlist,
 ]

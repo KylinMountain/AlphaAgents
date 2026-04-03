@@ -16,6 +16,7 @@ from alpha_agents.tools.xinhua import get_xinhua_fn
 from alpha_agents.tools.fed import get_fed_news_fn
 from alpha_agents.tools.sec import get_sec_news_fn
 from alpha_agents.tools.truthsocial import get_social_media_fn
+from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.news_digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 
@@ -26,6 +27,7 @@ MAX_SEEN = 1000
 # Source registry: (id, display_name, fetch_fn_factory)
 NEWS_SOURCES = [
     ("eastmoney", "东方财富", lambda: get_news_fn(limit=NEWS_FETCH_LIMIT)),
+    ("eastmoney_live", "东方财富7x24", lambda: get_eastmoney_live_fn(limit=NEWS_FETCH_LIMIT)),
     ("world_rss", "国际RSS", lambda: get_world_news_fn(limit=NEWS_FETCH_LIMIT)),
     ("cls", "财联社电报", lambda: get_cls_telegraph_fn(limit=NEWS_FETCH_LIMIT)),
     ("wallstreetcn", "华尔街见闻", lambda: get_wallstreetcn_fn(limit=NEWS_FETCH_LIMIT)),

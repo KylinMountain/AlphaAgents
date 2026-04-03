@@ -5,9 +5,12 @@ Provides a configured httpx.Client with:
 - Per-domain rate limiting
 - Automatic retry with exponential backoff
 - Random request jitter
+- Optional Cloudflare Worker proxy for IP rotation
 """
 
+import json as _json
 import logging
+import os
 import random
 import time
 import threading
@@ -174,6 +177,89 @@ def fetch(
                 raise
 
     raise last_exc  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare Worker proxy for IP rotation
+# ---------------------------------------------------------------------------
+
+# Set these env vars to enable CF Worker proxy:
+#   CF_WORKER_URL=https://your-worker.your-subdomain.workers.dev
+#   CF_WORKER_AUTH_TOKEN=your-secret-token  (optional, but recommended)
+
+_CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "")
+_CF_WORKER_AUTH_TOKEN = os.environ.get("CF_WORKER_AUTH_TOKEN", "")
+
+
+def cf_worker_available() -> bool:
+    """Check if Cloudflare Worker proxy is configured."""
+    return bool(_CF_WORKER_URL)
+
+
+def fetch_via_worker(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> httpx.Response:
+    """Fetch a URL through the Cloudflare Worker proxy.
+
+    The Worker runs on CF edge nodes with rotating IPs, making it
+    much harder for targets to block by IP. Free tier = 100k req/day.
+
+    Falls back to direct fetch() if Worker is not configured.
+
+    Returns:
+        An httpx.Response-like object. The .text property contains
+        the response body, .status_code contains the HTTP status.
+    """
+    if not _CF_WORKER_URL:
+        logger.debug("CF Worker not configured, falling back to direct fetch")
+        return fetch(url, method=method, headers=headers, timeout=timeout)
+
+    req_headers = get_headers(headers)
+    worker_headers = {"Content-Type": "application/json"}
+    if _CF_WORKER_AUTH_TOKEN:
+        worker_headers["Authorization"] = f"Bearer {_CF_WORKER_AUTH_TOKEN}"
+
+    payload = {
+        "url": url,
+        "method": method,
+        "headers": req_headers,
+        "timeout": timeout * 1000,  # Worker expects milliseconds
+    }
+
+    try:
+        with httpx.Client(timeout=timeout + 5) as client:
+            resp = client.post(
+                _CF_WORKER_URL,
+                headers=worker_headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if "error" in data:
+            raise httpx.HTTPError(f"Worker error: {data['error']}")
+
+        cf_info = data.get("cf", {})
+        logger.debug(
+            "CF Worker fetch: %s → %d (colo=%s, country=%s)",
+            url, data.get("status", 0),
+            cf_info.get("colo", "?"), cf_info.get("country", "?"),
+        )
+
+        # Construct a minimal Response-like object
+        proxied = httpx.Response(
+            status_code=data.get("status", 200),
+            text=data.get("body", ""),
+        )
+        return proxied
+
+    except Exception as e:
+        logger.warning("CF Worker fetch failed for %s: %s, falling back to direct", url, e)
+        return fetch(url, method=method, headers=headers, timeout=timeout)
 
 
 @contextmanager

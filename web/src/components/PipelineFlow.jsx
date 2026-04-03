@@ -19,6 +19,7 @@ const nodeTypes = {
 // Source definitions
 const DOMESTIC = [
   { id: 'eastmoney', label: '东方财富' },
+  { id: 'eastmoney_live', label: '东财7x24' },
   { id: 'cls', label: '财联社' },
   { id: 'wallstreetcn', label: '华尔街见闻' },
   { id: 'jin10', label: '金十数据' },

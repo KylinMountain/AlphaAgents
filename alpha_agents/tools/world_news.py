@@ -1,6 +1,7 @@
 """Fetch international news from public RSS feeds.
 
-Sources: Reuters, AP, BBC, CNBC — no API key required.
+Sources: BBC, CNBC, Google News, Al Jazeera, Bloomberg, FT,
+France24, DW, RT, Middle East Eye, Haaretz — no API key required.
 """
 
 import json
@@ -13,12 +14,24 @@ from alpha_agents.http_client import client_session
 logger = logging.getLogger(__name__)
 
 RSS_FEEDS = [
+    # --- 英美主流 ---
     ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
     ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
     ("CNBC World", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362"),
     ("CNBC Economy", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258"),
     ("Google News World", "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en"),
     ("Google News Business", "https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en"),
+    # --- 财经专业 ---
+    ("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss"),
+    ("Financial Times", "https://www.ft.com/rss/home"),
+    # --- 中东 ---
+    ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+    ("Middle East Eye", "https://www.middleeasteye.net/rss"),
+    ("Haaretz", "https://www.haaretz.com/srv/haaretz-latest-headlines"),
+    # --- 欧洲/多视角 ---
+    ("France24", "https://www.france24.com/en/rss"),
+    ("DW News", "https://rss.dw.com/rdf/rss-en-world"),
+    ("RT News", "https://www.rt.com/rss/news/"),
 ]
 
 def _parse_rss(xml_text: str, source: str) -> list[dict]:
@@ -44,7 +57,25 @@ def _parse_rss(xml_text: str, source: str) -> list[dict]:
                 "link": link,
             })
 
-    # Atom (if no RSS items found)
+    # RDF 1.0 (e.g. DW News) — default namespace means iter("item") won't match
+    if not items:
+        rss10 = "http://purl.org/rss/1.0/"
+        dc = "http://purl.org/dc/elements/1.1/"
+        for item in root.iter(f"{{{rss10}}}item"):
+            title = (item.findtext(f"{{{rss10}}}title", "") or "").strip()
+            desc = (item.findtext(f"{{{rss10}}}description", "") or "").strip()
+            pub_date = (item.findtext(f"{{{dc}}}date", "") or "").strip()
+            link = (item.findtext(f"{{{rss10}}}link", "") or "").strip()
+            if title:
+                items.append({
+                    "title": title,
+                    "summary": desc[:300],
+                    "time": pub_date,
+                    "source": source,
+                    "link": link,
+                })
+
+    # Atom (if still no items found)
     if not items:
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall(".//atom:entry", ns):

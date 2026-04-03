@@ -28,23 +28,12 @@ DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "https://api.siliconflow.cn/
 DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 # ---------------------------------------------------------------------------
-# Agent LLM (Claude-compatible, for strategist & geopolitical agents)
-# Default: Anthropic Claude. Supports any provider with Claude message format
-# (e.g. Anthropic, AWS Bedrock, GCP Vertex, proxies like OpenRouter)
+# Agent LLM (OpenAI-compatible, for strategist & geopolitical agents)
+# Works with any OpenAI-compatible provider: DashScope, DeepSeek, SiliconFlow, etc.
 # ---------------------------------------------------------------------------
-AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
-AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "")  # empty = SDK default
-
-# ---------------------------------------------------------------------------
-# Open-source Claude Code as CLI backend (optional, replaces bundled CLI)
-# Set CC_LLM_PROVIDER=openai to use OpenAI-compatible models via open-source CC
-# ---------------------------------------------------------------------------
-CC_CLI_PATH = os.environ.get("CC_CLI_PATH", str(PROJECT_ROOT / "scripts" / "cc-wrapper.sh"))
-CC_LLM_PROVIDER = os.environ.get("CC_LLM_PROVIDER", "")  # "openai" to enable
-CC_LLM_BASE_URL = os.environ.get("CC_LLM_BASE_URL", "")
-CC_LLM_API_KEY = os.environ.get("CC_LLM_API_KEY", "")
-CC_LLM_MODEL = os.environ.get("CC_LLM_MODEL", "")
+AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
+AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen-plus")
 
 # News monitor settings
 MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))

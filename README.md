@@ -2,7 +2,7 @@
 
 新闻驱动的自主选股系统。监控国内外财经新闻和地缘政治事件，自主分析对A股板块的多空影响，输出推荐关注的个股列表。
 
-> 本系统只负责"选什么股"，不负责"怎么交易"。筛选出的个股可交给 [TradingAgents](https://github.com/KylinMountain/TradingAgents) 做单股深度分析。
+> 本系统只负责"选什么股"，不负责"怎么交易"。筛选出的个股可交给我的另一个项目 [TradingAgents-AShare](https://github.com/KylinMountain/TradingAgents-AShare) 做单股深度分析。
 
 ## 架构
 

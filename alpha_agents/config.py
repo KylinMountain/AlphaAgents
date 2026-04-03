@@ -3,13 +3,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-CONFIG_DIR = PROJECT_ROOT / "config"
 DATA_DIR = PROJECT_ROOT / "alpha_agents" / "data"
 PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"
 CHROMA_PATH = DATA_DIR / "chroma"
-WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
 
 # ---------------------------------------------------------------------------
 # Embedding model (OpenAI-compatible, for concept vector search)

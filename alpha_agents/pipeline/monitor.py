@@ -66,7 +66,7 @@ async def route_and_analyze(events: list[dict], event_bus=None) -> dict[str, str
             return None
         def emit(hook_event):
             import asyncio
-            from alpha_agents.web.events import StageEvent, StageStatus
+            from alpha_agents.server.events import StageEvent, StageStatus
             evt_type = hook_event.get("type", "")
             stage = f"tool_{agent_label}"
             data = {"agent": hook_event.get("agent", ""), "event_type": evt_type}
@@ -163,7 +163,7 @@ class NewsMonitor:
         """Emit a pipeline event if web event bus is attached."""
         if self._bus is None:
             return
-        from alpha_agents.web.events import StageEvent, StageStatus
+        from alpha_agents.server.events import StageEvent, StageStatus
         status_map = {
             "running": StageStatus.RUNNING,
             "success": StageStatus.SUCCESS,

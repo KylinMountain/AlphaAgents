@@ -15,7 +15,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from alpha_agents.web.events import event_bus
+from alpha_agents.server.events import event_bus
 from alpha_agents.data.report_store import (
     get_recent_reports, get_recent_reviews,
     get_predictions_by_date, get_event_graph,
@@ -143,6 +143,38 @@ async def get_source_health():
     """Detailed health status for all news sources."""
     from alpha_agents.pipeline.source_health import health_tracker
     return JSONResponse({"sources": health_tracker.get_status()})
+
+
+# --- Watchlist CRUD ---
+
+@app.get("/api/watchlist")
+async def get_watchlist_api():
+    """Get user's watchlist."""
+    from alpha_agents.tools.watchlist import list_watchlist
+    stocks = await asyncio.to_thread(list_watchlist)
+    return JSONResponse({"stocks": stocks})
+
+
+@app.post("/api/watchlist")
+async def add_watchlist_api(request):
+    """Add a stock to watchlist. Body: {"code": "600519", "name": "贵州茅台", "concepts": ["白酒"]}"""
+    from alpha_agents.tools.watchlist import add_to_watchlist
+    body = await request.json()
+    code = body.get("code", "").strip()
+    name = body.get("name", "").strip()
+    concepts = body.get("concepts", [])
+    if not code or not name:
+        return JSONResponse({"ok": False, "error": "code and name required"}, status_code=400)
+    result = await asyncio.to_thread(add_to_watchlist, code, name, concepts)
+    return JSONResponse(result)
+
+
+@app.delete("/api/watchlist/{code}")
+async def delete_watchlist_api(code: str):
+    """Remove a stock from watchlist."""
+    from alpha_agents.tools.watchlist import remove_from_watchlist
+    result = await asyncio.to_thread(remove_from_watchlist, code)
+    return JSONResponse(result)
 
 
 # --- WebSocket ---

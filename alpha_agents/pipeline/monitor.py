@@ -60,25 +60,44 @@ async def route_and_analyze(events: list[dict], event_bus=None) -> dict[str, str
     logger.info("Routing: %d stock events, %d futures events",
                 len(stock_events), len(futures_events))
 
-    # Build hooks that emit tool call events to the event bus
+    # Build hooks that emit tool call and reasoning events to the event bus
     def _make_emitter(agent_label):
         if event_bus is None:
             return None
-        def emit(tool_event):
+        def emit(hook_event):
             import asyncio
             from alpha_agents.web.events import StageEvent, StageStatus
+            evt_type = hook_event.get("type", "")
             stage = f"tool_{agent_label}"
-            status = StageStatus.RUNNING if tool_event["status"] == "start" else StageStatus.SUCCESS
-            message = f"{tool_event['tool']}"
-            if tool_event["status"] == "end":
-                message += " ✓"
-            data = {
-                "agent": tool_event["agent"],
-                "tool": tool_event["tool"],
-                "tool_status": tool_event["status"],
-            }
-            if "result_preview" in tool_event:
-                data["result_preview"] = tool_event["result_preview"]
+            data = {"agent": hook_event.get("agent", ""), "event_type": evt_type}
+
+            if evt_type == "tool_start":
+                status = StageStatus.RUNNING
+                message = hook_event["tool"]
+                data["tool"] = hook_event["tool"]
+                data["tool_status"] = "start"
+            elif evt_type == "tool_end":
+                status = StageStatus.SUCCESS
+                message = f"{hook_event['tool']} ✓"
+                data["tool"] = hook_event["tool"]
+                data["tool_status"] = "end"
+                data["result_preview"] = hook_event.get("result_preview", "")
+            elif evt_type == "reasoning":
+                status = StageStatus.RUNNING
+                message = hook_event.get("text", "")
+                data["text"] = hook_event.get("text", "")
+            elif evt_type == "handoff":
+                status = StageStatus.RUNNING
+                message = hook_event.get("text", "handoff")
+                data["tool"] = hook_event.get("tool", "")
+                data["text"] = hook_event.get("text", "")
+            elif evt_type == "agent_start":
+                status = StageStatus.RUNNING
+                message = hook_event.get("text", "")
+                data["text"] = hook_event.get("text", "")
+            else:
+                return
+
             event = StageEvent(stage=stage, status=status, message=message, data=data)
             # Fire-and-forget emit (we're in a sync callback)
             try:

@@ -149,18 +149,101 @@ const toolIcons = {
   'get_cftc_positions': '📋',
 }
 
-function ToolCallEvent({ event }) {
+function AgentEvent({ event }) {
   const data = event.data || {}
-  const isStart = data.tool_status === 'start'
-  const toolName = data.tool || ''
+  const evtType = data.event_type || data.tool_status  // backward compat
   const agent = data.agent || ''
-  const icon = toolIcons[toolName] || '⚙'
   const time = new Date(event.timestamp * 1000).toLocaleTimeString('zh-CN')
   const agentColor = agent.includes('期货') ? 'var(--accent-yellow)' : 'var(--accent-blue)'
 
+  // Reasoning / thinking text
+  if (evtType === 'reasoning') {
+    const text = data.text || event.message || ''
+    if (!text) return null
+    return (
+      <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"
+           style={{ borderBottom: '1px solid var(--border)' }}>
+        <div className="shrink-0 mt-1">
+          <div className="w-1.5 h-1.5 rounded-full" style={{ background: agentColor }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span style={{ fontSize: 11 }}>💭</span>
+            <span className="text-xs px-1 rounded"
+                  style={{ background: `${agentColor}15`, color: agentColor, fontSize: 10 }}>
+              {agent}
+            </span>
+            <span className="text-xs ml-auto tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {time}
+            </span>
+          </div>
+          <div className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            {text}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Handoff
+  if (evtType === 'handoff') {
+    return (
+      <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"
+           style={{ borderBottom: '1px solid var(--border)', background: '#8b5cf608' }}>
+        <div className="shrink-0 mt-1">
+          <div className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-orange)' }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span style={{ fontSize: 11 }}>🔀</span>
+            <span className="text-xs font-medium" style={{ color: 'var(--accent-orange)' }}>
+              {data.tool || 'handoff'}
+            </span>
+            <span className="text-xs px-1 rounded"
+                  style={{ background: `${agentColor}15`, color: agentColor, fontSize: 10 }}>
+              {agent}
+            </span>
+            <span className="text-xs ml-auto tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {time}
+            </span>
+          </div>
+          {data.text && (
+            <div className="text-xs mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+              {data.text}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // Agent start
+  if (evtType === 'agent_start') {
+    return (
+      <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"
+           style={{ borderBottom: '1px solid var(--border)', background: `${agentColor}06` }}>
+        <div className="shrink-0 mt-1">
+          <div className="w-1.5 h-1.5 rounded-full animate-pulse-dot" style={{ background: agentColor }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span style={{ fontSize: 11 }}>🤖</span>
+            <span className="text-xs font-medium" style={{ color: agentColor }}>{data.text || agent}</span>
+            <span className="text-xs ml-auto tabular-nums" style={{ color: 'var(--text-muted)' }}>{time}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Tool call (start / end)
+  const isStart = evtType === 'tool_start' || data.tool_status === 'start'
+  const toolName = data.tool || ''
+  const icon = toolIcons[toolName] || '⚙'
+
   return (
     <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"
-         style={{ borderBottom: '1px solid var(--border)', background: isStart ? '#3b82f606' : 'transparent' }}>
+         style={{ borderBottom: '1px solid var(--border)', background: isStart ? '#8b5cf608' : 'transparent' }}>
       <div className="shrink-0 mt-1">
         <div className={`w-1.5 h-1.5 rounded-full ${isStart ? 'animate-pulse-dot' : ''}`}
              style={{ background: isStart ? 'var(--accent-purple)' : 'var(--accent-green)' }} />
@@ -179,7 +262,7 @@ function ToolCallEvent({ event }) {
             <span className="text-xs" style={{ color: 'var(--accent-green)', fontSize: 10 }}>✓</span>
           )}
           {isStart && (
-            <span className="text-xs" style={{ color: 'var(--accent-purple)', fontSize: 10 }}>调用中...</span>
+            <span className="text-xs animate-pulse-dot" style={{ color: 'var(--accent-purple)', fontSize: 10 }}>调用中...</span>
           )}
           <span className="text-xs ml-auto tabular-nums" style={{ color: 'var(--text-muted)' }}>
             {time}
@@ -202,8 +285,8 @@ function PipelineEvent({ event }) {
   const st = statusStyles[event.status] || statusStyles.idle
   const time = new Date(event.timestamp * 1000).toLocaleTimeString('zh-CN')
 
-  // Tool call events get special rendering
-  if (isTool) return <ToolCallEvent event={event} />
+  // Agent tool/reasoning events get special rendering
+  if (isTool) return <AgentEvent event={event} />
 
   // Skip idle events and source-level noise
   if (event.status === 'idle') return null

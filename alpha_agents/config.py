@@ -36,6 +36,16 @@ AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("ANTHROPIC_API_KE
 AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "")  # empty = SDK default
 
+# ---------------------------------------------------------------------------
+# Open-source Claude Code as CLI backend (optional, replaces bundled CLI)
+# Set CC_LLM_PROVIDER=openai to use OpenAI-compatible models via open-source CC
+# ---------------------------------------------------------------------------
+CC_CLI_PATH = os.environ.get("CC_CLI_PATH", str(PROJECT_ROOT / "scripts" / "cc-wrapper.sh"))
+CC_LLM_PROVIDER = os.environ.get("CC_LLM_PROVIDER", "")  # "openai" to enable
+CC_LLM_BASE_URL = os.environ.get("CC_LLM_BASE_URL", "")
+CC_LLM_API_KEY = os.environ.get("CC_LLM_API_KEY", "")
+CC_LLM_MODEL = os.environ.get("CC_LLM_MODEL", "")
+
 # News monitor settings
 MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))
 NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))

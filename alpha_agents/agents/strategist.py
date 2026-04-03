@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from agents import Agent, Runner
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -43,5 +44,8 @@ def _create_strategist() -> Agent:
 async def run_analysis(prompt: str) -> str:
     """Run a full analysis cycle and return the final output."""
     agent = _create_strategist()
-    result = await Runner.run(agent, prompt)
+    # Inject current time in user message (not system prompt) to preserve LLM cache
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+    user_message = f"[当前时间: {now}]\n\n{prompt}"
+    result = await Runner.run(agent, user_message)
     return result.final_output

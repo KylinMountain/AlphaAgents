@@ -16,6 +16,7 @@ from alpha_agents.tools.truthsocial import get_social_media_fn
 from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.web_search import web_search_fn
+from alpha_agents.tools.web_fetch import web_fetch_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
@@ -115,6 +116,15 @@ def web_search(query: str, max_results: int = 10) -> str:
 
 
 @function_tool
+def web_fetch(url: str) -> str:
+    """获取网页内容。输入URL，返回页面的文本内容（自动去除HTML标签）。
+
+    用于深入阅读 web_search 返回的链接、查看新闻全文、读取报告原文等。
+    """
+    return web_fetch_fn(url=url)
+
+
+@function_tool
 def get_sector_data(sector_name: str) -> str:
     """获取板块行情数据，包括涨跌幅和资金流向。"""
     return get_sector_data_fn(sector_name=sector_name)
@@ -138,5 +148,5 @@ ALL_TOOLS = [
     get_cls_telegraph, get_wallstreetcn,
     get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
     get_fed_news, get_sec_news, get_social_media,
-    search_stocks, web_search, get_sector_data, filter_stocks, get_watchlist,
+    search_stocks, web_search, web_fetch, get_sector_data, filter_stocks, get_watchlist,
 ]

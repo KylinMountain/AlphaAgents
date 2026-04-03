@@ -1,11 +1,13 @@
 """Shared HTTP client with anti-scraping measures.
 
-Provides a configured httpx.Client with:
+Provides a unified fetch() function with:
 - Rotating User-Agent headers
-- Per-domain rate limiting
+- Per-domain rate limiting with jitter
 - Automatic retry with exponential backoff
-- Random request jitter
 - Optional Cloudflare Worker proxy for IP rotation
+
+When CF_WORKER_URL is set, ALL requests automatically route through
+the Worker for IP rotation. When not set, requests go direct.
 """
 
 import json as _json
@@ -49,6 +51,12 @@ RETRY_BASE_DELAY = 1.0  # seconds
 MIN_REQUEST_INTERVAL = 1.0  # min seconds between requests to same domain
 JITTER_RANGE = (0.3, 1.5)  # random delay range in seconds
 
+# Cloudflare Worker proxy — set env vars to enable:
+#   CF_WORKER_URL=https://alpha-fetch-proxy.xxx.workers.dev
+#   CF_WORKER_AUTH_TOKEN=your-secret  (optional but recommended)
+_CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "")
+_CF_WORKER_AUTH_TOKEN = os.environ.get("CF_WORKER_AUTH_TOKEN", "")
+
 
 def random_ua() -> str:
     """Return a random User-Agent string."""
@@ -61,6 +69,11 @@ def get_headers(extra: dict | None = None) -> dict:
     if extra:
         headers.update(extra)
     return headers
+
+
+def cf_worker_available() -> bool:
+    """Check if Cloudflare Worker proxy is configured."""
+    return bool(_CF_WORKER_URL)
 
 
 class _DomainThrottle:
@@ -93,6 +106,68 @@ def _extract_domain(url: str) -> str:
     return urlparse(url).netloc
 
 
+def _fetch_via_worker(
+    url: str,
+    method: str,
+    req_headers: dict,
+    timeout: int,
+) -> httpx.Response:
+    """Route a request through the Cloudflare Worker proxy.
+
+    The Worker runs on CF edge nodes — each invocation may use a
+    different IP. All sources share the same Worker endpoint.
+    """
+    worker_headers = {"Content-Type": "application/json"}
+    if _CF_WORKER_AUTH_TOKEN:
+        worker_headers["Authorization"] = f"Bearer {_CF_WORKER_AUTH_TOKEN}"
+
+    payload = {
+        "url": url,
+        "method": method,
+        "headers": req_headers,
+        "timeout": timeout * 1000,
+    }
+
+    with httpx.Client(timeout=timeout + 5) as client:
+        resp = client.post(_CF_WORKER_URL, headers=worker_headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    if "error" in data:
+        raise httpx.HTTPError(f"Worker error: {data['error']}")
+
+    cf_info = data.get("cf", {})
+    logger.debug(
+        "CF Worker: %s → %d (colo=%s, country=%s)",
+        url, data.get("status", 0),
+        cf_info.get("colo", "?"), cf_info.get("country", "?"),
+    )
+
+    return httpx.Response(
+        status_code=data.get("status", 200),
+        text=data.get("body", ""),
+    )
+
+
+def _fetch_direct(
+    url: str,
+    method: str,
+    req_headers: dict,
+    params: dict | None,
+    timeout: int,
+    follow_redirects: bool,
+    **kwargs,
+) -> httpx.Response:
+    """Direct HTTP request without proxy."""
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=follow_redirects,
+    ) as client:
+        return client.request(
+            method, url, headers=req_headers, params=params, **kwargs
+        )
+
+
 def fetch(
     url: str,
     *,
@@ -107,11 +182,11 @@ def fetch(
 ) -> httpx.Response:
     """Make an HTTP request with anti-scraping protections.
 
-    Features:
-    - Random User-Agent on each request
+    Automatically routes through Cloudflare Worker when CF_WORKER_URL
+    is set. Otherwise makes direct requests. Both paths include:
+    - Random User-Agent rotation
     - Per-domain rate limiting with jitter
     - Retry with exponential backoff on transient errors
-    - Proper browser-like headers
 
     Args:
         url: Target URL.
@@ -122,7 +197,7 @@ def fetch(
         max_retries: Max retry attempts on failure.
         throttle: Whether to apply per-domain rate limiting.
         follow_redirects: Follow HTTP redirects.
-        **kwargs: Passed to httpx.Client.request().
+        **kwargs: Passed to httpx.Client.request() (direct mode only).
 
     Returns:
         httpx.Response
@@ -131,6 +206,7 @@ def fetch(
         httpx.HTTPStatusError: On non-retryable HTTP errors.
         httpx.ConnectError: After all retries exhausted.
     """
+    use_worker = bool(_CF_WORKER_URL)
     domain = _extract_domain(url)
     req_headers = get_headers(headers)
 
@@ -140,28 +216,28 @@ def fetch(
             _throttle.wait(domain)
 
         try:
-            with httpx.Client(
-                timeout=timeout,
-                follow_redirects=follow_redirects,
-            ) as client:
-                resp = client.request(
-                    method, url, headers=req_headers, params=params, **kwargs
+            if use_worker:
+                resp = _fetch_via_worker(url, method, req_headers, timeout)
+            else:
+                resp = _fetch_direct(
+                    url, method, req_headers, params, timeout,
+                    follow_redirects, **kwargs,
                 )
-                # Retry on server errors and rate limits
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    if attempt < max_retries:
-                        delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                        logger.warning(
-                            "HTTP %d from %s, retrying in %.1fs (attempt %d/%d)",
-                            resp.status_code, domain, delay, attempt + 1, max_retries,
-                        )
-                        time.sleep(delay)
-                        # Rotate UA on retry
-                        req_headers["User-Agent"] = random_ua()
-                        continue
 
-                resp.raise_for_status()
-                return resp
+            # Retry on server errors and rate limits
+            if resp.status_code in (429, 500, 502, 503, 504):
+                if attempt < max_retries:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "HTTP %d from %s, retrying in %.1fs (attempt %d/%d)",
+                        resp.status_code, domain, delay, attempt + 1, max_retries,
+                    )
+                    time.sleep(delay)
+                    req_headers["User-Agent"] = random_ua()
+                    continue
+
+            resp.raise_for_status()
+            return resp
 
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
             last_exc = e
@@ -179,89 +255,6 @@ def fetch(
     raise last_exc  # type: ignore[misc]
 
 
-# ---------------------------------------------------------------------------
-# Cloudflare Worker proxy for IP rotation
-# ---------------------------------------------------------------------------
-
-# Set these env vars to enable CF Worker proxy:
-#   CF_WORKER_URL=https://your-worker.your-subdomain.workers.dev
-#   CF_WORKER_AUTH_TOKEN=your-secret-token  (optional, but recommended)
-
-_CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "")
-_CF_WORKER_AUTH_TOKEN = os.environ.get("CF_WORKER_AUTH_TOKEN", "")
-
-
-def cf_worker_available() -> bool:
-    """Check if Cloudflare Worker proxy is configured."""
-    return bool(_CF_WORKER_URL)
-
-
-def fetch_via_worker(
-    url: str,
-    *,
-    method: str = "GET",
-    headers: dict | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> httpx.Response:
-    """Fetch a URL through the Cloudflare Worker proxy.
-
-    The Worker runs on CF edge nodes with rotating IPs, making it
-    much harder for targets to block by IP. Free tier = 100k req/day.
-
-    Falls back to direct fetch() if Worker is not configured.
-
-    Returns:
-        An httpx.Response-like object. The .text property contains
-        the response body, .status_code contains the HTTP status.
-    """
-    if not _CF_WORKER_URL:
-        logger.debug("CF Worker not configured, falling back to direct fetch")
-        return fetch(url, method=method, headers=headers, timeout=timeout)
-
-    req_headers = get_headers(headers)
-    worker_headers = {"Content-Type": "application/json"}
-    if _CF_WORKER_AUTH_TOKEN:
-        worker_headers["Authorization"] = f"Bearer {_CF_WORKER_AUTH_TOKEN}"
-
-    payload = {
-        "url": url,
-        "method": method,
-        "headers": req_headers,
-        "timeout": timeout * 1000,  # Worker expects milliseconds
-    }
-
-    try:
-        with httpx.Client(timeout=timeout + 5) as client:
-            resp = client.post(
-                _CF_WORKER_URL,
-                headers=worker_headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        if "error" in data:
-            raise httpx.HTTPError(f"Worker error: {data['error']}")
-
-        cf_info = data.get("cf", {})
-        logger.debug(
-            "CF Worker fetch: %s → %d (colo=%s, country=%s)",
-            url, data.get("status", 0),
-            cf_info.get("colo", "?"), cf_info.get("country", "?"),
-        )
-
-        # Construct a minimal Response-like object
-        proxied = httpx.Response(
-            status_code=data.get("status", 200),
-            text=data.get("body", ""),
-        )
-        return proxied
-
-    except Exception as e:
-        logger.warning("CF Worker fetch failed for %s: %s, falling back to direct", url, e)
-        return fetch(url, method=method, headers=headers, timeout=timeout)
-
-
 @contextmanager
 def client_session(
     *,
@@ -273,6 +266,9 @@ def client_session(
 
     Use this when you need to make multiple requests in a session
     (e.g., iterating RSS feeds).
+
+    Note: client_session always uses direct connections (no Worker proxy).
+    For Worker-proxied requests, use fetch() directly.
     """
     headers = get_headers(extra_headers)
     with httpx.Client(

@@ -81,11 +81,14 @@ def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
     ths_headers = _get_ths_headers()
     url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
 
-    with no_proxy():
-        try:
-            r = http_fetch(url, headers=ths_headers)
-        except Exception:
-            return []
+    try:
+        with no_proxy():
+            r = requests.get(url, headers=headers, timeout=15)
+    except Exception:
+        return []
+
+    if r.status_code != 200:
+        return []
 
     soup = BeautifulSoup(r.text, "lxml")
     table = soup.find("table", class_="m-table")
@@ -174,10 +177,15 @@ def build_index(db_path: Path) -> None:
             else:
                 concept_success += 1
                 for stock in stocks:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
-                        (concept_id, stock["code"]),
-                    )
+                    # Only insert mapping if stock exists in stocks table
+                    exists = conn.execute(
+                        "SELECT 1 FROM stocks WHERE code = ?", (stock["code"],)
+                    ).fetchone()
+                    if exists:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
+                            (concept_id, stock["code"]),
+                        )
 
             if (i + 1) % 50 == 0:
                 logger.info("Progress: %d/%d concepts processed", i + 1, total)

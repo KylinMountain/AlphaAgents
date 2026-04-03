@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.jin10 import get_jin10_fn, _parse_item
+from alpha_agents.sources.jin10 import get_jin10_fn, _parse_item
 
 # Sample data matching the flash_newest.js format: a flat JSON array
 # wrapped in "var newest = [...];"
@@ -67,7 +67,7 @@ def _mock_fetch(js_text):
 
 
 def test_get_jin10_returns_json():
-    with patch("alpha_agents.tools.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
+    with patch("alpha_agents.sources.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
         result = json.loads(get_jin10_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["source"] == "金十数据"
@@ -75,20 +75,20 @@ def test_get_jin10_returns_json():
 
 
 def test_get_jin10_keyword_filter():
-    with patch("alpha_agents.tools.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
+    with patch("alpha_agents.sources.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
         result = json.loads(get_jin10_fn(keyword="茅台"))
         assert result["count"] == 1
         assert "茅台" in result["news"][0]["summary"]
 
 
 def test_get_jin10_respects_limit():
-    with patch("alpha_agents.tools.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
+    with patch("alpha_agents.sources.jin10.fetch", return_value=_mock_fetch(SAMPLE_JS_TEXT)):
         result = json.loads(get_jin10_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_jin10_handles_error():
-    with patch("alpha_agents.tools.jin10.fetch", side_effect=Exception("connection failed")):
+    with patch("alpha_agents.sources.jin10.fetch", side_effect=Exception("connection failed")):
         result = json.loads(get_jin10_fn())
         assert result["count"] == 0
         assert result["news"] == []
@@ -97,7 +97,7 @@ def test_get_jin10_handles_error():
 
 def test_get_jin10_empty_response():
     empty_js = "var newest = [];"
-    with patch("alpha_agents.tools.jin10.fetch", return_value=_mock_fetch(empty_js)):
+    with patch("alpha_agents.sources.jin10.fetch", return_value=_mock_fetch(empty_js)):
         result = json.loads(get_jin10_fn())
         assert result["count"] == 0
         assert result["news"] == []

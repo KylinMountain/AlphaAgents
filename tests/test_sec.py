@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.sec import get_sec_news_fn, _parse_rss
+from alpha_agents.sources.sec import get_sec_news_fn, _parse_rss
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -55,7 +55,7 @@ def _mock_fetch(text):
 
 
 def test_get_sec_news_returns_json():
-    with patch("alpha_agents.tools.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_sec_news_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "SEC Charges Company with Fraud"
@@ -63,20 +63,20 @@ def test_get_sec_news_returns_json():
 
 
 def test_get_sec_news_keyword_filter():
-    with patch("alpha_agents.tools.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_sec_news_fn(keyword="insider trading"))
         assert result["count"] == 1
         assert "insider trading" in result["news"][0]["title"].lower()
 
 
 def test_get_sec_news_respects_limit():
-    with patch("alpha_agents.tools.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.sec.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_sec_news_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_sec_news_handles_fetch_error():
-    with patch("alpha_agents.tools.sec.fetch", side_effect=Exception("Connection refused")):
+    with patch("alpha_agents.sources.sec.fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_sec_news_fn())
         assert result["count"] == 0
         assert result["news"] == []

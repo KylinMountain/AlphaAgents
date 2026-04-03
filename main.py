@@ -87,7 +87,7 @@ def cmd_web(args: argparse.Namespace) -> None:
     import uvicorn
     from alpha_agents.web.events import event_bus
     from alpha_agents.web.app import app, set_monitor
-    from alpha_agents.monitor import NewsMonitor
+    from alpha_agents.pipeline.monitor import NewsMonitor
 
     interval = args.interval or MONITOR_INTERVAL_SECONDS
     monitor = NewsMonitor(interval=interval, event_bus=event_bus)
@@ -122,7 +122,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(result)
     else:
         # Continuous monitoring
-        from alpha_agents.monitor import NewsMonitor
+        from alpha_agents.pipeline.monitor import NewsMonitor
         interval = args.interval or MONITOR_INTERVAL_SECONDS
         monitor = NewsMonitor(interval=interval)
         logging.info("Starting continuous news monitoring...")
@@ -131,7 +131,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_review(args: argparse.Namespace) -> None:
     """Run daily prediction review."""
-    from alpha_agents.daily_review import run_daily_review
+    from alpha_agents.pipeline.daily_review import run_daily_review
     import json as _json
     result = asyncio.run(run_daily_review(target_date=args.date))
     if result.get("status") == "no_predictions":

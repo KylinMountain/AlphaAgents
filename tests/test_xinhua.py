@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.xinhua import get_xinhua_fn, _parse_rss, _parse_fallback_html
+from alpha_agents.sources.xinhua import get_xinhua_fn, _parse_rss, _parse_fallback_html
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -82,27 +82,27 @@ def _mock_fetch(text):
 
 def test_get_xinhua_returns_json():
     """RSS_URLS is empty, so code goes straight to fallback HTML parser."""
-    with patch("alpha_agents.tools.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_xinhua_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["source"] == "新华社"
 
 
 def test_get_xinhua_keyword_filter():
-    with patch("alpha_agents.tools.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_xinhua_fn(keyword="新能源"))
         assert result["count"] == 1
         assert "新能源" in result["news"][0]["title"]
 
 
 def test_get_xinhua_respects_limit():
-    with patch("alpha_agents.tools.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.xinhua.fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_xinhua_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_xinhua_handles_fetch_error():
-    with patch("alpha_agents.tools.xinhua.fetch", side_effect=Exception("Connection refused")):
+    with patch("alpha_agents.sources.xinhua.fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_xinhua_fn())
         assert result["count"] == 0
         assert result["news"] == []
@@ -110,8 +110,8 @@ def test_get_xinhua_handles_fetch_error():
 
 def test_get_xinhua_rss_with_urls():
     """When RSS_URLS is populated, RSS parsing should work."""
-    with patch("alpha_agents.tools.xinhua.RSS_URLS", ["http://example.com/rss.xml"]):
-        with patch("alpha_agents.tools.xinhua.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.xinhua.RSS_URLS", ["http://example.com/rss.xml"]):
+        with patch("alpha_agents.sources.xinhua.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
             result = json.loads(get_xinhua_fn())
             assert result["count"] == 3
             assert result["news"][0]["title"] == "央行宣布降准0.5个百分点"

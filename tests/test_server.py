@@ -1,4 +1,4 @@
-from alpha_agents.tools.server import create_tools_server
+from alpha_agents.tools.registry import create_tools_server
 
 
 def test_create_server_returns_server_config():

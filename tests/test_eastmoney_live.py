@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.eastmoney_live import (
+from alpha_agents.sources.eastmoney_live import (
     _parse_response,
     get_eastmoney_live_fn,
 )
@@ -49,7 +49,7 @@ def test_parse_response_empty():
 
 
 def test_get_eastmoney_live_returns_json():
-    with patch("alpha_agents.tools.eastmoney_live.http_client") as mock:
+    with patch("alpha_agents.sources.eastmoney_live.http_client") as mock:
         resp = MagicMock()
         resp.text = SAMPLE_RESPONSE
         mock.fetch.return_value = resp
@@ -60,7 +60,7 @@ def test_get_eastmoney_live_returns_json():
 
 
 def test_get_eastmoney_live_keyword_filter():
-    with patch("alpha_agents.tools.eastmoney_live.http_client") as mock:
+    with patch("alpha_agents.sources.eastmoney_live.http_client") as mock:
         resp = MagicMock()
         resp.text = SAMPLE_RESPONSE
         mock.fetch.return_value = resp
@@ -71,7 +71,7 @@ def test_get_eastmoney_live_keyword_filter():
 
 
 def test_get_eastmoney_live_respects_limit():
-    with patch("alpha_agents.tools.eastmoney_live.http_client") as mock:
+    with patch("alpha_agents.sources.eastmoney_live.http_client") as mock:
         resp = MagicMock()
         resp.text = SAMPLE_RESPONSE
         mock.fetch.return_value = resp
@@ -81,7 +81,7 @@ def test_get_eastmoney_live_respects_limit():
 
 
 def test_get_eastmoney_live_handles_error():
-    with patch("alpha_agents.tools.eastmoney_live.http_client") as mock:
+    with patch("alpha_agents.sources.eastmoney_live.http_client") as mock:
         mock.fetch.side_effect = Exception("network error")
 
         result = json.loads(get_eastmoney_live_fn())

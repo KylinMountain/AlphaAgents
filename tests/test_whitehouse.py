@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.whitehouse import get_whitehouse_fn, _parse_rss
+from alpha_agents.sources.whitehouse import get_whitehouse_fn, _parse_rss
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -55,7 +55,7 @@ def _mock_fetch(text):
 
 
 def test_get_whitehouse_returns_json():
-    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "Executive Order on Protecting American Industry"
@@ -63,20 +63,20 @@ def test_get_whitehouse_returns_json():
 
 
 def test_get_whitehouse_keyword_filter():
-    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(keyword="infrastructure"))
         assert result["count"] == 1
         assert "infrastructure" in result["news"][0]["title"].lower()
 
 
 def test_get_whitehouse_respects_limit():
-    with patch("alpha_agents.tools.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.whitehouse.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_whitehouse_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_whitehouse_handles_fetch_error():
-    with patch("alpha_agents.tools.whitehouse.fetch", side_effect=Exception("Connection refused")):
+    with patch("alpha_agents.sources.whitehouse.fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_whitehouse_fn())
         assert result["count"] == 0
         assert result["news"] == []

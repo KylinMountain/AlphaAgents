@@ -24,8 +24,47 @@ function EventBadge({ event }) {
   )
 }
 
+function ReportContent({ label, content, color }) {
+  if (!content) return null
+  return (
+    <details>
+      <summary
+        className="text-xs cursor-pointer hover:text-slate-200 select-none flex items-center gap-1"
+        style={{ color }}
+      >
+        {label}
+      </summary>
+      <pre
+        className="mt-2 text-xs text-slate-300 whitespace-pre-wrap leading-relaxed overflow-auto"
+        style={{ maxHeight: 400, fontFamily: 'inherit' }}
+      >
+        {content}
+      </pre>
+    </details>
+  )
+}
+
+function RoutesBadge({ routes }) {
+  if (!routes) return null
+  return (
+    <div className="flex gap-1">
+      {routes.stock > 0 && (
+        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#3b82f622', color: '#3b82f6' }}>
+          股票 {routes.stock}
+        </span>
+      )}
+      {routes.futures > 0 && (
+        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#f59e0b22', color: '#f59e0b' }}>
+          期货 {routes.futures}
+        </span>
+      )}
+    </div>
+  )
+}
+
 function ReportCard({ report, index }) {
   const time = new Date(report.timestamp * 1000).toLocaleString('zh-CN')
+  const hasRoutes = report.routes && (report.routes.stock > 0 || report.routes.futures > 0)
 
   return (
     <div
@@ -37,9 +76,12 @@ function ReportCard({ report, index }) {
           <span className="text-xs font-mono text-slate-500">#{report.cycle}</span>
           <span className="text-xs text-slate-400">{time}</span>
         </div>
-        <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#22c55e22', color: '#22c55e' }}>
-          {report.event_count} 事件
-        </span>
+        <div className="flex items-center gap-2">
+          {hasRoutes && <RoutesBadge routes={report.routes} />}
+          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#22c55e22', color: '#22c55e' }}>
+            {report.event_count} 事件
+          </span>
+        </div>
       </div>
 
       {/* Event summaries */}
@@ -56,18 +98,18 @@ function ReportCard({ report, index }) {
         </div>
       )}
 
-      {/* Report content */}
-      <details>
-        <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-200 select-none">
-          展开分析报告
-        </summary>
-        <pre
-          className="mt-2 text-xs text-slate-300 whitespace-pre-wrap leading-relaxed overflow-auto"
-          style={{ maxHeight: 400, fontFamily: 'inherit' }}
-        >
-          {report.report}
-        </pre>
-      </details>
+      {/* Report content — stock and futures tabs */}
+      <div className="space-y-2">
+        {report.report && (
+          <ReportContent label="展开股票分析报告" content={report.report} color="#94a3b8" />
+        )}
+        {report.futures_report && (
+          <ReportContent label="展开期货分析报告" content={report.futures_report} color="#f59e0b" />
+        )}
+        {!report.report && !report.futures_report && report.analysis && (
+          <ReportContent label="展开分析报告" content={report.analysis} color="#94a3b8" />
+        )}
+      </div>
     </div>
   )
 }

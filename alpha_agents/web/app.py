@@ -95,14 +95,9 @@ async def _monitor_one_cycle():
         events = await digest_news(new_items)
         if not events:
             return
-        from alpha_agents.agents.strategist import run_analysis
-        events_json = json.dumps(events, ensure_ascii=False, indent=2)
-        prompt = (
-            f"以下是经过预处理的{len(events)}条重要事件摘要，"
-            f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
-            f"{events_json}"
-        )
-        await run_analysis(prompt)
+
+        from alpha_agents.pipeline.monitor import route_and_analyze
+        await route_and_analyze(events)
     except Exception:
         logger.exception("Manual trigger failed")
 
@@ -117,8 +112,10 @@ async def trigger_review():
 
 @app.get("/api/sources")
 async def get_sources():
-    """List of configured news sources."""
-    return JSONResponse({"sources": [
+    """List of configured news sources with health status."""
+    from alpha_agents.pipeline.source_health import health_tracker
+    health = {s["source_id"]: s for s in health_tracker.get_status()}
+    static_sources = [
         {"id": "eastmoney", "name": "东方财富", "type": "domestic"},
         {"id": "eastmoney_live", "name": "东方财富7x24", "type": "domestic"},
         {"id": "cls", "name": "财联社电报", "type": "domestic"},
@@ -131,7 +128,21 @@ async def get_sources():
         {"id": "fed", "name": "美联储", "type": "international"},
         {"id": "sec", "name": "SEC", "type": "international"},
         {"id": "social", "name": "社交媒体", "type": "social"},
-    ]})
+    ]
+    for src in static_sources:
+        h = health.get(src["id"], {})
+        src["healthy"] = h.get("healthy", True)
+        src["success_rate"] = h.get("success_rate", 0.0)
+        src["total_items"] = h.get("total_items", 0)
+        src["last_error"] = h.get("last_error", "")
+    return JSONResponse({"sources": static_sources})
+
+
+@app.get("/api/source-health")
+async def get_source_health():
+    """Detailed health status for all news sources."""
+    from alpha_agents.pipeline.source_health import health_tracker
+    return JSONResponse({"sources": health_tracker.get_status()})
 
 
 # --- WebSocket ---

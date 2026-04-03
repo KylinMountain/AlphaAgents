@@ -39,7 +39,8 @@ def _build_options(system_prompt: str) -> ClaudeAgentOptions:
         allowed_tools=["Agent", "WebSearch", "WebFetch"],
         agents={agent_name: agent_def},
         env=env,
-        permission_mode="acceptEdits",
+        permission_mode="bypassPermissions",
+        extra_args={"allow-dangerously-skip-permissions": None},
     )
 
     # Point to open-source CC wrapper if configured

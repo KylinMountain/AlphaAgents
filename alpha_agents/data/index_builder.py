@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from alpha_agents.http_client import fetch as http_fetch, get_headers
 from alpha_agents.data.db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
+
+# py_mini_racer is not thread-safe — serialize all THS auth calls
+_ths_lock = threading.Lock()
 
 
 def _fetch_stock_info_baostock() -> pd.DataFrame:
@@ -52,12 +56,16 @@ def _fetch_industry_baostock() -> pd.DataFrame:
 
 
 def _get_ths_headers() -> dict:
-    """Generate THS auth headers with v cookie (same method akshare uses)."""
-    js_code = py_mini_racer.MiniRacer()
-    with open(get_ths_js("ths.js"), encoding="utf-8") as f:
-        js_content = f.read()
-    js_code.eval(js_content)
-    v_code = js_code.call("v")
+    """Generate THS auth headers with v cookie (same method akshare uses).
+
+    Thread-locked because py_mini_racer crashes on concurrent access.
+    """
+    with _ths_lock:
+        js_code = py_mini_racer.MiniRacer()
+        with open(get_ths_js("ths.js"), encoding="utf-8") as f:
+            js_content = f.read()
+        js_code.eval(js_content)
+        v_code = js_code.call("v")
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Cookie": f"v={v_code}",

@@ -80,7 +80,7 @@ def get_futures_quotes_fn(symbols: str = "", days: int = 5) -> str:
                 if records:
                     latest = records[-1]
                     prev = records[-2] if len(records) > 1 else latest
-                    change_pct = round((latest["close"] - prev["close"]) / prev["close"] * 100, 2) if prev["close"] else 0
+                    change_pct = round((latest["close"] - prev["close"]) / prev["close"] * 100, 2) if prev["close"] != 0 else 0
                     results.append({
                         "name": name,
                         "symbol": code,

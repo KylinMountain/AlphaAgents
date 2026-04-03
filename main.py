@@ -5,8 +5,6 @@ import os
 import sys
 from pathlib import Path
 
-from alpha_agents.config import DB_PATH, CHROMA_PATH, MONITOR_INTERVAL_SECONDS
-
 
 def load_env() -> None:
     """Load .env file from project root if it exists."""
@@ -19,6 +17,12 @@ def load_env() -> None:
             continue
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip())
+
+
+# Load .env BEFORE importing config (config reads os.environ at import time)
+load_env()
+
+from alpha_agents.config import DB_PATH, CHROMA_PATH, MONITOR_INTERVAL_SECONDS
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -197,7 +201,6 @@ def main() -> None:
     p_embed.set_defaults(func=cmd_build_embeddings)
 
     args = parser.parse_args()
-    load_env()
     setup_logging(getattr(args, "verbose", False))
 
     # Default to 'run' if no subcommand given

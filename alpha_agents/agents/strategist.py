@@ -24,6 +24,8 @@ def _build_options(system_prompt: str) -> ClaudeAgentOptions:
         allowed_tools=["Agent", "WebSearch", "WebFetch"],
         agents={agent_name: agent_def},
         env=env,
+        permission_mode="bypassPermissions",
+        allow_dangerously_skip_permissions=True,
     )
 
     # Set model if configured (empty = SDK default)

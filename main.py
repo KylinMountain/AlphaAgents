@@ -75,6 +75,35 @@ def _ensure_embeddings() -> None:
         conn.close()
 
 
+def cmd_web(args: argparse.Namespace) -> None:
+    """Start web UI with real-time pipeline visualization."""
+    _ensure_index()
+    _ensure_embeddings()
+
+    import uvicorn
+    from alpha_agents.web.events import event_bus
+    from alpha_agents.web.app import app
+    from alpha_agents.monitor import NewsMonitor
+
+    interval = args.interval or MONITOR_INTERVAL_SECONDS
+    monitor = NewsMonitor(interval=interval, event_bus=event_bus)
+
+    async def run_all():
+        # Run monitor and uvicorn server concurrently
+        config = uvicorn.Config(
+            app, host=args.host, port=args.port,
+            log_level="info", access_log=False,
+        )
+        server = uvicorn.Server(config)
+        logging.info("Starting web UI at http://%s:%d", args.host, args.port)
+        await asyncio.gather(
+            server.serve(),
+            monitor.run(),
+        )
+
+    asyncio.run(run_all())
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """One command to rule them all: ensure index → ensure embeddings → start monitor."""
     _ensure_index()
@@ -126,6 +155,13 @@ def main() -> None:
     p_run.add_argument("--event", type=str, help="指定分析的事件（一次性分析，不启动监控）")
     p_run.add_argument("--interval", type=int, help="监控间隔（秒）")
     p_run.set_defaults(func=cmd_run)
+
+    # web — web UI with pipeline visualization
+    p_web = subparsers.add_parser("web", help="启动Web界面（实时Pipeline可视化）")
+    p_web.add_argument("--host", default="0.0.0.0", help="监听地址")
+    p_web.add_argument("--port", type=int, default=8000, help="监听端口")
+    p_web.add_argument("--interval", type=int, help="监控间隔（秒）")
+    p_web.set_defaults(func=cmd_web)
 
     # build-index — force rebuild
     p_index = subparsers.add_parser("build-index", help="强制重建股票概念索引")

@@ -90,7 +90,13 @@ async def get_eastmoney_live(args):
     return {"content": [{"type": "text", "text": result}]}
 
 
-@tool("search_stocks", "根据概念/板块关键词检索相关个股。从本地同花顺概念板块索引中模糊匹配。", {"keyword": str})
+@tool("search_stocks", """根据概念/板块描述检索相关A股个股。支持语义搜索，可以输入完整的描述句子。
+
+重要提示：
+- 输入可以是一个完整的句子或短语，例如"特朗普关税利好的国产替代和半导体板块"
+- 不需要拆成多个关键词分别搜索，一次调用即可覆盖多个相关概念
+- 系统会同时做语义匹配和关键词匹配，返回所有相关概念板块及其成分股
+- 请尽量一次搜索完成，避免多次重复调用""", {"keyword": str})
 async def search_stocks(args):
     result = search_stocks_fn(keyword=args["keyword"])
     return {"content": [{"type": "text", "text": result}]}

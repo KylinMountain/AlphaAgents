@@ -71,6 +71,7 @@ async def websocket_endpoint(ws: WebSocket):
         # Stream events
         while True:
             msg = await queue.get()
+            event_bus.mark_consumed(queue)
             await ws.send_text(json.dumps({"type": "event", "data": json.loads(msg)}, ensure_ascii=False))
     except WebSocketDisconnect:
         pass

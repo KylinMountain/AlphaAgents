@@ -82,27 +82,38 @@ class NewsMonitor:
 
         return new_items
 
-    async def _fetch_all_sources(self) -> list[dict]:
-        """Fetch from all news sources, return combined list."""
-        news_items: list[dict] = []
-        await self._emit("fetch", "running", f"正在从{len(NEWS_SOURCES)}个源抓取新闻...")
+    async def _fetch_one(self, source_id: str, name: str, fetch_fn) -> tuple[str, list[dict]]:
+        """Fetch a single source in a thread (non-blocking)."""
+        await self._emit(f"source_{source_id}", "running", f"抓取 {name}...")
+        try:
+            raw = await asyncio.to_thread(fetch_fn)
+            data = json.loads(raw)
+            items = data.get("news", [])
+            if items:
+                logger.debug("Fetched %d items from %s", len(items), name)
+            await self._emit(f"source_{source_id}", "success",
+                             f"{name}: {len(items)}条", {"count": len(items)})
+            return source_id, items
+        except Exception:
+            logger.warning("Failed to fetch from %s", name, exc_info=True)
+            await self._emit(f"source_{source_id}", "error", f"{name}: 抓取失败")
+            return source_id, []
 
+    async def _fetch_all_sources(self) -> list[dict]:
+        """Fetch from all news sources concurrently, return combined list."""
+        await self._emit("fetch", "running", f"正在从{len(NEWS_SOURCES)}个源并发抓取...")
+
+        tasks = [
+            self._fetch_one(sid, name, fn)
+            for sid, name, fn in NEWS_SOURCES
+        ]
+        results = await asyncio.gather(*tasks)
+
+        news_items: list[dict] = []
         source_results = {}
-        for source_id, name, fetch in NEWS_SOURCES:
-            try:
-                await self._emit(f"source_{source_id}", "running", f"抓取 {name}...")
-                data = json.loads(fetch())
-                items = data.get("news", [])
-                news_items.extend(items)
-                source_results[source_id] = len(items)
-                if items:
-                    logger.debug("Fetched %d items from %s", len(items), name)
-                await self._emit(f"source_{source_id}", "success",
-                                 f"{name}: {len(items)}条", {"count": len(items)})
-            except Exception:
-                logger.warning("Failed to fetch from %s", name, exc_info=True)
-                source_results[source_id] = 0
-                await self._emit(f"source_{source_id}", "error", f"{name}: 抓取失败")
+        for source_id, items in results:
+            news_items.extend(items)
+            source_results[source_id] = len(items)
 
         await self._emit("fetch", "success",
                          f"共抓取{len(news_items)}条新闻",

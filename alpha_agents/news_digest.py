@@ -90,16 +90,37 @@ def _parse_response(text: str) -> list[dict]:
         logger.warning("LLM returned non-list JSON, wrapping: %s", type(events))
         events = [events]
 
-    # Filter importance >= 3
-    events = [e for e in events if e.get("importance", 0) >= 3]
+    # Validate and normalize each event
+    valid = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        # Ensure required fields with defaults
+        e.setdefault("event", "未知事件")
+        e.setdefault("category", "未知")
+        e.setdefault("summary", "")
+        e.setdefault("sources", [])
+        e.setdefault("credibility", "low")
+        e.setdefault("raw_titles", [])
+        e.setdefault("market_impact", {})
+        # Coerce importance to int, clamp 1-5
+        try:
+            imp = int(e.get("importance", 0))
+        except (ValueError, TypeError):
+            imp = 0
+        e["importance"] = max(0, min(imp, 5))
+        # Filter importance >= 3
+        if e["importance"] >= 3:
+            valid.append(e)
 
     # Sort by importance desc, then credibility (high > medium > low)
     cred_order = {"high": 0, "medium": 1, "low": 2}
-    events.sort(
-        key=lambda e: (-e.get("importance", 0), cred_order.get(e.get("credibility", "low"), 3))
+    valid.sort(
+        key=lambda e: (-e["importance"], cred_order.get(e.get("credibility", "low"), 3))
     )
 
-    return events
+    # Cap at 20 events max
+    return valid[:20]
 
 
 def _get_client() -> AsyncOpenAI:

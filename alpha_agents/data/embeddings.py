@@ -6,6 +6,7 @@ Default: SiliconFlow free BGE-M3. Configurable to any provider.
 
 import logging
 import sqlite3
+from functools import lru_cache
 
 import chromadb
 from openai import OpenAI
@@ -130,6 +131,13 @@ def build_concept_embeddings(conn: sqlite3.Connection) -> int:
     return len(new_ids)
 
 
+@lru_cache(maxsize=128)
+def _get_query_embedding(query: str) -> tuple:
+    """Cache query embeddings to avoid repeated API calls."""
+    embedding = _call_embedding_api([query])[0]
+    return tuple(embedding)  # tuple for hashability
+
+
 def search_concepts_semantic(
     conn: sqlite3.Connection,
     query: str,
@@ -151,8 +159,8 @@ def search_concepts_semantic(
     if collection.count() == 0:
         return []
 
-    # Embed query via API
-    query_embedding = _call_embedding_api([query])[0]
+    # Embed query via API (cached to avoid repeated calls for same/similar queries)
+    query_embedding = list(_get_query_embedding(query))
 
     results = collection.query(
         query_embeddings=[query_embedding],

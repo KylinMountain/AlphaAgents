@@ -68,16 +68,22 @@ def _parse_rss(xml_text: str, source: str, author: str) -> list[dict]:
 
 
 def _fetch_feed(primary_url: str, fallback_url: str, source: str, author: str) -> list[dict]:
-    """Try fetching from primary URL, fall back to secondary on failure."""
+    """Try fetching from primary URL, fall back to secondary on failure.
+
+    All failures are logged at DEBUG level — third-party RSS bridges (rsshub,
+    nitter) are inherently unreliable (403/429/404) and WARNING spam every
+    polling cycle makes the monitor output unreadable.
+    """
     for url in (primary_url, fallback_url):
         try:
-            resp = fetch(url)
+            resp = fetch(url, max_retries=1)
             items = _parse_rss(resp.text, source, author)
             if items:
                 logger.debug("Fetched %d items from %s for %s", len(items), url, author)
                 return items
         except Exception as e:
-            logger.warning("Failed to fetch %s (%s): %s", url, author, e)
+            logger.debug("Social feed unavailable (%s for %s): %s", url, author, e)
+    logger.debug("All feeds failed for %s (%s), returning empty", author, source)
     return []
 
 

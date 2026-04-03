@@ -12,12 +12,16 @@ from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
-RSS_URLS = [
-    "http://www.news.cn/feed/caijing.xml",
-    "http://www.news.cn/feed/toutiao.xml",
+RSS_URLS: list[str] = [
+    # All known Xinhua RSS feeds — tried in order until one succeeds.
+    # Note: http://www.news.cn/feed/*.xml returned 404 as of 2026-04.
+    # https://news.xinhuanet.com/politics/rss_cj.xml is slow/unreliable.
+    # Keeping list for future re-activation if Xinhua restores RSS.
 ]
 
-FALLBACK_URL = "http://www.news.cn/fortune/"
+# The fortune/index.htm page loads fine and has ~30 article links.
+# The bare http://www.news.cn/fortune/ only returns a JS redirect stub.
+FALLBACK_URL = "http://www.news.cn/fortune/index.htm"
 
 
 def _parse_rss(xml_text: str) -> list[dict]:
@@ -76,7 +80,7 @@ def get_xinhua_fn(limit: int = 20, keyword: str | None = None) -> str:
     """
     all_news: list[dict] = []
 
-    # Try each RSS URL in order
+    # Try each RSS URL in order (list may be empty if all feeds are dead)
     for url in RSS_URLS:
         try:
             resp = fetch(url)
@@ -85,14 +89,19 @@ def get_xinhua_fn(limit: int = 20, keyword: str | None = None) -> str:
                 logger.debug("Fetched %d items from Xinhua RSS: %s", len(all_news), url)
                 break
         except Exception as e:
-            logger.warning("Failed to fetch Xinhua RSS (%s): %s", url, e)
+            # Use debug level — RSS feeds are known-unreliable; warnings would
+            # spam the monitor output every polling cycle.
+            logger.debug("Xinhua RSS unavailable (%s): %s", url, e)
 
-    # Fallback to scraping the fortune page
+    # Fallback to scraping the finance index page
     if not all_news:
         try:
             resp = fetch(FALLBACK_URL)
             all_news = _parse_fallback_html(resp.text)
-            logger.debug("Fetched %d items from Xinhua fallback page", len(all_news))
+            if all_news:
+                logger.debug("Fetched %d items from Xinhua fallback page", len(all_news))
+            else:
+                logger.debug("Xinhua fallback page returned no items")
         except Exception as e:
             logger.warning("Failed to fetch Xinhua fallback page: %s", e)
 

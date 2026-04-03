@@ -21,20 +21,35 @@
 
 // Allowed domains — only proxy requests to known news sources
 const ALLOWED_DOMAINS = new Set([
+  // 国内源
   "newsapi.eastmoney.com",
   "np-listapi.eastmoney.com",
   "search-api-web.eastmoney.com",
   "www.cls.cn",
   "api-one-wscn.awtmt.com",
   "flash-api.jin10.com",
+  "www.jin10.com",
   "www.pbc.gov.cn",
   "www.news.cn",
+  // 英美主流
   "feeds.bbci.co.uk",
   "search.cnbc.com",
   "news.google.com",
   "www.whitehouse.gov",
   "www.federalreserve.gov",
   "www.sec.gov",
+  // 财经专业
+  "feeds.bloomberg.com",
+  "www.ft.com",
+  // 中东
+  "www.aljazeera.com",
+  "www.middleeasteye.net",
+  "www.haaretz.com",
+  // 欧洲/多视角
+  "www.france24.com",
+  "rss.dw.com",
+  "www.rt.com",
+  // 社交媒体 RSS 桥
   "rsshub.app",
   "nitter.net",
 ]);

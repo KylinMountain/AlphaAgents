@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from alpha_agents.news_digest import (
+from alpha_agents.pipeline.digest import (
     _build_user_message,
     _parse_response,
     digest_news,
@@ -170,8 +170,8 @@ class TestParseResponse:
 async def test_digest_news_parses_response():
     mock_create = AsyncMock(return_value=_mock_completion(SAMPLE_LLM_RESPONSE))
 
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
-         patch("alpha_agents.news_digest._get_client") as mock_client:
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.pipeline.digest._get_client") as mock_client:
         mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
@@ -186,9 +186,9 @@ async def test_digest_news_parses_response():
 async def test_digest_news_calls_api_correctly():
     mock_create = AsyncMock(return_value=_mock_completion(SAMPLE_LLM_RESPONSE))
 
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
-         patch("alpha_agents.news_digest.DIGEST_MODEL", "test-model"), \
-         patch("alpha_agents.news_digest._get_client") as mock_client:
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.pipeline.digest.DIGEST_MODEL", "test-model"), \
+         patch("alpha_agents.pipeline.digest._get_client") as mock_client:
         mock_client.return_value.chat.completions.create = mock_create
         await digest_news(SAMPLE_NEWS)
 
@@ -205,8 +205,8 @@ async def test_digest_news_calls_api_correctly():
 async def test_digest_news_handles_api_error():
     mock_create = AsyncMock(side_effect=Exception("API error"))
 
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
-         patch("alpha_agents.news_digest._get_client") as mock_client:
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.pipeline.digest._get_client") as mock_client:
         mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
@@ -219,8 +219,8 @@ async def test_digest_news_handles_malformed_json():
     bad_completion.choices[0].message.content = "not valid json [[["
     mock_create = AsyncMock(return_value=bad_completion)
 
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
-         patch("alpha_agents.news_digest._get_client") as mock_client:
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.pipeline.digest._get_client") as mock_client:
         mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 
@@ -235,7 +235,7 @@ async def test_digest_news_empty_input():
 
 @pytest.mark.asyncio
 async def test_digest_news_missing_api_key():
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", ""):
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", ""):
         result = await digest_news(SAMPLE_NEWS)
     assert result == []
 
@@ -250,8 +250,8 @@ async def test_digest_news_importance_sorting():
     ]
     mock_create = AsyncMock(return_value=_mock_completion(events))
 
-    with patch("alpha_agents.news_digest.DIGEST_API_KEY", "test-key"), \
-         patch("alpha_agents.news_digest._get_client") as mock_client:
+    with patch("alpha_agents.pipeline.digest.DIGEST_API_KEY", "test-key"), \
+         patch("alpha_agents.pipeline.digest._get_client") as mock_client:
         mock_client.return_value.chat.completions.create = mock_create
         result = await digest_news(SAMPLE_NEWS)
 

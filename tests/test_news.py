@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from alpha_agents.tools.news import get_news_fn
+from alpha_agents.sources.eastmoney import get_news_fn
 
 
 def _mock_stock_news():
@@ -16,7 +16,7 @@ def _mock_stock_news():
     })
 
 
-@patch("alpha_agents.tools.news._fetch_news", side_effect=lambda **kw: _mock_stock_news())
+@patch("alpha_agents.sources.eastmoney._fetch_news", side_effect=lambda **kw: _mock_stock_news())
 def test_get_news_returns_list(mock_fetch):
     result = get_news_fn(limit=10)
     parsed = json.loads(result)
@@ -24,7 +24,7 @@ def test_get_news_returns_list(mock_fetch):
     assert parsed["news"][0]["title"] == "特朗普宣布对华加征关税"
 
 
-@patch("alpha_agents.tools.news._fetch_news", side_effect=lambda **kw: _mock_stock_news())
+@patch("alpha_agents.sources.eastmoney._fetch_news", side_effect=lambda **kw: _mock_stock_news())
 def test_get_news_with_keyword(mock_fetch):
     result = get_news_fn(limit=10, keyword="特朗普")
     parsed = json.loads(result)
@@ -32,7 +32,7 @@ def test_get_news_with_keyword(mock_fetch):
     assert "特朗普" in parsed["news"][0]["title"]
 
 
-@patch("alpha_agents.tools.news._fetch_news", side_effect=lambda **kw: _mock_stock_news())
+@patch("alpha_agents.sources.eastmoney._fetch_news", side_effect=lambda **kw: _mock_stock_news())
 def test_get_news_respects_limit(mock_fetch):
     result = get_news_fn(limit=2)
     parsed = json.loads(result)

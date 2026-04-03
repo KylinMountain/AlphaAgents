@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.fed import get_fed_news_fn, _parse_rss
+from alpha_agents.sources.fed import get_fed_news_fn, _parse_rss
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -55,7 +55,7 @@ def _mock_fetch(text):
 
 
 def test_get_fed_news_returns_json():
-    with patch("alpha_agents.tools.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_fed_news_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "Federal Reserve issues FOMC statement"
@@ -63,20 +63,20 @@ def test_get_fed_news_returns_json():
 
 
 def test_get_fed_news_keyword_filter():
-    with patch("alpha_agents.tools.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_fed_news_fn(keyword="FOMC"))
         assert result["count"] == 1
         assert "FOMC" in result["news"][0]["title"]
 
 
 def test_get_fed_news_respects_limit():
-    with patch("alpha_agents.tools.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
+    with patch("alpha_agents.sources.fed.fetch", return_value=_mock_fetch(SAMPLE_RSS)):
         result = json.loads(get_fed_news_fn(limit=2))
         assert result["count"] == 2
 
 
 def test_get_fed_news_handles_fetch_error():
-    with patch("alpha_agents.tools.fed.fetch", side_effect=Exception("Connection refused")):
+    with patch("alpha_agents.sources.fed.fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_fed_news_fn())
         assert result["count"] == 0
         assert result["news"] == []

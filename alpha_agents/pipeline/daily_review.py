@@ -8,6 +8,7 @@ Workflow:
 5. Store review results + push notification
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -213,12 +214,13 @@ async def run_daily_review(target_date: str | None = None) -> dict:
             response = await client.chat.completions.create(
                 model=DIGEST_MODEL,
                 max_tokens=2048,
+                timeout=90,
                 messages=[
                     {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
             )
-            review_text = response.choices[0].message.content or ""
+            review_text = (response.choices[0].message.content if response.choices else "") or ""
         except Exception as e:
             logger.warning("LLM review analysis failed: %s", e)
             review_text = f"LLM分析失败: {e}"
@@ -238,7 +240,7 @@ async def run_daily_review(target_date: str | None = None) -> dict:
         target_date, accuracy, len(predictions),
         review_text[:500] if review_text else f"准确率: {accuracy * 100:.0f}%",
     )
-    notify_all(title, body)
+    await asyncio.to_thread(notify_all, title, body)
 
     return {
         "date": target_date,

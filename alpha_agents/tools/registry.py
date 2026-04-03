@@ -2,22 +2,22 @@
 
 from agents import function_tool
 
-from alpha_agents.tools.news import get_news_fn
-from alpha_agents.tools.world_news import get_world_news_fn
-from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
-from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
-from alpha_agents.tools.whitehouse import get_whitehouse_fn
-from alpha_agents.tools.pboc import get_pboc_news_fn
-from alpha_agents.tools.jin10 import get_jin10_fn
-from alpha_agents.tools.xinhua import get_xinhua_fn
-from alpha_agents.tools.fed import get_fed_news_fn
-from alpha_agents.tools.sec import get_sec_news_fn
-from alpha_agents.tools.truthsocial import get_social_media_fn
-from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
+from alpha_agents.sources.eastmoney import get_news_fn
+from alpha_agents.sources.world_news import get_world_news_fn
+from alpha_agents.sources.cls_telegraph import get_cls_telegraph_fn
+from alpha_agents.sources.wallstreetcn import get_wallstreetcn_fn
+from alpha_agents.sources.whitehouse import get_whitehouse_fn
+from alpha_agents.sources.pboc import get_pboc_news_fn
+from alpha_agents.sources.jin10 import get_jin10_fn
+from alpha_agents.sources.xinhua import get_xinhua_fn
+from alpha_agents.sources.fed import get_fed_news_fn
+from alpha_agents.sources.sec import get_sec_news_fn
+from alpha_agents.sources.truthsocial import get_social_media_fn
+from alpha_agents.sources.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.web_search import web_search_fn
 from alpha_agents.tools.web_fetch import web_fetch_fn
-from alpha_agents.tools.pizzint import get_pizzint_fn
+from alpha_agents.sources.pizzint import get_pizzint_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
@@ -158,12 +158,27 @@ def get_watchlist() -> str:
     return get_watchlist_fn()
 
 
-# All tools as a list for agent construction
-ALL_TOOLS = [
+# --- Tool sets for different agents ---
+
+# News source tools — used by monitor pipeline, NOT by agents during analysis.
+# Agents receive pre-digested events; they don't need to re-fetch news.
+NEWS_TOOLS = [
     get_news, get_eastmoney_live, get_world_news,
     get_cls_telegraph, get_wallstreetcn,
     get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
     get_fed_news, get_sec_news, get_social_media,
-    search_stocks, web_search, web_fetch, get_pizzint,
-    get_sector_data, filter_stocks, get_watchlist,
 ]
+
+# Stock analysis tools — for the stock strategist agent
+STOCK_TOOLS = [
+    search_stocks, get_sector_data, filter_stocks, get_watchlist,
+    web_search, web_fetch, get_pizzint,
+]
+
+# Futures analysis tools — for the futures strategist agent
+FUTURES_TOOLS = [
+    web_search, web_fetch, get_pizzint,
+]
+
+# ALL_TOOLS: full set including news (for backward compatibility / one-shot mode)
+ALL_TOOLS = NEWS_TOOLS + STOCK_TOOLS

@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn, _parse_items
+from alpha_agents.sources.wallstreetcn import get_wallstreetcn_fn, _parse_items
 
 SAMPLE_RESPONSE = {
     "code": 20000,
@@ -73,27 +73,27 @@ def _mock_fetch(response_json):
 
 
 def test_get_wallstreetcn_returns_json():
-    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
+    with patch("alpha_agents.sources.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["title"] == "美联储维持利率不变"
 
 
 def test_get_wallstreetcn_keyword_filter():
-    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
+    with patch("alpha_agents.sources.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(keyword="美联储"))
         assert result["count"] == 1
         assert "美联储" in result["news"][0]["title"]
 
 
 def test_get_wallstreetcn_respects_limit():
-    with patch("alpha_agents.tools.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
+    with patch("alpha_agents.sources.wallstreetcn.fetch", return_value=_mock_fetch(SAMPLE_RESPONSE)):
         result = json.loads(get_wallstreetcn_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_wallstreetcn_handles_api_error():
-    with patch("alpha_agents.tools.wallstreetcn.fetch", side_effect=Exception("500 error")):
+    with patch("alpha_agents.sources.wallstreetcn.fetch", side_effect=Exception("500 error")):
         result = json.loads(get_wallstreetcn_fn())
         assert result["count"] == 0
         assert result["news"] == []

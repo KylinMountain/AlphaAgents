@@ -76,17 +76,22 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
         response = await client.chat.completions.create(
             model=DIGEST_MODEL,
             max_tokens=1024,
+            timeout=60,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
         )
 
-        text = (response.choices[0].message.content or "").strip()
+        text = ((response.choices[0].message.content if response.choices else "") or "").strip()
 
         # Strip markdown fences
         if text.startswith("```"):
-            text = text[text.index("\n") + 1:]
+            nl = text.find("\n")
+            if nl != -1:
+                text = text[nl + 1:]
+            else:
+                text = text[3:]
             if text.endswith("```"):
                 text = text[:-3].strip()
 

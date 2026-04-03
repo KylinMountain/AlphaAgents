@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.world_news import get_world_news_fn, _parse_rss
+from alpha_agents.sources.world_news import get_world_news_fn, _parse_rss
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -55,20 +55,20 @@ def _mock_client_session():
 
 
 def test_get_world_news_returns_json():
-    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
+    with patch("alpha_agents.sources.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(limit=10))
         assert result["count"] > 0
         assert result["news"][0]["title"] == "Trump announces new tariffs on China"
 
 
 def test_get_world_news_keyword_filter():
-    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
+    with patch("alpha_agents.sources.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(keyword="trump"))
         assert result["count"] > 0
         assert all("trump" in n["title"].lower() for n in result["news"])
 
 
 def test_get_world_news_respects_limit():
-    with patch("alpha_agents.tools.world_news.client_session", return_value=_mock_client_session()):
+    with patch("alpha_agents.sources.world_news.client_session", return_value=_mock_client_session()):
         result = json.loads(get_world_news_fn(limit=1))
         assert result["count"] == 1

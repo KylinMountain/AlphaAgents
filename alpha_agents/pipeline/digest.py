@@ -56,6 +56,7 @@ SYSTEM_PROMPT = """\
 {
   "event": "事件标题",
   "category": "政策/地缘/宏观/行业/市场",
+  "target_market": "stock/futures/both",
   "summary": "综合多源信息的事件摘要",
   "importance": 4,
   "credibility": "high/medium/low",
@@ -70,6 +71,11 @@ SYSTEM_PROMPT = """\
   },
   "raw_titles": ["原始标题1", "原始标题2"]
 }
+
+target_market 路由规则：
+- "stock" — 仅影响股票市场的事件（公司年报、板块异动、监管政策、并购重组）
+- "futures" — 仅影响期货市场的事件（OPEC减产、极端天气影响农产品、库存数据）
+- "both" — 同时影响股票和期货的事件（关税政策、央行利率决议、地缘冲突、重大宏观数据）
 
 只返回一个JSON数组，不要有其他文字。如果没有重要性>=3的事件，返回空数组 []。
 """
@@ -171,11 +177,15 @@ def _parse_response(text: str) -> list[dict]:
         # Ensure required fields with defaults
         e.setdefault("event", "未知事件")
         e.setdefault("category", "未知")
+        e.setdefault("target_market", "both")
         e.setdefault("summary", "")
         e.setdefault("sources", [])
         e.setdefault("credibility", "low")
         e.setdefault("raw_titles", [])
         e.setdefault("market_impact", {})
+        # Validate target_market
+        if e["target_market"] not in ("stock", "futures", "both"):
+            e["target_market"] = "both"
         # Coerce importance to int, clamp 1-5
         try:
             imp = int(e.get("importance", 0))
@@ -210,12 +220,13 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
     response = await client.chat.completions.create(
         model=DIGEST_MODEL,
         max_tokens=MAX_OUTPUT_TOKENS,
+        timeout=90,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
     )
-    text = response.choices[0].message.content or ""
+    text = (response.choices[0].message.content if response.choices else "") or ""
     return _parse_response(text)
 
 

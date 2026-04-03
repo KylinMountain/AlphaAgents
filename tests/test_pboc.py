@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.pboc import get_pboc_news_fn, _parse_pboc_html
+from alpha_agents.sources.pboc import get_pboc_news_fn, _parse_pboc_html
 
 SAMPLE_HTML = """
 <html>
@@ -65,27 +65,27 @@ def _mock_fetch(text):
 
 
 def test_get_pboc_news_returns_json():
-    with patch("alpha_agents.tools.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_pboc_news_fn(limit=10))
         assert result["count"] == 3
         assert result["news"][0]["source"] == "中国人民银行"
 
 
 def test_get_pboc_news_keyword_filter():
-    with patch("alpha_agents.tools.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_pboc_news_fn(keyword="准备金"))
         assert result["count"] == 1
         assert "准备金" in result["news"][0]["title"]
 
 
 def test_get_pboc_news_respects_limit():
-    with patch("alpha_agents.tools.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
+    with patch("alpha_agents.sources.pboc.http_fetch", return_value=_mock_fetch(SAMPLE_HTML)):
         result = json.loads(get_pboc_news_fn(limit=1))
         assert result["count"] == 1
 
 
 def test_get_pboc_news_handles_fetch_error():
-    with patch("alpha_agents.tools.pboc.http_fetch", side_effect=Exception("Connection refused")):
+    with patch("alpha_agents.sources.pboc.http_fetch", side_effect=Exception("Connection refused")):
         result = json.loads(get_pboc_news_fn())
         assert result["count"] == 0
         assert result["news"] == []

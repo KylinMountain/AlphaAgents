@@ -5,22 +5,23 @@ import time
 from collections import deque
 
 from alpha_agents.config import MONITOR_INTERVAL_SECONDS, NEWS_FETCH_LIMIT
-from alpha_agents.tools.news import get_news_fn
-from alpha_agents.tools.world_news import get_world_news_fn
-from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
-from alpha_agents.tools.wallstreetcn import get_wallstreetcn_fn
-from alpha_agents.tools.whitehouse import get_whitehouse_fn
-from alpha_agents.tools.pboc import get_pboc_news_fn
-from alpha_agents.tools.jin10 import get_jin10_fn
-from alpha_agents.tools.xinhua import get_xinhua_fn
-from alpha_agents.tools.fed import get_fed_news_fn
-from alpha_agents.tools.sec import get_sec_news_fn
-from alpha_agents.tools.truthsocial import get_social_media_fn
-from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
-from alpha_agents.news_digest import digest_news
+from alpha_agents.sources.eastmoney import get_news_fn
+from alpha_agents.sources.world_news import get_world_news_fn
+from alpha_agents.sources.cls_telegraph import get_cls_telegraph_fn
+from alpha_agents.sources.wallstreetcn import get_wallstreetcn_fn
+from alpha_agents.sources.whitehouse import get_whitehouse_fn
+from alpha_agents.sources.pboc import get_pboc_news_fn
+from alpha_agents.sources.jin10 import get_jin10_fn
+from alpha_agents.sources.xinhua import get_xinhua_fn
+from alpha_agents.sources.fed import get_fed_news_fn
+from alpha_agents.sources.sec import get_sec_news_fn
+from alpha_agents.sources.truthsocial import get_social_media_fn
+from alpha_agents.sources.eastmoney_live import get_eastmoney_live_fn
+from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
+from alpha_agents.agents.futures import run_futures_analysis
 from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
-from alpha_agents.event_linker import analyze_event_links
+from alpha_agents.pipeline.event_linker import analyze_event_links
 from alpha_agents.notify import notify_all, format_report_notification
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,8 @@ class NewsMonitor:
     async def run(self) -> None:
         logger.info("News monitor started. Interval: %ds", self.interval)
         cycle = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         while True:
             cycle += 1
             try:
@@ -182,25 +185,71 @@ class NewsMonitor:
                     events[0].get("importance", 0),
                 )
 
-                # 3. Feed digested events to the expensive strategist Agent
-                await self._emit("agent", "running",
-                                 "Agent正在深度分析...")
-                events_json = json.dumps(events, ensure_ascii=False, indent=2)
-                prompt = (
-                    f"以下是经过预处理的{len(events)}条重要事件摘要，"
-                    f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
-                    f"{events_json}"
-                )
-                result = await run_analysis(prompt)
+                # 3. Route events by target_market
+                stock_events = [e for e in events if e.get("target_market") in ("stock", "both")]
+                futures_events = [e for e in events if e.get("target_market") in ("futures", "both")]
 
-                # 4. Persist report to SQLite
+                logger.info("Routing: %d stock events, %d futures events",
+                            len(stock_events), len(futures_events))
+
+                # 4. Run stock and futures agents in parallel
+                await self._emit("agent", "running", "Agent正在深度分析...")
+
+                analysis_tasks = []
+                if stock_events:
+                    stock_json = json.dumps(stock_events, ensure_ascii=False, indent=2)
+                    stock_prompt = (
+                        f"以下是经过预处理的{len(stock_events)}条重要事件摘要，"
+                        f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
+                        f"{stock_json}"
+                    )
+                    analysis_tasks.append(("stock", run_analysis(stock_prompt)))
+
+                if futures_events:
+                    futures_json = json.dumps(futures_events, ensure_ascii=False, indent=2)
+                    futures_prompt = (
+                        f"以下是经过预处理的{len(futures_events)}条重要事件摘要，"
+                        f"请分析这些事件对期货市场各品种的影响，输出完整期货分析报告：\n\n"
+                        f"{futures_json}"
+                    )
+                    analysis_tasks.append(("futures", run_futures_analysis(futures_prompt)))
+
+                # Run both agents concurrently
+                results_map = {}
+                if analysis_tasks:
+                    labels = [t[0] for t in analysis_tasks]
+                    coros = [t[1] for t in analysis_tasks]
+                    outputs = await asyncio.gather(*coros, return_exceptions=True)
+                    for label, output in zip(labels, outputs):
+                        if isinstance(output, Exception):
+                            logger.error("%s agent failed: %s", label, output)
+                            results_map[label] = f"[{label} agent error: {output}]"
+                        else:
+                            results_map[label] = output
+
+                stock_result = results_map.get("stock", "")
+                futures_result = results_map.get("futures", "")
+
+                # Combine results for display
+                combined_result = ""
+                if stock_result:
+                    combined_result += stock_result
+                if futures_result:
+                    if combined_result:
+                        combined_result += "\n\n" + "=" * 50 + "\n\n"
+                    combined_result += futures_result
+
+                if not combined_result:
+                    combined_result = "[No analysis produced]"
+
+                # 5. Persist reports to SQLite
                 ts = time.time()
                 today = time.strftime("%Y-%m-%d")
                 report_id = await asyncio.to_thread(
-                    save_report, cycle, ts, events, categories, result)
+                    save_report, cycle, ts, events, categories, combined_result)
                 logger.info("Saved report #%d", report_id)
 
-                # 5. Extract predictions from events and save
+                # 6. Extract predictions from events and save
                 predictions = []
                 event_ids = []
                 for e in events:
@@ -240,49 +289,77 @@ class NewsMonitor:
                     await asyncio.to_thread(save_predictions, report_id, today, predictions)
                     logger.info("Saved %d predictions for %s", len(predictions), today)
 
-                # 6. LLM analyzes causal relationships between events
+                # 7. LLM analyzes causal relationships between events
                 if len(events) >= 2:
                     llm_links = await analyze_event_links(events)
+                    n_events = len(event_ids)
                     for lnk in llm_links:
-                        src_eid = event_ids[lnk["source"]]
-                        tgt_eid = event_ids[lnk["target"]]
+                        si, ti = lnk["source"], lnk["target"]
+                        if si >= n_events or ti >= n_events:
+                            logger.warning("Event link index out of range: %d->%d (max %d)", si, ti, n_events - 1)
+                            continue
                         await asyncio.to_thread(
-                            link_events, src_eid, tgt_eid,
+                            link_events, event_ids[si], event_ids[ti],
                             lnk["relation"], lnk["confidence"],
                             lnk.get("reason", ""))
                     if llm_links:
                         logger.info("Linked %d event relationships", len(llm_links))
 
-                # 7. Push to web event bus
+                # 8. Push to web event bus
                 report = {
                     "cycle": cycle,
                     "timestamp": ts,
                     "event_count": len(events),
                     "categories": categories,
+                    "routes": {
+                        "stock": len(stock_events),
+                        "futures": len(futures_events),
+                    },
                     "events_summary": [
                         {"event": e.get("event"), "category": e.get("category"),
-                         "importance": e.get("importance")}
+                         "importance": e.get("importance"),
+                         "target_market": e.get("target_market")}
                         for e in events
                     ],
-                    "report": result,
+                    "report": stock_result,
+                    "futures_report": futures_result,
                 }
                 if self._bus:
                     self._bus.add_report(report)
 
-                # 8. Push notification
-                title, body = format_report_notification(events, result[:500])
-                await asyncio.to_thread(notify_all, title, body)
+                # 9. Push notifications (separate for stock/futures)
+                if stock_result:
+                    title, body = format_report_notification(stock_events, stock_result[:500])
+                    await asyncio.to_thread(notify_all, title, body)
+                if futures_result:
+                    title = f"AlphaAgents 期货: {futures_events[0].get('event', '?')[:30]}"
+                    body = f"共{len(futures_events)}条期货相关事件\n\n{futures_result[:500]}"
+                    await asyncio.to_thread(notify_all, title, body)
 
                 await self._emit("agent", "success", "分析完成",
-                                 {"report_preview": result[:500]})
+                                 {"stock_preview": stock_result[:300],
+                                  "futures_preview": futures_result[:300]})
                 await self._emit("pipeline", "success",
-                                 f"第{cycle}轮分析完成",
+                                 f"第{cycle}轮分析完成 (股票:{len(stock_events)} 期货:{len(futures_events)})",
                                  {"cycle": cycle})
 
-                print(result)
+                # Print both reports
+                if stock_result:
+                    print(stock_result)
+                if futures_result:
+                    print("\n" + "=" * 50)
+                    print(futures_result)
+                consecutive_errors = 0  # reset on success
 
             except Exception:
-                logger.exception("Error in monitor loop")
-                await self._emit("pipeline", "error", "监控循环出错")
+                consecutive_errors += 1
+                logger.exception("Error in monitor loop (consecutive: %d/%d)",
+                                 consecutive_errors, max_consecutive_errors)
+                await self._emit("pipeline", "error",
+                                 f"监控循环出错 ({consecutive_errors}/{max_consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical("Too many consecutive errors (%d), stopping monitor", consecutive_errors)
+                    await self._emit("pipeline", "error", "连续错误过多，监控已停止")
+                    break
 
             await asyncio.sleep(self.interval)

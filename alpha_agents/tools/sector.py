@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 import akshare as ak
 import pandas as pd
@@ -8,9 +9,12 @@ from alpha_agents.config import no_proxy
 
 logger = logging.getLogger(__name__)
 
+# py_mini_racer (used internally by akshare THS functions) is not thread-safe
+_ths_lock = threading.Lock()
+
 
 def _fetch_sector_fund_flow() -> pd.DataFrame:
-    with no_proxy():
+    with _ths_lock, no_proxy():
         return ak.stock_fund_flow_concept()
 
 

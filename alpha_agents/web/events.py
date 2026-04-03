@@ -39,30 +39,41 @@ class EventBus:
     """Async event bus that broadcasts pipeline events to WebSocket clients."""
 
     def __init__(self):
-        self._subscribers: set[asyncio.Queue] = set()
+        self._subscribers: dict[asyncio.Queue, float] = {}  # queue -> last_consumed
         self._stage_states: dict[str, StageEvent] = {}
         self._reports: list[dict] = []
         self._max_reports = 50
+        self._stale_timeout = 60.0  # evict queues not consumed for 60s
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._subscribers.add(q)
+        self._subscribers[q] = time.time()
         return q
 
     def unsubscribe(self, q: asyncio.Queue):
-        self._subscribers.discard(q)
+        self._subscribers.pop(q, None)
+
+    def mark_consumed(self, q: asyncio.Queue):
+        """Mark a queue as actively consumed (call from WS reader)."""
+        if q in self._subscribers:
+            self._subscribers[q] = time.time()
 
     async def emit(self, event: StageEvent):
         self._stage_states[event.stage] = event
         msg = event.to_json()
+        now = time.time()
         dead = []
-        for q in self._subscribers:
+        for q, last_consumed in self._subscribers.items():
+            # Evict stale queues (disconnected without cleanup)
+            if now - last_consumed > self._stale_timeout:
+                dead.append(q)
+                continue
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
                 dead.append(q)
         for q in dead:
-            self._subscribers.discard(q)
+            self._subscribers.pop(q, None)
 
     def add_report(self, report: dict):
         self._reports.append(report)

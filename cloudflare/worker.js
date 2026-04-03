@@ -19,6 +19,29 @@
  *   Then set CF_WORKER_AUTH_TOKEN env var in your .env
  */
 
+// Allowed domains — only proxy requests to known news sources
+const ALLOWED_DOMAINS = new Set([
+  "newsapi.eastmoney.com",
+  "np-listapi.eastmoney.com",
+  "search-api-web.eastmoney.com",
+  "www.cls.cn",
+  "api-one-wscn.awtmt.com",
+  "flash-api.jin10.com",
+  "www.pbc.gov.cn",
+  "www.news.cn",
+  "feeds.bbci.co.uk",
+  "search.cnbc.com",
+  "news.google.com",
+  "www.whitehouse.gov",
+  "www.federalreserve.gov",
+  "www.sec.gov",
+  "rsshub.app",
+  "nitter.net",
+]);
+
+const ALLOWED_METHODS = new Set(["GET", "HEAD"]);
+const MAX_TIMEOUT = 30000;
+
 export default {
   async fetch(request, env) {
     // CORS preflight
@@ -36,7 +59,7 @@ export default {
       return Response.json({ error: "POST only" }, { status: 405 });
     }
 
-    // Auth check
+    // Auth check — required in production
     if (env.AUTH_TOKEN) {
       const auth = request.headers.get("Authorization");
       if (auth !== `Bearer ${env.AUTH_TOKEN}`) {
@@ -57,15 +80,52 @@ export default {
       return Response.json({ error: "url required" }, { status: 400 });
     }
 
+    // Validate URL — only allow HTTPS/HTTP to known domains
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return Response.json({ error: "invalid url" }, { status: 400 });
+    }
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return Response.json({ error: "only http/https allowed" }, { status: 400 });
+    }
+
+    if (!ALLOWED_DOMAINS.has(parsed.hostname)) {
+      return Response.json(
+        { error: `domain not allowed: ${parsed.hostname}` },
+        { status: 403 },
+      );
+    }
+
+    // Validate method — only GET/HEAD for news fetching
+    const safeMethod = method.toUpperCase();
+    if (!ALLOWED_METHODS.has(safeMethod)) {
+      return Response.json({ error: `method not allowed: ${method}` }, { status: 405 });
+    }
+
+    // Cap timeout
+    const safeTimeout = Math.min(Number(timeout) || 15000, MAX_TIMEOUT);
+
+    // Strip sensitive headers from passthrough
+    const safeHeaders = {};
+    const BLOCKED_HEADERS = new Set(["host", "authorization", "cookie", "x-forwarded-for"]);
+    for (const [k, v] of Object.entries(headers)) {
+      if (!BLOCKED_HEADERS.has(k.toLowerCase())) {
+        safeHeaders[k] = v;
+      }
+    }
+
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
+      const timer = setTimeout(() => controller.abort(), safeTimeout);
 
       const resp = await fetch(url, {
-        method,
+        method: safeMethod,
         headers: {
-          "User-Agent": headers["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          ...headers,
+          "User-Agent": safeHeaders["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          ...safeHeaders,
         },
         signal: controller.signal,
         redirect: "follow",

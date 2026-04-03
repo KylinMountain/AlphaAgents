@@ -8,6 +8,12 @@ dependencies = [
     "akshare",
     "baostock",
     "anyio",
+    "chromadb>=1.5.5",
+    "httpx>=0.28.1",
+    "openai>=2.30.0",
+    "fastapi>=0.135.3",
+    "uvicorn>=0.42.0",
+    "websockets>=16.0",
 ]
 
 [project.optional-dependencies]
@@ -19,5 +25,12 @@ dev = [
 [project.scripts]
 alpha-agents = "main:main"
 
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["alpha_agents*"]
+
+[tool.uv]
+package = true

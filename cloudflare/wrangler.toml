@@ -1,0 +1,7 @@
+name = "alpha-fetch-proxy"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# Free tier is sufficient: 100k requests/day
+# Deploy: npx wrangler deploy
+# Set auth token: npx wrangler secret put AUTH_TOKEN

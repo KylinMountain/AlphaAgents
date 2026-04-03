@@ -5,12 +5,12 @@ from pathlib import Path
 import baostock as bs
 import pandas as pd
 import py_mini_racer
-import requests
 from bs4 import BeautifulSoup
 
 from akshare.datasets import get_ths_js
 
 from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch as http_fetch, get_headers
 from alpha_agents.data.db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
     Returns top stocks from the first page (usually 10-20).
     THS blocks ajax pagination but the first page with auth cookie works.
     """
-    headers = _get_ths_headers()
+    ths_headers = _get_ths_headers()
     url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
 
     try:
@@ -200,6 +200,16 @@ def build_index(db_path: Path) -> None:
             "Stocks: %d, Concepts: %d, Constituents mapped: %d/%d",
             len(stock_info), total, concept_success, total,
         )
+
+        # 4. Build concept embeddings for semantic search
+        logger.info("Building concept embeddings...")
+        try:
+            from alpha_agents.data.embeddings import build_concept_embeddings
+            n = build_concept_embeddings(conn)
+            logger.info("Embedded %d concepts for semantic search", n)
+        except Exception as e:
+            logger.warning("Failed to build embeddings (non-fatal): %s", e)
+
     except Exception:
         conn.rollback()
         raise

@@ -17,6 +17,7 @@ from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.web_search import web_search_fn
 from alpha_agents.tools.web_fetch import web_fetch_fn
+from alpha_agents.tools.pizzint import get_pizzint_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
@@ -125,6 +126,21 @@ def web_fetch(url: str) -> str:
 
 
 @function_tool
+def get_pizzint() -> str:
+    """获取五角大楼披萨指数（Pentagon Pizza Index）— 地缘政治紧张度的OSINT早期预警。
+
+    返回数据包括：
+    - 五角大楼附近披萨店的异常活动（订单暴涨=可能有大事）
+    - "末日指数"（基于Polymarket预测市场的地缘风险综合评分）
+    - 突发预测市场（最大波动的地缘政治赌盘）
+    - 双边威胁等级（美俄、美中、美伊等）
+
+    在分析地缘政治事件时建议调用此工具获取实时紧张度评估。
+    """
+    return get_pizzint_fn()
+
+
+@function_tool
 def get_sector_data(sector_name: str) -> str:
     """获取板块行情数据，包括涨跌幅和资金流向。"""
     return get_sector_data_fn(sector_name=sector_name)
@@ -148,5 +164,6 @@ ALL_TOOLS = [
     get_cls_telegraph, get_wallstreetcn,
     get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
     get_fed_news, get_sec_news, get_social_media,
-    search_stocks, web_search, web_fetch, get_sector_data, filter_stocks, get_watchlist,
+    search_stocks, web_search, web_fetch, get_pizzint,
+    get_sector_data, filter_stocks, get_watchlist,
 ]

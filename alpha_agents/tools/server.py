@@ -158,12 +158,27 @@ def get_watchlist() -> str:
     return get_watchlist_fn()
 
 
-# All tools as a list for agent construction
-ALL_TOOLS = [
+# --- Tool sets for different agents ---
+
+# News source tools — used by monitor pipeline, NOT by agents during analysis.
+# Agents receive pre-digested events; they don't need to re-fetch news.
+NEWS_TOOLS = [
     get_news, get_eastmoney_live, get_world_news,
     get_cls_telegraph, get_wallstreetcn,
     get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
     get_fed_news, get_sec_news, get_social_media,
-    search_stocks, web_search, web_fetch, get_pizzint,
-    get_sector_data, filter_stocks, get_watchlist,
 ]
+
+# Stock analysis tools — for the stock strategist agent
+STOCK_TOOLS = [
+    search_stocks, get_sector_data, filter_stocks, get_watchlist,
+    web_search, web_fetch, get_pizzint,
+]
+
+# Futures analysis tools — for the futures strategist agent
+FUTURES_TOOLS = [
+    web_search, web_fetch, get_pizzint,
+]
+
+# ALL_TOOLS: full set including news (for backward compatibility / one-shot mode)
+ALL_TOOLS = NEWS_TOOLS + STOCK_TOOLS

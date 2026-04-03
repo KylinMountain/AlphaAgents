@@ -85,8 +85,8 @@ def cmd_web(args: argparse.Namespace) -> None:
     _ensure_embeddings()
 
     import uvicorn
-    from alpha_agents.web.events import event_bus
-    from alpha_agents.web.app import app, set_monitor
+    from alpha_agents.server.events import event_bus
+    from alpha_agents.server.app import app, set_monitor
     from alpha_agents.pipeline.monitor import NewsMonitor
 
     interval = args.interval or MONITOR_INTERVAL_SECONDS

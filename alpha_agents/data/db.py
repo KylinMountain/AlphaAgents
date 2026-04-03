@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS concept_stocks (
 
 CREATE INDEX IF NOT EXISTS idx_concept_name ON concepts(name);
 CREATE INDEX IF NOT EXISTS idx_stock_name ON stocks(name);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    concepts TEXT NOT NULL DEFAULT '[]',
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

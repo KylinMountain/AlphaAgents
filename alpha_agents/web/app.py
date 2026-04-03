@@ -96,26 +96,8 @@ async def _monitor_one_cycle():
         if not events:
             return
 
-        from alpha_agents.agents.strategist import run_analysis
-        from alpha_agents.agents.futures import run_futures_analysis
-
-        stock_events = [e for e in events if e.get("target_market") in ("stock", "both")]
-        futures_events = [e for e in events if e.get("target_market") in ("futures", "both")]
-
-        coros = []
-        if stock_events:
-            stock_json = json.dumps(stock_events, ensure_ascii=False, indent=2)
-            coros.append(run_analysis(
-                f"以下是经过预处理的{len(stock_events)}条重要事件摘要，"
-                f"请对高重要性事件进行深度多市场影响分析：\n\n{stock_json}"))
-        if futures_events:
-            futures_json = json.dumps(futures_events, ensure_ascii=False, indent=2)
-            coros.append(run_futures_analysis(
-                f"以下是经过预处理的{len(futures_events)}条重要事件摘要，"
-                f"请分析对期货市场各品种的影响：\n\n{futures_json}"))
-
-        if coros:
-            await asyncio.gather(*coros, return_exceptions=True)
+        from alpha_agents.pipeline.monitor import route_and_analyze
+        await route_and_analyze(events)
     except Exception:
         logger.exception("Manual trigger failed")
 

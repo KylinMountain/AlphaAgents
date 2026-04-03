@@ -46,6 +46,56 @@ NEWS_SOURCES = [
 ]
 
 
+async def route_and_analyze(events: list[dict]) -> dict[str, str]:
+    """Route events by target_market and run stock/futures agents in parallel.
+
+    Returns dict with "stock" and "futures" report strings (may be empty).
+    """
+    stock_events = [e for e in events if e.get("target_market", "both") in ("stock", "both")]
+    futures_events = [e for e in events if e.get("target_market", "both") in ("futures", "both")]
+
+    logger.info("Routing: %d stock events, %d futures events",
+                len(stock_events), len(futures_events))
+
+    analysis_tasks = []
+    if stock_events:
+        stock_json = json.dumps(stock_events, ensure_ascii=False, indent=2)
+        stock_prompt = (
+            f"以下是经过预处理的{len(stock_events)}条重要事件摘要，"
+            f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
+            f"{stock_json}"
+        )
+        analysis_tasks.append(("stock", run_analysis(stock_prompt)))
+
+    if futures_events:
+        futures_json = json.dumps(futures_events, ensure_ascii=False, indent=2)
+        futures_prompt = (
+            f"以下是经过预处理的{len(futures_events)}条重要事件摘要，"
+            f"请分析这些事件对期货市场各品种的影响，输出完整期货分析报告：\n\n"
+            f"{futures_json}"
+        )
+        analysis_tasks.append(("futures", run_futures_analysis(futures_prompt)))
+
+    results_map: dict[str, str] = {}
+    if analysis_tasks:
+        labels = [t[0] for t in analysis_tasks]
+        coros = [t[1] for t in analysis_tasks]
+        outputs = await asyncio.gather(*coros, return_exceptions=True)
+        for label, output in zip(labels, outputs):
+            if isinstance(output, Exception):
+                logger.error("%s agent failed: %s", label, output)
+                results_map[label] = f"[{label} agent error: {output}]"
+            else:
+                results_map[label] = output
+
+    return {
+        "stock": results_map.get("stock", ""),
+        "futures": results_map.get("futures", ""),
+        "stock_events": stock_events,
+        "futures_events": futures_events,
+    }
+
+
 class NewsMonitor:
     def __init__(self, interval: int = MONITOR_INTERVAL_SECONDS, event_bus=None):
         self.interval = interval
@@ -197,50 +247,13 @@ class NewsMonitor:
                     events[0].get("importance", 0),
                 )
 
-                # 3. Route events by target_market
-                stock_events = [e for e in events if e.get("target_market") in ("stock", "both")]
-                futures_events = [e for e in events if e.get("target_market") in ("futures", "both")]
-
-                logger.info("Routing: %d stock events, %d futures events",
-                            len(stock_events), len(futures_events))
-
-                # 4. Run stock and futures agents in parallel
+                # 3. Route events and run agents in parallel
                 await self._emit("agent", "running", "Agent正在深度分析...")
-
-                analysis_tasks = []
-                if stock_events:
-                    stock_json = json.dumps(stock_events, ensure_ascii=False, indent=2)
-                    stock_prompt = (
-                        f"以下是经过预处理的{len(stock_events)}条重要事件摘要，"
-                        f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
-                        f"{stock_json}"
-                    )
-                    analysis_tasks.append(("stock", run_analysis(stock_prompt)))
-
-                if futures_events:
-                    futures_json = json.dumps(futures_events, ensure_ascii=False, indent=2)
-                    futures_prompt = (
-                        f"以下是经过预处理的{len(futures_events)}条重要事件摘要，"
-                        f"请分析这些事件对期货市场各品种的影响，输出完整期货分析报告：\n\n"
-                        f"{futures_json}"
-                    )
-                    analysis_tasks.append(("futures", run_futures_analysis(futures_prompt)))
-
-                # Run both agents concurrently
-                results_map = {}
-                if analysis_tasks:
-                    labels = [t[0] for t in analysis_tasks]
-                    coros = [t[1] for t in analysis_tasks]
-                    outputs = await asyncio.gather(*coros, return_exceptions=True)
-                    for label, output in zip(labels, outputs):
-                        if isinstance(output, Exception):
-                            logger.error("%s agent failed: %s", label, output)
-                            results_map[label] = f"[{label} agent error: {output}]"
-                        else:
-                            results_map[label] = output
-
-                stock_result = results_map.get("stock", "")
-                futures_result = results_map.get("futures", "")
+                results = await route_and_analyze(events)
+                stock_events = results["stock_events"]
+                futures_events = results["futures_events"]
+                stock_result = results["stock"]
+                futures_result = results["futures"]
 
                 # Combine results for display
                 combined_result = ""

@@ -9,7 +9,7 @@ from alpha_agents.config import (
     PROMPTS_DIR,
     AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
-from alpha_agents.tools.server import ALL_TOOLS
+from alpha_agents.tools.server import STOCK_TOOLS
 from alpha_agents.agents.geopolitical import create_geopolitical_agent
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def _create_strategist() -> Agent:
         name="strategist",
         instructions=system_prompt,
         model=model,
-        tools=ALL_TOOLS,
+        tools=STOCK_TOOLS,
         handoffs=[geopolitical],
     )
 

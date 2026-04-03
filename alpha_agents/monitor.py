@@ -19,6 +19,8 @@ from alpha_agents.tools.truthsocial import get_social_media_fn
 from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.news_digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
+from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
+from alpha_agents.notify import notify_all, format_report_notification
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +192,63 @@ class NewsMonitor:
                 )
                 result = await run_analysis(prompt)
 
-                # Store report
+                # 4. Persist report to SQLite
+                ts = time.time()
+                today = time.strftime("%Y-%m-%d")
+                report_id = await asyncio.to_thread(
+                    save_report, cycle, ts, events, categories, result)
+                logger.info("Saved report #%d", report_id)
+
+                # 5. Extract predictions from events and save
+                predictions = []
+                event_ids = []
+                for e in events:
+                    mi = e.get("market_impact", {})
+                    a_share = mi.get("a_share", {})
+                    cat = e.get("category", "")
+                    evt_summary = e.get("event", "")
+
+                    # Save event node for graph
+                    eid = await asyncio.to_thread(
+                        save_event, evt_summary, cat,
+                        e.get("importance", 0), ts, e.get("summary", ""), report_id)
+                    event_ids.append(eid)
+
+                    for sector in a_share.get("sectors_bullish", []):
+                        if isinstance(sector, str):
+                            predictions.append({"direction": "bullish", "sector": sector,
+                                                "category": cat, "event_summary": evt_summary})
+                        elif isinstance(sector, dict):
+                            predictions.append({"direction": "bullish",
+                                                "sector": sector.get("name", sector.get("sector", "")),
+                                                "strength": sector.get("strength", 0),
+                                                "reason": sector.get("reason", ""),
+                                                "category": cat, "event_summary": evt_summary})
+                    for sector in a_share.get("sectors_bearish", []):
+                        if isinstance(sector, str):
+                            predictions.append({"direction": "bearish", "sector": sector,
+                                                "category": cat, "event_summary": evt_summary})
+                        elif isinstance(sector, dict):
+                            predictions.append({"direction": "bearish",
+                                                "sector": sector.get("name", sector.get("sector", "")),
+                                                "strength": sector.get("strength", 0),
+                                                "reason": sector.get("reason", ""),
+                                                "category": cat, "event_summary": evt_summary})
+
+                if predictions:
+                    await asyncio.to_thread(save_predictions, report_id, today, predictions)
+                    logger.info("Saved %d predictions for %s", len(predictions), today)
+
+                # 6. Link related events (simple: events in same cycle are related)
+                for i, eid in enumerate(event_ids):
+                    for j in range(i + 1, len(event_ids)):
+                        await asyncio.to_thread(
+                            link_events, eid, event_ids[j], "relates_to", 0.3)
+
+                # 7. Push to web event bus
                 report = {
                     "cycle": cycle,
-                    "timestamp": time.time(),
+                    "timestamp": ts,
                     "event_count": len(events),
                     "categories": categories,
                     "events_summary": [
@@ -205,6 +260,10 @@ class NewsMonitor:
                 }
                 if self._bus:
                     self._bus.add_report(report)
+
+                # 8. Push notification
+                title, body = format_report_notification(events, result[:500])
+                await asyncio.to_thread(notify_all, title, body)
 
                 await self._emit("agent", "success", "分析完成",
                                  {"report_preview": result[:500]})

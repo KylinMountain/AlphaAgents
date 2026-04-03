@@ -16,12 +16,24 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from alpha_agents.web.events import event_bus
+from alpha_agents.data.report_store import (
+    get_recent_reports, get_recent_reviews,
+    get_predictions_by_date, get_event_graph,
+)
 
 logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
 
 app = FastAPI(title="AlphaAgents", docs_url=None, redoc_url=None)
+
+# Reference to monitor (set by main.py cmd_web)
+_monitor = None
+
+
+def set_monitor(monitor):
+    global _monitor
+    _monitor = monitor
 
 
 # --- REST endpoints ---
@@ -34,8 +46,73 @@ async def get_snapshot():
 
 @app.get("/api/reports")
 async def get_reports():
-    """Historical analysis reports (most recent 50)."""
-    return JSONResponse({"reports": event_bus._reports})
+    """Historical analysis reports from DB + in-memory."""
+    db_reports = await asyncio.to_thread(get_recent_reports, 20)
+    return JSONResponse({"reports": db_reports, "live": event_bus._reports})
+
+
+@app.get("/api/reviews")
+async def get_reviews():
+    """Historical daily reviews."""
+    reviews = await asyncio.to_thread(get_recent_reviews, 10)
+    return JSONResponse({"reviews": reviews})
+
+
+@app.get("/api/predictions/{date}")
+async def get_predictions(date: str):
+    """Get predictions for a specific date."""
+    preds = await asyncio.to_thread(get_predictions_by_date, date)
+    return JSONResponse({"date": date, "predictions": preds})
+
+
+@app.get("/api/event-graph")
+async def get_event_graph_api():
+    """Get event relationship graph for visualization."""
+    graph = await asyncio.to_thread(get_event_graph, 50)
+    return JSONResponse(graph)
+
+
+@app.post("/api/trigger")
+async def trigger_analysis():
+    """Manually trigger one analysis cycle."""
+    if _monitor is None:
+        return JSONResponse({"error": "Monitor not initialized"}, status_code=503)
+    # Run one cycle in background
+    asyncio.create_task(_monitor_one_cycle())
+    return JSONResponse({"status": "triggered"})
+
+
+async def _monitor_one_cycle():
+    """Run a single monitor cycle (for manual trigger)."""
+    if _monitor is None:
+        return
+    try:
+        raw_items = await _monitor._fetch_all_sources()
+        new_items = _monitor.deduplicate(raw_items)
+        if not new_items:
+            return
+        from alpha_agents.news_digest import digest_news
+        events = await digest_news(new_items)
+        if not events:
+            return
+        from alpha_agents.agents.strategist import run_analysis
+        events_json = json.dumps(events, ensure_ascii=False, indent=2)
+        prompt = (
+            f"以下是经过预处理的{len(events)}条重要事件摘要，"
+            f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
+            f"{events_json}"
+        )
+        await run_analysis(prompt)
+    except Exception:
+        logger.exception("Manual trigger failed")
+
+
+@app.post("/api/review")
+async def trigger_review():
+    """Manually trigger daily review."""
+    from alpha_agents.daily_review import run_daily_review
+    result = await run_daily_review()
+    return JSONResponse(result)
 
 
 @app.get("/api/sources")

@@ -82,11 +82,12 @@ def cmd_web(args: argparse.Namespace) -> None:
 
     import uvicorn
     from alpha_agents.web.events import event_bus
-    from alpha_agents.web.app import app
+    from alpha_agents.web.app import app, set_monitor
     from alpha_agents.monitor import NewsMonitor
 
     interval = args.interval or MONITOR_INTERVAL_SECONDS
     monitor = NewsMonitor(interval=interval, event_bus=event_bus)
+    set_monitor(monitor)
 
     async def run_all():
         # Run monitor and uvicorn server concurrently
@@ -122,6 +123,25 @@ def cmd_run(args: argparse.Namespace) -> None:
         monitor = NewsMonitor(interval=interval)
         logging.info("Starting continuous news monitoring...")
         asyncio.run(monitor.run())
+
+
+def cmd_review(args: argparse.Namespace) -> None:
+    """Run daily prediction review."""
+    from alpha_agents.daily_review import run_daily_review
+    import json as _json
+    result = asyncio.run(run_daily_review(target_date=args.date))
+    if result.get("status") == "no_predictions":
+        print(f"没有找到 {result['date']} 的预测记录")
+    elif result.get("status") == "no_market_data":
+        print(f"无法获取行情数据")
+    else:
+        print(f"\n=== {result['date']} 预测回顾 ===")
+        print(f"预测数: {result['predictions_count']}")
+        print(f"匹配到行情: {result['matched']}")
+        print(f"预测正确: {result['correct']}")
+        print(f"准确率: {result['accuracy'] * 100:.0f}%")
+        if result.get("review_text"):
+            print(f"\n{result['review_text']}")
 
 
 def cmd_build_index(args: argparse.Namespace) -> None:
@@ -162,6 +182,11 @@ def main() -> None:
     p_web.add_argument("--port", type=int, default=8000, help="监听端口")
     p_web.add_argument("--interval", type=int, help="监控间隔（秒）")
     p_web.set_defaults(func=cmd_web)
+
+    # review — daily prediction review
+    p_review = subparsers.add_parser("review", help="回顾验证昨日预测结果")
+    p_review.add_argument("--date", type=str, help="指定日期（YYYY-MM-DD），默认昨天")
+    p_review.set_defaults(func=cmd_review)
 
     # build-index — force rebuild
     p_index = subparsers.add_parser("build-index", help="强制重建股票概念索引")

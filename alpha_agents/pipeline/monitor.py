@@ -46,16 +46,50 @@ NEWS_SOURCES = [
 ]
 
 
-async def route_and_analyze(events: list[dict]) -> dict[str, str]:
+async def route_and_analyze(events: list[dict], event_bus=None) -> dict[str, str]:
     """Route events by target_market and run stock/futures agents in parallel.
 
     Returns dict with "stock" and "futures" report strings (may be empty).
+    If event_bus is provided, tool call events are broadcast in real-time.
     """
+    from alpha_agents.agents.hooks import ToolEventHooks
+
     stock_events = [e for e in events if e.get("target_market", "both") in ("stock", "both")]
     futures_events = [e for e in events if e.get("target_market", "both") in ("futures", "both")]
 
     logger.info("Routing: %d stock events, %d futures events",
                 len(stock_events), len(futures_events))
+
+    # Build hooks that emit tool call events to the event bus
+    def _make_emitter(agent_label):
+        if event_bus is None:
+            return None
+        def emit(tool_event):
+            import asyncio
+            from alpha_agents.web.events import StageEvent, StageStatus
+            stage = f"tool_{agent_label}"
+            status = StageStatus.RUNNING if tool_event["status"] == "start" else StageStatus.SUCCESS
+            message = f"{tool_event['tool']}"
+            if tool_event["status"] == "end":
+                message += " ✓"
+            data = {
+                "agent": tool_event["agent"],
+                "tool": tool_event["tool"],
+                "tool_status": tool_event["status"],
+            }
+            if "result_preview" in tool_event:
+                data["result_preview"] = tool_event["result_preview"]
+            event = StageEvent(stage=stage, status=status, message=message, data=data)
+            # Fire-and-forget emit (we're in a sync callback)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(event_bus.emit(event))
+            except RuntimeError:
+                pass
+        return emit
+
+    stock_hooks = ToolEventHooks(_make_emitter("stock"), agent_label="股票策略师") if event_bus else None
+    futures_hooks = ToolEventHooks(_make_emitter("futures"), agent_label="期货策略师") if event_bus else None
 
     analysis_tasks = []
     if stock_events:
@@ -65,7 +99,7 @@ async def route_and_analyze(events: list[dict]) -> dict[str, str]:
             f"请对高重要性事件进行深度多市场影响分析，输出完整分析报告：\n\n"
             f"{stock_json}"
         )
-        analysis_tasks.append(("stock", run_analysis(stock_prompt)))
+        analysis_tasks.append(("stock", run_analysis(stock_prompt, hooks=stock_hooks)))
 
     if futures_events:
         futures_json = json.dumps(futures_events, ensure_ascii=False, indent=2)
@@ -74,7 +108,7 @@ async def route_and_analyze(events: list[dict]) -> dict[str, str]:
             f"请分析这些事件对期货市场各品种的影响，输出完整期货分析报告：\n\n"
             f"{futures_json}"
         )
-        analysis_tasks.append(("futures", run_futures_analysis(futures_prompt)))
+        analysis_tasks.append(("futures", run_futures_analysis(futures_prompt, hooks=futures_hooks)))
 
     results_map: dict[str, str] = {}
     if analysis_tasks:
@@ -249,7 +283,7 @@ class NewsMonitor:
 
                 # 3. Route events and run agents in parallel
                 await self._emit("agent", "running", "Agent正在深度分析...")
-                results = await route_and_analyze(events)
+                results = await route_and_analyze(events, event_bus=self._bus)
                 stock_events = results["stock_events"]
                 futures_events = results["futures_events"]
                 stock_result = results["stock"]

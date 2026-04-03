@@ -45,10 +45,10 @@ def _create_futures_agent() -> Agent:
     )
 
 
-async def run_futures_analysis(prompt: str) -> str:
+async def run_futures_analysis(prompt: str, hooks=None) -> str:
     """Run futures market analysis and return the final output."""
     agent = _create_futures_agent()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     user_message = f"[当前时间: {now}]\n\n{prompt}"
-    result = await Runner.run(agent, user_message)
+    result = await Runner.run(agent, user_message, hooks=hooks)
     return result.final_output

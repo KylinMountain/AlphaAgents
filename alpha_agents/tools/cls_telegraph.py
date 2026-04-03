@@ -1,68 +1,43 @@
 """Fetch news flashes from 财联社电报 (CLS Telegraph).
 
 CLS Telegraph is one of the fastest A-share news flash sources in China.
-No authentication required.
+Uses akshare's stock_info_global_cls() which handles CLS API auth internally.
 """
 
 import json
 import logging
-from datetime import datetime
 
-from alpha_agents.http_client import fetch
+from alpha_agents.config import no_proxy
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://www.cls.cn/api/roll/get_roll_list"
-DEFAULT_PARAMS = {
-    "app": "CailianpressWeb",
-    "os": "web",
-    "sv": "8.5.2",
-    "category": "",
-    "has_signing": "",
-}
 
-# Fallback if the primary API moves again
-FALLBACK_URL = "https://www.cls.cn/v1/roll/get_roll_list"
+def _fetch_telegraph() -> list[dict]:
+    """Fetch telegraph items via akshare (handles CLS API auth)."""
+    import akshare as ak
+    with no_proxy():
+        df = ak.stock_info_global_cls()
 
+    items = []
+    for _, row in df.iterrows():
+        title = str(row.get("标题", "")).strip()
+        content = str(row.get("内容", "")).strip()
+        date_str = str(row.get("发布日期", "")).strip()
+        time_str = str(row.get("发布时间", "")).strip()
+        timestamp = f"{date_str} {time_str}".strip()
 
-def _fetch_telegraph(limit: int = 30) -> list[dict]:
-    """Fetch raw telegraph items from CLS API."""
-    params = {**DEFAULT_PARAMS, "rn": str(limit)}
-    try:
-        resp = fetch(API_URL, params=params)
-        data = resp.json()
-        items = data.get("data", {}).get("roll_data", [])
-        if items:
-            return items
-    except Exception:
-        logger.debug("Primary CLS API failed, trying fallback")
+        # Use content as title if title is empty
+        if not title and content:
+            title = content[:50]
 
-    # Try fallback URL
-    try:
-        resp = fetch(FALLBACK_URL, params=params)
-        data = resp.json()
-        return data.get("data", {}).get("roll_data", [])
-    except Exception:
-        raise
-
-
-def _parse_item(item: dict) -> dict:
-    """Convert a raw CLS telegraph item into a standardised news dict."""
-    title = (item.get("title") or "").strip()
-    content = (item.get("content") or "").strip()
-    ctime = item.get("ctime", 0)
-    subjects = item.get("subjects") or []
-
-    time_str = datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S") if ctime else ""
-    tags = [s.get("subject_name", "") for s in subjects if s.get("subject_name")]
-
-    return {
-        "title": title,
-        "summary": content[:300],
-        "time": time_str,
-        "source": "财联社电报",
-        "tags": tags,
-    }
+        if title:
+            items.append({
+                "title": title,
+                "summary": content[:300] if content else title,
+                "time": timestamp,
+                "source": "财联社电报",
+            })
+    return items
 
 
 def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
@@ -73,8 +48,7 @@ def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
         keyword: Optional keyword to filter results on title and content.
     """
     try:
-        raw_items = _fetch_telegraph(limit)
-        news = [_parse_item(item) for item in raw_items]
+        news = _fetch_telegraph()
 
         if keyword:
             kw = keyword.lower()

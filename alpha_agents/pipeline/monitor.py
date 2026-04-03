@@ -23,6 +23,7 @@ from alpha_agents.agents.futures import run_futures_analysis
 from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
 from alpha_agents.pipeline.event_linker import analyze_event_links
 from alpha_agents.notify import notify_all, format_report_notification
+from alpha_agents.pipeline.source_health import health_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ class NewsMonitor:
         self._seen_titles: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._bus = event_bus  # optional web event bus
+        # Register all sources for health tracking
+        for sid, name, _ in NEWS_SOURCES:
+            health_tracker.register(sid, name)
 
     async def _emit(self, stage: str, status: str, message: str = "", data: dict | None = None):
         """Emit a pipeline event if web event bus is attached."""
@@ -88,6 +92,12 @@ class NewsMonitor:
 
     async def _fetch_one(self, source_id: str, name: str, fetch_fn) -> tuple[str, list[dict]]:
         """Fetch a single source in a thread (non-blocking)."""
+        if health_tracker.should_skip(source_id):
+            logger.debug("Skipping unhealthy source %s", name)
+            await self._emit(f"source_{source_id}", "error",
+                             f"{name}: 暂时跳过(不健康)", {"skipped": True})
+            return source_id, []
+
         await self._emit(f"source_{source_id}", "running", f"抓取 {name}...")
         try:
             raw = await asyncio.to_thread(fetch_fn)
@@ -95,11 +105,13 @@ class NewsMonitor:
             items = data.get("news", [])
             if items:
                 logger.debug("Fetched %d items from %s", len(items), name)
+            health_tracker.record_success(source_id, len(items))
             await self._emit(f"source_{source_id}", "success",
                              f"{name}: {len(items)}条", {"count": len(items)})
             return source_id, items
-        except Exception:
+        except Exception as exc:
             logger.warning("Failed to fetch from %s", name, exc_info=True)
+            health_tracker.record_failure(source_id, str(exc))
             await self._emit(f"source_{source_id}", "error", f"{name}: 抓取失败")
             return source_id, []
 

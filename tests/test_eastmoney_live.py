@@ -6,32 +6,26 @@ from alpha_agents.tools.eastmoney_live import (
     get_eastmoney_live_fn,
 )
 
-SAMPLE_RESPONSE = json.dumps({
-    "data": {
-        "list": [
-            {
-                "title": "央行开展1000亿元MLF操作",
-                "digest": "央行公告",
-                "summary": "中国人民银行今日开展1000亿元中期借贷便利操作，利率维持不变。",
-                "showTime": "2024-12-01 09:30:00",
-                "source": "央行",
-            },
-            {
-                "title": "",
-                "digest": "特朗普发布关税新政策声明",
-                "summary": "美国总统特朗普宣布对中国商品加征新一轮关税。",
-                "showTime": "2024-12-01 08:00:00",
-                "source": "白宫",
-            },
-            {
-                "title": "",
-                "digest": "",
-                "summary": "",
-                "showTime": "",
-                "source": "",
-            },
-        ]
-    }
+SAMPLE_RESPONSE = 'var ajaxResult=' + json.dumps({
+    "rc": 1,
+    "me": "",
+    "LivesList": [
+        {
+            "title": "央行开展1000亿元MLF操作",
+            "digest": "【央行开展1000亿元MLF操作】中国人民银行今日开展1000亿元中期借贷便利操作，利率维持不变。",
+            "showtime": "2024-12-01 09:30:00",
+        },
+        {
+            "title": "",
+            "digest": "特朗普发布关税新政策声明",
+            "showtime": "2024-12-01 08:00:00",
+        },
+        {
+            "title": "",
+            "digest": "",
+            "showtime": "",
+        },
+    ]
 })
 
 
@@ -43,13 +37,14 @@ def test_parse_response_normal():
 
 
 def test_parse_response_jsonp():
-    jsonp = f"({SAMPLE_RESPONSE});"
+    inner = json.dumps({"rc": 1, "LivesList": [{"title": "test", "digest": "d", "showtime": "now"}]})
+    jsonp = f"({inner});"
     items = _parse_response(jsonp)
-    assert len(items) == 2
+    assert len(items) == 1
 
 
 def test_parse_response_empty():
-    items = _parse_response('{"data": {"list": []}}')
+    items = _parse_response('{"rc":1,"LivesList":[]}')
     assert items == []
 
 

@@ -43,6 +43,7 @@ async def get_sources():
     """List of configured news sources."""
     return JSONResponse({"sources": [
         {"id": "eastmoney", "name": "东方财富", "type": "domestic"},
+        {"id": "eastmoney_live", "name": "东方财富7x24", "type": "domestic"},
         {"id": "cls", "name": "财联社电报", "type": "domestic"},
         {"id": "wallstreetcn", "name": "华尔街见闻", "type": "domestic"},
         {"id": "jin10", "name": "金十数据", "type": "domestic"},

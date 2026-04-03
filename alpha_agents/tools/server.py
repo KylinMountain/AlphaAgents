@@ -11,6 +11,7 @@ from alpha_agents.tools.xinhua import get_xinhua_fn
 from alpha_agents.tools.fed import get_fed_news_fn
 from alpha_agents.tools.sec import get_sec_news_fn
 from alpha_agents.tools.truthsocial import get_social_media_fn
+from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
@@ -83,6 +84,12 @@ async def get_social_media(args):
     return {"content": [{"type": "text", "text": result}]}
 
 
+@tool("get_eastmoney_live", "获取东方财富7x24小时实时快讯。全天候财经快讯流。", {"limit": int, "keyword": str})
+async def get_eastmoney_live(args):
+    result = get_eastmoney_live_fn(limit=args.get("limit", 30), keyword=args.get("keyword"))
+    return {"content": [{"type": "text", "text": result}]}
+
+
 @tool("search_stocks", "根据概念/板块关键词检索相关个股。从本地同花顺概念板块索引中模糊匹配。", {"keyword": str})
 async def search_stocks(args):
     result = search_stocks_fn(keyword=args["keyword"])
@@ -111,7 +118,8 @@ def create_tools_server():
     return create_sdk_mcp_server(
         "alpha-agents-data",
         tools=[
-            get_news, get_world_news, get_cls_telegraph, get_wallstreetcn,
+            get_news, get_eastmoney_live, get_world_news,
+            get_cls_telegraph, get_wallstreetcn,
             get_whitehouse, get_pboc_news, get_jin10, get_xinhua,
             get_fed_news, get_sec_news, get_social_media,
             search_stocks, get_sector_data, filter_stocks, get_watchlist,

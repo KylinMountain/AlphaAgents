@@ -10,12 +10,16 @@ Schema:
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
 from alpha_agents.config import DATA_DIR
 
 REPORTS_DB_PATH = DATA_DIR / "reports.db"
+
+_lock = threading.Lock()
+_local = threading.local()
 
 _REPORTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reports (
@@ -85,12 +89,21 @@ CREATE INDEX IF NOT EXISTS idx_event_links_target ON event_links(target_event_id
 
 
 def _get_conn() -> sqlite3.Connection:
+    """Get a thread-local SQLite connection (reused within the same thread)."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except sqlite3.ProgrammingError:
+            conn = None
     REPORTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(REPORTS_DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
     conn.executescript(_REPORTS_SCHEMA)
+    _local.conn = conn
     return conn
 
 
@@ -102,8 +115,8 @@ def save_report(
     report_text: str,
 ) -> int:
     """Persist an analysis report and return its ID."""
-    conn = _get_conn()
-    try:
+    with _lock:
+        conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO reports (cycle, timestamp, event_count, categories, events_json, report_text) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -113,14 +126,12 @@ def save_report(
         report_id = cur.lastrowid
         conn.commit()
         return report_id
-    finally:
-        conn.close()
 
 
 def save_predictions(report_id: int, date: str, predictions: list[dict]) -> None:
     """Save extracted predictions for a given report."""
-    conn = _get_conn()
-    try:
+    with _lock:
+        conn = _get_conn()
         for p in predictions:
             conn.execute(
                 "INSERT INTO predictions (report_id, date, direction, sector, strength, reason, category, event_summary) "
@@ -130,28 +141,23 @@ def save_predictions(report_id: int, date: str, predictions: list[dict]) -> None
                  p.get("category", ""), p.get("event_summary", "")),
             )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_predictions_by_date(date: str) -> list[dict]:
     """Get all predictions for a given date."""
     conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM predictions WHERE date = ? ORDER BY direction, strength DESC",
-            (date,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT * FROM predictions WHERE date = ? ORDER BY direction, strength DESC",
+        (date,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def save_review(date: str, predictions_count: int, correct_count: int,
                 accuracy: float, review_text: str, market_data: dict) -> int:
     """Save a daily review result."""
-    conn = _get_conn()
-    try:
+    with _lock:
+        conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO reviews (date, predictions_count, correct_count, accuracy, review_text, market_data) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -160,35 +166,27 @@ def save_review(date: str, predictions_count: int, correct_count: int,
         )
         conn.commit()
         return cur.lastrowid
-    finally:
-        conn.close()
 
 
 def get_recent_reports(limit: int = 20) -> list[dict]:
     """Get most recent reports."""
     conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT id, cycle, timestamp, event_count, categories, report_text, created_at "
-            "FROM reports ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT id, cycle, timestamp, event_count, categories, report_text, created_at "
+        "FROM reports ORDER BY timestamp DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_recent_reviews(limit: int = 10) -> list[dict]:
     """Get most recent reviews."""
     conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM reviews ORDER BY date DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT * FROM reviews ORDER BY date DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --- Event Graph ---
@@ -196,8 +194,8 @@ def get_recent_reviews(limit: int = 10) -> list[dict]:
 def save_event(title: str, category: str, importance: int,
                timestamp: float, summary: str, report_id: int | None = None) -> int:
     """Save an event node and return its ID."""
-    conn = _get_conn()
-    try:
+    with _lock:
+        conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO events (title, category, importance, timestamp, summary, report_id) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -205,59 +203,48 @@ def save_event(title: str, category: str, importance: int,
         )
         conn.commit()
         return cur.lastrowid
-    finally:
-        conn.close()
 
 
 def link_events(source_id: int, target_id: int, relation: str,
                 confidence: float = 0.5, reason: str = "") -> None:
     """Create a causal link between two events."""
-    conn = _get_conn()
-    try:
+    with _lock:
+        conn = _get_conn()
         conn.execute(
             "INSERT INTO event_links (source_event_id, target_event_id, relation, confidence, reason) "
             "VALUES (?, ?, ?, ?, ?)",
             (source_id, target_id, relation, confidence, reason),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_event_graph(limit: int = 50) -> dict:
     """Get recent events and their links for graph visualization."""
     conn = _get_conn()
-    try:
-        events = conn.execute(
-            "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,)
-        ).fetchall()
-        event_ids = [e["id"] for e in events]
-        if not event_ids:
-            return {"events": [], "links": []}
+    events = conn.execute(
+        "SELECT * FROM events ORDER BY timestamp DESC LIMIT ?", (limit,)
+    ).fetchall()
+    event_ids = [e["id"] for e in events]
+    if not event_ids:
+        return {"events": [], "links": []}
 
-        placeholders = ",".join("?" * len(event_ids))
-        links = conn.execute(
-            f"SELECT * FROM event_links WHERE source_event_id IN ({placeholders}) "
-            f"OR target_event_id IN ({placeholders})",
-            event_ids + event_ids,
-        ).fetchall()
-        return {
-            "events": [dict(e) for e in events],
-            "links": [dict(l) for l in links],
-        }
-    finally:
-        conn.close()
+    placeholders = ",".join("?" * len(event_ids))
+    links = conn.execute(
+        f"SELECT * FROM event_links WHERE source_event_id IN ({placeholders}) "
+        f"OR target_event_id IN ({placeholders})",
+        event_ids + event_ids,
+    ).fetchall()
+    return {
+        "events": [dict(e) for e in events],
+        "links": [dict(lnk) for lnk in links],
+    }
 
 
 def find_related_events(event_title: str, limit: int = 10) -> list[dict]:
     """Find events with similar titles (for linking)."""
     conn = _get_conn()
-    try:
-        # Simple LIKE search — could use FTS5 for better matching
-        rows = conn.execute(
-            "SELECT * FROM events WHERE title LIKE ? ORDER BY timestamp DESC LIMIT ?",
-            (f"%{event_title[:20]}%", limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT * FROM events WHERE title LIKE ? ORDER BY timestamp DESC LIMIT ?",
+        (f"%{event_title[:20]}%", limit),
+    ).fetchall()
+    return [dict(r) for r in rows]

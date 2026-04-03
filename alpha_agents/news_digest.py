@@ -210,12 +210,13 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
     response = await client.chat.completions.create(
         model=DIGEST_MODEL,
         max_tokens=MAX_OUTPUT_TOKENS,
+        timeout=90,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
     )
-    text = response.choices[0].message.content or ""
+    text = (response.choices[0].message.content if response.choices else "") or ""
     return _parse_response(text)
 
 

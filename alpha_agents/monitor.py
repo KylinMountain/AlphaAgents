@@ -126,6 +126,8 @@ class NewsMonitor:
     async def run(self) -> None:
         logger.info("News monitor started. Interval: %ds", self.interval)
         cycle = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         while True:
             cycle += 1
             try:
@@ -243,11 +245,14 @@ class NewsMonitor:
                 # 6. LLM analyzes causal relationships between events
                 if len(events) >= 2:
                     llm_links = await analyze_event_links(events)
+                    n_events = len(event_ids)
                     for lnk in llm_links:
-                        src_eid = event_ids[lnk["source"]]
-                        tgt_eid = event_ids[lnk["target"]]
+                        si, ti = lnk["source"], lnk["target"]
+                        if si >= n_events or ti >= n_events:
+                            logger.warning("Event link index out of range: %d->%d (max %d)", si, ti, n_events - 1)
+                            continue
                         await asyncio.to_thread(
-                            link_events, src_eid, tgt_eid,
+                            link_events, event_ids[si], event_ids[ti],
                             lnk["relation"], lnk["confidence"],
                             lnk.get("reason", ""))
                     if llm_links:
@@ -280,9 +285,17 @@ class NewsMonitor:
                                  {"cycle": cycle})
 
                 print(result)
+                consecutive_errors = 0  # reset on success
 
             except Exception:
-                logger.exception("Error in monitor loop")
-                await self._emit("pipeline", "error", "监控循环出错")
+                consecutive_errors += 1
+                logger.exception("Error in monitor loop (consecutive: %d/%d)",
+                                 consecutive_errors, max_consecutive_errors)
+                await self._emit("pipeline", "error",
+                                 f"监控循环出错 ({consecutive_errors}/{max_consecutive_errors})")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical("Too many consecutive errors (%d), stopping monitor", consecutive_errors)
+                    await self._emit("pipeline", "error", "连续错误过多，监控已停止")
+                    break
 
             await asyncio.sleep(self.interval)

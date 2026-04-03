@@ -23,6 +23,7 @@ from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
 from alpha_agents.tools.futures_quotes import (
     get_futures_quotes_fn, get_futures_inventory_fn, get_futures_basis_fn,
+    get_cftc_positions_fn,
 )
 
 
@@ -202,6 +203,18 @@ def get_futures_inventory(symbol: str) -> str:
 
 
 @function_tool
+def get_cftc_positions(commodity: str = "") -> str:
+    """获取CFTC持仓报告（Commitment of Traders）— 国际期货大户持仓动向。
+
+    追踪商业/非商业持仓变化，判断机构资金方向。
+    输入品种名称（如"原油"、"黄金"、"大豆"），留空返回所有品种概览。
+    返回最近10周的多单、空单、净多头寸及趋势。
+    可选品种：原油、黄金、白银、铂金、天然气、铜、玉米、大豆、豆油、豆粕、棉花、白糖。
+    """
+    return get_cftc_positions_fn(commodity=commodity)
+
+
+@function_tool
 def get_futures_basis(date: str = "") -> str:
     """获取期现基差数据（现货价 vs 期货价）。
 
@@ -214,7 +227,7 @@ def get_futures_basis(date: str = "") -> str:
 # Futures analysis tools — for the futures strategist agent
 FUTURES_TOOLS = [
     get_futures_quotes, get_futures_inventory, get_futures_basis,
-    web_search, web_fetch, get_pizzint,
+    get_cftc_positions, web_search, web_fetch, get_pizzint,
 ]
 
 # ALL_TOOLS: full set including news (for backward compatibility / one-shot mode)

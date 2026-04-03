@@ -173,3 +173,89 @@ def get_futures_basis_fn(date: str = "") -> str:
     except Exception as e:
         logger.error("get_futures_basis failed: %s", e)
         return json.dumps({"date": date, "data": [], "error": str(e)}, ensure_ascii=False)
+
+
+# CFTC commodity name mapping for column lookup
+CFTC_COMMODITIES = {
+    "原油": "纽约原油", "黄金": "黄金", "白银": "白银", "铂金": "铂金",
+    "天然气": "天然气", "铜": "铜", "玉米": "玉米", "大豆": "大豆",
+    "豆油": "豆油", "豆粕": "豆粕", "棉花": "棉花", "白糖": "原糖",
+    "钯金": "钯金",
+}
+
+
+def get_cftc_positions_fn(commodity: str = "") -> str:
+    """Get CFTC Commitment of Traders data for commodity futures.
+
+    Args:
+        commodity: Commodity name (e.g. "原油", "黄金", "大豆"). Empty for all.
+    """
+    try:
+        with no_proxy():
+            df = ak.macro_usa_cftc_c_holding()
+        if df.empty:
+            return json.dumps({"data": [], "error": "no data"}, ensure_ascii=False)
+
+        # Get last 10 weeks
+        df = df.tail(10)
+
+        if commodity:
+            cn_name = CFTC_COMMODITIES.get(commodity, commodity)
+            # Find columns matching this commodity
+            long_col = f"{cn_name}_多单"
+            short_col = f"{cn_name}_空单"
+            net_col = f"{cn_name}_净多"
+            if net_col not in df.columns:
+                available = [c.rsplit("_", 1)[0] for c in df.columns if c.endswith("_净多")]
+                return json.dumps({
+                    "commodity": commodity,
+                    "error": f"未找到 {cn_name}，可选: {list(set(available))}",
+                    "data": [],
+                }, ensure_ascii=False)
+
+            records = []
+            for _, row in df.iterrows():
+                records.append({
+                    "date": str(row["日期"]),
+                    "long": int(row[long_col]) if long_col in df.columns else None,
+                    "short": int(row[short_col]) if short_col in df.columns else None,
+                    "net": int(row[net_col]),
+                })
+
+            # Trend analysis
+            if len(records) >= 2:
+                latest_net = records[-1]["net"]
+                prev_net = records[-2]["net"]
+                trend = "净多增加" if latest_net > prev_net else "净多减少"
+            else:
+                trend = "数据不足"
+
+            return json.dumps({
+                "commodity": commodity,
+                "latest_net": records[-1]["net"] if records else 0,
+                "trend": trend,
+                "data": records,
+            }, ensure_ascii=False)
+        else:
+            # Return summary of all commodities
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else latest
+            summary = []
+            for display_name, cn_name in CFTC_COMMODITIES.items():
+                net_col = f"{cn_name}_净多"
+                if net_col in df.columns:
+                    net_now = int(latest[net_col])
+                    net_prev = int(prev[net_col])
+                    summary.append({
+                        "commodity": display_name,
+                        "net_position": net_now,
+                        "change": net_now - net_prev,
+                        "direction": "净多" if net_now > 0 else "净空",
+                    })
+            return json.dumps({
+                "date": str(latest["日期"]),
+                "summary": summary,
+            }, ensure_ascii=False)
+    except Exception as e:
+        logger.error("get_cftc_positions failed: %s", e)
+        return json.dumps({"data": [], "error": str(e)}, ensure_ascii=False)

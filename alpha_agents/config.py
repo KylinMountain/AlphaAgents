@@ -8,11 +8,37 @@ DATA_DIR = PROJECT_ROOT / "alpha_agents" / "data"
 PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"
+CHROMA_PATH = DATA_DIR / "chroma"
 WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
 
+# ---------------------------------------------------------------------------
+# Embedding model (OpenAI-compatible, for concept vector search)
+# Default: SiliconFlow free BGE-M3
+# ---------------------------------------------------------------------------
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
+EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
+
+# ---------------------------------------------------------------------------
+# Digest LLM (OpenAI-compatible, cheap model for news filtering)
+# Default: SiliconFlow free Qwen
+# ---------------------------------------------------------------------------
+DIGEST_API_KEY = os.environ.get("DIGEST_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
+DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "https://api.siliconflow.cn/v1")
+DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+
+# ---------------------------------------------------------------------------
+# Agent LLM (Claude-compatible, for strategist & geopolitical agents)
+# Default: Anthropic Claude. Supports any provider with Claude message format
+# (e.g. Anthropic, AWS Bedrock, GCP Vertex, proxies like OpenRouter)
+# ---------------------------------------------------------------------------
+AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
+AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", ""))
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "")  # empty = SDK default
+
 # News monitor settings
-MONITOR_INTERVAL_SECONDS = 300
-NEWS_FETCH_LIMIT = 50
+MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))
+NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))
 
 
 @contextmanager

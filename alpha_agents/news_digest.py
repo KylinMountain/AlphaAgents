@@ -12,6 +12,7 @@ Configure via env vars: DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 
 import json
 import logging
+import re
 
 from openai import AsyncOpenAI
 
@@ -72,20 +73,51 @@ def _build_user_message(news_items: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _clean_json(text: str) -> str:
+    """Clean up non-standard JSON produced by some LLMs.
+
+    Handles:
+    - Markdown code fences (```json ... ``` or ``` ... ```)
+    - Trailing commas before ] or } (invalid JSON, valid in JS)
+    - Leading/trailing whitespace
+    """
+    text = text.strip()
+
+    # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
+    if text.startswith("```"):
+        # Remove opening fence line (e.g. "```json")
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:]
+        # Remove closing fence
+        if text.endswith("```"):
+            text = text[:-3].rstrip()
+
+    # Remove trailing commas before closing brackets/braces
+    # e.g.  { "a": 1, }  →  { "a": 1 }
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    return text.strip()
+
+
 def _parse_response(text: str) -> list[dict]:
     """Parse LLM response text into a list of event dicts.
 
-    Handles cases where the model wraps JSON in markdown code fences.
+    Handles non-standard LLM output:
+    - Markdown code fences around JSON
+    - Trailing commas in objects/arrays
+    - Single-line or multi-line JSON arrays
     """
-    text = text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1:]
-        if text.endswith("```"):
-            text = text[:-3].strip()
+    cleaned = _clean_json(text)
 
-    events = json.loads(text)
+    try:
+        events = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Failed to parse LLM JSON response (%s). Raw text (first 200 chars): %s",
+            exc, text[:200],
+        )
+        return []
     if not isinstance(events, list):
         logger.warning("LLM returned non-list JSON, wrapping: %s", type(events))
         events = [events]

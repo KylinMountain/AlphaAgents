@@ -61,27 +61,18 @@ SYSTEM_PROMPT = """\
 """
 
 
-MAX_INPUT_CHARS = 20000  # ~6K tokens, safe for 32K context with system prompt + output
+BATCH_SIZE = 30  # Process this many news items per LLM call
 
 
 def _build_user_message(news_items: list[dict]) -> str:
-    """Format raw news items into a user message for the LLM.
-
-    Truncates to MAX_INPUT_CHARS to stay within model context window.
-    """
+    """Format raw news items into a user message for the LLM."""
     lines = []
-    total_chars = 0
     for i, item in enumerate(news_items, 1):
         title = item.get("title", "")
-        summary = item.get("summary", "")[:150]  # Truncate long summaries
+        summary = item.get("summary", "")[:150]
         time_ = item.get("time", "")
         source = item.get("source", "")
-        line = f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}"
-        if total_chars + len(line) > MAX_INPUT_CHARS:
-            lines.append(f"... (共{len(news_items)}条新闻，已截断至{i-1}条)")
-            break
-        lines.append(line)
-        total_chars += len(line)
+        lines.append(f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}")
     return "\n\n".join(lines)
 
 
@@ -175,11 +166,26 @@ def _get_client() -> AsyncOpenAI:
     )
 
 
+async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
+    """Digest a single batch of news items."""
+    user_message = _build_user_message(batch)
+    response = await client.chat.completions.create(
+        model=DIGEST_MODEL,
+        max_tokens=MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+    )
+    text = response.choices[0].message.content or ""
+    return _parse_response(text)
+
+
 async def digest_news(news_items: list[dict]) -> list[dict]:
     """Filter, aggregate and score raw news using cheap LLM.
 
-    Uses OpenAI-compatible API so any provider works (SiliconFlow, OpenAI,
-    DeepSeek, Ollama, etc.). Configure via DIGEST_* env vars.
+    Splits large news lists into batches of BATCH_SIZE, processes each
+    batch with a separate LLM call, then merges and deduplicates results.
 
     Returns list of event dicts sorted by importance.
     """
@@ -193,22 +199,25 @@ async def digest_news(news_items: list[dict]) -> list[dict]:
         )
         return []
 
-    user_message = _build_user_message(news_items)
+    client = _get_client()
+    all_events = []
 
-    try:
-        client = _get_client()
-        response = await client.chat.completions.create(
-            model=DIGEST_MODEL,
-            max_tokens=MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-        )
+    # Split into batches
+    for i in range(0, len(news_items), BATCH_SIZE):
+        batch = news_items[i : i + BATCH_SIZE]
+        try:
+            events = await _digest_batch(client, batch)
+            all_events.extend(events)
+        except Exception as e:
+            logger.error("News digest batch %d failed: %s: %s", i // BATCH_SIZE, type(e).__name__, e)
 
-        text = response.choices[0].message.content or ""
-        return _parse_response(text)
+    # Deduplicate by event title (keep highest importance)
+    seen = {}
+    for ev in all_events:
+        title = ev.get("event", "")
+        if title not in seen or ev.get("importance", 0) > seen[title].get("importance", 0):
+            seen[title] = ev
 
-    except Exception as e:
-        logger.error("News digest failed: %s: %s", type(e).__name__, e)
-        return []
+    # Sort by importance desc
+    result = sorted(seen.values(), key=lambda x: x.get("importance", 0), reverse=True)
+    return result[:20]

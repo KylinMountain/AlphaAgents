@@ -21,6 +21,9 @@ from alpha_agents.sources.pizzint import get_pizzint_fn
 from alpha_agents.tools.sector import get_sector_data_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.watchlist import get_watchlist_fn
+from alpha_agents.tools.futures_quotes import (
+    get_futures_quotes_fn, get_futures_inventory_fn, get_futures_basis_fn,
+)
 
 
 @function_tool
@@ -175,8 +178,42 @@ STOCK_TOOLS = [
     web_search, web_fetch, get_pizzint,
 ]
 
+@function_tool
+def get_futures_quotes(symbols: str = "", days: int = 5) -> str:
+    """获取期货主力合约行情数据（OHLCV）。
+
+    输入品种名称，逗号分隔，例如："沪铜,沪金,螺纹钢,原油"。
+    留空则返回所有主力合约概览。返回最近N个交易日的开高低收、成交量、持仓量。
+    支持品种：沪铜、沪铝、沪锌、沪镍、沪金、沪银、螺纹钢、热卷、铁矿石、
+    焦煤、焦炭、原油、燃油、甲醇、PTA、乙二醇、聚丙烯、豆粕、豆油、棕榈油、
+    玉米、棉花、白糖、生猪、橡胶等。
+    """
+    return get_futures_quotes_fn(symbols=symbols, days=days)
+
+
+@function_tool
+def get_futures_inventory(symbol: str) -> str:
+    """获取期货品种交割仓库库存数据（仓单/库存）。
+
+    用于判断品种供需格局：去库存=供不应求偏多，累库存=供过于求偏空。
+    输入品种名称，如："沪铜"、"螺纹钢"、"铁矿石"。返回最近30天库存变化趋势。
+    """
+    return get_futures_inventory_fn(symbol=symbol)
+
+
+@function_tool
+def get_futures_basis(date: str = "") -> str:
+    """获取期现基差数据（现货价 vs 期货价）。
+
+    基差 = 现货价 - 期货价。正基差(现货升水)通常看多，负基差(期货升水)可能看空。
+    输入日期(YYYYMMDD格式)，留空为最新数据。返回所有品种的现货价、期货价、基差率。
+    """
+    return get_futures_basis_fn(date=date)
+
+
 # Futures analysis tools — for the futures strategist agent
 FUTURES_TOOLS = [
+    get_futures_quotes, get_futures_inventory, get_futures_basis,
     web_search, web_fetch, get_pizzint,
 ]
 

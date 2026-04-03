@@ -9,30 +9,27 @@ this source captures real-time flash news (快讯) streaming 24/7.
 
 import json
 import logging
-import time
+import re
 
 from alpha_agents import http_client
 
 logger = logging.getLogger(__name__)
 
 # East Money 7x24 live feed API
-LIVE_API_URL = "https://np-listapi.eastmoney.com/comm/wap/getListInfo"
-
-DEFAULT_PARAMS = {
-    "cb": "",
-    "client": "wap",
-    "type": "1",          # 7x24 快讯
-    "mession": "lst",
-    "pageSize": "50",
-    "pageIndex": "1",
-    "fields1": "title,summary,digest",
-    "fields2": "title,summary,digest,showTime,source",
-}
+# Format: getlist_{column}_ajaxResult_{pageSize}_{pageIndex}_.html
+# Column 102 = 7x24 快讯
+LIVE_API_TEMPLATE = "https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_{size}_{page}_.html"
 
 
 def _parse_response(text: str) -> list[dict]:
-    """Parse API response, handling potential JSONP wrapper."""
+    """Parse API response — strips JSONP wrapper `var ajaxResult=...`."""
     text = text.strip()
+
+    # Strip `var ajaxResult=` prefix
+    match = re.match(r"var\s+\w+\s*=\s*", text)
+    if match:
+        text = text[match.end():]
+
     # Strip JSONP callback if present
     if text.startswith("(") and text.endswith(");"):
         text = text[1:-2]
@@ -41,25 +38,23 @@ def _parse_response(text: str) -> list[dict]:
 
     data = json.loads(text)
     items = []
-    raw_list = data.get("data", {}).get("list", [])
+    raw_list = data.get("LivesList", [])
 
     for item in raw_list:
         title = item.get("title", "").strip()
         digest = item.get("digest", "").strip()
-        summary = item.get("summary", "").strip()
-        show_time = item.get("showTime", "")
-        source = item.get("source", "东方财富")
+        show_time = item.get("showtime", "")
+        source = "东方财富7x24"
 
-        # Use digest as title fallback; use summary as content
-        display_title = title or digest[:80] or summary[:80]
+        display_title = title or digest[:80]
         if not display_title:
             continue
 
         items.append({
             "title": display_title,
-            "summary": (summary or digest)[:300],
+            "summary": (digest or title)[:300],
             "time": show_time,
-            "source": f"东方财富7x24/{source}" if source else "东方财富7x24",
+            "source": source,
         })
 
     return items
@@ -76,10 +71,9 @@ def get_eastmoney_live_fn(*, keyword: str = "", limit: int = 50) -> str:
         JSON string with {"news": [...]} format.
     """
     try:
-        params = {**DEFAULT_PARAMS, "pageSize": str(min(limit * 2, 100))}
+        url = LIVE_API_TEMPLATE.format(size=min(limit * 2, 100), page=1)
         resp = http_client.fetch(
-            LIVE_API_URL,
-            params=params,
+            url,
             headers={"Referer": "https://kuaixun.eastmoney.com/"},
         )
         items = _parse_response(resp.text)

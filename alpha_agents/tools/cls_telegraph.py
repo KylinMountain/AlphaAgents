@@ -12,20 +12,38 @@ from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://www.cls.cn/nodeapi/updateTelegraph"
+API_URL = "https://www.cls.cn/api/roll/get_roll_list"
 DEFAULT_PARAMS = {
     "app": "CailianpressWeb",
     "os": "web",
-    "sv": "8.4.6",
+    "sv": "8.5.2",
+    "category": "",
+    "has_signing": "",
 }
+
+# Fallback if the primary API moves again
+FALLBACK_URL = "https://www.cls.cn/v1/roll/get_roll_list"
 
 
 def _fetch_telegraph(limit: int = 30) -> list[dict]:
     """Fetch raw telegraph items from CLS API."""
     params = {**DEFAULT_PARAMS, "rn": str(limit)}
-    resp = fetch(API_URL, params=params)
-    data = resp.json()
-    return data.get("data", {}).get("roll_data", [])
+    try:
+        resp = fetch(API_URL, params=params)
+        data = resp.json()
+        items = data.get("data", {}).get("roll_data", [])
+        if items:
+            return items
+    except Exception:
+        logger.debug("Primary CLS API failed, trying fallback")
+
+    # Try fallback URL
+    try:
+        resp = fetch(FALLBACK_URL, params=params)
+        data = resp.json()
+        return data.get("data", {}).get("roll_data", [])
+    except Exception:
+        raise
 
 
 def _parse_item(item: dict) -> dict:

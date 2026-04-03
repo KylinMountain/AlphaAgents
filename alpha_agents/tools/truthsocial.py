@@ -108,4 +108,4 @@ def get_social_media_fn(limit: int = 20, keyword: str | None = None) -> str:
 
     all_posts = all_posts[:limit]
 
-    return json.dumps({"posts": all_posts, "count": len(all_posts)}, ensure_ascii=False)
+    return json.dumps({"news": all_posts, "count": len(all_posts)}, ensure_ascii=False)

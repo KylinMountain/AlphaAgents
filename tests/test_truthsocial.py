@@ -129,7 +129,7 @@ def test_get_social_media_returns_json():
     with patch("alpha_agents.tools.truthsocial.fetch", side_effect=side_effect):
         result = json.loads(get_social_media_fn(limit=20))
         assert result["count"] == 4
-        sources = {p["source"] for p in result["posts"]}
+        sources = {p["source"] for p in result["news"]}
         assert "Truth Social" in sources
         assert "X/Twitter" in sources
 
@@ -145,7 +145,7 @@ def test_get_social_media_keyword_filter():
     with patch("alpha_agents.tools.truthsocial.fetch", side_effect=side_effect):
         result = json.loads(get_social_media_fn(keyword="tariffs"))
         assert result["count"] == 1
-        assert "tariffs" in result["posts"][0]["title"].lower()
+        assert "tariffs" in result["news"][0]["title"].lower()
 
 
 def test_get_social_media_respects_limit():
@@ -165,4 +165,4 @@ def test_get_social_media_handles_all_errors():
     with patch("alpha_agents.tools.truthsocial.fetch", side_effect=Exception("Network error")):
         result = json.loads(get_social_media_fn())
         assert result["count"] == 0
-        assert result["posts"] == []
+        assert result["news"] == []

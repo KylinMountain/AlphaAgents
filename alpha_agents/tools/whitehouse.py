@@ -11,7 +11,11 @@ from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
-RSS_URL = "https://www.whitehouse.gov/feed/"
+RSS_URLS = [
+    "https://www.whitehouse.gov/briefing-room/feed/",
+    "https://www.whitehouse.gov/news/feed/",
+    "https://www.whitehouse.gov/feed/",
+]
 
 
 def _parse_rss(xml_text: str) -> list[dict]:
@@ -49,12 +53,19 @@ def get_whitehouse_fn(limit: int = 20, keyword: str | None = None) -> str:
     """
     all_news: list[dict] = []
 
-    try:
-        resp = fetch(RSS_URL)
-        all_news = _parse_rss(resp.text)
-        logger.debug("Fetched %d items from White House RSS", len(all_news))
-    except Exception as e:
-        logger.warning("Failed to fetch White House RSS: %s", e)
+    for rss_url in RSS_URLS:
+        try:
+            resp = fetch(rss_url)
+            all_news = _parse_rss(resp.text)
+            if all_news:
+                logger.debug("Fetched %d items from %s", len(all_news), rss_url)
+                break
+        except Exception as e:
+            logger.debug("White House RSS %s failed: %s", rss_url, e)
+            continue
+
+    if not all_news:
+        logger.warning("All White House RSS URLs failed")
 
     if keyword:
         kw = keyword.lower()

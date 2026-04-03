@@ -3,6 +3,10 @@
 Jin10 is one of the most popular real-time financial news flash sources in China,
 covering macro-economic data releases, central bank decisions, and market events.
 No authentication required.
+
+Note: The original flash-api.jin10.com API endpoint returned 502 Bad Gateway.
+We now use https://www.jin10.com/flash_newest.js which returns a JS file
+containing the 50 most recent flash items as a JSON array.
 """
 
 import json
@@ -12,12 +16,9 @@ from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://flash-api.jin10.com/get_flash_list"
-DEFAULT_PARAMS = {
-    "channel": "-8200",
-    "vip": "1",
-    "max_time": "",
-}
+# Public JS endpoint — no auth, no VIP required, returns 50 most recent items.
+# The original flash-api.jin10.com is down (502 Bad Gateway).
+FLASH_JS_URL = "https://www.jin10.com/flash_newest.js"
 
 _EXTRA_HEADERS = {
     "Referer": "https://www.jin10.com/",
@@ -26,10 +27,18 @@ _EXTRA_HEADERS = {
 
 
 def _fetch_flash_list(limit: int = 30) -> list[dict]:
-    """Fetch raw flash news items from Jin10 API."""
-    resp = fetch(API_URL, params=DEFAULT_PARAMS, headers=_EXTRA_HEADERS)
-    data = resp.json()
-    items = data.get("data", [])
+    """Fetch raw flash news items from Jin10's public JS endpoint."""
+    resp = fetch(FLASH_JS_URL, headers=_EXTRA_HEADERS)
+    text = resp.text.strip()
+    # Strip JS variable wrapper: "var newest = [...]; "
+    if text.startswith("var newest = "):
+        text = text[len("var newest = "):]
+    if text.endswith(";"):
+        text = text[:-1]
+    items = json.loads(text)
+    if not isinstance(items, list):
+        logger.warning("Jin10 flash_newest.js returned unexpected format: %s", type(items))
+        return []
     return items[:limit]
 
 

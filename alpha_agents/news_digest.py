@@ -12,15 +12,29 @@ Configure via env vars: DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 
 import json
 import logging
+import os
 import re
 
+import tiktoken
 from openai import AsyncOpenAI
 
 from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 
 logger = logging.getLogger(__name__)
 
-MAX_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 4096
+# Reserve tokens for system prompt + output + overhead
+_RESERVED_TOKENS = MAX_OUTPUT_TOKENS + 2000  # ~2K for system prompt
+# Model context window (configurable, default 32K for Qwen free tier)
+MODEL_CONTEXT_WINDOW = int(os.environ.get("DIGEST_CONTEXT_WINDOW", "32768"))
+MAX_INPUT_TOKENS = MODEL_CONTEXT_WINDOW - _RESERVED_TOKENS
+
+_encoder = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using tiktoken (fast, local)."""
+    return len(_encoder.encode(text))
 
 SYSTEM_PROMPT = """\
 你是一个专业的金融新闻分析助手。你的任务是将多条原始新闻聚合、去重、评分，输出结构化的事件摘要。
@@ -61,18 +75,42 @@ SYSTEM_PROMPT = """\
 """
 
 
-BATCH_SIZE = 30  # Process this many news items per LLM call
+def _format_item(i: int, item: dict) -> str:
+    """Format a single news item."""
+    title = item.get("title", "")
+    summary = item.get("summary", "")[:150]
+    time_ = item.get("time", "")
+    source = item.get("source", "")
+    return f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}"
+
+
+def _split_into_batches(news_items: list[dict]) -> list[list[dict]]:
+    """Split news items into batches that fit within MAX_INPUT_TOKENS."""
+    batches = []
+    current_batch = []
+    current_tokens = 0
+
+    for i, item in enumerate(news_items):
+        item_text = _format_item(i + 1, item)
+        item_tokens = _count_tokens(item_text)
+
+        if current_tokens + item_tokens > MAX_INPUT_TOKENS and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_tokens = 0
+
+        current_batch.append(item)
+        current_tokens += item_tokens
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
 
 
 def _build_user_message(news_items: list[dict]) -> str:
-    """Format raw news items into a user message for the LLM."""
-    lines = []
-    for i, item in enumerate(news_items, 1):
-        title = item.get("title", "")
-        summary = item.get("summary", "")[:150]
-        time_ = item.get("time", "")
-        source = item.get("source", "")
-        lines.append(f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}")
+    """Format news items into a user message for the LLM."""
+    lines = [_format_item(i, item) for i, item in enumerate(news_items, 1)]
     return "\n\n".join(lines)
 
 
@@ -171,7 +209,7 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
     user_message = _build_user_message(batch)
     response = await client.chat.completions.create(
         model=DIGEST_MODEL,
-        max_tokens=MAX_TOKENS,
+        max_tokens=MAX_OUTPUT_TOKENS,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
@@ -184,8 +222,9 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
 async def digest_news(news_items: list[dict]) -> list[dict]:
     """Filter, aggregate and score raw news using cheap LLM.
 
-    Splits large news lists into batches of BATCH_SIZE, processes each
-    batch with a separate LLM call, then merges and deduplicates results.
+    Splits news into token-aware batches that fit within the model's
+    context window, processes each batch with a separate LLM call,
+    then merges and deduplicates results.
 
     Returns list of event dicts sorted by importance.
     """
@@ -199,17 +238,20 @@ async def digest_news(news_items: list[dict]) -> list[dict]:
         )
         return []
 
+    batches = _split_into_batches(news_items)
+    logger.info("Splitting %d news items into %d batches (max %d input tokens/batch)",
+                len(news_items), len(batches), MAX_INPUT_TOKENS)
+
     client = _get_client()
     all_events = []
 
-    # Split into batches
-    for i in range(0, len(news_items), BATCH_SIZE):
-        batch = news_items[i : i + BATCH_SIZE]
+    for i, batch in enumerate(batches):
         try:
             events = await _digest_batch(client, batch)
             all_events.extend(events)
         except Exception as e:
-            logger.error("News digest batch %d failed: %s: %s", i // BATCH_SIZE, type(e).__name__, e)
+            logger.error("News digest batch %d/%d failed: %s: %s",
+                         i + 1, len(batches), type(e).__name__, e)
 
     # Deduplicate by event title (keep highest importance)
     seen = {}

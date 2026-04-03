@@ -61,15 +61,27 @@ SYSTEM_PROMPT = """\
 """
 
 
+MAX_INPUT_CHARS = 20000  # ~6K tokens, safe for 32K context with system prompt + output
+
+
 def _build_user_message(news_items: list[dict]) -> str:
-    """Format raw news items into a user message for the LLM."""
+    """Format raw news items into a user message for the LLM.
+
+    Truncates to MAX_INPUT_CHARS to stay within model context window.
+    """
     lines = []
+    total_chars = 0
     for i, item in enumerate(news_items, 1):
         title = item.get("title", "")
-        summary = item.get("summary", "")
+        summary = item.get("summary", "")[:150]  # Truncate long summaries
         time_ = item.get("time", "")
         source = item.get("source", "")
-        lines.append(f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}")
+        line = f"[{i}] 来源: {source} | 时间: {time_}\n标题: {title}\n摘要: {summary}"
+        if total_chars + len(line) > MAX_INPUT_CHARS:
+            lines.append(f"... (共{len(news_items)}条新闻，已截断至{i-1}条)")
+            break
+        lines.append(line)
+        total_chars += len(line)
     return "\n\n".join(lines)
 
 

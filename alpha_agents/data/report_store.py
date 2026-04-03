@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS event_links (
     target_event_id INTEGER NOT NULL,
     relation TEXT NOT NULL,     -- causes / amplifies / mitigates / relates_to
     confidence REAL DEFAULT 0.5,
+    reason TEXT DEFAULT '',     -- LLM explanation of why this relationship exists
     FOREIGN KEY (source_event_id) REFERENCES events(id),
     FOREIGN KEY (target_event_id) REFERENCES events(id)
 );
@@ -208,14 +209,15 @@ def save_event(title: str, category: str, importance: int,
         conn.close()
 
 
-def link_events(source_id: int, target_id: int, relation: str, confidence: float = 0.5) -> None:
+def link_events(source_id: int, target_id: int, relation: str,
+                confidence: float = 0.5, reason: str = "") -> None:
     """Create a causal link between two events."""
     conn = _get_conn()
     try:
         conn.execute(
-            "INSERT INTO event_links (source_event_id, target_event_id, relation, confidence) "
-            "VALUES (?, ?, ?, ?)",
-            (source_id, target_id, relation, confidence),
+            "INSERT INTO event_links (source_event_id, target_event_id, relation, confidence, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (source_id, target_id, relation, confidence, reason),
         )
         conn.commit()
     finally:

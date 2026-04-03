@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 export function useWebSocket() {
   const [stages, setStages] = useState({})
   const [reports, setReports] = useState([])
+  const [events, setEvents] = useState([])       // pipeline events history
   const [connected, setConnected] = useState(false)
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
@@ -23,17 +24,20 @@ export function useWebSocket() {
       try {
         const msg = JSON.parse(evt.data)
         if (msg.type === 'snapshot') {
-          // Initial state on connect
           const s = msg.data.stages || {}
           setStages(s)
           setReports(msg.data.reports || [])
         } else if (msg.type === 'event') {
           const e = msg.data
-          setStages(prev => ({
-            ...prev,
-            [e.stage]: e,
-          }))
-          // If pipeline success, refetch reports
+          setStages(prev => ({ ...prev, [e.stage]: e }))
+
+          // Append to events timeline (keep last 200)
+          setEvents(prev => {
+            const next = [...prev, { ...e, _id: Date.now() + Math.random() }]
+            return next.length > 200 ? next.slice(-200) : next
+          })
+
+          // If agent completes, refetch reports
           if (e.stage === 'agent' && e.status === 'success') {
             fetch('/api/reports')
               .then(r => r.json())
@@ -55,5 +59,5 @@ export function useWebSocket() {
     }
   }, [connect])
 
-  return { stages, reports, connected }
+  return { stages, reports, events, connected }
 }

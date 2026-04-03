@@ -135,17 +135,82 @@ function DigestEventCard({ event, index }) {
   )
 }
 
+const toolIcons = {
+  'search_stocks': '🔍',
+  'get_sector_data': '📊',
+  'filter_stocks': '🔧',
+  'get_watchlist': '👁',
+  'web_search': '🌐',
+  'web_fetch': '📄',
+  'get_pizzint': '🍕',
+  'get_futures_quotes': '📈',
+  'get_futures_inventory': '🏭',
+  'get_futures_basis': '⚖',
+  'get_cftc_positions': '📋',
+}
+
+function ToolCallEvent({ event }) {
+  const data = event.data || {}
+  const isStart = data.tool_status === 'start'
+  const toolName = data.tool || ''
+  const agent = data.agent || ''
+  const icon = toolIcons[toolName] || '⚙'
+  const time = new Date(event.timestamp * 1000).toLocaleTimeString('zh-CN')
+  const agentColor = agent.includes('期货') ? 'var(--accent-yellow)' : 'var(--accent-blue)'
+
+  return (
+    <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"
+         style={{ borderBottom: '1px solid var(--border)', background: isStart ? '#3b82f606' : 'transparent' }}>
+      <div className="shrink-0 mt-1">
+        <div className={`w-1.5 h-1.5 rounded-full ${isStart ? 'animate-pulse-dot' : ''}`}
+             style={{ background: isStart ? 'var(--accent-purple)' : 'var(--accent-green)' }} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span style={{ fontSize: 11 }}>{icon}</span>
+          <span className="text-xs font-medium" style={{ color: 'var(--accent-purple)' }}>
+            {toolName}
+          </span>
+          <span className="text-xs px-1 rounded"
+                style={{ background: `${agentColor}15`, color: agentColor, fontSize: 10 }}>
+            {agent}
+          </span>
+          {!isStart && (
+            <span className="text-xs" style={{ color: 'var(--accent-green)', fontSize: 10 }}>✓</span>
+          )}
+          {isStart && (
+            <span className="text-xs" style={{ color: 'var(--accent-purple)', fontSize: 10 }}>调用中...</span>
+          )}
+          <span className="text-xs ml-auto tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            {time}
+          </span>
+        </div>
+        {!isStart && data.result_preview && (
+          <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--text-muted)', maxWidth: 500 }}>
+            {data.result_preview}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function PipelineEvent({ event }) {
   const stage = event.stage?.replace('source_', '') || ''
   const isSource = event.stage?.startsWith('source_')
+  const isTool = event.stage?.startsWith('tool_')
   const st = statusStyles[event.status] || statusStyles.idle
-  const label = isSource ? stage : (stageLabels[stage] || stage)
-  const icon = isSource ? '📰' : (stageIcons[stage] || '⚙')
   const time = new Date(event.timestamp * 1000).toLocaleTimeString('zh-CN')
+
+  // Tool call events get special rendering
+  if (isTool) return <ToolCallEvent event={event} />
 
   // Skip idle events and source-level noise
   if (event.status === 'idle') return null
   if (isSource && event.status === 'running') return null
+
+  const label = isSource ? stage : (stageLabels[stage] || stage)
+  const icon = isSource ? '📰' : (stageIcons[stage] || '⚙')
 
   return (
     <div className="flex items-start gap-2 py-1.5 px-4 animate-fade-in"

@@ -2,7 +2,7 @@ import json
 from unittest.mock import patch, MagicMock
 import pandas as pd
 
-from alpha_agents.tools.cls_telegraph import get_cls_telegraph_fn
+from alpha_agents.sources.cls_telegraph import get_cls_telegraph_fn
 
 
 def _make_sample_df():

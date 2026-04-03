@@ -3,7 +3,7 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
-from alpha_agents.monitor import NewsMonitor
+from alpha_agents.pipeline.monitor import NewsMonitor
 
 
 @pytest.fixture

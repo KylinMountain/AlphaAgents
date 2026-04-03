@@ -15,7 +15,7 @@ from alpha_agents.config import (
     PROMPTS_DIR,
     AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
-from alpha_agents.tools.server import FUTURES_TOOLS
+from alpha_agents.tools.registry import FUTURES_TOOLS
 from alpha_agents.agents.geopolitical import create_geopolitical_agent
 
 logger = logging.getLogger(__name__)

@@ -91,7 +91,7 @@ async def _monitor_one_cycle():
         new_items = _monitor.deduplicate(raw_items)
         if not new_items:
             return
-        from alpha_agents.news_digest import digest_news
+        from alpha_agents.pipeline.digest import digest_news
         events = await digest_news(new_items)
         if not events:
             return
@@ -110,7 +110,7 @@ async def _monitor_one_cycle():
 @app.post("/api/review")
 async def trigger_review():
     """Manually trigger daily review."""
-    from alpha_agents.daily_review import run_daily_review
+    from alpha_agents.pipeline.daily_review import run_daily_review
     result = await run_daily_review()
     return JSONResponse(result)
 

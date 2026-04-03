@@ -1,7 +1,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from alpha_agents.tools.truthsocial import (
+from alpha_agents.sources.truthsocial import (
     get_social_media_fn,
     _parse_google_rss,
     _parse_rss,
@@ -82,20 +82,20 @@ def _mock_fetch(text):
 
 
 def test_fetch_feed_google():
-    with patch("alpha_agents.tools.truthsocial.fetch", return_value=_mock_fetch(SAMPLE_GOOGLE_RSS)):
+    with patch("alpha_agents.sources.truthsocial.fetch", return_value=_mock_fetch(SAMPLE_GOOGLE_RSS)):
         items = _fetch_feed("https://example.com", "Trump", is_google=True)
         assert len(items) == 2
         assert items[0]["source"] == "CNBC"
 
 
 def test_fetch_feed_political():
-    with patch("alpha_agents.tools.truthsocial.fetch", return_value=_mock_fetch(SAMPLE_POLITICAL_RSS)):
+    with patch("alpha_agents.sources.truthsocial.fetch", return_value=_mock_fetch(SAMPLE_POLITICAL_RSS)):
         items = _fetch_feed("https://example.com", "The Hill")
         assert len(items) == 2
 
 
 def test_fetch_feed_error():
-    with patch("alpha_agents.tools.truthsocial.fetch", side_effect=Exception("Network error")):
+    with patch("alpha_agents.sources.truthsocial.fetch", side_effect=Exception("Network error")):
         items = _fetch_feed("https://example.com", "Test")
         assert items == []
 
@@ -106,7 +106,7 @@ def test_get_social_media_returns_json():
             return _mock_fetch(SAMPLE_GOOGLE_RSS)
         return _mock_fetch(SAMPLE_POLITICAL_RSS)
 
-    with patch("alpha_agents.tools.truthsocial.fetch", side_effect=side_effect):
+    with patch("alpha_agents.sources.truthsocial.fetch", side_effect=side_effect):
         result = json.loads(get_social_media_fn(limit=20))
         assert result["count"] > 0
         # Should have both Google News and political feed items
@@ -119,7 +119,7 @@ def test_get_social_media_keyword_filter():
             return _mock_fetch(SAMPLE_GOOGLE_RSS)
         return _mock_fetch(SAMPLE_POLITICAL_RSS)
 
-    with patch("alpha_agents.tools.truthsocial.fetch", side_effect=side_effect):
+    with patch("alpha_agents.sources.truthsocial.fetch", side_effect=side_effect):
         result = json.loads(get_social_media_fn(keyword="tariff"))
         assert result["count"] >= 1
         assert all("tariff" in n["title"].lower() or "tariff" in n["summary"].lower()
@@ -132,13 +132,13 @@ def test_get_social_media_respects_limit():
             return _mock_fetch(SAMPLE_GOOGLE_RSS)
         return _mock_fetch(SAMPLE_POLITICAL_RSS)
 
-    with patch("alpha_agents.tools.truthsocial.fetch", side_effect=side_effect):
+    with patch("alpha_agents.sources.truthsocial.fetch", side_effect=side_effect):
         result = json.loads(get_social_media_fn(limit=2))
         assert result["count"] == 2
 
 
 def test_get_social_media_handles_all_errors():
-    with patch("alpha_agents.tools.truthsocial.fetch", side_effect=Exception("Network error")):
+    with patch("alpha_agents.sources.truthsocial.fetch", side_effect=Exception("Network error")):
         result = json.loads(get_social_media_fn())
         assert result["count"] == 0
         assert result["news"] == []

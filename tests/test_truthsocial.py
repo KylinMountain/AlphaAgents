@@ -92,7 +92,7 @@ def test_fetch_feed_primary_success():
 
 def test_fetch_feed_falls_back():
     """When primary fails, fallback is tried."""
-    def side_effect(url):
+    def side_effect(url, **kwargs):
         if "primary" in url:
             raise Exception("Primary down")
         return _mock_fetch(SAMPLE_TRUMP_RSS)
@@ -119,7 +119,7 @@ def test_fetch_feed_both_fail():
 
 
 def test_get_social_media_returns_json():
-    def side_effect(url):
+    def side_effect(url, **kwargs):
         if "truthsocial" in url:
             return _mock_fetch(SAMPLE_TRUMP_RSS)
         if "twitter" in url:
@@ -135,7 +135,7 @@ def test_get_social_media_returns_json():
 
 
 def test_get_social_media_keyword_filter():
-    def side_effect(url):
+    def side_effect(url, **kwargs):
         if "truthsocial" in url:
             return _mock_fetch(SAMPLE_TRUMP_RSS)
         if "twitter" in url:
@@ -149,7 +149,7 @@ def test_get_social_media_keyword_filter():
 
 
 def test_get_social_media_respects_limit():
-    def side_effect(url):
+    def side_effect(url, **kwargs):
         if "truthsocial" in url:
             return _mock_fetch(SAMPLE_TRUMP_RSS)
         if "twitter" in url:

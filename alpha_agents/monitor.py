@@ -20,6 +20,7 @@ from alpha_agents.tools.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.news_digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
+from alpha_agents.event_linker import analyze_event_links
 from alpha_agents.notify import notify_all, format_report_notification
 
 logger = logging.getLogger(__name__)
@@ -239,11 +240,18 @@ class NewsMonitor:
                     await asyncio.to_thread(save_predictions, report_id, today, predictions)
                     logger.info("Saved %d predictions for %s", len(predictions), today)
 
-                # 6. Link related events (simple: events in same cycle are related)
-                for i, eid in enumerate(event_ids):
-                    for j in range(i + 1, len(event_ids)):
+                # 6. LLM analyzes causal relationships between events
+                if len(events) >= 2:
+                    llm_links = await analyze_event_links(events)
+                    for lnk in llm_links:
+                        src_eid = event_ids[lnk["source"]]
+                        tgt_eid = event_ids[lnk["target"]]
                         await asyncio.to_thread(
-                            link_events, eid, event_ids[j], "relates_to", 0.3)
+                            link_events, src_eid, tgt_eid,
+                            lnk["relation"], lnk["confidence"],
+                            lnk.get("reason", ""))
+                    if llm_links:
+                        logger.info("Linked %d event relationships", len(llm_links))
 
                 # 7. Push to web event bus
                 report = {

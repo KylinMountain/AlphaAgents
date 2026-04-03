@@ -6,6 +6,7 @@ from alpha_agents.tools.futures_quotes import (
     get_futures_quotes_fn,
     get_futures_inventory_fn,
     get_futures_basis_fn,
+    get_cftc_positions_fn,
 )
 
 
@@ -99,4 +100,40 @@ def test_get_futures_basis_error(mock_spot):
     mock_spot.side_effect = Exception("no data")
     result = json.loads(get_futures_basis_fn())
     assert result["data"] == []
+    assert "error" in result
+
+
+def _make_cftc_df():
+    return pd.DataFrame([
+        {"日期": "2026-03-21", "纽约原油_多单": 300000, "纽约原油_空单": 200000, "纽约原油_净多": 100000,
+         "黄金_多单": 250000, "黄金_空单": 100000, "黄金_净多": 150000},
+        {"日期": "2026-03-28", "纽约原油_多单": 310000, "纽约原油_空单": 190000, "纽约原油_净多": 120000,
+         "黄金_多单": 240000, "黄金_空单": 110000, "黄金_净多": 130000},
+    ])
+
+
+@patch("akshare.macro_usa_cftc_c_holding")
+def test_get_cftc_positions_single(mock_cftc):
+    mock_cftc.return_value = _make_cftc_df()
+    result = json.loads(get_cftc_positions_fn(commodity="原油"))
+    assert result["commodity"] == "原油"
+    assert result["latest_net"] == 120000
+    assert result["trend"] == "净多增加"
+    assert len(result["data"]) == 2
+
+
+@patch("akshare.macro_usa_cftc_c_holding")
+def test_get_cftc_positions_all(mock_cftc):
+    mock_cftc.return_value = _make_cftc_df()
+    result = json.loads(get_cftc_positions_fn())
+    assert "summary" in result
+    names = [s["commodity"] for s in result["summary"]]
+    assert "原油" in names
+    assert "黄金" in names
+
+
+@patch("akshare.macro_usa_cftc_c_holding")
+def test_get_cftc_positions_error(mock_cftc):
+    mock_cftc.side_effect = Exception("network error")
+    result = json.loads(get_cftc_positions_fn())
     assert "error" in result

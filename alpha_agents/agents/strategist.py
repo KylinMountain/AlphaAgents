@@ -41,11 +41,11 @@ def _create_strategist() -> Agent:
     )
 
 
-async def run_analysis(prompt: str) -> str:
+async def run_analysis(prompt: str, hooks=None) -> str:
     """Run a full analysis cycle and return the final output."""
     agent = _create_strategist()
     # Inject current time in user message (not system prompt) to preserve LLM cache
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     user_message = f"[当前时间: {now}]\n\n{prompt}"
-    result = await Runner.run(agent, user_message)
+    result = await Runner.run(agent, user_message, hooks=hooks)
     return result.final_output

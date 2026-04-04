@@ -1,50 +1,95 @@
 @import "tailwindcss";
 
 :root {
-  --bg-primary: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-card: #1e293b;
-  --border: #334155;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
+  --bg-primary: #0a0e1a;
+  --bg-secondary: #111827;
+  --bg-card: #151d2e;
+  --bg-card-hover: #1a2435;
+  --border: #1e2d42;
+  --border-bright: #2a3f5f;
+  --text-primary: #e2e8f0;
+  --text-secondary: #8892a4;
+  --text-muted: #4a5568;
   --accent-blue: #3b82f6;
-  --accent-green: #22c55e;
+  --accent-green: #10b981;
   --accent-red: #ef4444;
-  --accent-yellow: #eab308;
-  --accent-purple: #a855f7;
+  --accent-yellow: #f59e0b;
+  --accent-purple: #8b5cf6;
   --accent-cyan: #06b6d4;
+  --accent-orange: #f97316;
 }
 
 body {
   margin: 0;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* React Flow overrides */
+/* Hide ReactFlow attribution */
 .react-flow__attribution { display: none; }
-.react-flow__background { background: var(--bg-primary); }
 
-/* Animated edge for running state */
-@keyframes flowEdge {
-  from { stroke-dashoffset: 24; }
-  to { stroke-dashoffset: 0; }
-}
-.animated-edge {
-  stroke-dasharray: 8 4;
-  animation: flowEdge 0.8s linear infinite;
+/* Scrollbar — thin, minimal */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+/* Glow animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
-/* Pulse for running nodes */
-@keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
-  70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+@keyframes scan-line {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
-.node-running { animation: pulse-ring 1.5s infinite; }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: var(--bg-primary); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* Status indicator glow */
+.glow-green { box-shadow: 0 0 8px #10b98155, 0 0 2px #10b981; }
+.glow-blue { box-shadow: 0 0 8px #3b82f655, 0 0 2px #3b82f6; }
+.glow-red { box-shadow: 0 0 8px #ef444455, 0 0 2px #ef4444; }
+.glow-yellow { box-shadow: 0 0 8px #f59e0b55, 0 0 2px #f59e0b; }
+.glow-purple { box-shadow: 0 0 8px #8b5cf655, 0 0 2px #8b5cf6; }
+
+/* Category tag colors */
+.tag-政策 { background: #3b82f618; color: #60a5fa; border: 1px solid #3b82f633; }
+.tag-地缘 { background: #ef444418; color: #f87171; border: 1px solid #ef444433; }
+.tag-宏观 { background: #f59e0b18; color: #fbbf24; border: 1px solid #f59e0b33; }
+.tag-行业 { background: #10b98118; color: #34d399; border: 1px solid #10b98133; }
+.tag-市场 { background: #8b5cf618; color: #a78bfa; border: 1px solid #8b5cf633; }
+
+/* Importance bar gradient */
+.importance-bar {
+  background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444);
+}
+
+/* Card hover effect */
+.card-hover {
+  transition: background 0.15s, border-color 0.15s;
+}
+.card-hover:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-bright);
+}
+
+/* Report content styling */
+.report-content h1, .report-content h2, .report-content h3 {
+  color: var(--text-primary);
+}

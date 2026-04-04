@@ -1,114 +1,128 @@
+import { useState } from 'react'
+
 const categoryColors = {
-  '政策': '#3b82f6',
-  '地缘': '#ef4444',
-  '宏观': '#eab308',
-  '行业': '#22c55e',
-  '市场': '#a855f7',
+  '政策': { bg: '#3b82f618', text: '#60a5fa', border: '#3b82f633' },
+  '地缘': { bg: '#ef444418', text: '#f87171', border: '#ef444433' },
+  '宏观': { bg: '#f59e0b18', text: '#fbbf24', border: '#f59e0b33' },
+  '行业': { bg: '#10b98118', text: '#34d399', border: '#10b98133' },
+  '市场': { bg: '#8b5cf618', text: '#a78bfa', border: '#8b5cf633' },
 }
 
 function EventBadge({ event }) {
-  const color = categoryColors[event.category] || '#64748b'
+  const cat = categoryColors[event.category] || { bg: '#1e2d42', text: '#8892a4', border: '#2a3f5f' }
   return (
     <div className="flex items-center gap-2 py-1">
-      <span
-        className="text-xs px-1.5 py-0.5 rounded font-medium"
-        style={{ background: `${color}22`, color, border: `1px solid ${color}44` }}
-      >
+      <span className="text-xs px-1.5 py-0.5 rounded shrink-0"
+            style={{ background: cat.bg, color: cat.text, border: `1px solid ${cat.border}` }}>
         {event.category || '未知'}
       </span>
-      <span className="text-xs text-slate-300 flex-1 truncate">{event.event}</span>
-      <span className="text-xs text-slate-500">
+      <span className="text-xs flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
+        {event.event}
+      </span>
+      <span className="text-xs tabular-nums" style={{ color: 'var(--text-muted)' }}>
         {event.importance && `${event.importance}/5`}
       </span>
     </div>
   )
 }
 
-function ReportContent({ label, content, color }) {
+function ReportSection({ label, content, color, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen)
   if (!content) return null
-  return (
-    <details>
-      <summary
-        className="text-xs cursor-pointer hover:text-slate-200 select-none flex items-center gap-1"
-        style={{ color }}
-      >
-        {label}
-      </summary>
-      <pre
-        className="mt-2 text-xs text-slate-300 whitespace-pre-wrap leading-relaxed overflow-auto"
-        style={{ maxHeight: 400, fontFamily: 'inherit' }}
-      >
-        {content}
-      </pre>
-    </details>
-  )
-}
 
-function RoutesBadge({ routes }) {
-  if (!routes) return null
   return (
-    <div className="flex gap-1">
-      {routes.stock > 0 && (
-        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#3b82f622', color: '#3b82f6' }}>
-          股票 {routes.stock}
+    <div className="rounded-lg overflow-hidden"
+         style={{ border: `1px solid var(--border)` }}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left"
+        style={{ background: 'var(--bg-secondary)', border: 'none', cursor: 'pointer' }}
+      >
+        <span className="w-1 h-3 rounded-full shrink-0" style={{ background: color }} />
+        <span className="text-xs font-semibold flex-1" style={{ color }}>{label}</span>
+        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+          {open ? '▼' : '▶'}
         </span>
-      )}
-      {routes.futures > 0 && (
-        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: '#f59e0b22', color: '#f59e0b' }}>
-          期货 {routes.futures}
-        </span>
+      </button>
+      {open && (
+        <pre className="px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap overflow-auto"
+             style={{ color: 'var(--text-secondary)', maxHeight: 500, background: 'var(--bg-card)', margin: 0 }}>
+          {content}
+        </pre>
       )}
     </div>
   )
 }
 
-function ReportCard({ report, index }) {
+function ReportCard({ report }) {
   const time = new Date(report.timestamp * 1000).toLocaleString('zh-CN')
   const hasRoutes = report.routes && (report.routes.stock > 0 || report.routes.futures > 0)
 
   return (
     <div
-      className="rounded-lg p-4 mb-3"
-      style={{ background: '#1e293b', border: '1px solid #334155' }}
+      className="rounded-lg p-4 animate-fade-in"
+      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
     >
-      <div className="flex items-center justify-between mb-2">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-slate-500">#{report.cycle}</span>
-          <span className="text-xs text-slate-400">{time}</span>
+          <span className="text-xs font-mono" style={{ color: 'var(--accent-purple)' }}>
+            #{report.cycle}
+          </span>
+          <span className="text-xs tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            {time}
+          </span>
         </div>
-        <div className="flex items-center gap-2">
-          {hasRoutes && <RoutesBadge routes={report.routes} />}
-          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#22c55e22', color: '#22c55e' }}>
+        <div className="flex items-center gap-1.5">
+          {hasRoutes && (
+            <>
+              {report.routes.stock > 0 && (
+                <span className="text-xs px-1.5 py-0.5 rounded"
+                      style={{ background: '#3b82f612', color: '#60a5fa', border: '1px solid #3b82f625' }}>
+                  股票 {report.routes.stock}
+                </span>
+              )}
+              {report.routes.futures > 0 && (
+                <span className="text-xs px-1.5 py-0.5 rounded"
+                      style={{ background: '#f59e0b12', color: '#fbbf24', border: '1px solid #f59e0b25' }}>
+                  期货 {report.routes.futures}
+                </span>
+              )}
+            </>
+          )}
+          <span className="text-xs px-1.5 py-0.5 rounded"
+                style={{ background: '#10b98112', color: '#34d399', border: '1px solid #10b98125' }}>
             {report.event_count} 事件
           </span>
         </div>
       </div>
 
-      {/* Event summaries */}
+      {/* Events */}
       {report.events_summary && (
-        <div className="mb-3 border-b border-slate-700 pb-2">
+        <div className="mb-3 pb-3" style={{ borderBottom: '1px solid var(--border)' }}>
           {report.events_summary.slice(0, 5).map((e, i) => (
             <EventBadge key={i} event={e} />
           ))}
           {report.events_summary.length > 5 && (
-            <div className="text-xs text-slate-500 mt-1">
-              +{report.events_summary.length - 5} more events
+            <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+              +{report.events_summary.length - 5} more
             </div>
           )}
         </div>
       )}
 
-      {/* Report content — stock and futures tabs */}
+      {/* Report sections */}
       <div className="space-y-2">
-        {report.report && (
-          <ReportContent label="展开股票分析报告" content={report.report} color="#94a3b8" />
-        )}
-        {report.futures_report && (
-          <ReportContent label="展开期货分析报告" content={report.futures_report} color="#f59e0b" />
-        )}
-        {!report.report && !report.futures_report && report.analysis && (
-          <ReportContent label="展开分析报告" content={report.analysis} color="#94a3b8" />
-        )}
+        <ReportSection
+          label="股票分析报告"
+          content={report.report}
+          color="var(--accent-blue)"
+        />
+        <ReportSection
+          label="期货分析报告"
+          content={report.futures_report}
+          color="var(--accent-yellow)"
+        />
       </div>
     </div>
   )
@@ -117,10 +131,10 @@ function ReportCard({ report, index }) {
 export default function ReportPanel({ reports }) {
   if (!reports || reports.length === 0) {
     return (
-      <div className="text-center py-12 text-slate-500">
-        <div className="text-4xl mb-3">📋</div>
-        <div className="text-sm">暂无分析报告</div>
-        <div className="text-xs mt-1">等待第一轮分析完成...</div>
+      <div className="p-8 text-center">
+        <div className="text-2xl mb-3 opacity-20">📊</div>
+        <div className="text-xs" style={{ color: 'var(--text-muted)' }}>暂无分析报告</div>
+        <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>等待第一轮分析完成...</div>
       </div>
     )
   }
@@ -128,9 +142,9 @@ export default function ReportPanel({ reports }) {
   const sorted = [...reports].reverse()
 
   return (
-    <div>
+    <div className="p-4 space-y-3">
       {sorted.map((r, i) => (
-        <ReportCard key={r.cycle || i} report={r} index={i} />
+        <ReportCard key={r.cycle || i} report={r} />
       ))}
     </div>
   )

@@ -207,13 +207,12 @@ AlphaAgents/
 │   ├── notify.py                    推送通知（钉钉/企微/Telegram）
 │   ├── config.py                    配置管理
 │   ├── http_client.py               统一HTTP客户端（重试/代理）
-│   └── web/                         Web界面
+│   └── server/                      Web后端
 │       ├── app.py                   FastAPI后端 + WebSocket
 │       └── events.py                实时事件总线
 ├── web/                             React前端（可视化监控面板）
-├── cloudflare/                      CF Worker代理（海外RSS加速）
-├── config/
-│   └── watchlist.json               自选股配置
+├── deploy/
+│   └── cloudflare/                  CF Worker代理（海外RSS加速）
 └── tests/                           145+单元测试
 ```
 
@@ -261,17 +260,21 @@ AlphaAgents/
 | `POST /api/review` | 手动触发每日复盘 |
 | `WS /ws` | WebSocket实时事件推送 |
 
-## 自选股配置
+## 自选股管理
 
-编辑 `config/watchlist.json`：
+通过 Web API 管理自选股（存储在 SQLite）：
 
-```json
-{
-  "stocks": [
-    {"code": "600519", "name": "贵州茅台", "concepts": ["白酒", "消费"]},
-    {"code": "002371", "name": "北方华创", "concepts": ["半导体设备", "国产替代"]}
-  ]
-}
+```bash
+# 添加
+curl -X POST http://localhost:8000/api/watchlist \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "600519", "name": "贵州茅台", "concepts": ["白酒", "消费"]}'
+
+# 查看
+curl http://localhost:8000/api/watchlist
+
+# 删除
+curl -X DELETE http://localhost:8000/api/watchlist/600519
 ```
 
 分析时会自动检查自选股是否受当前事件影响。

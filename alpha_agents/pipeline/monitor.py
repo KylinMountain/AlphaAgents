@@ -18,6 +18,7 @@ from alpha_agents.sources.sec import get_sec_news_fn
 from alpha_agents.sources.truthsocial import get_social_media_fn
 from alpha_agents.sources.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.sources.xcancel import get_xcancel_fn
+from alpha_agents.sources.tech_news import get_tech_news_fn
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 from alpha_agents.agents.futures import run_futures_analysis
@@ -45,6 +46,7 @@ NEWS_SOURCES = [
     ("sec", "SEC", lambda: get_sec_news_fn(limit=10)),
     ("social", "社交媒体", lambda: get_social_media_fn(limit=20)),
     ("xcancel", "X/推特", lambda: get_xcancel_fn(limit=30)),
+    ("tech_news", "科技媒体", lambda: get_tech_news_fn(limit=30)),
 ]
 
 

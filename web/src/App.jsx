@@ -1,75 +1,191 @@
+import { useState } from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
 import Header from './components/Header'
-import PipelineFlow from './components/PipelineFlow'
+import SourceGrid from './components/SourceGrid'
+import EventTimeline from './components/EventTimeline'
 import ReportPanel from './components/ReportPanel'
+import StatsBar from './components/StatsBar'
 
-function PipelineStatus({ stages }) {
-  const pipeline = stages['pipeline']
-  if (!pipeline) return null
+export default function App() {
+  const { stages, reports, events, connected } = useWebSocket()
+  const [activeTab, setActiveTab] = useState('timeline') // timeline | reports
 
-  const statusLabels = {
-    idle: '空闲',
-    running: '运行中',
-    success: '已完成',
-    error: '出错',
-  }
-
-  const statusColors = {
-    idle: '#64748b',
-    running: '#3b82f6',
-    success: '#22c55e',
-    error: '#ef4444',
-  }
-
-  const color = statusColors[pipeline.status] || statusColors.idle
+  // Extract digest events from stages
+  const digestData = stages['digest']?.data || {}
+  const digestEvents = digestData.events || []
 
   return (
-    <div
-      className="flex items-center gap-3 px-4 py-2 rounded-lg text-sm"
-      style={{ background: `${color}11`, border: `1px solid ${color}33` }}
-    >
-      <div
-        className="w-2.5 h-2.5 rounded-full shrink-0"
-        style={{ background: color, boxShadow: `0 0 8px ${color}` }}
-      />
-      <span style={{ color }}>{statusLabels[pipeline.status] || pipeline.status}</span>
-      <span className="text-slate-400 text-xs">{pipeline.message}</span>
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--bg-primary)' }}>
+      <Header connected={connected} stages={stages} />
+      <StatsBar stages={stages} reports={reports} />
+
+      <main className="flex-1 flex min-h-0">
+        {/* Left sidebar — Source health grid */}
+        <div
+          className="w-[220px] shrink-0 overflow-y-auto"
+          style={{ borderRight: '1px solid var(--border)' }}
+        >
+          <div className="px-3 py-2 text-xs font-semibold uppercase tracking-wider"
+               style={{ color: 'var(--text-muted)' }}>
+            数据源
+          </div>
+          <SourceGrid stages={stages} />
+        </div>
+
+        {/* Center — Event timeline + Digest events */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Tab bar */}
+          <div className="flex items-center gap-0 px-4"
+               style={{ borderBottom: '1px solid var(--border)' }}>
+            <TabButton
+              active={activeTab === 'timeline'}
+              onClick={() => setActiveTab('timeline')}
+              label="事件流"
+              count={events.length}
+            />
+            <TabButton
+              active={activeTab === 'reports'}
+              onClick={() => setActiveTab('reports')}
+              label="分析报告"
+              count={reports.length}
+            />
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {activeTab === 'timeline' ? (
+              <EventTimeline
+                events={events}
+                digestEvents={digestEvents}
+                stages={stages}
+              />
+            ) : (
+              <ReportPanel reports={reports} />
+            )}
+          </div>
+        </div>
+
+        {/* Right — Latest report quick view */}
+        <div
+          className="w-[400px] shrink-0 overflow-y-auto hidden xl:block"
+          style={{ borderLeft: '1px solid var(--border)' }}
+        >
+          <div className="px-4 py-2 flex items-center justify-between"
+               style={{ borderBottom: '1px solid var(--border)' }}>
+            <span className="text-xs font-semibold uppercase tracking-wider"
+                  style={{ color: 'var(--text-muted)' }}>
+              最新报告
+            </span>
+            {reports.length > 0 && (
+              <span className="text-xs" style={{ color: 'var(--accent-green)' }}>
+                #{reports[reports.length - 1]?.cycle}
+              </span>
+            )}
+          </div>
+          <LatestReport report={reports[reports.length - 1]} />
+        </div>
+      </main>
     </div>
   )
 }
 
-export default function App() {
-  const { stages, reports, connected } = useWebSocket()
+function TabButton({ active, onClick, label, count }) {
+  return (
+    <button
+      onClick={onClick}
+      className="px-4 py-2.5 text-xs font-medium transition-colors relative"
+      style={{
+        color: active ? 'var(--accent-blue)' : 'var(--text-muted)',
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+      {count > 0 && (
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-xs"
+              style={{
+                background: active ? '#3b82f622' : '#1e2d42',
+                color: active ? 'var(--accent-blue)' : 'var(--text-muted)',
+                fontSize: 10,
+              }}>
+          {count}
+        </span>
+      )}
+      {active && (
+        <div className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full"
+             style={{ background: 'var(--accent-blue)' }} />
+      )}
+    </button>
+  )
+}
+
+function LatestReport({ report }) {
+  if (!report) {
+    return (
+      <div className="p-4 text-center" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-2xl mb-2 opacity-30">⏳</div>
+        <div className="text-xs">等待第一轮分析...</div>
+      </div>
+    )
+  }
+
+  const time = new Date(report.timestamp * 1000).toLocaleString('zh-CN')
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: '#0f172a' }}>
-      <Header connected={connected} />
+    <div className="p-4 space-y-3">
+      <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{time}</div>
 
-      <main className="flex-1 flex flex-col lg:flex-row gap-0">
-        {/* Left: Pipeline visualization */}
-        <div className="flex-1 flex flex-col" style={{ minWidth: 0 }}>
-          <div className="px-6 pt-4 pb-2 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-200">Pipeline</h2>
-            <PipelineStatus stages={stages} />
-          </div>
-          <div className="flex-1 mx-4 mb-4 rounded-xl overflow-hidden" style={{ border: '1px solid #334155' }}>
-            <PipelineFlow stages={stages} />
-          </div>
+      {/* Events summary */}
+      {report.events_summary?.map((e, i) => (
+        <div key={i} className="flex items-start gap-2 py-1">
+          <span className={`tag-${e.category || '未知'} text-xs px-1.5 py-0.5 rounded shrink-0`}>
+            {e.category || '?'}
+          </span>
+          <span className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            {e.event}
+          </span>
+          {e.target_market && e.target_market !== 'both' && (
+            <span className="text-xs px-1 rounded shrink-0"
+                  style={{
+                    background: e.target_market === 'stock' ? '#3b82f615' : '#f59e0b15',
+                    color: e.target_market === 'stock' ? '#60a5fa' : '#fbbf24',
+                    fontSize: 10,
+                  }}>
+              {e.target_market === 'stock' ? '股' : '期'}
+            </span>
+          )}
         </div>
+      ))}
 
-        {/* Right: Reports panel */}
-        <div
-          className="w-full lg:w-[420px] shrink-0 overflow-y-auto flex flex-col"
-          style={{ borderLeft: '1px solid #334155', maxHeight: 'calc(100vh - 52px)' }}
-        >
-          <div className="px-4 pt-4 pb-2 sticky top-0 z-10" style={{ background: '#0f172a' }}>
-            <h2 className="text-base font-semibold text-slate-200">分析报告</h2>
+      {/* Stock report */}
+      {report.report && (
+        <div className="mt-3">
+          <div className="text-xs font-semibold mb-1.5 flex items-center gap-1.5"
+               style={{ color: 'var(--accent-blue)' }}>
+            <span className="w-1 h-3 rounded-full" style={{ background: 'var(--accent-blue)' }} />
+            股票分析
           </div>
-          <div className="px-4 pb-4 flex-1">
-            <ReportPanel reports={reports} />
-          </div>
+          <pre className="text-xs leading-relaxed whitespace-pre-wrap overflow-auto"
+               style={{ color: 'var(--text-secondary)', maxHeight: 300 }}>
+            {report.report}
+          </pre>
         </div>
-      </main>
+      )}
+
+      {/* Futures report */}
+      {report.futures_report && (
+        <div className="mt-3">
+          <div className="text-xs font-semibold mb-1.5 flex items-center gap-1.5"
+               style={{ color: 'var(--accent-yellow)' }}>
+            <span className="w-1 h-3 rounded-full" style={{ background: 'var(--accent-yellow)' }} />
+            期货分析
+          </div>
+          <pre className="text-xs leading-relaxed whitespace-pre-wrap overflow-auto"
+               style={{ color: 'var(--text-secondary)', maxHeight: 300 }}>
+            {report.futures_report}
+          </pre>
+        </div>
+      )}
     </div>
   )
 }

@@ -37,7 +37,9 @@ def setup_logging(verbose: bool = False) -> None:
 def _ensure_index() -> None:
     """Build stock index + embeddings if not already done."""
     if DB_PATH.exists():
-        from alpha_agents.data.db import get_connection
+        from alpha_agents.data.db import get_connection, init_db
+        # Always run init_db to create any missing tables (e.g. watchlist)
+        init_db(DB_PATH)
         conn = get_connection(DB_PATH)
         count = conn.execute("SELECT COUNT(*) as n FROM concepts").fetchone()["n"]
         conn.close()

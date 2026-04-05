@@ -99,6 +99,14 @@ def get_futures_quotes_fn(symbols: str = "", days: int = 5) -> str:
         return json.dumps({"count": 0, "quotes": [], "error": str(e)}, ensure_ascii=False)
 
 
+# Fuzzy mapping for inventory: agent may pass various names
+_INVENTORY_ALIASES = {
+    "铜": "沪铜", "铝": "沪铝", "锌": "沪锌", "镍": "沪镍", "锡": "沪锡", "铅": "沪铅",
+    "金": "沪金", "银": "沪银", "原油": "燃油",  # 原油无库存数据，用燃油近似
+    "聚乙烯": "塑料", "棕榈油": "棕榈", "菜籽油": "菜油", "棉花": "郑棉",
+}
+
+
 def get_futures_inventory_fn(symbol: str) -> str:
     """Get warehouse inventory data for a futures commodity.
 
@@ -106,7 +114,8 @@ def get_futures_inventory_fn(symbol: str) -> str:
         symbol: Commodity name (e.g. "沪铜", "螺纹钢", "铁矿石").
     """
     try:
-        inv_symbol = INVENTORY_SYMBOLS.get(symbol, symbol)
+        # Try direct, then alias, then INVENTORY_SYMBOLS mapping
+        inv_symbol = _INVENTORY_ALIASES.get(symbol, INVENTORY_SYMBOLS.get(symbol, symbol))
         with no_proxy():
             df = ak.futures_inventory_em(symbol=inv_symbol)
         if df.empty:

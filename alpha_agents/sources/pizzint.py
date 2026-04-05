@@ -107,11 +107,17 @@ def get_pizzint_fn() -> str:
         logger.warning("Failed to fetch breaking markets: %s", e)
 
     try:
-        # 4. Bilateral threat levels
+        # 4. Bilateral threat levels (requires dateStart/dateEnd/method params)
+        from datetime import datetime, timedelta
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
         gdelt = _fetch_api("/api/gdelt/batch", params={
             "pairs": "usa_russia,russia_ukraine,usa_china,china_taiwan,usa_iran,usa_venezuela",
+            "method": "tone",
+            "dateStart": start,
+            "dateEnd": end,
         })
-        if isinstance(gdelt, dict):
+        if isinstance(gdelt, dict) and "error" not in gdelt:
             for pair, data in gdelt.items():
                 if isinstance(data, dict):
                     result["bilateral_threats"].append({
@@ -121,7 +127,7 @@ def get_pizzint_fn() -> str:
                         "event_count": data.get("event_count"),
                     })
     except Exception as e:
-        logger.warning("Failed to fetch bilateral threats: %s", e)
+        logger.debug("Bilateral threats unavailable: %s", e)
 
     # Summary line for quick assessment
     spikes = [s for s in result["pizza_stores"] if s.get("is_spike")]

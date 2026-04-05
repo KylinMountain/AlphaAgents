@@ -1,22 +1,74 @@
-"""Fetch Trump/political social media content via Google News RSS search.
+"""Fetch Trump/political social media content.
 
-Truth Social's API and all RSS bridges (rsshub, nitter) are behind Cloudflare
-anti-bot protection. Instead, we use Google News RSS search which aggregates
-media reports of Truth Social posts — often within minutes of posting.
+Three data channels (tried in order):
+1. Twitter Syndication API — direct tweet text, no API key, public endpoint
+2. Google News RSS search — media reports of social posts, minutes delay
+3. US political RSS feeds — The Hill, Politico, Fox News
 
-Additional US political news feeds (The Hill, Politico, Fox News) are included
-to capture policy announcements that move markets.
-
-No API key required.
+No API key required for any channel.
 """
 
 import json
 import logging
+import re
 import xml.etree.ElementTree as ET
 
+import httpx
+
+from alpha_agents.config import no_proxy
 from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
+
+# Twitter Syndication API — direct tweet content, no auth needed
+# This is the public API used by Twitter embed widgets
+TWITTER_ACCOUNTS = [
+    ("realDonaldTrump", "Trump"),
+    ("POTUS", "POTUS"),
+    ("elonmusk", "Musk"),
+]
+
+SYNDICATION_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
+
+
+def _fetch_tweets(username: str, label: str, limit: int = 10) -> list[dict]:
+    """Fetch tweets via Twitter Syndication API (public, no auth)."""
+    try:
+        with no_proxy():
+            r = httpx.get(
+                SYNDICATION_URL.format(username=username),
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"},
+                timeout=15,
+                follow_redirects=True,
+            )
+        if r.status_code != 200:
+            return []
+
+        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text)
+        if not match:
+            return []
+
+        data = json.loads(match.group(1))
+        entries = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
+
+        items = []
+        for e in entries[:limit]:
+            tweet = e.get("content", {}).get("tweet", {})
+            text = tweet.get("full_text", tweet.get("text", ""))
+            created = tweet.get("created_at", "")
+            if text:
+                items.append({
+                    "title": f"@{username}: {text[:80]}",
+                    "summary": text[:300],
+                    "time": created,
+                    "source": f"X/@{username}",
+                    "author": label,
+                })
+        return items
+    except Exception as e:
+        logger.debug("Twitter Syndication failed for @%s: %s", username, e)
+        return []
+
 
 # Google News RSS search queries — captures Trump Truth Social posts via media reports
 GOOGLE_NEWS_FEEDS = [
@@ -112,7 +164,12 @@ def get_social_media_fn(limit: int = 20, keyword: str | None = None) -> str:
     """
     all_posts: list[dict] = []
 
-    # Google News search feeds (highest priority — captures actual social posts)
+    # 1. Twitter Syndication — direct tweets (highest priority)
+    for username, label in TWITTER_ACCOUNTS:
+        tweets = _fetch_tweets(username, label, limit=10)
+        all_posts.extend(tweets)
+
+    # 2. Google News search feeds — captures social posts reported by media
     for name, url in GOOGLE_NEWS_FEEDS:
         items = _fetch_feed(url, name, is_google=True)
         all_posts.extend(items)

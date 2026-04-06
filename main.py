@@ -22,6 +22,9 @@ def load_env() -> None:
 # Load .env BEFORE importing config (config reads os.environ at import time)
 load_env()
 
+# Suppress OpenAI Agents SDK trace export warning (we don't use OpenAI tracing)
+os.environ.setdefault("OPENAI_AGENTS_DISABLE_TRACING", "1")
+
 from alpha_agents.config import DB_PATH, CHROMA_PATH, MONITOR_INTERVAL_SECONDS
 
 

@@ -53,7 +53,7 @@ async def run_analysis(prompt: str, hooks=None) -> str:
     user_message = f"[当前时间: {now}]\n\n{prompt}"
 
     # First pass: strategist analysis
-    result = await Runner.run(agent, user_message, hooks=hooks)
+    result = await Runner.run(agent, user_message, hooks=hooks, max_turns=25)
     report = result.final_output
 
     # Second pass: reflection verification
@@ -66,7 +66,7 @@ async def run_analysis(prompt: str, hooks=None) -> str:
             f"如果发现矛盾，分析原因并给出修正意见。\n\n"
             f"--- 策略师原始报告 ---\n{report}"
         )
-        verify_result = await Runner.run(reflection, verify_prompt, hooks=hooks)
+        verify_result = await Runner.run(reflection, verify_prompt, hooks=hooks, max_turns=15)
         reflection_report = verify_result.final_output
 
         return f"{report}\n\n{'=' * 50}\n{reflection_report}"

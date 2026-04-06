@@ -22,8 +22,13 @@ def create_reflection_agent(model) -> Agent:
     """Create the reflection/verification agent."""
     prompt = (PROMPTS_DIR / "reflection.md").read_text(encoding="utf-8")
 
-    # Needs both stock and futures tools to verify all judgments
-    verify_tools = list({*STOCK_TOOLS, *FUTURES_TOOLS})
+    # Merge stock + futures tools, deduplicate by id
+    seen = set()
+    verify_tools = []
+    for t in [*STOCK_TOOLS, *FUTURES_TOOLS]:
+        if id(t) not in seen:
+            seen.add(id(t))
+            verify_tools.append(t)
 
     return Agent(
         name="reflection",

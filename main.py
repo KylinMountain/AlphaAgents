@@ -111,7 +111,10 @@ def cmd_web(args: argparse.Namespace) -> None:
             monitor.run(),
         )
 
-    asyncio.run(run_all())
+    try:
+        asyncio.run(run_all())
+    except KeyboardInterrupt:
+        logging.info("Web server stopped by user.")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -131,7 +134,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         interval = args.interval or MONITOR_INTERVAL_SECONDS
         monitor = NewsMonitor(interval=interval)
         logging.info("Starting continuous news monitoring...")
-        asyncio.run(monitor.run())
+        try:
+            asyncio.run(monitor.run())
+        except KeyboardInterrupt:
+            logging.info("Monitor stopped by user.")
 
 
 def cmd_review(args: argparse.Namespace) -> None:

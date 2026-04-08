@@ -17,8 +17,35 @@ from alpha_agents.data.memory_store import (
 logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_THEMES = 8
+MAX_PER_CATEGORY = 3  # Max themes from the same broad category
 
 STATUS_ORDER = ["watching", "active", "peak", "declining", "archived"]
+
+# Broad category mapping — prevents all 8 themes being tech
+CATEGORY_KEYWORDS = {
+    "科技": ["芯片", "半导体", "AI", "人工智能", "数据中心", "算力", "5G", "光模块", "CPO",
+             "华为", "DeepSeek", "Sora", "ChatGPT", "通信", "软件", "云计算", "物联网",
+             "信创", "操作系统", "数据库", "网络安全", "量子", "存储"],
+    "消费": ["白酒", "食品", "零售", "电商", "消费电子", "家电", "旅游", "酒店", "免税",
+             "预制菜", "医美", "服装", "汽车", "新能源汽车"],
+    "制造": ["机器人", "无人机", "低空经济", "3D打印", "工业母机", "新材料", "军工",
+             "航天", "船舶", "先进封装"],
+    "金融": ["银行", "保险", "券商", "证券", "金融科技", "数字货币"],
+    "资源": ["黄金", "贵金属", "石油", "天然气", "煤炭", "有色", "稀土", "锂电",
+             "光伏", "风电", "新能源", "储能", "氢能"],
+    "医药": ["医药", "生物", "疫苗", "中药", "医疗器械", "创新药", "CXO"],
+    "基建": ["地产", "基建", "水泥", "钢铁", "建材", "交通", "港口", "航运"],
+}
+
+
+def _get_theme_category(name: str) -> str:
+    """Classify a theme into a broad category."""
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw in name:
+                return cat
+    return "其他"
+
 
 # Concepts that are too broad or not real investment themes — skip these
 NOISE_CONCEPTS = {
@@ -123,6 +150,15 @@ def maybe_discover_theme(
 
     existing = get_theme_by_name(sector_name)
     if existing and existing["status"] != "archived":
+        return False
+
+    # Check category diversity — max 3 themes per broad category
+    new_cat = _get_theme_category(sector_name)
+    active = get_active_themes()
+    same_cat_count = sum(1 for t in active if _get_theme_category(t["name"]) == new_cat)
+    if same_cat_count >= MAX_PER_CATEGORY:
+        logger.debug("Skipping '%s': category '%s' already has %d themes",
+                      sector_name, new_cat, same_cat_count)
         return False
 
     active = get_active_themes()

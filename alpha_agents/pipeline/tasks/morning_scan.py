@@ -21,6 +21,7 @@ from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.global_market import get_global_overview_fn
+from alpha_agents.tools.futures_quotes import get_futures_quotes_fn
 from alpha_agents.data.memory_store import upsert_theme
 from alpha_agents.agents.morning import run_morning_analysis
 from alpha_agents.notify import notify_all
@@ -218,6 +219,14 @@ async def run_morning_scan() -> str | None:
             lines.append(f"  中美利差: {bonds['cn_us_spread']}%")
         for sig in overview.get("signals", []):
             lines.append(f"  信号: {sig}")
+        # Add commodity prices (oil, gold)
+        try:
+            futures = json.loads(await asyncio.to_thread(get_futures_quotes_fn, "原油,沪金", 2))
+            for q in futures.get("quotes", []):
+                lines.append(f"  {q['name']}: {q['latest_close']} ({q['change_pct']:+.2f}%)")
+        except Exception:
+            pass
+
         global_ctx = "【全球市场】\n" + "\n".join(lines) if lines else ""
     except Exception as e:
         logger.debug("Morning scan: global overview failed: %s", e)

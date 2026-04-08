@@ -42,13 +42,24 @@ NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))
 def no_proxy():
     """Temporarily disable HTTP proxy for direct access to domestic APIs.
 
-    macOS system proxy is read by urllib3 via urllib.request.getproxies().
-    We monkey-patch it to return empty dict, which is more reliable than
-    setting NO_PROXY env var.
+    Patches both urllib and requests to bypass macOS system proxy.
     """
     import urllib.request
+    import requests
+
+    # Patch urllib
     saved_getproxies = urllib.request.getproxies
     urllib.request.getproxies = lambda: {}
+
+    # Patch requests — trust_env=False prevents reading macOS system proxy
+    saved_trust_env_init = requests.Session.__init__
+    _original_init = saved_trust_env_init
+
+    def _patched_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        self.trust_env = False
+
+    requests.Session.__init__ = _patched_init
 
     # Also clear env vars in case anything reads them directly
     saved_env = {}
@@ -62,6 +73,7 @@ def no_proxy():
         yield
     finally:
         urllib.request.getproxies = saved_getproxies
+        requests.Session.__init__ = saved_trust_env_init
         os.environ["NO_PROXY"] = old_no_proxy
         for var, val in saved_env.items():
             os.environ[var] = val

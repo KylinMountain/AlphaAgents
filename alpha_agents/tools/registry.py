@@ -25,6 +25,10 @@ from alpha_agents.tools.futures_quotes import (
     get_futures_quotes_fn, get_futures_inventory_fn, get_futures_basis_fn,
     get_cftc_positions_fn,
 )
+from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
+from alpha_agents.tools.financial_data import get_financial_data_fn
+from alpha_agents.tools.market_breadth import get_market_breadth_fn
+from alpha_agents.tools.earnings_calendar import get_earnings_calendar_fn
 
 
 @function_tool
@@ -162,6 +166,54 @@ def get_watchlist() -> str:
     return get_watchlist_fn()
 
 
+@function_tool
+def get_stock_quotes(codes: str) -> str:
+    """获取个股实时行情数据（价格、市值、涨跌幅）。
+
+    输入股票代码，逗号分隔，例如："000858,600519,002594"。
+    返回最新价格、涨跌幅、总市值、流通市值、所属行业。
+    用于验证推荐股票的当前价格位置和市值规模。
+    """
+    return get_stock_quotes_fn(codes=codes)
+
+
+@function_tool
+def get_financial_data(code: str) -> str:
+    """获取个股基本面财务数据（ROE、EPS、负债率、毛利率等）。
+
+    输入单个股票代码，如"000858"。
+    返回最近报告期的核心财务指标，用于评估个股质量：
+    - ROE > 15% = 优质企业
+    - 负债率 > 100% = 高杠杆风险
+    - 净利润增速 < 0 = 业绩下滑
+    """
+    return get_financial_data_fn(code=code)
+
+
+@function_tool
+def get_market_breadth() -> str:
+    """获取A股市场整体情绪指标（涨跌比、涨停跌停数、市场活跃度）。
+
+    无需输入参数。返回当前市场情绪判断：
+    - 涨跌比 > 2 = 乐观（适合看多）
+    - 涨跌比 < 0.5 = 悲观（谨慎看多，关注超跌机会）
+    在分析开始时调用此工具，了解当前市场环境再做推荐。
+    """
+    return get_market_breadth_fn()
+
+
+@function_tool
+def get_earnings_calendar(codes: str = "") -> str:
+    """获取业绩预告数据 — 检查推荐股票是否有业绩地雷风险。
+
+    输入股票代码（逗号分隔），返回该股票的业绩预告类型：
+    - "首亏"/"预减" = 高风险（earnings_risk: high），建议回避
+    - "预增"/"大幅预增" = 低风险（earnings_risk: low），业绩支撑
+    留空则返回近期最值得关注的业绩预告（首亏/预减/大幅预增等）。
+    """
+    return get_earnings_calendar_fn(codes=codes)
+
+
 # --- Tool sets for different agents ---
 
 # News source tools — used by monitor pipeline, NOT by agents during analysis.
@@ -176,6 +228,7 @@ NEWS_TOOLS = [
 # Stock analysis tools — for the stock strategist agent
 STOCK_TOOLS = [
     search_stocks, get_sector_data, filter_stocks, get_watchlist,
+    get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
     web_search, web_fetch, get_pizzint,
 ]
 

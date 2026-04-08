@@ -4,8 +4,10 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-import akshare as ak
-
+from alpha_agents.data.market_data import (
+    get_futures_history, get_futures_inventory as _get_futures_inv,
+    get_futures_spot_price, get_cftc_holdings,
+)
 from alpha_agents.config import no_proxy
 
 logger = logging.getLogger(__name__)
@@ -61,8 +63,7 @@ def get_futures_quotes_fn(symbols: str = "", days: int = 5) -> str:
             if not code:
                 continue
             try:
-                with no_proxy():
-                    df = ak.futures_main_sina(symbol=code, start_date=start_date, end_date=end_date)
+                df = get_futures_history(symbol=code, start=start_date, end=end_date)
                 if df.empty:
                     continue
                 df = df.tail(days)
@@ -116,8 +117,7 @@ def get_futures_inventory_fn(symbol: str) -> str:
     try:
         # Try direct, then alias, then INVENTORY_SYMBOLS mapping
         inv_symbol = _INVENTORY_ALIASES.get(symbol, INVENTORY_SYMBOLS.get(symbol, symbol))
-        with no_proxy():
-            df = ak.futures_inventory_em(symbol=inv_symbol)
+        df = _get_futures_inv(symbol=inv_symbol)
         if df.empty:
             return json.dumps({"symbol": symbol, "data": [], "error": None}, ensure_ascii=False)
 
@@ -156,13 +156,11 @@ def get_futures_basis_fn(date: str = "") -> str:
         if not date:
             date = datetime.now().strftime("%Y%m%d")
 
-        with no_proxy():
-            df = ak.futures_spot_price(date=date)
+        df = get_futures_spot_price(date=date)
         if df.empty:
             # Try previous day
             prev = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-            with no_proxy():
-                df = ak.futures_spot_price(date=prev)
+            df = get_futures_spot_price(date=prev)
 
         if df.empty:
             return json.dumps({"date": date, "data": [], "error": "no data"}, ensure_ascii=False)
@@ -200,8 +198,7 @@ def get_cftc_positions_fn(commodity: str = "") -> str:
         commodity: Commodity name (e.g. "原油", "黄金", "大豆"). Empty for all.
     """
     try:
-        with no_proxy():
-            df = ak.macro_usa_cftc_c_holding()
+        df = get_cftc_holdings()
         if df.empty:
             return json.dumps({"data": [], "error": "no data"}, ensure_ascii=False)
 

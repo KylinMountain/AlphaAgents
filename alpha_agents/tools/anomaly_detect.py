@@ -9,9 +9,7 @@ import json
 import logging
 from datetime import datetime
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_limit_up_pool, get_broken_limit_pool, get_limit_down_pool
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +39,9 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
 
         # 1. Limit-up pool (涨停)
         try:
-            with no_proxy():
-                df_zt = ak.stock_zt_pool_em(date=date)
+            df_zt = get_limit_up_pool(date=date)
+            if df_zt is None:
+                raise ValueError("no data")
             for _, row in df_zt.head(20).iterrows():
                 result["limit_up"].append({
                     "code": str(row.get("代码", "")),
@@ -60,8 +59,9 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
 
         # 2. Broken limit-up pool (炸板)
         try:
-            with no_proxy():
-                df_zb = ak.stock_zt_pool_zbgc_em(date=date)
+            df_zb = get_broken_limit_pool(date=date)
+            if df_zb is None:
+                raise ValueError("no data")
             for _, row in df_zb.head(10).iterrows():
                 result["broken_limit"].append({
                     "code": str(row.get("代码", "")),
@@ -75,8 +75,9 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
 
         # 3. Limit-down pool (跌停)
         try:
-            with no_proxy():
-                df_dt = ak.stock_zt_pool_dtgc_em(date=date)
+            df_dt = get_limit_down_pool(date=date)
+            if df_dt is None:
+                raise ValueError("no data")
             for _, row in df_dt.head(10).iterrows():
                 result["limit_down"].append({
                     "code": str(row.get("代码", "")),

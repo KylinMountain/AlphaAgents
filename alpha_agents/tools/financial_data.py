@@ -3,9 +3,7 @@
 import json
 import logging
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_financial_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +15,9 @@ def get_financial_data_fn(code: str) -> str:
         code: Stock code, e.g. "000858"
     """
     try:
-        with no_proxy():
-            df = ak.stock_financial_analysis_indicator(symbol=code, start_year=str(__import__('datetime').datetime.now().year - 1))
+        df = get_financial_indicator(code)
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"code": code, "error": "no financial data"}, ensure_ascii=False)
 
         latest = df.iloc[-1]

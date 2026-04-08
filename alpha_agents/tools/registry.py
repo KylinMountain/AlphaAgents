@@ -33,7 +33,7 @@ from alpha_agents.tools.fund_flow import (
     get_lhb_detail_fn, get_block_trade_fn, get_north_flow_fn,
     get_margin_data_fn, get_stock_fund_flow_fn,
 )
-from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.global_market import (
     get_us_market_fn, get_bond_yields_fn, get_global_overview_fn,
@@ -286,6 +286,17 @@ def get_sector_ranking(top_n: int = 20) -> str:
 
 
 @function_tool
+def get_concept_ranking(top_n: int = 20) -> str:
+    """获取概念板块资金流排名 — 发现热门投资主线。
+
+    显示资金正在流入哪些概念板块（如华为昇腾、AI算力、低空经济）。
+    概念名称与数据库中的概念板块一致，可直接用于主线发现和标的检索。
+    比行业排名更细，更贴近市场热点。
+    """
+    return get_concept_ranking_fn(top_n=top_n)
+
+
+@function_tool
 def get_anomaly_stocks(date: str = "") -> str:
     """获取涨停/跌停/炸板数据 — 检测市场异动和主线方向。
 
@@ -343,7 +354,7 @@ STOCK_TOOLS = [
     search_stocks, get_sector_data, filter_stocks, get_watchlist,
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
-    get_stock_fund_flow, get_sector_ranking, get_anomaly_stocks,
+    get_stock_fund_flow, get_sector_ranking, get_concept_ranking, get_anomaly_stocks,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
 ]

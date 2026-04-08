@@ -1,10 +1,3 @@
-"""Build stock concept index from baostock (stock info) + eastmoney (concept boards).
-
-Run once via `python main.py build-index`. Data is cached in SQLite.
-Subsequent runs skip if index already exists (use --force to rebuild).
-"""
-
-import json
 import logging
 import threading
 import time
@@ -12,14 +5,19 @@ from pathlib import Path
 
 import baostock as bs
 import pandas as pd
+import py_mini_racer
+from bs4 import BeautifulSoup
 
-from alpha_agents.config import no_proxy, DATA_DIR
+from akshare.datasets import get_ths_js
+
+from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch as http_fetch, get_headers
 from alpha_agents.data.db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
 
-# Cache file for concept constituents (avoid re-fetching on retry)
-_CONCEPT_CACHE_PATH = DATA_DIR / "concept_cache.json"
+# py_mini_racer is not thread-safe — serialize all THS auth calls
+_ths_lock = threading.Lock()
 
 
 def _fetch_stock_info_baostock() -> pd.DataFrame:
@@ -57,82 +55,69 @@ def _fetch_industry_baostock() -> pd.DataFrame:
         bs.logout()
 
 
-def _fetch_concept_names_em() -> pd.DataFrame:
-    """Fetch eastmoney concept board names.
+def _get_ths_headers() -> dict:
+    """Generate THS auth headers with v cookie (same method akshare uses).
 
-    Uses stock_fund_flow_concept (data.eastmoney.com, reliable) to get
-    the concept list with fund flow data. Falls back to
-    stock_board_concept_name_em (push2.eastmoney.com) if available.
+    Thread-locked because py_mini_racer crashes on concurrent access.
     """
+    with _ths_lock:
+        js_code = py_mini_racer.MiniRacer()
+        with open(get_ths_js("ths.js"), encoding="utf-8") as f:
+            js_content = f.read()
+        js_code.eval(js_content)
+        v_code = js_code.call("v")
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Cookie": f"v={v_code}",
+        "Referer": "https://q.10jqka.com.cn/gn/",
+    }
+
+
+def _fetch_concept_names_ths() -> pd.DataFrame:
+    """Fetch THS concept board names via akshare (10jqka.com, works through proxy)."""
     import akshare as ak
     with no_proxy():
-        # Primary: fund flow concept list (always works, 387 concepts)
-        df = ak.stock_fund_flow_concept()
-
-    name_col = "行业" if "行业" in df.columns else "名称"
-    result = pd.DataFrame({
-        "concept_name": df[name_col],
-    })
-    return result
+        return ak.stock_board_concept_name_ths()
 
 
-def _fetch_concept_constituents_em(concept_name: str, max_retries: int = 3) -> list[dict]:
-    """Fetch constituents for a single EM concept board.
+def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
+    """Scrape concept constituents from THS detail page (10jqka.com).
 
-    Uses stock_board_concept_cons_em (push2.eastmoney.com).
-    Retries on failure. Returns empty list if all retries fail.
+    Returns top stocks from the first page (usually 10-20).
+    THS blocks ajax pagination but the first page with auth cookie works.
     """
-    import akshare as ak
+    ths_headers = _get_ths_headers()
+    url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
 
-    for attempt in range(max_retries):
-        try:
-            with no_proxy():
-                df = ak.stock_board_concept_cons_em(symbol=concept_name)
-            if df is None or df.empty:
-                return []
+    try:
+        with no_proxy():
+            r = requests.get(url, headers=headers, timeout=15)
+    except Exception:
+        return []
 
-            stocks = []
-            for _, row in df.iterrows():
-                code = str(row.get("代码", ""))
-                name = str(row.get("名称", ""))
-                if code and name:
-                    stocks.append({"code": code, "name": name})
-            return stocks
+    if r.status_code != 200:
+        return []
 
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = 2 ** attempt + 1
-                logger.debug("Retry %d for concept '%s': %s (wait %ds)",
-                             attempt + 1, concept_name, type(e).__name__, delay)
-                time.sleep(delay)
-            else:
-                logger.debug("Failed to fetch constituents for '%s' after %d retries: %s",
-                             concept_name, max_retries, e)
-                return []
+    soup = BeautifulSoup(r.text, "lxml")
+    table = soup.find("table", class_="m-table")
+    if not table:
+        return []
 
-
-def _load_concept_cache() -> dict:
-    """Load cached concept constituents from disk."""
-    if _CONCEPT_CACHE_PATH.exists():
-        try:
-            with open(_CONCEPT_CACHE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_concept_cache(cache: dict) -> None:
-    """Save concept constituents cache to disk."""
-    _CONCEPT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_CONCEPT_CACHE_PATH, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False)
+    stocks = []
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) >= 3:
+            stocks.append({
+                "code": cells[1].text.strip(),
+                "name": cells[2].text.strip(),
+            })
+    return stocks
 
 
 # Module-level aliases for easy mocking in tests
 _fetch_stock_info = _fetch_stock_info_baostock
-_fetch_concept_names = _fetch_concept_names_em
-_fetch_concept_constituents = _fetch_concept_constituents_em
+_fetch_concept_names = _fetch_concept_names_ths
+_fetch_concept_constituents = _fetch_concept_constituents_ths
 
 
 def build_index(db_path: Path) -> None:
@@ -171,41 +156,36 @@ def build_index(db_path: Path) -> None:
                     (industry, code),
                 )
 
-        # 3. Eastmoney concept names + constituents
-        logger.info("Fetching concept names via eastmoney...")
+        # 3. THS concept names + constituents (all via 10jqka.com, no eastmoney)
+        logger.info("Fetching concept names via THS...")
         concept_names_df = _fetch_concept_names()
-        total = len(concept_names_df)
-        logger.info("Found %d concept boards", total)
+        name_col = "name" if "name" in concept_names_df.columns else "概念名称"
+        code_col = "code" if "code" in concept_names_df.columns else "概念代码"
 
-        # Load cache to avoid re-fetching already successful concepts
-        cache = _load_concept_cache()
         concept_success = 0
         concept_fail = 0
+        total = len(concept_names_df)
 
         for i, (_, row) in enumerate(concept_names_df.iterrows()):
-            concept_name = str(row["concept_name"])
+            concept_name = str(row[name_col])
+            concept_code = str(row[code_col])
 
             conn.execute(
-                "INSERT OR REPLACE INTO concepts (name, source) VALUES (?, 'em')",
+                "INSERT OR REPLACE INTO concepts (name, source) VALUES (?, 'ths')",
                 (concept_name,),
             )
             concept_id = conn.execute(
                 "SELECT id FROM concepts WHERE name = ?", (concept_name,)
             ).fetchone()["id"]
 
-            # Check cache first
-            if concept_name in cache:
-                stocks = cache[concept_name]
-            else:
-                stocks = _fetch_concept_constituents(concept_name)
-                if stocks:
-                    cache[concept_name] = stocks
-
+            # Scrape constituents from THS detail page
+            stocks = _fetch_concept_constituents(concept_code)
             if not stocks:
                 concept_fail += 1
             else:
                 concept_success += 1
                 for stock in stocks:
+                    # Only insert mapping if stock exists in stocks table
                     exists = conn.execute(
                         "SELECT 1 FROM stocks WHERE code = ?", (stock["code"],)
                     ).fetchone()
@@ -215,21 +195,18 @@ def build_index(db_path: Path) -> None:
                             (concept_id, stock["code"]),
                         )
 
-            if (i + 1) % 20 == 0:
-                logger.info("Progress: %d/%d concepts (%d success, %d fail)",
-                            i + 1, total, concept_success, concept_fail)
-                conn.commit()
-                _save_concept_cache(cache)
+            if (i + 1) % 50 == 0:
+                logger.info("Progress: %d/%d concepts processed", i + 1, total)
+                conn.commit()  # Intermediate commit
 
-            time.sleep(0.5)  # Rate limit
+            time.sleep(0.3)  # Be nice to THS servers
 
         conn.commit()
-        _save_concept_cache(cache)
 
         logger.info("Index build complete.")
         logger.info(
-            "Stocks: %d, Concepts: %d (success: %d, fail: %d)",
-            len(stock_info), total, concept_success, concept_fail,
+            "Stocks: %d, Concepts: %d, Constituents mapped: %d/%d",
+            len(stock_info), total, concept_success, total,
         )
 
         # 4. Build concept embeddings for semantic search

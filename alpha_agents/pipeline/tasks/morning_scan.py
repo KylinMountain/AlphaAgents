@@ -14,7 +14,7 @@ from alpha_agents.data.memory_store import (
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
-from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
 from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.global_market import get_global_overview_fn
@@ -25,25 +25,45 @@ from alpha_agents.notify import notify_all
 logger = logging.getLogger(__name__)
 
 
-def _fill_theme_stocks(theme_name: str) -> None:
-    """Search for core stocks for a newly discovered theme and update it."""
+def _fill_theme_stocks(theme_name: str, leader_name: str = "") -> None:
+    """Fill core stocks for a newly discovered theme.
+
+    Uses the concept ranking's leader as the confirmed leader,
+    then searches for related stocks via semantic + keyword matching.
+    """
     try:
+        # Search for stocks related to this concept
         result = json.loads(search_stocks_fn(keyword=theme_name))
         all_codes = []
         for concept in result.get("matches", []):
             for stock in concept.get("stocks", [])[:5]:
-                all_codes.append(stock["code"])
+                all_codes.append({"code": stock["code"], "name": stock["name"]})
+
+        # If search found nothing, try to at least record the leader
+        if not all_codes and leader_name:
+            # Search by leader name
+            leader_result = json.loads(search_stocks_fn(keyword=leader_name))
+            for concept in leader_result.get("matches", []):
+                for stock in concept.get("stocks", [])[:3]:
+                    all_codes.append({"code": stock["code"], "name": stock["name"]})
 
         if not all_codes:
+            logger.debug("No stocks found for theme '%s'", theme_name)
             return
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for s in all_codes:
+            if s["code"] not in seen:
+                seen.add(s["code"])
+                unique.append(s)
 
         # Filter out ST/suspended
-        filtered = json.loads(filter_stocks_fn(stock_codes=all_codes[:20]))
+        codes = [s["code"] for s in unique[:20]]
+        filtered = json.loads(filter_stocks_fn(stock_codes=codes))
         kept = filtered.get("stocks", [])
-        if not kept:
-            return
 
-        # First stock as leader, rest as core
         core_stocks = []
         for i, s in enumerate(kept[:10]):
             core_stocks.append({
@@ -52,10 +72,11 @@ def _fill_theme_stocks(theme_name: str) -> None:
                 "role": "龙头" if i == 0 else "核心",
             })
 
-        leader = core_stocks[0]["code"] if core_stocks else None
-        upsert_theme(theme_name, core_stocks=core_stocks, leader_code=leader)
+        leader_code = core_stocks[0]["code"] if core_stocks else None
+        upsert_theme(theme_name, core_stocks=core_stocks, leader_code=leader_code)
         logger.info("  Filled %d stocks for '%s', leader=%s",
-                     len(core_stocks), theme_name, core_stocks[0]["name"] if core_stocks else "无")
+                     len(core_stocks), theme_name,
+                     core_stocks[0]["name"] if core_stocks else "无")
     except Exception as e:
         logger.debug("Failed to fill stocks for '%s': %s", theme_name, e)
 
@@ -137,21 +158,24 @@ async def run_morning_scan() -> str | None:
 
     # 2. Auto-discover themes from current sector data
     try:
-        ranking = json.loads(await asyncio.to_thread(get_sector_ranking_fn, 5))
-        for gainer in ranking.get("gainers", [])[:5]:
+        ranking = json.loads(await asyncio.to_thread(get_concept_ranking_fn, 10))
+        for gainer in ranking.get("gainers", [])[:8]:
+            concept_name = gainer.get("concept", "")
+            if not concept_name:
+                continue
             signals = evaluate_theme_signals(
-                sector_name=gainer["sector"],
+                sector_name=concept_name,
                 sector_change_pct=gainer.get("change_pct", 0),
                 sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
                 market_change_pct=0,
             )
+            leader = gainer.get("leader", "")
             if maybe_discover_theme(
-                gainer["sector"], signals,
-                catalyst=f"板块涨{gainer.get('change_pct', 0):.1f}%, 领涨{gainer.get('leader', '')}",
+                concept_name, signals,
+                catalyst=f"概念涨{gainer.get('change_pct', 0):.1f}%, 净流入{gainer.get('net_flow_yi', 0):.1f}亿, 领涨{leader}",
             ):
-                logger.info("Morning scan: discovered theme '%s', searching for stocks...", gainer["sector"])
-                # Fill in core stocks for the new theme
-                _fill_theme_stocks(gainer["sector"])
+                logger.info("Morning scan: discovered theme '%s', searching for stocks...", concept_name)
+                _fill_theme_stocks(concept_name, leader_name=leader)
     except Exception as e:
         logger.debug("Morning scan theme discovery failed: %s", e)
 

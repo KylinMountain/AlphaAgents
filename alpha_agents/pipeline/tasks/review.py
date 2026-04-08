@@ -16,7 +16,7 @@ from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
     retire_stale_themes,
 )
-from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.agents.review_agent import run_review_analysis
 from alpha_agents.notify import notify_all
@@ -35,49 +35,41 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         market_change = 0.0  # Approximate from breadth
         ad_ratio = breadth.get("advance_decline_ratio", 1)
 
-        # Get sector ranking
-        ranking = json.loads(get_sector_ranking_fn(top_n=10))
+        # Get concept ranking (matches DB concept names)
+        ranking = json.loads(get_concept_ranking_fn(top_n=10))
+        all_concepts = ranking.get("gainers", []) + ranking.get("losers", [])
+
+        # Build lookup by concept name
+        concept_lookup = {c.get("concept", ""): c for c in all_concepts}
 
         # Update existing themes
         existing_names = {t["name"] for t in existing_themes}
         for theme in existing_themes:
-            # Find matching sector in ranking
-            for gainer in ranking.get("gainers", []):
-                if gainer["sector"] == theme["name"]:
-                    signals = evaluate_theme_signals(
-                        sector_name=theme["name"],
-                        sector_change_pct=gainer.get("change_pct", 0),
-                        sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
-                        market_change_pct=market_change,
-                    )
-                    update_theme_strength(theme["name"], signals)
-                    break
-            for loser in ranking.get("losers", []):
-                if loser["sector"] == theme["name"]:
-                    signals = evaluate_theme_signals(
-                        sector_name=theme["name"],
-                        sector_change_pct=loser.get("change_pct", 0),
-                        sector_fund_flow=loser.get("net_flow_yi", 0) * 1e8,
-                        market_change_pct=market_change,
-                    )
-                    update_theme_strength(theme["name"], signals)
-                    break
+            if theme["name"] in concept_lookup:
+                c = concept_lookup[theme["name"]]
+                signals = evaluate_theme_signals(
+                    sector_name=theme["name"],
+                    sector_change_pct=c.get("change_pct", 0),
+                    sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
+                    market_change_pct=market_change,
+                )
+                update_theme_strength(theme["name"], signals)
 
-        # Discover new themes from top-performing sectors
-        for gainer in ranking.get("gainers", [])[:5]:
-            sector = gainer["sector"]
-            if sector in existing_names:
+        # Discover new themes from top-performing concepts
+        for gainer in ranking.get("gainers", [])[:8]:
+            concept = gainer.get("concept", "")
+            if not concept or concept in existing_names:
                 continue
             signals = evaluate_theme_signals(
-                sector_name=sector,
+                sector_name=concept,
                 sector_change_pct=gainer.get("change_pct", 0),
                 sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
                 market_change_pct=market_change,
             )
             maybe_discover_theme(
-                sector,
+                concept,
                 signals,
-                catalyst=f"板块涨{gainer.get('change_pct', 0):.1f}%, 资金净流入{gainer.get('net_flow_yi', 0):.1f}亿, 领涨{gainer.get('leader', '')}",
+                catalyst=f"概念涨{gainer.get('change_pct', 0):.1f}%, 净流入{gainer.get('net_flow_yi', 0):.1f}亿, 领涨{gainer.get('leader', '')}",
             )
 
         logger.info("Theme update: %d existing updated, checked top 5 for discovery",

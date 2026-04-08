@@ -8,10 +8,9 @@ import json
 import logging
 import re
 
-import httpx
 import trafilatura
 
-from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +39,7 @@ def web_fetch_fn(url: str) -> str:
     Fully local, no external API needed.
     """
     try:
-        with no_proxy():
-            response = httpx.get(url, timeout=15, follow_redirects=True, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            })
-            response.raise_for_status()
+        response = fetch(url, timeout=15, max_retries=1)
 
         html = response.text
 

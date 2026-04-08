@@ -57,6 +57,30 @@ JITTER_RANGE = (0.3, 1.5)  # random delay range in seconds
 _CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "")
 _CF_WORKER_AUTH_TOKEN = os.environ.get("CF_WORKER_AUTH_TOKEN", "")
 
+# Domestic domains — always go direct, never through Worker
+_DOMESTIC_SUFFIXES = (
+    ".cn", ".com.cn", ".net.cn", ".org.cn",
+)
+_DOMESTIC_DOMAINS = {
+    "api.siliconflow.cn",
+    "dashscope.aliyuncs.com",
+    "newsapi.eastmoney.com",
+    "push2his.eastmoney.com",
+    "push2.eastmoney.com",
+    "api-one-wscn.awtmt.com",
+    "www.jin10.com",
+    "www.cls.cn",
+    "www.news.cn",
+    "www.pbc.gov.cn",
+}
+
+
+def _is_domestic(domain: str) -> bool:
+    """Check if a domain is domestic (should bypass Worker proxy)."""
+    if domain in _DOMESTIC_DOMAINS:
+        return True
+    return any(domain.endswith(suffix) for suffix in _DOMESTIC_SUFFIXES)
+
 
 def random_ua() -> str:
     """Return a random User-Agent string."""
@@ -137,7 +161,7 @@ def _fetch_via_worker(
         raise httpx.HTTPError(f"Worker error: {data['error']}")
 
     cf_info = data.get("cf", {})
-    logger.debug(
+    logger.info(
         "CF Worker: %s → %d (colo=%s, country=%s)",
         url, data.get("status", 0),
         cf_info.get("colo", "?"), cf_info.get("country", "?"),
@@ -146,6 +170,7 @@ def _fetch_via_worker(
     return httpx.Response(
         status_code=data.get("status", 200),
         text=data.get("body", ""),
+        request=httpx.Request(method, url),
     )
 
 
@@ -206,9 +231,19 @@ def fetch(
         httpx.HTTPStatusError: On non-retryable HTTP errors.
         httpx.ConnectError: After all retries exhausted.
     """
-    use_worker = bool(_CF_WORKER_URL)
     domain = _extract_domain(url)
+    use_worker = bool(_CF_WORKER_URL) and not _is_domestic(domain)
     req_headers = get_headers(headers)
+
+    # Worker proxy doesn't support separate params — encode them into the URL
+    if use_worker and params:
+        from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+        parsed = urlparse(url)
+        existing = parse_qs(parsed.query)
+        existing.update(params)
+        new_query = urlencode(existing, doseq=True)
+        url = urlunparse(parsed._replace(query=new_query))
+        params = None  # already in URL
 
     last_exc = None
     for attempt in range(max_retries + 1):

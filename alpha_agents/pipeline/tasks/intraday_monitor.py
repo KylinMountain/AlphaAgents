@@ -1,7 +1,8 @@
 """Intraday monitoring task — runs every 15 minutes during trading hours.
 
-Detects anomalies in active theme stocks and sector fund flows,
-then traces causes and generates alerts.
+Pre-fetches sector ranking and anomaly data, then only invokes the
+intraday agent if something unusual is detected. This avoids wasting
+LLM calls on "nothing happened" cycles.
 """
 
 import json
@@ -9,6 +10,9 @@ import logging
 from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
+from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.agents.intraday import run_intraday_analysis
 from alpha_agents.notify import notify_all
 
@@ -31,12 +35,69 @@ def _format_themes_for_monitoring(themes: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _detect_anomalies() -> tuple[bool, str]:
+    """Pre-fetch market data and check for anomalies before calling LLM.
+
+    Returns (has_anomaly, context_text).
+    """
+    signals = []
+
+    # 1. Sector ranking — which sectors are surging/plunging?
+    try:
+        ranking = json.loads(get_sector_ranking_fn(top_n=5))
+        top_gainers = ranking.get("gainers", [])
+        top_losers = ranking.get("losers", [])
+        if top_gainers:
+            best = top_gainers[0]
+            if best.get("change_pct", 0) > 2.0:
+                signals.append(f"板块异动: {best['sector']} 涨{best['change_pct']:.1f}%, 资金净流入{best['net_flow_yi']:.1f}亿, 领涨股{best.get('leader', '')}")
+        if top_losers:
+            worst = top_losers[0]
+            if worst.get("change_pct", 0) < -2.0:
+                signals.append(f"板块下杀: {worst['sector']} 跌{abs(worst['change_pct']):.1f}%")
+    except Exception as e:
+        logger.debug("Sector ranking fetch failed: %s", e)
+
+    # 2. Anomaly stocks — limit up concentration
+    try:
+        anomalies = json.loads(get_anomaly_stocks_fn())
+        summary = anomalies.get("summary", {})
+        limit_up = summary.get("limit_up_count", 0)
+        consecutive = summary.get("consecutive_limit_stocks", [])
+        top_sector = summary.get("top_sector", "")
+
+        if limit_up > 30:
+            signals.append(f"涨停板活跃: {limit_up}家涨停, 集中在{top_sector}")
+        if consecutive:
+            names = ", ".join(f"{s['name']}({s['consecutive_limits']}板)" for s in consecutive[:5])
+            signals.append(f"连板股: {names}")
+    except Exception as e:
+        logger.debug("Anomaly detection failed: %s", e)
+
+    # 3. Market breadth
+    try:
+        breadth = json.loads(get_market_breadth_fn())
+        ad_ratio = breadth.get("advance_decline_ratio", 1)
+        sentiment = breadth.get("sentiment", "")
+        if ad_ratio > 5 or ad_ratio < 0.3:
+            signals.append(f"市场情绪极端: 涨跌比{ad_ratio}, {sentiment}")
+    except Exception as e:
+        logger.debug("Market breadth failed: %s", e)
+
+    if not signals:
+        return False, ""
+
+    context = "【实时市场数据异动】\n" + "\n".join(f"• {s}" for s in signals)
+    return True, context
+
+
 async def run_intraday_monitor() -> str | None:
     """Execute one intraday monitoring cycle.
 
-    1. Get active theme lines and core stocks
-    2. Run intraday agent to detect anomalies
-    3. If anomaly found, push notification
+    1. Print current themes being watched
+    2. Pre-fetch market data to detect anomalies (no LLM cost)
+    3. Only call intraday agent if anomaly detected
+    4. Push notification on alert
 
     Returns alert text if anomaly found, None otherwise.
     """
@@ -44,19 +105,36 @@ async def run_intraday_monitor() -> str | None:
 
     themes = get_active_themes()
     if not themes:
-        logger.debug("Intraday monitor: no active themes")
+        logger.info("Intraday monitor: no active themes to watch")
         return None
 
-    context = _format_themes_for_monitoring(themes)
-    logger.info("Intraday monitor: watching %d themes", len(themes))
+    # Print what we're watching
+    for t in themes:
+        stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
+        leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
+        logger.info("  主线: %s（强度 %d/10, %s）龙头: %s",
+                     t["name"], t["strength"], t["status"], leader)
 
-    output = await run_intraday_analysis(context)
+    # Pre-fetch data to check for anomalies (cheap, no LLM)
+    has_anomaly, anomaly_context = await asyncio.to_thread(_detect_anomalies)
+
+    if not has_anomaly:
+        logger.info("Intraday monitor: no anomaly detected (checked sectors + limit-up + breadth)")
+        return None
+
+    logger.info("Intraday monitor: anomaly detected, calling agent for analysis...")
+    logger.info(anomaly_context)
+
+    # Build full context for agent
+    themes_context = _format_themes_for_monitoring(themes)
+    full_context = f"{themes_context}\n\n{anomaly_context}"
+
+    output = await run_intraday_analysis(full_context)
 
     if output and output.strip() != "无异动":
-        logger.info("Intraday anomaly detected!")
+        logger.info("Intraday alert generated!")
         print(output)
 
-        # Push notification
         try:
             now = datetime.now().strftime("%H:%M")
             await asyncio.to_thread(
@@ -69,5 +147,5 @@ async def run_intraday_monitor() -> str | None:
 
         return output
 
-    logger.debug("Intraday monitor: no anomaly")
+    logger.info("Intraday monitor: agent found no actionable anomaly")
     return None

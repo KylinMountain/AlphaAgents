@@ -101,7 +101,26 @@ class TradingDayScheduler:
     async def run(self) -> None:
         """Main scheduler loop. Checks every 30 seconds which tasks should run."""
         self._running = True
-        logger.info("Trading day scheduler started")
+        is_trading = self.is_trading_day()
+        logger.info("Trading day scheduler started (today is %s)",
+                     "trading day" if is_trading else "non-trading day")
+
+        # Show active themes on startup
+        try:
+            from alpha_agents.data.memory_store import get_active_themes
+            import json as _json
+            themes = get_active_themes()
+            if themes:
+                logger.info("Active themes (%d):", len(themes))
+                for t in themes:
+                    stocks = _json.loads(t["core_stocks"]) if t["core_stocks"] else []
+                    leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
+                    logger.info("  %s (strength=%d, %s) leader=%s",
+                                t["name"], t["strength"], t["status"], leader)
+            else:
+                logger.info("No active themes yet")
+        except Exception:
+            pass
 
         while self._running:
             now = datetime.now()

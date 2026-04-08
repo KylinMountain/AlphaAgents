@@ -150,6 +150,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
     from alpha_agents.pipeline.tasks.review import run_review
+    from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
     scheduler = TradingDayScheduler()
 
@@ -169,6 +170,12 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task(
         "night_scan", run_morning_scan,  # Reuse morning scan logic for now
         dtime(20, 0), trading_day_only=False,
+    ))
+
+    # Weekly report: Saturday 10:00
+    scheduler.add_task(Task(
+        "weekly_report", run_weekly_report,
+        dtime(10, 0), trading_day_only=False,
     ))
 
     logging.info("Starting AlphaAgents 2.0 scheduler...")

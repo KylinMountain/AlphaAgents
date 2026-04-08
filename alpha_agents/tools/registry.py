@@ -29,6 +29,12 @@ from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.tools.financial_data import get_financial_data_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.earnings_calendar import get_earnings_calendar_fn
+from alpha_agents.tools.fund_flow import (
+    get_lhb_detail_fn, get_block_trade_fn, get_north_flow_fn,
+    get_margin_data_fn, get_stock_fund_flow_fn,
+)
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 
 
 @function_tool
@@ -214,6 +220,80 @@ def get_earnings_calendar(codes: str = "") -> str:
     return get_earnings_calendar_fn(codes=codes)
 
 
+@function_tool
+def get_lhb_detail(date: str = "") -> str:
+    """获取龙虎榜数据 — 机构/游资席位买卖明细。
+
+    龙虎榜展示当日涨跌幅异常、成交量异常的个股的买卖席位。
+    机构席位买入 = 持续性较好；游资席位买入 = 可能是一日游。
+    输入日期(YYYYMMDD)，留空为最新交易日。
+    """
+    return get_lhb_detail_fn(date=date)
+
+
+@function_tool
+def get_block_trade(date: str = "") -> str:
+    """获取大宗交易数据 — 折溢价率判断买卖意愿。
+
+    折价成交 = 卖方急于出货；溢价成交 = 买方看好。
+    输入日期(YYYYMMDD)，留空为最新交易日。
+    """
+    return get_block_trade_fn(date=date)
+
+
+@function_tool
+def get_north_flow(indicator: str = "today") -> str:
+    """获取北向资金持股数据 — 外资方向是重要信号。
+
+    外资通过陆股通买卖A股，其方向通常具有较强的参考价值。
+    输入"today"查看今日持股排名；输入股票代码（如"000858"）查看该股是否被北向持有及增减仓情况。
+    """
+    return get_north_flow_fn(indicator=indicator)
+
+
+@function_tool
+def get_margin_data(code: str = "") -> str:
+    """获取融资融券数据 — 杠杆资金方向。
+
+    融资余额增加 = 杠杆资金看多；融资余额减少 = 去杠杆。
+    输入股票代码查看该股融资融券情况；留空查看市场融资余额排名前20。
+    """
+    return get_margin_data_fn(code=code)
+
+
+@function_tool
+def get_stock_fund_flow(code: str, market: str = "") -> str:
+    """获取个股资金流向 — 主力vs散户资金方向。
+
+    主力净流入 = 大资金看好；主力净流出 = 大资金撤退。
+    返回最近5个交易日的主力/散户资金流入流出数据及趋势判断。
+    输入股票代码，如"000858"。market留空自动判断。
+    """
+    return get_stock_fund_flow_fn(code=code, market=market)
+
+
+@function_tool
+def get_sector_ranking(top_n: int = 20) -> str:
+    """获取行业板块资金流排名 — 检测板块轮动方向。
+
+    显示资金正在流入哪些行业、流出哪些行业。
+    用于判断市场当前的轮动方向和主线热度。
+    """
+    return get_sector_ranking_fn(top_n=top_n)
+
+
+@function_tool
+def get_anomaly_stocks(date: str = "") -> str:
+    """获取涨停/跌停/炸板数据 — 检测市场异动和主线方向。
+
+    涨停板集中在某个行业 = 该行业可能是新主线。
+    炸板多 = 市场分歧大，追高风险高。
+    连板股 = 短线资金认可的最强方向。
+    输入日期(YYYYMMDD)，留空为今日。
+    """
+    return get_anomaly_stocks_fn(date=date)
+
+
 # --- Tool sets for different agents ---
 
 # News source tools — used by monitor pipeline, NOT by agents during analysis.
@@ -229,6 +309,8 @@ NEWS_TOOLS = [
 STOCK_TOOLS = [
     search_stocks, get_sector_data, filter_stocks, get_watchlist,
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
+    get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
+    get_stock_fund_flow, get_sector_ranking, get_anomaly_stocks,
     web_search, web_fetch, get_pizzint,
 ]
 

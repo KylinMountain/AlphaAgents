@@ -18,6 +18,8 @@ from alpha_agents.tools.registry import (
     get_sector_data, filter_stocks, get_watchlist,
     get_futures_quotes, get_futures_inventory, get_futures_basis,
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
+    get_lhb_detail, get_north_flow, get_margin_data, get_stock_fund_flow,
+    get_sector_ranking,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,8 @@ def create_reflection_agent(model) -> Agent:
         get_sector_data, filter_stocks, get_watchlist,
         get_futures_quotes, get_futures_inventory, get_futures_basis,
         get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
+        get_lhb_detail, get_north_flow, get_margin_data, get_stock_fund_flow,
+        get_sector_ranking,
     ]
 
     return Agent(

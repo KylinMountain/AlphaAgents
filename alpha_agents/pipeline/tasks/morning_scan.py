@@ -30,7 +30,7 @@ def _fill_theme_stocks(theme_name: str) -> None:
     try:
         result = json.loads(search_stocks_fn(keyword=theme_name))
         all_codes = []
-        for concept in result.get("concepts", []):
+        for concept in result.get("matches", []):
             for stock in concept.get("stocks", [])[:5]:
                 all_codes.append(stock["code"])
 

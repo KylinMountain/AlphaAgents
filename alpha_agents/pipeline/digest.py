@@ -134,19 +134,17 @@ def _build_user_message(news_items: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def _clean_json(text: str) -> str:
-    """Clean up non-standard JSON produced by some LLMs.
+def _parse_response(text: str) -> list[dict]:
+    """Parse LLM response text into a list of event dicts.
 
-    Handles:
-    - Markdown code fences (```json ... ``` or ``` ... ```)
-    - Trailing commas before ] or } (invalid JSON, valid in JS)
-    - Single quotes instead of double quotes
-    - Truncated JSON (missing closing brackets)
-    - Leading/trailing whitespace
+    Uses json_repair to handle all common LLM JSON issues:
+    truncation, trailing commas, markdown fences, single quotes, etc.
     """
+    from json_repair import repair_json
+
     text = text.strip()
 
-    # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
+    # Strip markdown code fences
     if text.startswith("```"):
         first_newline = text.find("\n")
         if first_newline != -1:
@@ -154,78 +152,14 @@ def _clean_json(text: str) -> str:
         if text.endswith("```"):
             text = text[:-3].rstrip()
 
-    # Remove trailing commas before closing brackets/braces
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    # Fix truncated JSON: count brackets and add missing closers
-    open_braces = text.count("{") - text.count("}")
-    open_brackets = text.count("[") - text.count("]")
-
-    if open_braces > 0 or open_brackets > 0:
-        # Find the last complete JSON object and truncate there
-        last_complete = text.rfind("}")
-        if last_complete > 0:
-            text = text[:last_complete + 1]
-            # Recount after truncation
-            open_brackets = text.count("[") - text.count("]")
-
-        # Close any remaining open brackets
-        text += "]" * open_brackets
-
-    return text.strip()
-
-
-def _extract_partial_json(text: str) -> list[dict]:
-    """Extract individual JSON objects from a broken/truncated JSON array.
-
-    When the LLM output is cut off mid-array, this finds all complete
-    {...} objects that can be individually parsed.
-    """
-    results = []
-    depth = 0
-    start = None
-
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    obj = json.loads(text[start:i + 1])
-                    if isinstance(obj, dict):
-                        results.append(obj)
-                except json.JSONDecodeError:
-                    pass
-                start = None
-
-    return results
-
-
-def _parse_response(text: str) -> list[dict]:
-    """Parse LLM response text into a list of event dicts.
-
-    Handles non-standard LLM output:
-    - Markdown code fences around JSON
-    - Trailing commas in objects/arrays
-    - Single-line or multi-line JSON arrays
-    """
-    cleaned = _clean_json(text)
-
     try:
-        events = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Try to extract individual JSON objects from the broken array
-        events = _extract_partial_json(cleaned)
-        if not events:
-            logger.warning(
-                "Failed to parse LLM JSON response. Raw text (first 200 chars): %s",
-                text[:200],
-            )
-            return []
-        logger.info("Recovered %d events from truncated JSON", len(events))
+        events = repair_json(text, return_objects=True)
+    except Exception:
+        logger.warning("json_repair failed. Raw text (first 200 chars): %s", text[:200])
+        return []
+
+    if not isinstance(events, list):
+        events = [events] if isinstance(events, dict) else []
     if not isinstance(events, list):
         logger.warning("LLM returned non-list JSON, wrapping: %s", type(events))
         events = [events]

@@ -180,16 +180,29 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
     logging.info("Starting AlphaAgents 2.0 scheduler...")
 
+    import signal
+
     async def _run():
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        loop.add_signal_handler(signal.SIGINT, stop.set)
+        loop.add_signal_handler(signal.SIGTERM, stop.set)
+
         if getattr(args, 'now', False):
             logging.info("--now flag set, running morning scan immediately...")
             await run_morning_scan()
-        await scheduler.run()
+
+        # Run scheduler until signal received
+        scheduler_task = asyncio.create_task(scheduler.run())
+        await stop.wait()
+        scheduler.stop()
+        scheduler_task.cancel()
+        logging.info("Scheduler stopped by user.")
 
     try:
         asyncio.run(_run())
-    except KeyboardInterrupt:
-        logging.info("Scheduler stopped by user.")
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 def cmd_review(args: argparse.Namespace) -> None:

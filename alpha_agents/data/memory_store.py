@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS theme_lines (
     notes TEXT
 );
 
-CREATE TABLE IF NOT EXISTS predictions_v2 (
+CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,
     report_type TEXT,
@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS predictions_v2 (
     hit INTEGER,
     review_note TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions_v2(date);
-CREATE INDEX IF NOT EXISTS idx_pred_code ON predictions_v2(code);
+CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions(date);
+CREATE INDEX IF NOT EXISTS idx_pred_code ON predictions(code);
 
 CREATE TABLE IF NOT EXISTS market_cognition (
     id INTEGER PRIMARY KEY,
@@ -171,7 +171,7 @@ def save_prediction(
     with _write_lock:
         conn = _get_conn()
         cur = conn.execute(
-            "INSERT INTO predictions_v2 (date, report_type, code, name, direction, confidence, theme_line, entry_price, reason) "
+            "INSERT INTO predictions (date, report_type, code, name, direction, confidence, theme_line, entry_price, reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (date, report_type, code, name, direction, confidence, theme_line, entry_price, reason),
         )
@@ -196,7 +196,7 @@ def update_prediction_result(pred_id: int, *, next_day_return: float | None = No
             sets.append("review_note = ?"); vals.append(review_note)
         if sets:
             vals.append(pred_id)
-            conn.execute(f"UPDATE predictions_v2 SET {', '.join(sets)} WHERE id = ?", vals)
+            conn.execute(f"UPDATE predictions SET {', '.join(sets)} WHERE id = ?", vals)
             conn.commit()
 
 
@@ -204,7 +204,7 @@ def get_pending_predictions(date: str) -> list[dict]:
     """Get predictions that haven't been reviewed yet for a given date."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM predictions_v2 WHERE date = ? AND hit IS NULL", (date,)
+        "SELECT * FROM predictions WHERE date = ? AND hit IS NULL", (date,)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -213,7 +213,7 @@ def get_prediction_stats(days: int = 7) -> dict:
     """Get hit rate statistics for recent predictions."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT direction, confidence, hit FROM predictions_v2 "
+        "SELECT direction, confidence, hit FROM predictions "
         "WHERE hit IS NOT NULL ORDER BY date DESC LIMIT ?",
         (days * 20,),
     ).fetchall()

@@ -36,13 +36,13 @@ def get_lhb_detail_fn(date: str = "") -> str:
         with no_proxy():
             df = ak.stock_lhb_detail_em(start_date=date, end_date=date)
 
-        if df.empty:
+        if df is None or df.empty:
             # Try previous trading day
             prev = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
             with no_proxy():
                 df = ak.stock_lhb_detail_em(start_date=prev, end_date=prev)
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"date": date, "data": [], "error": None}, ensure_ascii=False)
 
         results = []
@@ -102,12 +102,12 @@ def get_block_trade_fn(date: str = "") -> str:
         with no_proxy():
             df = ak.stock_dzjy_mrtj(start_date=date, end_date=date)
 
-        if df.empty:
+        if df is None or df.empty:
             prev = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
             with no_proxy():
                 df = ak.stock_dzjy_mrtj(start_date=prev, end_date=prev)
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"date": date, "data": [], "error": None}, ensure_ascii=False)
 
         results = []
@@ -156,7 +156,7 @@ def get_north_flow_fn(indicator: str = "today") -> str:
         with no_proxy():
             df = ak.stock_hsgt_hold_stock_em(market="北向", indicator="今日排行")
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"data": [], "error": "no data"}, ensure_ascii=False)
 
         if indicator != "today":
@@ -291,7 +291,7 @@ def get_stock_fund_flow_fn(code: str, market: str = "") -> str:
         with no_proxy():
             df = ak.stock_individual_fund_flow(stock=code, market=market)
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"code": code, "data": [], "error": None}, ensure_ascii=False)
 
         # Get last 5 trading days

@@ -20,6 +20,15 @@ MAX_ACTIVE_THEMES = 8
 
 STATUS_ORDER = ["watching", "active", "peak", "declining", "archived"]
 
+# Concepts that are too broad or not real investment themes — skip these
+NOISE_CONCEPTS = {
+    "融资融券", "深股通", "沪股通", "国企改革", "人民币贬值受益",
+    "人民币升值受益", "标准普尔", "MSCI概念", "富时罗素概念",
+    "基金重仓", "社保重仓", "险资重仓", "送转预期",
+    "年报预增", "2025年报预增", "2024年报预增",
+    "ST股", "B股", "AH股", "注册制次新股",
+}
+
 
 def evaluate_theme_signals(
     sector_name: str,
@@ -107,6 +116,9 @@ def maybe_discover_theme(
     Returns True if a new theme was created.
     """
     if signals["bullish_signals"] < 2:
+        return False
+
+    if sector_name in NOISE_CONCEPTS:
         return False
 
     existing = get_theme_by_name(sector_name)

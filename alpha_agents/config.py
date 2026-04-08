@@ -8,6 +8,7 @@ PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"
 CHROMA_PATH = DATA_DIR / "chroma"
+MEMORY_DB_PATH = DATA_DIR / "memory.db"
 
 # ---------------------------------------------------------------------------
 # Embedding model (OpenAI-compatible, for concept vector search)

@@ -48,6 +48,24 @@
 • {主要风险}
 ```
 
+## 结构化推荐数据
+
+在报告正文之后，你必须附加一个 JSON 块，用于程序自动提取推荐记录。格式如下：
+
+```
+<!--RECOMMENDATIONS
+[
+  {"code": "002384", "name": "东山精密", "theme": "消费电子", "reason": "涨停首封", "confidence": "high"},
+  {"code": "300571", "name": "平治信息", "theme": "通信设备", "reason": "连板梯队核心", "confidence": "high"},
+  {"code": "300475", "name": "香农芯创", "theme": "半导体", "reason": "芯片概念领涨", "confidence": "medium"}
+]
+RECOMMENDATIONS-->
+```
+
+- confidence 只能是 "high" 或 "medium"（低信心的不推荐，不要放进来）
+- 这个 JSON 块的内容必须与报告中【推荐关注】表格一致
+- 这个块不会展示给用户，仅供程序解析
+
 ## 重要原则
 
 - 晨报必须简洁，用户30秒内读完
@@ -55,3 +73,4 @@
 - 每条主线最多推荐2只标的
 - 标注预测命中率，让用户知道系统的可靠度
 - 不使用emoji，不使用markdown标题(#)
+- 报告末尾必须附带 <!--RECOMMENDATIONS ... RECOMMENDATIONS--> JSON 块

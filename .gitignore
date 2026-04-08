@@ -221,4 +221,3 @@ __marimo__/
 *.db-shm
 *.egg-info/
 reports/
-cf-worker/

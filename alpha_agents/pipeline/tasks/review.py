@@ -13,12 +13,77 @@ from alpha_agents.data.memory_store import (
     get_prediction_stats, upsert_cognition,
 )
 from alpha_agents.pipeline.theme_manager import (
-    evaluate_theme_signals, update_theme_strength, retire_stale_themes,
+    evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
+    retire_stale_themes,
 )
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.agents.review_agent import run_review_analysis
 from alpha_agents.notify import notify_all
 
 logger = logging.getLogger(__name__)
+
+
+def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
+    """Use real sector ranking data to discover new themes and update existing ones.
+
+    This runs synchronously (called via to_thread).
+    """
+    try:
+        # Get market breadth for context
+        breadth = json.loads(get_market_breadth_fn())
+        market_change = 0.0  # Approximate from breadth
+        ad_ratio = breadth.get("advance_decline_ratio", 1)
+
+        # Get sector ranking
+        ranking = json.loads(get_sector_ranking_fn(top_n=10))
+
+        # Update existing themes
+        existing_names = {t["name"] for t in existing_themes}
+        for theme in existing_themes:
+            # Find matching sector in ranking
+            for gainer in ranking.get("gainers", []):
+                if gainer["sector"] == theme["name"]:
+                    signals = evaluate_theme_signals(
+                        sector_name=theme["name"],
+                        sector_change_pct=gainer.get("change_pct", 0),
+                        sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
+                        market_change_pct=market_change,
+                    )
+                    update_theme_strength(theme["name"], signals)
+                    break
+            for loser in ranking.get("losers", []):
+                if loser["sector"] == theme["name"]:
+                    signals = evaluate_theme_signals(
+                        sector_name=theme["name"],
+                        sector_change_pct=loser.get("change_pct", 0),
+                        sector_fund_flow=loser.get("net_flow_yi", 0) * 1e8,
+                        market_change_pct=market_change,
+                    )
+                    update_theme_strength(theme["name"], signals)
+                    break
+
+        # Discover new themes from top-performing sectors
+        for gainer in ranking.get("gainers", [])[:5]:
+            sector = gainer["sector"]
+            if sector in existing_names:
+                continue
+            signals = evaluate_theme_signals(
+                sector_name=sector,
+                sector_change_pct=gainer.get("change_pct", 0),
+                sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
+                market_change_pct=market_change,
+            )
+            maybe_discover_theme(
+                sector,
+                signals,
+                catalyst=f"板块涨{gainer.get('change_pct', 0):.1f}%, 资金净流入{gainer.get('net_flow_yi', 0):.1f}亿, 领涨{gainer.get('leader', '')}",
+            )
+
+        logger.info("Theme update: %d existing updated, checked top 5 for discovery",
+                     len(existing_themes))
+    except Exception as e:
+        logger.warning("Theme update from market data failed: %s", e)
 
 
 def _format_predictions(predictions: list[dict]) -> str:
@@ -81,15 +146,21 @@ async def run_review() -> str | None:
 
     logger.info("Review: %d predictions, %d themes", len(pending), len(themes))
 
-    # 2. Format contexts
+    # 2. Auto-discover/update themes from real sector data
+    await asyncio.to_thread(_update_themes_from_market_data, themes)
+
+    # Re-read themes after update
+    themes = get_active_themes()
+
+    # 3. Format contexts
     pred_ctx = _format_predictions(pending)
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
 
-    # 3. Run review agent
+    # 4. Run review agent
     report = await run_review_analysis(pred_ctx, themes_ctx, stats_ctx)
 
-    # 4. Retire stale themes
+    # 5. Retire stale themes
     retired = retire_stale_themes()
     if retired:
         logger.info("Review: retired themes: %s", retired)

@@ -35,6 +35,9 @@ from alpha_agents.tools.fund_flow import (
 )
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
+from alpha_agents.tools.global_market import (
+    get_us_market_fn, get_bond_yields_fn, get_global_overview_fn,
+)
 
 
 @function_tool
@@ -294,6 +297,36 @@ def get_anomaly_stocks(date: str = "") -> str:
     return get_anomaly_stocks_fn(date=date)
 
 
+@function_tool
+def get_us_market() -> str:
+    """获取美股三大指数最新行情（道琼斯、标普500、纳斯达克）。
+
+    返回最近2个交易日的收盘价和涨跌幅。用于晨扫判断隔夜外盘方向。
+    """
+    return get_us_market_fn()
+
+
+@function_tool
+def get_bond_yields() -> str:
+    """获取中美国债收益率（2Y/5Y/10Y/30Y）及利差信号。
+
+    关键信号：
+    - 美债10Y上升 → A股成长股估值承压
+    - 中美利差收窄 → 资本外流压力
+    - 美债10Y-2Y倒挂 → 衰退信号
+    """
+    return get_bond_yields_fn()
+
+
+@function_tool
+def get_global_overview() -> str:
+    """获取全球市场综合概览 — 美股指数 + 国债收益率 + 关键信号。
+
+    一站式获取隔夜全球市场状态，用于晨扫和夜扫。
+    """
+    return get_global_overview_fn()
+
+
 # --- Tool sets for different agents ---
 
 # News source tools — used by monitor pipeline, NOT by agents during analysis.
@@ -311,6 +344,7 @@ STOCK_TOOLS = [
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
     get_stock_fund_flow, get_sector_ranking, get_anomaly_stocks,
+    get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
 ]
 

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes
+from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
@@ -125,9 +126,30 @@ async def run_intraday_monitor() -> str | None:
     logger.info("Intraday monitor: anomaly detected, calling agent for analysis...")
     logger.info(anomaly_context)
 
+    # Read today's events from morning scan (if available)
+    events_context = ""
+    try:
+        import time as _time
+        cache_path = DATA_DIR / "today_events.json"
+        if cache_path.exists():
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached.get("date") == _time.strftime("%Y-%m-%d"):
+                event_lines = []
+                for e in cached.get("events", [])[:5]:
+                    event_lines.append(f"  [{e.get('category', '?')}] {e.get('event', '?')} (重要性{e.get('importance', 0)}/5)")
+                if event_lines:
+                    events_context = "【今日已知事件（晨扫识别）】\n" + "\n".join(event_lines)
+                    logger.info("Intraday: loaded %d events from morning scan", len(event_lines))
+    except Exception:
+        pass
+
     # Build full context for agent
     themes_context = _format_themes_for_monitoring(themes)
-    full_context = f"{themes_context}\n\n{anomaly_context}"
+    parts = [themes_context, anomaly_context]
+    if events_context:
+        parts.append(events_context)
+    full_context = "\n\n".join(parts)
 
     output = await run_intraday_analysis(full_context)
 

@@ -24,6 +24,7 @@ from alpha_agents.tools.global_market import get_global_overview_fn
 from alpha_agents.data.memory_store import upsert_theme
 from alpha_agents.agents.morning import run_morning_analysis
 from alpha_agents.notify import notify_all
+from alpha_agents.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,14 @@ async def run_morning_scan() -> str | None:
     if not events:
         logger.info("Morning scan: no significant events")
         return None
+
+    # Cache today's events for intraday agent to read
+    try:
+        cache_path = DATA_DIR / "today_events.json"
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({"date": time.strftime("%Y-%m-%d"), "events": events}, f, ensure_ascii=False)
+    except Exception:
+        pass
 
     # 4. Pre-fetch global market data
     global_ctx = ""

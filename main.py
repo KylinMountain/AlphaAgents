@@ -178,6 +178,24 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         dtime(10, 0), trading_day_only=False,
     ))
 
+    # --task: run a single task and exit
+    task_name = getattr(args, 'task', None)
+    if task_name:
+        task_map = {
+            "morning": run_morning_scan,
+            "intraday": run_intraday_monitor,
+            "review": run_review,
+            "night": run_morning_scan,
+            "weekly": run_weekly_report,
+        }
+        fn = task_map.get(task_name)
+        if not fn:
+            logging.error("Unknown task: %s (available: %s)", task_name, ", ".join(task_map))
+            return
+        logging.info("Running single task: %s", task_name)
+        asyncio.run(fn())
+        return
+
     logging.info("Starting AlphaAgents 2.0 scheduler...")
 
     import signal
@@ -259,6 +277,8 @@ def main() -> None:
     # run-v2 — trading-day scheduler
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
     p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
+    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "night", "weekly"],
+                          help="Run a single task and exit (for testing)")
     p_run_v2.set_defaults(func=cmd_run_v2)
 
     # web — web UI with pipeline visualization

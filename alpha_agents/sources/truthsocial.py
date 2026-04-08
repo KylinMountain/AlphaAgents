@@ -13,9 +13,6 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 
-import httpx
-
-from alpha_agents.config import no_proxy
 from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
@@ -34,13 +31,12 @@ SYNDICATION_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-n
 def _fetch_tweets(username: str, label: str, limit: int = 10) -> list[dict]:
     """Fetch tweets via Twitter Syndication API (public, no auth)."""
     try:
-        with no_proxy():
-            r = httpx.get(
-                SYNDICATION_URL.format(username=username),
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"},
-                timeout=15,
-                follow_redirects=True,
-            )
+        r = fetch(
+            SYNDICATION_URL.format(username=username),
+            headers={"Accept": "text/html"},
+            timeout=15,
+            max_retries=1,
+        )
         if r.status_code != 200:
             return []
 

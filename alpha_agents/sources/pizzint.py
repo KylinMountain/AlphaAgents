@@ -9,9 +9,7 @@ Data from https://www.pizzint.watch (free, no API key).
 import json
 import logging
 
-import httpx
-
-from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +18,8 @@ BASE_URL = "https://www.pizzint.watch"
 
 def _fetch_api(path: str, params: dict | None = None) -> dict:
     """Fetch from pizzint.watch API."""
-    with no_proxy():
-        r = httpx.get(
-            f"{BASE_URL}{path}",
-            params=params,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
+    r = fetch(f"{BASE_URL}{path}", params=params, timeout=15, max_retries=1)
+    return r.json()
 
 
 def get_pizzint_fn() -> str:

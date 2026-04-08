@@ -48,12 +48,25 @@ def _create_futures_agent() -> Agent:
 
 async def run_futures_analysis(prompt: str, hooks=None) -> str:
     """Run futures market analysis with reflection verification."""
+    import asyncio
     agent = _create_futures_agent()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     user_message = f"[当前时间: {now}]\n\n{prompt}"
 
-    result = await Runner.run(agent, user_message, hooks=hooks, max_turns=25)
-    report = result.final_output
+    logger.info("Futures strategist starting (max_turns=100)...")
+    try:
+        result = await asyncio.wait_for(
+            Runner.run(agent, user_message, hooks=hooks, max_turns=100),
+            timeout=600,
+        )
+        report = result.final_output
+        logger.info("Futures strategist finished, report length=%d", len(report))
+    except asyncio.TimeoutError:
+        logger.error("Futures strategist timed out after 300s")
+        return "[期货策略师超时，未生成报告]"
 
     # Reflection: verify with actual market data
-    return await run_reflection(report, _create_model(), hooks=hooks)
+    logger.info("Futures reflection starting...")
+    result = await run_reflection(report, _create_model(), hooks=hooks)
+    logger.info("Futures reflection finished, final length=%d", len(result))
+    return result

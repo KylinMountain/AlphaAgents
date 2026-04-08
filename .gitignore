@@ -219,3 +219,6 @@ __marimo__/
 *.db.bak
 *.db-wal
 *.db-shm
+*.egg-info/
+reports/
+cf-worker/

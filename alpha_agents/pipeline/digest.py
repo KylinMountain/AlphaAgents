@@ -37,25 +37,39 @@ def _count_tokens(text: str) -> int:
     return len(_encoder.encode(text))
 
 SYSTEM_PROMPT = """\
-你是一个专业的金融新闻分析助手。你的任务是将多条原始新闻聚合、去重、评分，输出结构化的事件摘要。
+你是一个专业的金融新闻分析助手。你的任务是从原始新闻中**全面提取各行业、各领域的事件**，聚合去重后输出结构化摘要。
 
-规则：
-1. 将相关的新闻合并为同一个"事件"（例如：3篇关于特朗普关税的文章 → 1个事件）
-2. 只返回重要性 >= 3 的事件
-3. 按重要性从高到低排序，重要性相同时按可信度排序（high > medium > low）
-4. 用中文输出
+## 核心原则
 
-事件分类(category)定义：
+**全面覆盖，不遗漏任何行业。** 你的目标是让下游策略师看到各个行业发生了什么，而不仅仅是当天最大的那一条新闻。即使某个行业事件的重要性不如地缘政治，它对关注该行业的投资者仍然至关重要。
+
+## 规则
+
+1. 将相关新闻合并为同一个"事件"（例如：3篇关于特朗普关税的文章 → 1个事件）
+2. **按行业维度全面归纳**，确保以下领域的事件都被提取（如果新闻中存在）：
+   - 科技/半导体/AI、医药/医疗、新能源/光伏/锂电、消费/白酒/零售
+   - 金融/银行/保险、地产/基建、军工/航天、汽车/智能驾驶
+   - 化工/材料、农业/食品、传媒/游戏、交通/物流/航运
+   - 以及任何其他出现在新闻中的行业
+3. 宏观、政策、地缘类事件也要保留，但不能挤掉行业事件
+4. 按重要性从高到低排序
+5. 用中文输出
+
+## 事件分类(category)
+
 - "政策" — 央行货币政策、财政政策、监管政策、产业政策等政府行为
 - "地缘" — 国际关系、战争冲突、制裁、关税博弈、外交事件
 - "宏观" — 经济数据、就业、通胀、GDP、PMI等宏观指标
-- "行业" — 具体行业/公司层面的重大事件、技术突破、并购重组
-- "市场" — 市场异动、资金流向、流动性事件、黑天鹅
+- "行业" — 具体行业/公司层面的事件、技术突破、并购重组、产品发布、业绩公告
+- "市场" — 市场异动、资金流向、流动性事件
 
-对每个事件，输出以下JSON格式：
+## 输出格式
+
+对每个事件，输出以下JSON：
 {
   "event": "事件标题",
   "category": "政策/地缘/宏观/行业/市场",
+  "industry": "所属行业（如：半导体、医药、新能源、军工、消费等，宏观/地缘类填'宏观'或'地缘'）",
   "target_market": "stock/futures/both",
   "summary": "综合多源信息的事件摘要",
   "importance": 4,
@@ -72,12 +86,12 @@ SYSTEM_PROMPT = """\
   "raw_titles": ["原始标题1", "原始标题2"]
 }
 
-target_market 路由规则：
-- "stock" — 仅影响股票市场的事件（公司年报、板块异动、监管政策、并购重组）
-- "futures" — 仅影响期货市场的事件（OPEC减产、极端天气影响农产品、库存数据）
-- "both" — 同时影响股票和期货的事件（关税政策、央行利率决议、地缘冲突、重大宏观数据）
+## target_market 路由规则
+- "stock" — 仅影响股票市场（公司年报、板块异动、监管政策、并购重组）
+- "futures" — 仅影响期货市场（OPEC减产、极端天气影响农产品、库存数据）
+- "both" — 同时影响股票和期货（关税政策、央行利率决议、地缘冲突、重大宏观数据）
 
-只返回一个JSON数组，不要有其他文字。如果没有重要性>=3的事件，返回空数组 []。
+只返回一个JSON数组，不要有其他文字。如果没有任何有价值的事件，返回空数组 []。
 """
 
 
@@ -126,25 +140,68 @@ def _clean_json(text: str) -> str:
     Handles:
     - Markdown code fences (```json ... ``` or ``` ... ```)
     - Trailing commas before ] or } (invalid JSON, valid in JS)
+    - Single quotes instead of double quotes
+    - Truncated JSON (missing closing brackets)
     - Leading/trailing whitespace
     """
     text = text.strip()
 
     # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
     if text.startswith("```"):
-        # Remove opening fence line (e.g. "```json")
         first_newline = text.find("\n")
         if first_newline != -1:
             text = text[first_newline + 1:]
-        # Remove closing fence
         if text.endswith("```"):
             text = text[:-3].rstrip()
 
     # Remove trailing commas before closing brackets/braces
-    # e.g.  { "a": 1, }  →  { "a": 1 }
     text = re.sub(r",\s*([}\]])", r"\1", text)
 
+    # Fix truncated JSON: count brackets and add missing closers
+    open_braces = text.count("{") - text.count("}")
+    open_brackets = text.count("[") - text.count("]")
+
+    if open_braces > 0 or open_brackets > 0:
+        # Find the last complete JSON object and truncate there
+        last_complete = text.rfind("}")
+        if last_complete > 0:
+            text = text[:last_complete + 1]
+            # Recount after truncation
+            open_brackets = text.count("[") - text.count("]")
+
+        # Close any remaining open brackets
+        text += "]" * open_brackets
+
     return text.strip()
+
+
+def _extract_partial_json(text: str) -> list[dict]:
+    """Extract individual JSON objects from a broken/truncated JSON array.
+
+    When the LLM output is cut off mid-array, this finds all complete
+    {...} objects that can be individually parsed.
+    """
+    results = []
+    depth = 0
+    start = None
+
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(text[start:i + 1])
+                    if isinstance(obj, dict):
+                        results.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = None
+
+    return results
 
 
 def _parse_response(text: str) -> list[dict]:
@@ -159,12 +216,16 @@ def _parse_response(text: str) -> list[dict]:
 
     try:
         events = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "Failed to parse LLM JSON response (%s). Raw text (first 200 chars): %s",
-            exc, text[:200],
-        )
-        return []
+    except json.JSONDecodeError:
+        # Try to extract individual JSON objects from the broken array
+        events = _extract_partial_json(cleaned)
+        if not events:
+            logger.warning(
+                "Failed to parse LLM JSON response. Raw text (first 200 chars): %s",
+                text[:200],
+            )
+            return []
+        logger.info("Recovered %d events from truncated JSON", len(events))
     if not isinstance(events, list):
         logger.warning("LLM returned non-list JSON, wrapping: %s", type(events))
         events = [events]
@@ -192,8 +253,7 @@ def _parse_response(text: str) -> list[dict]:
         except (ValueError, TypeError):
             imp = 0
         e["importance"] = max(0, min(imp, 5))
-        # Filter importance >= 3
-        if e["importance"] >= 3:
+        if e["importance"] >= 2:
             valid.append(e)
 
     # Sort by importance desc, then credibility (high > medium > low)
@@ -202,8 +262,8 @@ def _parse_response(text: str) -> list[dict]:
         key=lambda e: (-e["importance"], cred_order.get(e.get("credibility", "low"), 3))
     )
 
-    # Cap at 20 events max
-    return valid[:20]
+    # Cap at 8 events max — more events = much longer agent runtime
+    return valid[:8]
 
 
 def _get_client() -> AsyncOpenAI:

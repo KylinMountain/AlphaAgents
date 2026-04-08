@@ -12,9 +12,10 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import (
+    get_lhb, get_block_trades, get_north_holdings,
+    get_margin_detail, get_individual_fund_flow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +34,11 @@ def get_lhb_detail_fn(date: str = "") -> str:
         if not date:
             date = datetime.now().strftime("%Y%m%d")
 
-        with no_proxy():
-            df = ak.stock_lhb_detail_em(start_date=date, end_date=date)
+        df = get_lhb(date)
 
         if df is None or df.empty:
-            # Try previous trading day
             prev = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-            with no_proxy():
-                df = ak.stock_lhb_detail_em(start_date=prev, end_date=prev)
+            df = get_lhb(prev)
 
         if df is None or df.empty:
             return json.dumps({"date": date, "data": [], "error": None}, ensure_ascii=False)
@@ -99,13 +97,11 @@ def get_block_trade_fn(date: str = "") -> str:
         if not date:
             date = datetime.now().strftime("%Y%m%d")
 
-        with no_proxy():
-            df = ak.stock_dzjy_mrtj(start_date=date, end_date=date)
+        df = get_block_trades(date)
 
         if df is None or df.empty:
             prev = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-            with no_proxy():
-                df = ak.stock_dzjy_mrtj(start_date=prev, end_date=prev)
+            df = get_block_trades(prev)
 
         if df is None or df.empty:
             return json.dumps({"date": date, "data": [], "error": None}, ensure_ascii=False)
@@ -153,8 +149,7 @@ def get_north_flow_fn(indicator: str = "today") -> str:
                    to check if northbound holds that specific stock.
     """
     try:
-        with no_proxy():
-            df = ak.stock_hsgt_hold_stock_em(market="北向", indicator="今日排行")
+        df = get_north_holdings()
 
         if df is None or df.empty:
             return json.dumps({"data": [], "error": "no data"}, ensure_ascii=False)
@@ -216,15 +211,9 @@ def get_margin_data_fn(code: str = "") -> str:
         code: Stock code to check (e.g. "000858"). Empty for market summary.
     """
     try:
-        with no_proxy():
-            df_sse = ak.stock_margin_detail_sse(date=datetime.now().strftime("%Y%m%d"))
+        df_sse = get_margin_detail()
 
-        if df_sse.empty:
-            prev = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-            with no_proxy():
-                df_sse = ak.stock_margin_detail_sse(date=prev)
-
-        if df_sse.empty:
+        if df_sse is None or df_sse.empty:
             return json.dumps({"data": [], "error": "no margin data"}, ensure_ascii=False)
 
         if code:
@@ -288,8 +277,7 @@ def get_stock_fund_flow_fn(code: str, market: str = "") -> str:
         if not market:
             market = "sh" if code.startswith("6") else "sz"
 
-        with no_proxy():
-            df = ak.stock_individual_fund_flow(stock=code, market=market)
+        df = get_individual_fund_flow(code, market)
 
         if df is None or df.empty:
             return json.dumps({"code": code, "data": [], "error": None}, ensure_ascii=False)

@@ -10,9 +10,7 @@ Both from 同花顺 via data.10jqka.com.cn (reliable, no push2 issues).
 import json
 import logging
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_industry_fund_flow, get_concept_fund_flow
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +25,9 @@ def get_sector_ranking_fn(top_n: int = 20) -> str:
         top_n: Number of top/bottom sectors to return. Default 20.
     """
     try:
-        with no_proxy():
-            df = ak.stock_fund_flow_industry()
+        df = get_industry_fund_flow()
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"error": "no sector data", "gainers": [], "losers": []}, ensure_ascii=False)
 
         gainers = []
@@ -84,10 +81,9 @@ def get_concept_ranking_fn(top_n: int = 20) -> str:
         top_n: Number of top/bottom concepts to return. Default 20.
     """
     try:
-        with no_proxy():
-            df = ak.stock_fund_flow_concept()
+        df = get_concept_fund_flow()
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"error": "no concept data", "gainers": [], "losers": []}, ensure_ascii=False)
 
         name_col = "行业" if "行业" in df.columns else "名称"

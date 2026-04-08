@@ -3,9 +3,7 @@
 import json
 import logging
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_us_index as _get_us_index, get_bond_yields as _get_bond_yields
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +20,8 @@ def get_us_market_fn() -> str:
         results = []
         for name, symbol in US_INDICES.items():
             try:
-                with no_proxy():
-                    df = ak.index_us_stock_sina(symbol=symbol)
-                if df.empty:
+                df = _get_us_index(symbol=symbol)
+                if df is None or df.empty:
                     continue
                 df = df.tail(2)
                 latest = df.iloc[-1]
@@ -43,9 +40,8 @@ def get_us_market_fn() -> str:
 def get_bond_yields_fn() -> str:
     """Get China and US government bond yields (2Y, 5Y, 10Y, 30Y)."""
     try:
-        with no_proxy():
-            df = ak.bond_zh_us_rate()
-        if df.empty:
+        df = _get_bond_yields()
+        if df is None or df.empty:
             return json.dumps({"error": "no bond data", "data": {}}, ensure_ascii=False)
         df = df.dropna(subset=["美国国债收益率10年"], how="all").tail(2)
         if df.empty:

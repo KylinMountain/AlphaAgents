@@ -3,9 +3,7 @@
 import json
 import logging
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_earnings_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +27,9 @@ def get_earnings_calendar_fn(codes: str = "") -> str:
         else:
             date = f"{now.year}0930"
 
-        with no_proxy():
-            df = ak.stock_yjyg_em(date=date)
+        df = get_earnings_forecast(date=date)
 
-        if df.empty:
+        if df is None or df.empty:
             return json.dumps({"error": "no earnings data available", "forecasts": []}, ensure_ascii=False)
 
         code_list = [c.strip() for c in codes.split(",") if c.strip()] if codes else []

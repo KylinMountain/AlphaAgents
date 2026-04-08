@@ -2,10 +2,9 @@ import json
 import logging
 import threading
 
-import akshare as ak
 import pandas as pd
 
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_concept_fund_flow
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,8 @@ _ths_lock = threading.Lock()
 
 
 def _fetch_sector_fund_flow() -> pd.DataFrame:
-    with _ths_lock, no_proxy():
-        return ak.stock_fund_flow_concept()
+    with _ths_lock:
+        return get_concept_fund_flow() or pd.DataFrame()
 
 
 def get_sector_data_fn(sector_name: str) -> str:

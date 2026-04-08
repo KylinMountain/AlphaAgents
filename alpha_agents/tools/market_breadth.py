@@ -4,9 +4,7 @@ import json
 import logging
 from datetime import datetime
 
-import akshare as ak
-
-from alpha_agents.config import no_proxy
+from alpha_agents.data.market_data import get_market_activity
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +16,9 @@ def get_market_breadth_fn() -> str:
     Use this to assess whether the market is risk-on or risk-off before making recommendations.
     """
     try:
-        with no_proxy():
-            df = ak.stock_market_activity_legu()
+        df = get_market_activity()
+        if df is None:
+            return json.dumps({"error": "no market data"}, ensure_ascii=False)
 
         data = {}
         for _, row in df.iterrows():

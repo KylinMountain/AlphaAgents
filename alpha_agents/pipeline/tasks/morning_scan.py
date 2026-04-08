@@ -13,6 +13,8 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
+from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
 from alpha_agents.agents.morning import run_morning_analysis
 from alpha_agents.notify import notify_all
 
@@ -94,7 +96,25 @@ async def run_morning_scan() -> str | None:
         logger.info("Morning scan: no news items")
         return None
 
-    # 2. Read memory
+    # 2. Auto-discover themes from current sector data
+    try:
+        ranking = json.loads(await asyncio.to_thread(get_sector_ranking_fn, 5))
+        for gainer in ranking.get("gainers", [])[:5]:
+            signals = evaluate_theme_signals(
+                sector_name=gainer["sector"],
+                sector_change_pct=gainer.get("change_pct", 0),
+                sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
+                market_change_pct=0,
+            )
+            if maybe_discover_theme(
+                gainer["sector"], signals,
+                catalyst=f"板块涨{gainer.get('change_pct', 0):.1f}%, 领涨{gainer.get('leader', '')}",
+            ):
+                logger.info("Morning scan: discovered theme '%s'", gainer["sector"])
+    except Exception as e:
+        logger.debug("Morning scan theme discovery failed: %s", e)
+
+    # 3. Read memory
     themes = get_active_themes()
     stats = get_prediction_stats(days=7)
     cognition = get_all_cognition_latest()

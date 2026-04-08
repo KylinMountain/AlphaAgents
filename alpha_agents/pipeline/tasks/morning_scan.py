@@ -8,8 +8,11 @@ import json
 import logging
 import time
 
+import re
+
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats, get_all_cognition_latest,
+    save_prediction,
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
@@ -230,5 +233,83 @@ async def run_morning_scan() -> str | None:
         except Exception as e:
             logger.debug("Morning notification failed: %s", e)
 
+    # 6. Extract recommendations and save as predictions
+    if report and not report.startswith("["):
+        _save_recommendations(report)
+
     print(report)
     return report
+
+
+def _save_recommendations(report: str) -> None:
+    """Parse the recommendation table from the report and save as predictions."""
+    today = time.strftime("%Y-%m-%d")
+
+    # Match table rows: | 代码 | 名称 | 主线 | 理由 | 信心 |
+    # Skip header and separator rows
+    lines = report.split("\n")
+    in_table = False
+    saved = 0
+
+    for line in lines:
+        line = line.strip()
+
+        # Detect start of recommendation table
+        if "推荐关注" in line:
+            in_table = True
+            continue
+
+        # End of table
+        if in_table and line and not line.startswith("|"):
+            in_table = False
+            continue
+
+        if not in_table or not line.startswith("|"):
+            continue
+
+        # Skip header and separator
+        if "代码" in line or "---" in line or "------" in line:
+            continue
+
+        # Parse: | 002384 | 东山精密 | 消费电子 | 涨停首封... | 高 |
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cells) < 5:
+            continue
+
+        code = cells[0].strip()
+        name = cells[1].strip()
+        theme = cells[2].strip()
+        reason = cells[3].strip()
+        confidence_raw = cells[4].strip()
+
+        # Skip if code doesn't look like a stock code
+        if not re.match(r"^\d{6}$", code):
+            continue
+
+        # Map confidence
+        if "高" in confidence_raw:
+            confidence = "high"
+        elif "中" in confidence_raw:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        try:
+            pid = save_prediction(
+                date=today,
+                report_type="morning",
+                code=code,
+                name=name,
+                direction="bullish",
+                confidence=confidence,
+                theme_line=theme,
+                entry_price=None,  # Will be filled by review task
+                reason=reason[:100],
+            )
+            saved += 1
+            logger.info("  Saved prediction: %s %s (%s confidence)", code, name, confidence)
+        except Exception as e:
+            logger.debug("Failed to save prediction for %s: %s", code, e)
+
+    if saved:
+        logger.info("Saved %d predictions from morning report", saved)

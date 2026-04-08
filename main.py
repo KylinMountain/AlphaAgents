@@ -179,8 +179,15 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     ))
 
     logging.info("Starting AlphaAgents 2.0 scheduler...")
+
+    async def _run():
+        if getattr(args, 'now', False):
+            logging.info("--now flag set, running morning scan immediately...")
+            await run_morning_scan()
+        await scheduler.run()
+
     try:
-        asyncio.run(scheduler.run())
+        asyncio.run(_run())
     except KeyboardInterrupt:
         logging.info("Scheduler stopped by user.")
 
@@ -238,6 +245,7 @@ def main() -> None:
 
     # run-v2 — trading-day scheduler
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
+    p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
     p_run_v2.set_defaults(func=cmd_run_v2)
 
     # web — web UI with pipeline visualization

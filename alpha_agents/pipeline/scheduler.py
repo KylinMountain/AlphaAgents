@@ -24,8 +24,11 @@ def _is_trading_day(date: datetime | None = None) -> bool:
         with no_proxy():
             df = ak.tool_trade_date_hist_sina()
         date = date or datetime.now()
-        date_str = date.strftime("%Y%m%d")
-        return date_str in df["trade_date"].astype(str).values
+        trade_dates = set(df["trade_date"].astype(str).values)
+        # Try both formats: YYYY-MM-DD and YYYYMMDD
+        date_a = date.strftime("%Y-%m-%d")
+        date_b = date.strftime("%Y%m%d")
+        return date_a in trade_dates or date_b in trade_dates
     except Exception as e:
         logger.warning("Failed to check trading calendar, using weekday fallback: %s", e)
         return (date or datetime.now()).weekday() < 5

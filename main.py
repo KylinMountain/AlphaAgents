@@ -140,6 +140,44 @@ def cmd_run(args: argparse.Namespace) -> None:
             logging.info("Monitor stopped by user.")
 
 
+def cmd_run_v2(args: argparse.Namespace) -> None:
+    """Run AlphaAgents 2.0 with trading-day scheduler."""
+    _ensure_index()
+    _ensure_embeddings()
+
+    from datetime import time as dtime
+    from alpha_agents.pipeline.scheduler import Task, TradingDayScheduler
+    from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
+    from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
+    from alpha_agents.pipeline.tasks.review import run_review
+
+    scheduler = TradingDayScheduler()
+
+    # Morning scan: 06:30, trading days only
+    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(6, 30)))
+
+    # Intraday monitor: 09:30-15:00 every 15 min, trading days only
+    scheduler.add_task(Task(
+        "intraday_monitor", run_intraday_monitor,
+        dtime(9, 30), end_at=dtime(15, 0), interval_minutes=15,
+    ))
+
+    # Post-market review: 15:30, trading days only
+    scheduler.add_task(Task("review", run_review, dtime(15, 30)))
+
+    # Night scan: 20:00, every day (monitors foreign markets)
+    scheduler.add_task(Task(
+        "night_scan", run_morning_scan,  # Reuse morning scan logic for now
+        dtime(20, 0), trading_day_only=False,
+    ))
+
+    logging.info("Starting AlphaAgents 2.0 scheduler...")
+    try:
+        asyncio.run(scheduler.run())
+    except KeyboardInterrupt:
+        logging.info("Scheduler stopped by user.")
+
+
 def cmd_review(args: argparse.Namespace) -> None:
     """Run daily prediction review."""
     from alpha_agents.pipeline.daily_review import run_daily_review
@@ -190,6 +228,10 @@ def main() -> None:
     p_run.add_argument("--event", type=str, help="指定分析的事件（一次性分析，不启动监控）")
     p_run.add_argument("--interval", type=int, help="监控间隔（秒）")
     p_run.set_defaults(func=cmd_run)
+
+    # run-v2 — trading-day scheduler
+    p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
+    p_run_v2.set_defaults(func=cmd_run_v2)
 
     # web — web UI with pipeline visualization
     p_web = subparsers.add_parser("web", help="启动Web界面（实时Pipeline可视化）")

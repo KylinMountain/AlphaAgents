@@ -15,10 +15,49 @@ from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.stock_search import search_stocks_fn
+from alpha_agents.tools.stock_filter import filter_stocks_fn
+from alpha_agents.tools.global_market import get_global_overview_fn
+from alpha_agents.data.memory_store import upsert_theme
 from alpha_agents.agents.morning import run_morning_analysis
 from alpha_agents.notify import notify_all
 
 logger = logging.getLogger(__name__)
+
+
+def _fill_theme_stocks(theme_name: str) -> None:
+    """Search for core stocks for a newly discovered theme and update it."""
+    try:
+        result = json.loads(search_stocks_fn(keyword=theme_name))
+        all_codes = []
+        for concept in result.get("concepts", []):
+            for stock in concept.get("stocks", [])[:5]:
+                all_codes.append(stock["code"])
+
+        if not all_codes:
+            return
+
+        # Filter out ST/suspended
+        filtered = json.loads(filter_stocks_fn(stock_codes=all_codes[:20]))
+        kept = filtered.get("stocks", [])
+        if not kept:
+            return
+
+        # First stock as leader, rest as core
+        core_stocks = []
+        for i, s in enumerate(kept[:10]):
+            core_stocks.append({
+                "code": s["code"],
+                "name": s["name"],
+                "role": "龙头" if i == 0 else "核心",
+            })
+
+        leader = core_stocks[0]["code"] if core_stocks else None
+        upsert_theme(theme_name, core_stocks=core_stocks, leader_code=leader)
+        logger.info("  Filled %d stocks for '%s', leader=%s",
+                     len(core_stocks), theme_name, core_stocks[0]["name"] if core_stocks else "无")
+    except Exception as e:
+        logger.debug("Failed to fill stocks for '%s': %s", theme_name, e)
 
 
 def _format_themes(themes: list[dict]) -> str:
@@ -110,7 +149,9 @@ async def run_morning_scan() -> str | None:
                 gainer["sector"], signals,
                 catalyst=f"板块涨{gainer.get('change_pct', 0):.1f}%, 领涨{gainer.get('leader', '')}",
             ):
-                logger.info("Morning scan: discovered theme '%s'", gainer["sector"])
+                logger.info("Morning scan: discovered theme '%s', searching for stocks...", gainer["sector"])
+                # Fill in core stocks for the new theme
+                _fill_theme_stocks(gainer["sector"])
     except Exception as e:
         logger.debug("Morning scan theme discovery failed: %s", e)
 
@@ -127,10 +168,30 @@ async def run_morning_scan() -> str | None:
         logger.info("Morning scan: no significant events")
         return None
 
-    # 4. Run morning agent with context
+    # 4. Pre-fetch global market data
+    global_ctx = ""
+    try:
+        overview = json.loads(await asyncio.to_thread(get_global_overview_fn))
+        lines = []
+        for idx in overview.get("us_indices", []):
+            lines.append(f"  {idx['name']}: {idx['close']} ({idx['change_pct']:+.2f}%)")
+        bonds = overview.get("bond_yields", {})
+        if bonds.get("us_10y"):
+            lines.append(f"  美债10Y: {bonds['us_10y']}%")
+        if bonds.get("cn_us_spread"):
+            lines.append(f"  中美利差: {bonds['cn_us_spread']}%")
+        for sig in overview.get("signals", []):
+            lines.append(f"  信号: {sig}")
+        global_ctx = "【全球市场】\n" + "\n".join(lines) if lines else ""
+    except Exception as e:
+        logger.debug("Morning scan: global overview failed: %s", e)
+
+    # 5. Run morning agent with context
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
     events_ctx = _format_events(events)
+    if global_ctx:
+        events_ctx = global_ctx + "\n\n" + events_ctx
 
     report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
 

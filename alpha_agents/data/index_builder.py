@@ -6,6 +6,7 @@ from pathlib import Path
 import baostock as bs
 import pandas as pd
 import py_mini_racer
+import requests
 from bs4 import BeautifulSoup
 
 from akshare.datasets import get_ths_js
@@ -91,7 +92,7 @@ def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
 
     try:
         with no_proxy():
-            r = requests.get(url, headers=headers, timeout=15)
+            r = requests.get(url, headers=ths_headers, timeout=15)
     except Exception:
         return []
 

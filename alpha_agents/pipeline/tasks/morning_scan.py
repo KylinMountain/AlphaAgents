@@ -1,7 +1,7 @@
 """Morning scan task — runs at 06:30 before market open.
 
-Reads: overnight news, foreign markets, active theme lines
-Outputs: morning briefing report
+Fetches overnight news, reads memory context, and runs the morning
+analyst agent to produce a daily briefing.
 """
 
 import json
@@ -13,17 +13,65 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
+from alpha_agents.agents.morning import run_morning_analysis
+from alpha_agents.notify import notify_all
 
 logger = logging.getLogger(__name__)
+
+
+def _format_themes(themes: list[dict]) -> str:
+    """Format active themes into a readable context string."""
+    if not themes:
+        return "无活跃主线"
+    lines = []
+    for t in themes:
+        stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
+        leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
+        stock_names = ", ".join(s["name"] for s in stocks[:5])
+        lines.append(
+            f"- {t['name']}（强度 {t['strength']}/10, {t['status']}）\n"
+            f"  龙头: {leader} | 标的: {stock_names}\n"
+            f"  催化: {t.get('catalyst', '无')}"
+        )
+    return "\n".join(lines)
+
+
+def _format_stats(stats: dict) -> str:
+    """Format prediction stats into readable text."""
+    total = stats.get("total", 0)
+    if total == 0:
+        return "暂无预测记录"
+    hit_rate = stats.get("hit_rate", 0)
+    hits = stats.get("hits", 0)
+    by_conf = stats.get("by_confidence", {})
+    lines = [f"近7天命中率: {hit_rate:.1f}% ({hits}/{total})"]
+    for conf, data in by_conf.items():
+        lines.append(f"  {conf}信心: {data['hit_rate']:.1f}% ({data['hits']}/{data['total']})")
+    return "\n".join(lines)
+
+
+def _format_events(events: list[dict]) -> str:
+    """Format digested events into readable text."""
+    if not events:
+        return "无重要事件"
+    lines = []
+    for e in events:
+        lines.append(
+            f"- [{e.get('category', '?')}] {e.get('event', '?')} "
+            f"(重要性 {e.get('importance', 0)}/5, {e.get('credibility', '?')})\n"
+            f"  摘要: {e.get('summary', '')[:100]}"
+        )
+    return "\n".join(lines)
 
 
 async def run_morning_scan() -> str | None:
     """Execute the morning scan task.
 
     1. Fetch overnight news from all sources
-    2. Read active theme lines and market cognition
-    3. Digest news with theme context
-    4. Generate morning briefing
+    2. Read active theme lines, stats, cognition from memory
+    3. Digest news into events
+    4. Run morning analyst agent with full context
+    5. Push notification
 
     Returns the morning report text, or None if nothing significant.
     """
@@ -31,7 +79,7 @@ async def run_morning_scan() -> str | None:
 
     logger.info("Morning scan starting...")
 
-    # 1. Fetch news from all sources (reuse existing infrastructure)
+    # 1. Fetch news from all sources
     news_items = []
     for source_id, name, fetch_fn_factory in NEWS_SOURCES:
         try:
@@ -39,7 +87,6 @@ async def run_morning_scan() -> str | None:
             data = json.loads(raw)
             items = data.get("news", [])
             news_items.extend(items)
-            logger.debug("Morning scan: %d items from %s", len(items), name)
         except Exception as e:
             logger.debug("Morning scan: %s unavailable: %s", name, e)
 
@@ -47,42 +94,36 @@ async def run_morning_scan() -> str | None:
         logger.info("Morning scan: no news items")
         return None
 
-    # 2. Read memory for context
+    # 2. Read memory
     themes = get_active_themes()
     stats = get_prediction_stats(days=7)
     cognition = get_all_cognition_latest()
 
-    logger.info("Morning scan: %d news items, %d active themes, hit rate=%.1f%%",
-                len(news_items), len(themes), stats.get("hit_rate", 0))
+    logger.info("Morning scan: %d news items, %d active themes", len(news_items), len(themes))
 
-    # 3. Digest news (reuse existing cheap LLM filtering)
+    # 3. Digest news
     events = await digest_news(news_items)
-
     if not events:
-        logger.info("Morning scan: no significant events after digest")
+        logger.info("Morning scan: no significant events")
         return None
 
-    # 4. Generate morning report
-    # TODO Phase 3: Replace with morning_scan Agent that uses memory context
-    report_lines = [
-        f"=== AlphaAgents 晨报 | {time.strftime('%Y-%m-%d')} ===",
-        "",
-        "【活跃主线】",
-    ]
-    for t in themes[:5]:
-        stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
-        leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
-        report_lines.append(f"  {t['name']}（强度 {t['strength']}/10, {t['status']}）— 龙头: {leader}")
+    # 4. Run morning agent with context
+    themes_ctx = _format_themes(themes)
+    stats_ctx = _format_stats(stats)
+    events_ctx = _format_events(events)
 
-    report_lines.append("")
-    report_lines.append(f"【预测命中率（近7天）】{stats.get('hit_rate', 0):.1f}% ({stats.get('hits', 0)}/{stats.get('total', 0)})")
+    report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
 
-    report_lines.append("")
-    report_lines.append("【今日事件】")
-    for e in events[:5]:
-        report_lines.append(f"  [{e.get('category', '?')}] {e.get('event', '?')} — 重要性 {e.get('importance', 0)}/5")
+    # 5. Push notification
+    if report and not report.startswith("["):
+        try:
+            await asyncio.to_thread(
+                notify_all,
+                f"AlphaAgents 晨报 | {time.strftime('%m-%d')}",
+                report[:500],
+            )
+        except Exception as e:
+            logger.debug("Morning notification failed: %s", e)
 
-    report = "\n".join(report_lines)
-    logger.info("Morning scan complete: %d events, report length=%d", len(events), len(report))
-
+    print(report)
     return report

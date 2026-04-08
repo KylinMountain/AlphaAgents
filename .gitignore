@@ -193,7 +193,8 @@ cython_debug/
 *.db
 
 # ChromaDB local vector store
-alpha_agents/data/chroma/
+data/chroma/
+data/concept_cache.json
 
 # Ruff stuff:
 .ruff_cache/

@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-DATA_DIR = PROJECT_ROOT / "alpha_agents" / "data"
+DATA_DIR = PROJECT_ROOT / "data"
 PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"

@@ -150,6 +150,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
     from alpha_agents.pipeline.tasks.review import run_review
+    from alpha_agents.pipeline.tasks.night_scan import run_night_scan
     from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
     scheduler = TradingDayScheduler()
@@ -168,7 +169,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
     # Night scan: 20:00, every day (monitors foreign markets)
     scheduler.add_task(Task(
-        "night_scan", run_morning_scan,  # Reuse morning scan logic for now
+        "night_scan", run_night_scan,
         dtime(20, 0), trading_day_only=False,
     ))
 
@@ -185,7 +186,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             "morning": run_morning_scan,
             "intraday": run_intraday_monitor,
             "review": run_review,
-            "night": run_morning_scan,
+            "night": run_night_scan,
             "weekly": run_weekly_report,
         }
         fn = task_map.get(task_name)

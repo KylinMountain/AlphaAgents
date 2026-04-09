@@ -28,7 +28,7 @@ from alpha_agents.agents.morning import run_morning_analysis
 from alpha_agents.agents.cross_validate import run_cross_validation
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
-from alpha_agents.data.portfolio import open_position
+from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone, parse_stop_loss
 
 logger = logging.getLogger(__name__)
 
@@ -349,13 +349,6 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
     return validated
 
 
-def _parse_stop_loss(action_text: str) -> float | None:
-    """Extract stop loss price from action text like '止损50元' or '止损50.5'."""
-    match = re.search(r"止损[：:\s]*(\d+\.?\d*)\s*元?", action_text)
-    if match:
-        return float(match.group(1))
-    return None
-
 
 def _save_recommendations_list(recs: list[dict]) -> None:
     """Save pre-validated recommendations as predictions, fetching entry prices."""
@@ -397,21 +390,24 @@ def _save_recommendations_list(recs: list[dict]) -> None:
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",
                         code, r.get("name", ""), r.get("confidence", ""),
                         entry_prices.get(code, 0) or 0)
-            # Open virtual position
+            # Create pending order (挂单，等价格回调到介入区间再建仓)
             try:
-                stop_loss_val = _parse_stop_loss(r.get("action", ""))
-                open_position(
+                action = r.get("action", "")
+                entry_low, entry_high = parse_entry_zone(action)
+                stop_loss_val = parse_stop_loss(action)
+                create_pending_order(
                     code=code,
                     name=r.get("name", ""),
                     theme=r.get("theme", ""),
-                    open_date=today,
-                    open_price=entry_prices.get(code) or 0,
+                    order_date=today,
+                    entry_low=entry_low,
+                    entry_high=entry_high,
                     stop_loss=stop_loss_val,
                     source="morning",
                     reason=r.get("reason", "")[:100],
                 )
             except Exception as e:
-                logger.debug("Failed to open position for %s: %s", code, e)
+                logger.debug("Failed to create pending order for %s: %s", code, e)
         except Exception as e:
             logger.debug("Failed to save prediction for %s: %s", code, e)
 

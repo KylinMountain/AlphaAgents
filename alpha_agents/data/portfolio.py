@@ -1,12 +1,16 @@
-"""Virtual portfolio — track recommendations from open to close.
+"""Virtual portfolio — pending orders → triggered fills → stop/target close.
 
-Simulates holding positions with stop-loss/take-profit monitoring.
-T+1 constraint: positions opened today are not checked until tomorrow.
+Lifecycle:
+  pending (挂单) → open (建仓) → stopped/target_hit/expired (平仓)
+                 → cancelled (挂单过期/涨走了)
+
 Capital management: 10万 total, 100-share lots, position limits.
+T+1 constraint: positions opened today are not checked until tomorrow.
+A-share rules: buy in multiples of 100 shares.
 """
 
-import json
 import logging
+import re
 from datetime import datetime
 
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
@@ -14,6 +18,7 @@ from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_
 logger = logging.getLogger(__name__)
 
 MAX_HOLDING_DAYS = 5
+PENDING_EXPIRE_DAYS = 2  # 挂单有效期（交易日）
 
 # ── Capital Management ──────────────────────────────────────
 TOTAL_CAPITAL = 100_000          # 总资金 10万
@@ -33,7 +38,7 @@ def _calc_shares(price: float, max_amount: float) -> int:
 
 
 def get_available_capital() -> float:
-    """Get remaining cash = total capital - sum of open position market values (at open_price)."""
+    """Get remaining cash = total capital - sum of open position costs."""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT open_price, shares FROM virtual_portfolio WHERE status = 'open'"
@@ -52,84 +57,209 @@ def get_theme_exposure(theme: str) -> float:
     return sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
 
 
-def open_position(
+# ── Pending Orders (挂单) ───────────────────────────────────
+
+def create_pending_order(
     *,
     code: str,
     name: str,
     theme: str,
-    open_date: str,
-    open_price: float,
+    order_date: str,
+    entry_low: float | None = None,
+    entry_high: float | None = None,
     stop_loss: float | None = None,
     target_price: float | None = None,
     source: str = "morning",
     reason: str = "",
 ) -> int | None:
-    """Open a virtual position with capital management.
+    """Create a pending order (挂单). Triggered when price enters entry zone.
 
-    Rules:
-    - Buy in lots of 100 shares
-    - Single position max 15% of total capital
-    - Same theme max 30% of total capital
-    - Must have enough available cash
-    Returns position id, or None if rejected.
+    Returns order id, or None if duplicate/rejected.
     """
-    if open_price <= 0:
-        logger.info("Skipping %s %s: invalid price %.2f", code, name, open_price)
-        return None
-
     with _write_lock:
         conn = _get_conn()
-        # Check for existing open position on same stock
+        # No duplicate: same stock pending or open
         existing = conn.execute(
-            "SELECT id FROM virtual_portfolio WHERE code = ? AND status = 'open'",
+            "SELECT id FROM virtual_portfolio WHERE code = ? AND status IN ('pending', 'open')",
             (code,),
         ).fetchone()
         if existing:
-            logger.info("Position already open for %s %s, skipping", code, name)
-            return None
-
-    # Capital checks (outside write lock to avoid deadlock with get_available_capital)
-    available = get_available_capital()
-    max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
-    max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
-
-    # Take the minimum of all constraints
-    max_amount = min(available, max_per_stock, max(0, max_for_theme))
-    shares = _calc_shares(open_price, max_amount)
-
-    if shares == 0:
-        cost_1lot = open_price * LOT_SIZE
-        logger.info("Skipping %s %s: can't afford 1 lot (need %.0f, available %.0f, "
-                     "stock_limit %.0f, theme_limit %.0f)",
-                     code, name, cost_1lot, available, max_per_stock, max_for_theme)
-        return None
-
-    cost = shares * open_price
-
-    with _write_lock:
-        conn = _get_conn()
-        # Re-check duplicate inside lock
-        existing = conn.execute(
-            "SELECT id FROM virtual_portfolio WHERE code = ? AND status = 'open'",
-            (code,),
-        ).fetchone()
-        if existing:
+            logger.info("Order/position already exists for %s %s, skipping", code, name)
             return None
 
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "
-            "(code, name, theme, open_date, open_price, shares, stop_loss, target_price, "
-            " status, source, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-            (code, name, theme, open_date, open_price, shares, stop_loss, target_price,
-             source, reason),
+            "(code, name, theme, order_date, entry_low, entry_high, "
+            " stop_loss, target_price, expire_days, status, source, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (code, name, theme, order_date, entry_low, entry_high,
+             stop_loss, target_price, PENDING_EXPIRE_DAYS, source, reason),
         )
         conn.commit()
-        remaining = available - cost
-        logger.info("Opened position: %s %s %d股 @ %.2f = %.0f元 (止损%.2f) | 剩余资金%.0f",
-                     code, name, shares, open_price, cost,
-                     stop_loss or 0, remaining)
+
+        zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
+        logger.info("Pending order: %s %s 介入区间%s 止损%s (%s)",
+                     code, name, zone, stop_loss or "无", source)
         return cursor.lastrowid
+
+
+def check_pending_orders(
+    realtime_prices: dict[str, float],
+    today: str,
+) -> list[dict]:
+    """Check pending orders against realtime prices. Fill if price in entry zone.
+
+    Returns list of fill alerts.
+    """
+    conn = _get_conn()
+    orders = conn.execute(
+        "SELECT * FROM virtual_portfolio WHERE status = 'pending'"
+    ).fetchall()
+
+    alerts = []
+    for order in orders:
+        order = dict(order)
+        code = order["code"]
+        price = realtime_prices.get(code)
+
+        # Check expiry first
+        try:
+            order_dt = datetime.strptime(order["order_date"], "%Y-%m-%d")
+            today_dt = datetime.strptime(today, "%Y-%m-%d")
+            days_pending = (today_dt - order_dt).days
+        except ValueError:
+            days_pending = 0
+
+        expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
+        if days_pending > expire_days:
+            _cancel_order(order["id"], f"挂单过期({days_pending}天未触发)")
+            alerts.append({
+                "type": "cancelled",
+                "code": code,
+                "name": order.get("name", ""),
+                "reason": f"挂单过期({days_pending}天)",
+            })
+            continue
+
+        if price is None or price <= 0:
+            continue
+
+        entry_low = order.get("entry_low")
+        entry_high = order.get("entry_high")
+
+        # Check if price has run away (> 5% above entry_high)
+        if entry_high and price > entry_high * 1.05:
+            _cancel_order(order["id"], f"价格已涨走({price:.2f}远超介入上限{entry_high:.2f})")
+            alerts.append({
+                "type": "cancelled",
+                "code": code,
+                "name": order.get("name", ""),
+                "reason": f"价格涨走({price:.2f})",
+            })
+            continue
+
+        # Check if price is in entry zone
+        triggered = False
+        if entry_low and entry_high:
+            triggered = entry_low <= price <= entry_high
+        elif entry_high:
+            # Only upper bound: buy at or below
+            triggered = price <= entry_high
+        elif entry_low:
+            # Only lower bound: buy at or above (breakout style)
+            triggered = price >= entry_low
+        else:
+            # No zone specified: trigger immediately (market order)
+            triggered = True
+
+        if triggered:
+            fill_alert = _fill_order(order, fill_price=price, fill_date=today)
+            if fill_alert:
+                alerts.append(fill_alert)
+
+    return alerts
+
+
+def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
+    """Convert a pending order to an open position at fill_price."""
+    code = order["code"]
+    name = order.get("name", "")
+    theme = order.get("theme", "")
+
+    # Capital checks
+    available = get_available_capital()
+    max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
+    max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
+    max_amount = min(available, max_per_stock, max(0, max_for_theme))
+
+    shares = _calc_shares(fill_price, max_amount)
+    if shares == 0:
+        _cancel_order(order["id"], f"资金不足(需{fill_price * LOT_SIZE:.0f}元/手, 可用{max_amount:.0f}元)")
+        return {
+            "type": "cancelled",
+            "code": code,
+            "name": name,
+            "reason": f"资金不足",
+        }
+
+    cost = shares * fill_price
+
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE virtual_portfolio SET "
+            "status = 'open', open_date = ?, open_price = ?, shares = ? "
+            "WHERE id = ?",
+            (fill_date, fill_price, shares, order["id"]),
+        )
+        conn.commit()
+
+    remaining = available - cost
+    logger.info("Order filled: %s %s %d股 @ %.2f = %.0f元 (止损%s) | 剩余%.0f",
+                 code, name, shares, fill_price, cost,
+                 order.get("stop_loss") or "无", remaining)
+
+    return {
+        "type": "filled",
+        "code": code,
+        "name": name,
+        "shares": shares,
+        "fill_price": fill_price,
+        "cost": cost,
+        "stop_loss": order.get("stop_loss"),
+    }
+
+
+def _cancel_order(order_id: int, reason: str) -> None:
+    """Cancel a pending order."""
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE virtual_portfolio SET status = 'cancelled', close_reason = ? WHERE id = ?",
+            (reason, order_id),
+        )
+        conn.commit()
+    logger.info("Cancelled order #%d: %s", order_id, reason)
+
+
+def get_pending_orders() -> list[dict]:
+    """Get all pending orders."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM virtual_portfolio WHERE status = 'pending' ORDER BY order_date"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Open Positions ──────────────────────────────────────────
+
+def get_open_positions() -> list[dict]:
+    """Get all currently open (filled) positions."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM virtual_portfolio WHERE status = 'open' ORDER BY open_date"
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def close_position(
@@ -138,17 +268,17 @@ def close_position(
     close_price: float,
     close_reason: str,
 ) -> None:
-    """Close a virtual position."""
+    """Close an open position."""
     with _write_lock:
         conn = _get_conn()
         row = conn.execute(
-            "SELECT open_price, shares, open_date, peak_return_pct FROM virtual_portfolio WHERE id = ?",
+            "SELECT open_price, shares FROM virtual_portfolio WHERE id = ?",
             (position_id,),
         ).fetchone()
         if not row:
             return
 
-        open_price = row["open_price"]
+        open_price = row["open_price"] or 0
         shares = row["shares"] or 0
         return_pct = round((close_price - open_price) / open_price * 100, 2) if open_price else 0
         return_amount = round((close_price - open_price) * shares, 2)
@@ -162,7 +292,7 @@ def close_position(
              return_amount, close_reason, position_id),
         )
         conn.commit()
-        logger.info("Closed position #%d: %d股 @ %.2f → %.2f (%+.2f%%, %+.0f元) %s",
+        logger.info("Closed #%d: %d股 @ %.2f → %.2f (%+.2f%%, %+.0f元) %s",
                      position_id, shares, open_price, close_price,
                      return_pct, return_amount, close_reason)
 
@@ -175,20 +305,11 @@ def _status_from_reason(reason: str) -> str:
     return "expired"
 
 
-def get_open_positions() -> list[dict]:
-    """Get all currently open positions."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'open' ORDER BY open_date"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def check_positions(
     realtime_prices: dict[str, float],
     today: str,
 ) -> list[dict]:
-    """Check open positions against realtime prices. Returns list of alerts.
+    """Check open positions for stop-loss/take-profit/expiry.
 
     Respects T+1: skips positions where open_date == today.
     """
@@ -206,14 +327,13 @@ def check_positions(
         if price is None or price <= 0:
             continue
 
-        open_price = pos["open_price"]
+        open_price = pos["open_price"] or 0
         current_return = round((price - open_price) / open_price * 100, 2) if open_price else 0
 
         # Update peak and drawdown
         peak = max(pos.get("peak_return_pct", 0) or 0, current_return)
         drawdown = round(peak - current_return, 2) if peak > 0 else 0
 
-        # Count holding days (simple: business days between open_date and today)
         try:
             open_dt = datetime.strptime(pos["open_date"], "%Y-%m-%d")
             today_dt = datetime.strptime(today, "%Y-%m-%d")
@@ -221,7 +341,6 @@ def check_positions(
         except ValueError:
             holding_days = pos.get("holding_days", 0)
 
-        # Update tracking fields
         with _write_lock:
             conn.execute(
                 "UPDATE virtual_portfolio SET peak_return_pct = ?, "
@@ -248,12 +367,16 @@ def check_positions(
 
         if alert:
             close_position(pos["id"], close_price=price, close_reason=alert["reason"])
+            shares = pos.get("shares", 0)
+            pnl = round((price - open_price) * shares, 2) if shares else 0
             alert.update({
                 "code": code,
                 "name": pos.get("name", ""),
+                "shares": shares,
                 "open_price": open_price,
                 "close_price": price,
                 "return_pct": current_return,
+                "return_amount": pnl,
                 "holding_days": holding_days,
             })
             alerts.append(alert)
@@ -261,50 +384,86 @@ def check_positions(
     return alerts
 
 
+# ── Summaries ───────────────────────────────────────────────
+
 def get_open_positions_summary() -> str:
-    """Format open positions as text for agent context."""
+    """Format open positions + pending orders for agent context."""
     positions = get_open_positions()
+    pending = get_pending_orders()
     available = get_available_capital()
     invested = TOTAL_CAPITAL - available
-    if not positions:
-        return f"当前无持仓 | 可用资金 {available:,.0f}元 / 总资金 {TOTAL_CAPITAL:,.0f}元"
+
     lines = [f"总资金 {TOTAL_CAPITAL:,.0f}元 | 已投 {invested:,.0f}元 | 可用 {available:,.0f}元"]
-    for p in positions:
-        shares = p.get('shares', 0)
-        cost = (p['open_price'] or 0) * shares
-        lines.append(
-            f"  {p['code']} {p.get('name','')} {shares}股 @ {p['open_price']:.2f} "
-            f"(持仓{cost:,.0f}元) | 止损{p.get('stop_loss') or '无'} | "
-            f"持仓{p.get('holding_days', 0)}天"
-        )
-    return f"当前持仓 {len(positions)} 笔:\n" + "\n".join(lines)
+
+    if pending:
+        lines.append(f"挂单中 {len(pending)} 笔:")
+        for p in pending:
+            zone = ""
+            if p.get("entry_low") and p.get("entry_high"):
+                zone = f"{p['entry_low']:.2f}-{p['entry_high']:.2f}"
+            elif p.get("entry_high"):
+                zone = f"≤{p['entry_high']:.2f}"
+            elif p.get("entry_low"):
+                zone = f"≥{p['entry_low']:.2f}"
+            lines.append(
+                f"  {p['code']} {p.get('name','')} | 介入区间{zone} | "
+                f"止损{p.get('stop_loss') or '无'} | 挂单日{p['order_date']}"
+            )
+
+    if positions:
+        lines.append(f"持仓中 {len(positions)} 笔:")
+        for p in positions:
+            shares = p.get('shares', 0)
+            cost = (p['open_price'] or 0) * shares
+            lines.append(
+                f"  {p['code']} {p.get('name','')} {shares}股 @ {p['open_price']:.2f} "
+                f"(市值{cost:,.0f}元) | 止损{p.get('stop_loss') or '无'} | "
+                f"持仓{p.get('holding_days', 0)}天"
+            )
+
+    if not pending and not positions:
+        lines.append("无挂单/持仓")
+
+    return "\n".join(lines)
 
 
 def get_today_changes_summary(today: str) -> str:
     """Format today's portfolio changes for agent context."""
     conn = _get_conn()
-    opened = conn.execute(
-        "SELECT code, name, open_price, source FROM virtual_portfolio WHERE open_date = ?",
+    filled = conn.execute(
+        "SELECT code, name, open_price, shares, source "
+        "FROM virtual_portfolio WHERE open_date = ? AND status = 'open'",
         (today,),
     ).fetchall()
     closed = conn.execute(
-        "SELECT code, name, close_price, return_pct, close_reason "
+        "SELECT code, name, shares, close_price, return_pct, return_amount, close_reason "
         "FROM virtual_portfolio WHERE close_date = ?",
+        (today,),
+    ).fetchall()
+    new_pending = conn.execute(
+        "SELECT code, name, entry_low, entry_high, source "
+        "FROM virtual_portfolio WHERE order_date = ? AND status = 'pending'",
         (today,),
     ).fetchall()
 
     lines = []
-    if opened:
-        lines.append(f"今日建仓 {len(opened)} 笔:")
-        for r in opened:
-            lines.append(f"  {r['code']} {r['name']} @ {r['open_price']:.2f} ({r['source']})")
+    if new_pending:
+        lines.append(f"今日新挂单 {len(new_pending)} 笔:")
+        for r in new_pending:
+            lines.append(f"  {r['code']} {r['name']} 介入区间{r.get('entry_low','?')}-{r.get('entry_high','?')} ({r['source']})")
+    if filled:
+        lines.append(f"今日成交 {len(filled)} 笔:")
+        for r in filled:
+            cost = (r['open_price'] or 0) * (r['shares'] or 0)
+            lines.append(f"  {r['code']} {r['name']} {r['shares']}股 @ {r['open_price']:.2f} = {cost:,.0f}元")
     if closed:
         lines.append(f"今日平仓 {len(closed)} 笔:")
         for r in closed:
             ret = r['return_pct'] or 0
+            amt = r['return_amount'] or 0
             lines.append(
-                f"  {r['code']} {r['name']} @ {r['close_price']:.2f} "
-                f"({'盈' if ret >= 0 else '亏'}{abs(ret):.1f}%) — {r['close_reason']}"
+                f"  {r['code']} {r['name']} {r.get('shares',0)}股 @ {r['close_price']:.2f} "
+                f"({'盈' if ret >= 0 else '亏'}{abs(ret):.1f}%, {amt:+,.0f}元) — {r['close_reason']}"
             )
     return "\n".join(lines) if lines else "今日无持仓变动"
 
@@ -313,7 +472,7 @@ def get_portfolio_stats(days: int = 7) -> dict:
     """Get portfolio performance statistics for recent N days."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status != 'open' "
+        "SELECT * FROM virtual_portfolio WHERE status NOT IN ('open', 'pending', 'cancelled') "
         "ORDER BY close_date DESC LIMIT ?",
         (days * 10,),
     ).fetchall()
@@ -322,6 +481,7 @@ def get_portfolio_stats(days: int = 7) -> dict:
         return {
             "total_closed": 0, "wins": 0, "losses": 0, "win_rate": 0,
             "avg_return": 0, "max_win": 0, "max_loss": 0,
+            "total_profit": 0,
             "avg_holding_days": 0, "by_theme": {}, "by_source": {},
         }
 
@@ -331,7 +491,6 @@ def get_portfolio_stats(days: int = 7) -> dict:
     wins = sum(1 for ret in returns if ret > 0)
     losses = sum(1 for ret in returns if ret <= 0)
 
-    # By theme
     by_theme: dict[str, list[float]] = {}
     for r in rows:
         theme = r["theme"] or "未知"
@@ -345,7 +504,6 @@ def get_portfolio_stats(days: int = 7) -> dict:
             "avg_return": round(sum(rets) / len(rets), 2),
         }
 
-    # By source
     by_source: dict[str, list[float]] = {}
     for r in rows:
         src = r["source"] or "未知"
@@ -399,3 +557,40 @@ def format_portfolio_stats(stats: dict) -> str:
             lines.append(f"  {src}: {ss['count']}笔, 胜率{ss['win_rate']:.0f}%, 均收{ss['avg_return']:+.2f}%")
 
     return "\n".join(lines)
+
+
+# ── Helpers ─────────────────────────────────────────────────
+
+def parse_entry_zone(action_text: str) -> tuple[float | None, float | None]:
+    """Parse entry zone from action text.
+
+    Examples:
+        "回调至342.0元不破可介入" → (None, 342.0)
+        "介入区间329.83-337.00元" → (329.83, 337.0)
+        "放量突破497.0元确认后跟进" → (497.0, None)
+        "回调至53.5元附近可介入，止损52.0元" → (None, 53.5)
+    """
+    # Pattern: 介入区间 X-Y
+    m = re.search(r"介入区间[：:\s]*(\d+\.?\d*)\s*[-–~]\s*(\d+\.?\d*)", action_text)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # Pattern: 回调至X元 → entry_high = X (buy at or below)
+    m = re.search(r"回调至[：:\s]*(\d+\.?\d*)\s*元", action_text)
+    if m:
+        return None, float(m.group(1))
+
+    # Pattern: 突破X元 → entry_low = X (buy at or above)
+    m = re.search(r"突破[：:\s]*(\d+\.?\d*)\s*元", action_text)
+    if m:
+        return float(m.group(1)), None
+
+    return None, None
+
+
+def parse_stop_loss(action_text: str) -> float | None:
+    """Extract stop loss price from action text."""
+    m = re.search(r"止损[：:\s]*(\d+\.?\d*)\s*元?", action_text)
+    if m:
+        return float(m.group(1))
+    return None

@@ -73,12 +73,19 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     code TEXT NOT NULL,
     name TEXT,
     theme TEXT,
-    open_date TEXT NOT NULL,
-    open_price REAL NOT NULL,
+    -- Pending order fields (set at recommendation time)
+    order_date TEXT NOT NULL,             -- 挂单日
+    entry_low REAL,                       -- 介入区间下限
+    entry_high REAL,                      -- 介入区间上限
+    stop_loss REAL,                       -- 止损价
+    target_price REAL,                    -- 止盈目标价
+    expire_days INTEGER DEFAULT 2,        -- 挂单有效天数
+    -- Fill fields (set when order triggers)
+    open_date TEXT,                        -- 实际建仓日
+    open_price REAL,                       -- 实际建仓价
     shares INTEGER DEFAULT 0,
-    stop_loss REAL,
-    target_price REAL,
-    status TEXT DEFAULT 'open',
+    -- Status: pending → open → stopped/target_hit/expired/cancelled
+    status TEXT DEFAULT 'pending',
     close_date TEXT,
     close_price REAL,
     holding_days INTEGER DEFAULT 0,

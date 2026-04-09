@@ -19,7 +19,11 @@ from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.agents.intraday import run_intraday_analysis
 from alpha_agents.notify import notify_all
-from alpha_agents.data.portfolio import open_position, check_positions, get_open_positions
+from alpha_agents.data.portfolio import (
+    create_pending_order, check_pending_orders, check_positions,
+    get_open_positions, get_pending_orders,
+    parse_entry_zone, parse_stop_loss,
+)
 from alpha_agents.data.market_data import get_realtime_quotes
 
 logger = logging.getLogger(__name__)
@@ -124,22 +128,38 @@ async def run_intraday_monitor() -> str | None:
         logger.info("Intraday monitor: lunch break, skipping")
         return None
 
-    # ── Check existing positions (T+1 constraint handled by check_positions) ──
+    # ── Portfolio monitoring: check pending orders + open positions ──
     today_str = now.strftime("%Y-%m-%d")
+    pending = get_pending_orders()
     open_pos = get_open_positions()
-    if open_pos:
-        codes = [p["code"] for p in open_pos]
-        rt_prices = await asyncio.to_thread(get_realtime_quotes, codes)
+    all_codes = list({p["code"] for p in pending + open_pos})
+
+    if all_codes:
+        rt_prices = await asyncio.to_thread(get_realtime_quotes, all_codes)
         if rt_prices:
             price_map = {code: data["price"] for code, data in rt_prices.items()}
-            alerts = check_positions(realtime_prices=price_map, today=today_str)
-            for alert in alerts:
-                msg = _format_portfolio_alert(alert)
-                logger.info("Portfolio alert: %s", msg)
-                try:
-                    await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
-                except Exception:
-                    pass
+
+            # Check pending orders — fill if price hits entry zone
+            if pending:
+                fill_alerts = check_pending_orders(realtime_prices=price_map, today=today_str)
+                for alert in fill_alerts:
+                    msg = _format_order_alert(alert)
+                    logger.info("Order alert: %s", msg)
+                    try:
+                        await asyncio.to_thread(notify_all, "AlphaAgents 订单提醒", msg)
+                    except Exception:
+                        pass
+
+            # Check open positions — stop loss / take profit / expiry
+            if open_pos:
+                pos_alerts = check_positions(realtime_prices=price_map, today=today_str)
+                for alert in pos_alerts:
+                    msg = _format_portfolio_alert(alert)
+                    logger.info("Portfolio alert: %s", msg)
+                    try:
+                        await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
+                    except Exception:
+                        pass
 
     themes = get_active_themes()
     if not themes:
@@ -232,12 +252,18 @@ async def run_intraday_monitor() -> str | None:
     return None
 
 
-def _parse_stop_loss(action_text: str) -> float | None:
-    """Extract stop loss price from action text like '止损50元' or '止损50.5'."""
-    match = re.search(r"止损[：:\s]*(\d+\.?\d*)\s*元?", action_text)
-    if match:
-        return float(match.group(1))
-    return None
+def _format_order_alert(alert: dict) -> str:
+    """Format a pending order alert (filled or cancelled)."""
+    code = alert["code"]
+    name = alert.get("name", "")
+    if alert["type"] == "filled":
+        shares = alert.get("shares", 0)
+        price = alert.get("fill_price", 0)
+        cost = alert.get("cost", 0)
+        return f"挂单成交 | {code} {name} {shares}股 @ {price:.2f}元 = {cost:,.0f}元"
+    else:
+        reason = alert.get("reason", "")
+        return f"挂单取消 | {code} {name} — {reason}"
 
 
 def _format_portfolio_alert(alert: dict) -> str:
@@ -303,22 +329,25 @@ def _save_intraday_recommendations(report: str) -> None:
             tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
             logger.info("  Saved intraday %s: %s %s @ %.2f",
                         tag, code, r.get("name", ""), entry_price or 0)
-            # Open virtual position for actionable recommendations (not signals)
-            if rec_type != "signal" and entry_price:
+            # Create pending order for actionable recommendations (not signals)
+            if rec_type != "signal":
                 try:
-                    stop_loss_val = _parse_stop_loss(r.get("action", ""))
-                    open_position(
+                    action = r.get("action", "")
+                    entry_low, entry_high = parse_entry_zone(action)
+                    stop_loss_val = parse_stop_loss(action)
+                    create_pending_order(
                         code=code,
                         name=r.get("name", ""),
                         theme=r.get("theme", ""),
-                        open_date=today,
-                        open_price=entry_price,
+                        order_date=today,
+                        entry_low=entry_low,
+                        entry_high=entry_high,
                         stop_loss=stop_loss_val,
                         source="intraday",
                         reason=r.get("reason", "")[:100],
                     )
                 except Exception as e:
-                    logger.debug("Failed to open intraday position for %s: %s", code, e)
+                    logger.debug("Failed to create pending order for %s: %s", code, e)
         except Exception as e:
             logger.debug("Failed to save intraday prediction for %s: %s", code, e)
 

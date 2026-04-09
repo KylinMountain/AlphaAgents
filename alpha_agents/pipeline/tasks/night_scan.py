@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 from alpha_agents.config import (
     PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
-from alpha_agents.data.memory_store import get_active_themes
+from alpha_agents.data.memory_store import get_active_themes, get_prediction_stats
 from alpha_agents.tools.registry import (
     get_global_overview, get_us_market, get_bond_yields,
     get_pizzint, web_search,
@@ -83,6 +83,21 @@ async def run_night_scan() -> str | None:
     themes = get_active_themes()
     themes_ctx = _format_themes(themes)
 
+    # 2b. Prediction stats (recent 7 days)
+    pred_ctx = ""
+    try:
+        stats = get_prediction_stats(days=7)
+        if stats.get("total", 0) > 0:
+            lines = [
+                f"总推荐: {stats['total']}次, 命中: {stats['hits']}次, "
+                f"命中率: {stats.get('hit_rate', 0):.1f}%"
+            ]
+            for conf, data in stats.get("by_confidence", {}).items():
+                lines.append(f"  {conf}信心: {data['hit_rate']:.1f}% ({data['hits']}/{data['total']})")
+            pred_ctx = "【近7日预测统计】\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug("Night scan: prediction stats failed: %s", e)
+
     # 3. Run night agent
     prompt_text = (PROMPTS_DIR / "night_scan.md").read_text(encoding="utf-8")
     agent = Agent(
@@ -93,12 +108,15 @@ async def run_night_scan() -> str | None:
     )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_message = (
-        f"[当前时间: {now}]\n\n"
-        f"{global_ctx}\n\n"
-        f"【当前活跃主线】\n{themes_ctx}\n\n"
-        f"请生成今日夜报，分析外盘对明日A股的影响。"
-    )
+    context_parts = [
+        f"[当前时间: {now}]",
+        global_ctx,
+        f"【当前活跃主线】\n{themes_ctx}",
+    ]
+    if pred_ctx:
+        context_parts.append(pred_ctx)
+    context_parts.append("请生成今日夜报，分析外盘对明日A股的影响。")
+    user_message = "\n\n".join(context_parts)
 
     logger.info("Night agent starting...")
     try:
@@ -115,16 +133,36 @@ async def run_night_scan() -> str | None:
         logger.error("Night agent failed: %s", e)
         return None
 
-    # 4. Push notification
+    # 4. Conditional push — only push if market moves are significant
     if report:
+        # Determine significance: check US index moves or keywords in report
+        significant = False
         try:
-            await asyncio.to_thread(
-                notify_all,
-                f"AlphaAgents 夜报 | {time.strftime('%m-%d')}",
-                report[:500],
-            )
+            for idx in overview.get("us_indices", []):
+                if abs(idx.get("change_pct", 0)) >= 1.5:
+                    significant = True
+                    break
         except Exception:
             pass
+        # Also check report text for high-impact keywords
+        high_impact_kw = ("重大", "剧烈", "暴跌", "暴涨", "熔断", "危机")
+        low_impact_kw = ("影响有限", "平稳", "波澜不惊")
+        if any(kw in report for kw in high_impact_kw):
+            significant = True
+        if not significant and any(kw in report for kw in low_impact_kw):
+            significant = False  # explicitly skip
+
+        if significant:
+            try:
+                await asyncio.to_thread(
+                    notify_all,
+                    f"AlphaAgents 夜报 | {time.strftime('%m-%d')}",
+                    report[:500],
+                )
+            except Exception:
+                pass
+        else:
+            logger.info("Night scan: no significant moves, skipping push notification")
 
     print(report)
     return report

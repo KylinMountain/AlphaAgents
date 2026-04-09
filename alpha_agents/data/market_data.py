@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 
 # ── baostock helpers ─────────────────────────────────────────
 
+import threading
+
 _bs_logged_in = False
+_bs_lock = threading.Lock()
 
 
 def _bs_login():
@@ -91,37 +94,124 @@ def _ak_call(fn, *args, **kwargs):
 
 # ── Stock Quotes (baostock TCP) ──────────────────────────────
 
+def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
+    """Get real-time intraday quotes via Sina finance API.
+
+    Returns dict mapping code -> {price, change_pct, volume, turnover_rate, ...}
+    Works during trading hours. Sina API is lightweight and reliable.
+    """
+    import urllib.request
+
+    if not codes:
+        return None
+
+    # Build Sina symbol list: sz300475, sh600519
+    symbols = []
+    for code in codes:
+        prefix = "sh" if code.startswith("6") else "sz"
+        symbols.append(f"{prefix}{code}")
+
+    url = f"https://hq.sinajs.cn/list={','.join(symbols)}"
+    try:
+        proxy_handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_handler)
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn",
+        })
+        resp = opener.open(req, timeout=10)
+        text = resp.read().decode("gbk")
+    except Exception as e:
+        logger.debug("Sina realtime API failed: %s", e)
+        return None
+
+    # Parse Sina format: var hq_str_sz300475="name,open,prev_close,price,high,low,..."
+    result = {}
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line or '="' not in line:
+            continue
+        # Extract symbol and data
+        var_part, data_part = line.split("=", 1)
+        symbol = var_part.split("_")[-1]  # e.g. "sz300475"
+        code = symbol[2:]  # e.g. "300475"
+        data_str = data_part.strip().strip('"').strip(";").strip('"')
+        if not data_str:
+            continue
+
+        fields = data_str.split(",")
+        if len(fields) < 32:
+            continue
+
+        # Sina fields: 0=name, 1=open, 2=prev_close, 3=price, 4=high, 5=low,
+        # 6=bid, 7=ask, 8=volume(shares), 9=amount(yuan), ...
+        try:
+            name = fields[0]
+            open_price = float(fields[1]) if fields[1] else 0
+            prev_close = float(fields[2]) if fields[2] else 0
+            price = float(fields[3]) if fields[3] else 0
+            high = float(fields[4]) if fields[4] else 0
+            low = float(fields[5]) if fields[5] else 0
+            volume = int(fields[8]) if fields[8] else 0
+            amount = float(fields[9]) if fields[9] else 0
+
+            if price <= 0 or prev_close <= 0:
+                continue
+
+            change_pct = round((price - prev_close) / prev_close * 100, 2)
+
+            result[code] = {
+                "code": code,
+                "name": name,
+                "price": price,
+                "change_pct": change_pct,
+                "high": high,
+                "low": low,
+                "open": open_price,
+                "prev_close": prev_close,
+                "volume": volume,
+                "amount_yi": round(amount / 1e8, 2),
+                "volume_ratio": 0,  # Sina doesn't provide this
+                "turnover_rate": 0,  # Need float shares to compute
+            }
+        except (ValueError, IndexError):
+            continue
+
+    return result if result else None
+
+
 def get_stock_history(code: str, days: int = 5) -> Optional[list[dict]]:
     """Get recent daily OHLCV for a stock. Returns list of dicts or None."""
-    try:
-        _bs_login()
-        end = datetime.now().strftime("%Y-%m-%d")
-        start = (datetime.now() - timedelta(days=days * 3)).strftime("%Y-%m-%d")
-        rows = _bs_query(
-            _to_bs_code(code),
-            "date,open,high,low,close,volume,turn,pctChg",
-            start, end,
-        )
-        if not rows:
+    with _bs_lock:
+        try:
+            _bs_login()
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=days * 3)).strftime("%Y-%m-%d")
+            rows = _bs_query(
+                _to_bs_code(code),
+                "date,open,high,low,close,volume,turn,pctChg",
+                start, end,
+            )
+            if not rows:
+                return None
+            result = []
+            for r in rows[-days:]:
+                result.append({
+                    "date": r[0],
+                    "open": float(r[1]) if r[1] else 0,
+                    "high": float(r[2]) if r[2] else 0,
+                    "low": float(r[3]) if r[3] else 0,
+                    "close": float(r[4]) if r[4] else 0,
+                    "volume": int(r[5]) if r[5] else 0,
+                    "turnover_rate": float(r[6]) if r[6] else 0,
+                    "change_pct": float(r[7]) if r[7] else 0,
+                })
+            return result
+        except Exception as e:
+            logger.debug("get_stock_history(%s) failed: %s", code, e)
+            # Force re-login on next call if something went wrong
+            _bs_logout()
             return None
-        result = []
-        for r in rows[-days:]:
-            result.append({
-                "date": r[0],
-                "open": float(r[1]) if r[1] else 0,
-                "high": float(r[2]) if r[2] else 0,
-                "low": float(r[3]) if r[3] else 0,
-                "close": float(r[4]) if r[4] else 0,
-                "volume": int(r[5]) if r[5] else 0,
-                "turnover_rate": float(r[6]) if r[6] else 0,
-                "change_pct": float(r[7]) if r[7] else 0,
-            })
-        return result
-    except Exception as e:
-        logger.debug("get_stock_history(%s) failed: %s", code, e)
-        return None
-    finally:
-        _bs_logout()
 
 
 def get_stock_latest_price(code: str) -> Optional[dict]:

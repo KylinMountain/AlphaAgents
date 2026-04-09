@@ -46,6 +46,7 @@ class Task:
         end_at: dtime | None = None,
         interval_minutes: int | None = None,
         trading_day_only: bool = True,
+        weekday: int | None = None,
     ):
         self.name = name
         self.run_fn = run_fn
@@ -54,10 +55,25 @@ class Task:
         self.interval_minutes = interval_minutes
         self.trading_day_only = trading_day_only
         self._last_run: datetime | None = None
+        # Weekday constraint: 0=Monday … 6=Sunday. None means any day.
+        self.weekday = weekday
+        # Dynamic interval boost — used to shorten polling on anomaly detection
+        self._boost_until: datetime | None = None
+        self._boost_interval: int = 2  # minutes to use while boosted
+
+    def boost(self, minutes: int = 15) -> None:
+        """Temporarily shorten the polling interval for *minutes* minutes."""
+        self._boost_until = datetime.now() + timedelta(minutes=minutes)
+        logger.info("Task %s boosted for %d min (interval → %d min)",
+                     self.name, minutes, self._boost_interval)
 
     def should_run(self, now: datetime, is_trading: bool) -> bool:
         """Check if this task should run at the given time."""
         if self.trading_day_only and not is_trading:
+            return False
+
+        # Weekday gate (e.g. weekly report only on Saturday)
+        if self.weekday is not None and now.weekday() != self.weekday:
             return False
 
         current_time = now.time()
@@ -66,8 +82,12 @@ class Task:
             if not (self.run_at <= current_time <= self.end_at):
                 return False
             if self._last_run:
+                # Use boosted interval if active
+                interval = self.interval_minutes
+                if self._boost_until and now < self._boost_until:
+                    interval = self._boost_interval
                 elapsed = (now - self._last_run).total_seconds() / 60
-                return elapsed >= self.interval_minutes
+                return elapsed >= interval
             return True
         else:
             if self._last_run and self._last_run.date() == now.date():
@@ -138,6 +158,14 @@ class TradingDayScheduler:
                         task._last_run = datetime.now()
 
             await asyncio.sleep(30)
+
+    def boost_task(self, name: str, minutes: int = 15) -> None:
+        """Temporarily shorten a task's polling interval after anomaly detection."""
+        for task in self._tasks:
+            if task.name == name:
+                task.boost(minutes)
+                return
+        logger.warning("boost_task: no task named '%s'", name)
 
     def stop(self) -> None:
         """Stop the scheduler."""

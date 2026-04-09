@@ -6,7 +6,7 @@ updates market cognition, and generates review report.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from alpha_agents.data.memory_store import (
     get_active_themes, get_pending_predictions, update_prediction_result,
@@ -14,14 +14,128 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
-    retire_stale_themes,
+    retire_stale_themes, check_leader_health,
 )
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
+from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
+from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.agents.review_agent import run_review_analysis
 from alpha_agents.notify import notify_all
+from alpha_agents.data.daily_archive import run_daily_archive
+from alpha_agents.data.portfolio import (
+    get_open_positions_summary, get_today_changes_summary, get_portfolio_stats,
+    format_portfolio_stats,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _verify_predictions() -> None:
+    """Verify yesterday's predictions against today's actual prices.
+
+    Fetches yesterday's unverified predictions, gets today's close prices,
+    calculates returns, and writes back hit/next_day_return to the DB.
+    """
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    predictions = get_pending_predictions(yesterday)
+    if not predictions:
+        logger.info("No pending predictions from %s to verify", yesterday)
+        return
+
+    # Collect all stock codes to fetch quotes
+    codes = list({p["code"] for p in predictions if p.get("code")})
+    if not codes:
+        return
+
+    try:
+        quotes_raw = get_stock_quotes_fn(",".join(codes))
+        quotes_data = json.loads(quotes_raw)
+        # Build lookup: code -> quote dict
+        quote_lookup = {q["code"]: q for q in quotes_data.get("quotes", []) if "error" not in q}
+    except Exception as e:
+        logger.warning("Failed to fetch quotes for prediction verification: %s", e)
+        return
+
+    verified = 0
+    for pred in predictions:
+        code = pred.get("code")
+        if not code or code not in quote_lookup:
+            continue
+
+        quote = quote_lookup[code]
+        today_close = quote.get("price")
+        if not today_close:
+            continue
+
+        # Use entry_price as baseline; fall back to yesterday's close if unavailable
+        entry_price = pred.get("entry_price")
+        if not entry_price:
+            # Approximate: today_close / (1 + change_pct/100) gives yesterday's close
+            change_pct = quote.get("change_pct", 0)
+            if change_pct and change_pct != 0:
+                entry_price = today_close / (1 + change_pct / 100)
+            else:
+                continue
+
+        return_pct = round((today_close - entry_price) / entry_price * 100, 2) if entry_price else 0
+        direction = pred.get("direction", "")
+        is_bullish = direction in ("看多", "bullish", "买入", "long")
+        if is_bullish:
+            hit_val = 1 if return_pct > 0 else 0
+        else:
+            hit_val = 1 if return_pct < 0 else 0
+
+        update_prediction_result(pred["id"], next_day_return=return_pct, hit=hit_val)
+        verified += 1
+        logger.debug("Prediction #%d %s: return=%.2f%%, hit=%d",
+                      pred["id"], code, return_pct, hit_val)
+
+    logger.info("Verified %d/%d predictions from %s", verified, len(predictions), yesterday)
+
+
+def _update_market_cognition(themes: list[dict], today: str) -> None:
+    """Write market cognition entries for each active theme.
+
+    Derives position from strength and fund_trend from recent strength changes.
+    """
+    for theme in themes:
+        name = theme["name"]
+        strength = theme.get("strength", 0) or 0
+
+        # Derive position from strength
+        if strength >= 7:
+            position = "high"
+        elif strength >= 4:
+            position = "mid"
+        else:
+            position = "low"
+
+        # Derive fund_trend from strength change direction
+        # Compare current strength with what we know: if theme was recently updated
+        # we check status transitions as a proxy for trend
+        status = theme.get("status", "watching")
+        if status in ("active", "peak"):
+            fund_trend = "inflow"
+        elif status == "declining":
+            fund_trend = "outflow"
+        else:
+            fund_trend = "neutral"
+
+        assessment = f"{name} 强度{strength}/10, {status}"
+
+        try:
+            upsert_cognition(
+                sector=name,
+                date=today,
+                position=position,
+                fund_trend=fund_trend,
+                assessment=assessment,
+            )
+        except Exception as e:
+            logger.debug("Failed to upsert cognition for %s: %s", name, e)
+
+    logger.info("Updated market cognition for %d themes", len(themes))
 
 
 def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
@@ -42,16 +156,35 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         # Build lookup by concept name
         concept_lookup = {c.get("concept", ""): c for c in all_concepts}
 
+        # Get anomaly data — check which stocks hit limit up today
+        limit_up_codes: set[str] = set()
+        try:
+            anomaly_raw = get_anomaly_stocks_fn()
+            anomaly_data = json.loads(anomaly_raw)
+            for stock in anomaly_data.get("limit_up", []):
+                code = stock.get("code", "")
+                if code:
+                    limit_up_codes.add(code)
+        except Exception as e:
+            logger.debug("Anomaly fetch for theme update failed: %s", e)
+
         # Update existing themes
         existing_names = {t["name"] for t in existing_themes}
         for theme in existing_themes:
             if theme["name"] in concept_lookup:
                 c = concept_lookup[theme["name"]]
+                # Check if this theme's leader hit limit up
+                leader_code = theme.get("leader_code", "")
+                leader_hit = leader_code in limit_up_codes if leader_code else False
+                # Check if leader is breaking down (price < 5-day MA)
+                leader_down = check_leader_health(theme)
                 signals = evaluate_theme_signals(
                     sector_name=theme["name"],
                     sector_change_pct=c.get("change_pct", 0),
                     sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
                     market_change_pct=market_change,
+                    leader_hit_limit=leader_hit,
+                    leader_breaking_down=leader_down,
                 )
                 update_theme_strength(theme["name"], signals)
 
@@ -131,6 +264,9 @@ async def run_review() -> str | None:
     today = datetime.now().strftime("%Y-%m-%d")
     logger.info("Review starting for %s...", today)
 
+    # 0. Verify yesterday's predictions against actual prices
+    await asyncio.to_thread(_verify_predictions)
+
     # 1. Get data
     pending = get_pending_predictions(today)
     themes = get_active_themes()
@@ -149,15 +285,36 @@ async def run_review() -> str | None:
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
 
-    # 4. Run review agent
-    report = await run_review_analysis(pred_ctx, themes_ctx, stats_ctx)
+    # Portfolio context
+    portfolio_ctx = ""
+    try:
+        pos_summary = get_open_positions_summary()
+        changes_summary = get_today_changes_summary(today)
+        perf_stats = format_portfolio_stats(get_portfolio_stats(days=7))
+        portfolio_ctx = (
+            f"【虚拟持仓状态】\n{pos_summary}\n\n"
+            f"【今日持仓变动】\n{changes_summary}\n\n"
+            f"【近7天策略表现】\n{perf_stats}"
+        )
+    except Exception as e:
+        logger.debug("Failed to build portfolio context: %s", e)
+
+    # 4. Run review agent (append portfolio context to stats)
+    full_stats_ctx = stats_ctx
+    if portfolio_ctx:
+        full_stats_ctx = stats_ctx + "\n\n" + portfolio_ctx
+    report = await run_review_analysis(pred_ctx, themes_ctx, full_stats_ctx)
 
     # 5. Retire stale themes
     retired = retire_stale_themes()
     if retired:
         logger.info("Review: retired themes: %s", retired)
 
-    # 5. Push notification
+    # 6. Update market cognition for all active themes
+    active_themes = get_active_themes()
+    _update_market_cognition(active_themes, today)
+
+    # 7. Push notification
     if report and not report.startswith("["):
         try:
             await asyncio.to_thread(
@@ -167,6 +324,12 @@ async def run_review() -> str | None:
             )
         except Exception as e:
             logger.debug("Review notification failed: %s", e)
+
+    # Archive today's market data for future backtesting
+    try:
+        await asyncio.to_thread(run_daily_archive)
+    except Exception as e:
+        logger.warning("Daily archive failed: %s", e)
 
     print(report)
     return report

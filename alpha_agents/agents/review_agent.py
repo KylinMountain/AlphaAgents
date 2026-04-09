@@ -45,6 +45,7 @@ async def run_review_analysis(
     predictions_context: str,
     themes_context: str,
     stats_context: str,
+    lessons_context: str = "暂无历史经验",
     hooks=None,
 ) -> str:
     """Run post-market review analysis.
@@ -53,6 +54,7 @@ async def run_review_analysis(
         predictions_context: Today's predictions to verify.
         themes_context: Active theme lines to evaluate.
         stats_context: Recent prediction stats.
+        lessons_context: Historical lessons for reference.
         hooks: Optional event hooks.
 
     Returns:
@@ -66,6 +68,7 @@ async def run_review_analysis(
         f"【待验证预测】\n{predictions_context}\n\n"
         f"【活跃主线】\n{themes_context}\n\n"
         f"【近期预测表现】\n{stats_context}\n\n"
+        f"【历史经验教训】\n{lessons_context}\n\n"
         f"请执行收盘复盘分析。"
     )
 

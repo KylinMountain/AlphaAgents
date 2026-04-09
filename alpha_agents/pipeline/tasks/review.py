@@ -6,11 +6,12 @@ updates market cognition, and generates review report.
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from alpha_agents.data.memory_store import (
     get_active_themes, get_pending_predictions, update_prediction_result,
-    get_prediction_stats, upsert_cognition,
+    get_prediction_stats, upsert_cognition, save_lesson, format_lessons_context,
 )
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
@@ -115,14 +116,58 @@ def _format_stats(stats: dict) -> str:
     return f"近7天命中率: {stats.get('hit_rate', 0):.1f}% ({stats.get('hits', 0)}/{total})"
 
 
+def _extract_lessons(report: str) -> list[dict]:
+    """Extract structured lessons from <!--LESSONS ... LESSONS--> block."""
+    match = re.search(r"<!--LESSONS\s*(.*?)\s*LESSONS-->", report, re.DOTALL)
+    if not match:
+        return []
+    try:
+        from json_repair import repair_json
+        data = repair_json(match.group(1), return_objects=True)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_lessons(report: str, today: str) -> int:
+    """Extract lessons from review report and persist them. Returns count saved."""
+    lessons = _extract_lessons(report)
+    saved = 0
+    for l in lessons:
+        lesson_type = l.get("type", "")
+        if lesson_type not in ("success", "mistake", "insight"):
+            continue
+        description = l.get("description", "")
+        if not description or len(description) < 5:
+            continue
+        try:
+            save_lesson(
+                date=today,
+                type=lesson_type,
+                description=description,
+                category=l.get("category"),
+                theme_line=l.get("theme") or None,
+                market_context=l.get("market_context"),
+                actionable=l.get("actionable"),
+            )
+            saved += 1
+            logger.info("  Saved lesson [%s]: %s", lesson_type, description[:60])
+        except Exception as e:
+            logger.debug("Failed to save lesson: %s", e)
+    return saved
+
+
 async def run_review() -> str | None:
     """Execute the post-market review task.
 
     1. Get pending predictions and format for agent
     2. Get active themes and format for agent
-    3. Run review agent to verify and analyze
-    4. Retire stale themes
-    5. Push notification
+    3. Run review agent to verify and analyze (with historical lessons)
+    4. Extract and save structured lessons
+    5. Retire stale themes
+    6. Push notification
 
     Returns the review report text.
     """
@@ -144,20 +189,27 @@ async def run_review() -> str | None:
     # Re-read themes after update
     themes = get_active_themes()
 
-    # 3. Format contexts
+    # 3. Format contexts (include historical lessons)
     pred_ctx = _format_predictions(pending)
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
+    lessons_ctx = format_lessons_context(limit=10)
 
-    # 4. Run review agent
-    report = await run_review_analysis(pred_ctx, themes_ctx, stats_ctx)
+    # 4. Run review agent with lessons context
+    report = await run_review_analysis(pred_ctx, themes_ctx, stats_ctx, lessons_ctx)
 
-    # 5. Retire stale themes
+    # 5. Extract and save structured lessons from report
+    if report and not report.startswith("["):
+        saved = _save_lessons(report, today)
+        if saved:
+            logger.info("Review: saved %d lessons", saved)
+
+    # 6. Retire stale themes
     retired = retire_stale_themes()
     if retired:
         logger.info("Review: retired themes: %s", retired)
 
-    # 5. Push notification
+    # 7. Push notification
     if report and not report.startswith("["):
         try:
             await asyncio.to_thread(

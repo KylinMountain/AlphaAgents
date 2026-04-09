@@ -49,6 +49,7 @@ async def run_morning_analysis(
     events_summary: str,
     themes_context: str,
     stats_context: str,
+    lessons_context: str = "暂无历史经验",
     hooks=None,
 ) -> str:
     """Run morning scan analysis with memory context.
@@ -57,6 +58,7 @@ async def run_morning_analysis(
         events_summary: Pre-digested news events as text.
         themes_context: Active theme lines summary.
         stats_context: Prediction hit rate stats.
+        lessons_context: Historical lessons for reference.
         hooks: Optional event hooks.
 
     Returns:
@@ -69,6 +71,7 @@ async def run_morning_analysis(
         f"[当前时间: {now}]\n\n"
         f"【活跃主线】\n{themes_context}\n\n"
         f"【近期预测表现】\n{stats_context}\n\n"
+        f"【历史经验教训】\n{lessons_context}\n\n"
         f"【隔夜新闻事件】\n{events_summary}\n\n"
         f"请生成今日晨报。"
     )

@@ -12,7 +12,7 @@ import re
 
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats, get_all_cognition_latest,
-    save_prediction,
+    save_prediction, format_lessons_context,
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
@@ -231,14 +231,15 @@ async def run_morning_scan() -> str | None:
     except Exception as e:
         logger.debug("Morning scan: global overview failed: %s", e)
 
-    # 5. Run morning agent with context
+    # 5. Run morning agent with context (including historical lessons)
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
+    lessons_ctx = format_lessons_context(limit=10)
     events_ctx = _format_events(events)
     if global_ctx:
         events_ctx = global_ctx + "\n\n" + events_ctx
 
-    report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
+    report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx, lessons_ctx)
 
     # 5. Push notification
     if report and not report.startswith("["):

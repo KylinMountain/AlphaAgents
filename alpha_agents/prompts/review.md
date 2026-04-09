@@ -60,6 +60,61 @@
 • 明日关注: {展望}
 ```
 
+## 结构化经验数据
+
+在报告正文之后，你必须附加一个 JSON 块，用于程序自动提取经验教训。格式如下：
+
+```
+<!--LESSONS
+[
+  {
+    "type": "success",
+    "category": "signal",
+    "theme": "AI算力",
+    "description": "龙虎榜机构连续买入3天的股票次日继续涨",
+    "market_context": "震荡偏强",
+    "actionable": "机构连买3天以上可提高推荐信心到high"
+  },
+  {
+    "type": "mistake",
+    "category": "timing",
+    "theme": "军工",
+    "description": "主线衰退期仍然推荐导致亏损",
+    "market_context": "震荡",
+    "actionable": "strength低于4的主线不再推荐新标的"
+  },
+  {
+    "type": "insight",
+    "category": "market_regime",
+    "theme": "",
+    "description": "美股暴跌次日A股低开但尾盘回升",
+    "market_context": "外盘恐慌",
+    "actionable": "外盘恐慌导致的低开可等待尾盘确认再判断"
+  }
+]
+LESSONS-->
+```
+
+字段说明：
+- type: 只能是 "success"（做对了）/ "mistake"（做错了）/ "insight"（新发现的规律）
+- category: "theme"（主线判断）/ "timing"（时机把握）/ "signal"（信号解读）/ "risk"（风险控制）/ "market_regime"（市场环境判断）
+- theme: 关联的主线名称，无关联时留空字符串
+- description: 具体描述，要具体到可验证，不要泛泛而谈
+- market_context: 当时的市场环境（如"牛市"/"震荡"/"恐慌"/"单边下跌"等）
+- actionable: 从这条经验推导出的具体规则，未来可以直接执行的
+
+重要：
+- 每次复盘至少提取1-3条经验，宁缺毋滥
+- description 必须具体（"龙虎榜机构连买3天"），不要抽象（"要关注资金面"）
+- actionable 必须是可执行的规则，不是感想
+- 这个块不会展示给用户，仅供程序解析
+
+## 历史经验参考
+
+你会收到系统积累的历史经验教训。请在分析时参考这些经验：
+- 如果今日的情况验证了某条历史经验，在经验总结中提及
+- 如果今日的情况推翻了某条历史经验，记录为新的 insight
+
 ## 重要原则
 
 - 验证预测时必须调用工具获取真实收盘价，不得推断

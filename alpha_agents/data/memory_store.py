@@ -57,6 +57,22 @@ CREATE TABLE IF NOT EXISTS market_cognition (
     UNIQUE(sector, date)
 );
 CREATE INDEX IF NOT EXISTS idx_cognition_sector ON market_cognition(sector);
+
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY,
+    date TEXT NOT NULL,
+    type TEXT NOT NULL,              -- success / mistake / insight
+    category TEXT,                   -- theme / timing / signal / risk / market_regime
+    theme_line TEXT,                 -- related theme line, nullable
+    description TEXT NOT NULL,       -- what happened
+    market_context TEXT,             -- market regime when this was observed
+    actionable TEXT,                 -- concrete rule derived
+    times_confirmed INTEGER DEFAULT 1,
+    last_confirmed TEXT,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_type ON lessons(type);
+CREATE INDEX IF NOT EXISTS idx_lessons_category ON lessons(category);
 """
 
 _local = threading.local()
@@ -275,3 +291,139 @@ def get_all_cognition_latest() -> list[dict]:
         "ORDER BY m1.sector"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Lessons ─────────────────────────────────────────────────
+
+def save_lesson(
+    date: str,
+    type: str,
+    description: str,
+    *,
+    category: str | None = None,
+    theme_line: str | None = None,
+    market_context: str | None = None,
+    actionable: str | None = None,
+) -> int:
+    """Save a structured lesson from review.
+
+    Before inserting, checks for semantically similar existing lessons
+    (same type + category + overlapping keywords). If a match is found,
+    increments times_confirmed instead of creating a duplicate.
+
+    Returns the lesson id (new or existing).
+    """
+    now = datetime.now().isoformat()
+    with _write_lock:
+        conn = _get_conn()
+
+        # Try to find a similar existing lesson to merge with
+        existing = _find_similar_lesson(conn, type, category, description)
+        if existing:
+            conn.execute(
+                "UPDATE lessons SET times_confirmed = times_confirmed + 1, "
+                "last_confirmed = ? WHERE id = ?",
+                (date, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+
+        cur = conn.execute(
+            "INSERT INTO lessons (date, type, category, theme_line, description, "
+            "market_context, actionable, times_confirmed, last_confirmed, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (date, type, category, theme_line, description,
+             market_context, actionable, date, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def _find_similar_lesson(
+    conn: sqlite3.Connection, type: str, category: str | None, description: str
+) -> dict | None:
+    """Find an existing lesson that is semantically similar enough to merge.
+
+    Uses keyword overlap: if 50%+ of the significant words match an existing
+    lesson of the same type+category, treat them as the same lesson.
+    """
+    rows = conn.execute(
+        "SELECT * FROM lessons WHERE type = ? AND category IS ? AND times_confirmed > 0",
+        (type, category),
+    ).fetchall()
+    if not rows:
+        return None
+
+    new_words = set(description)
+    # Use character bigrams for Chinese text matching
+    if len(description) >= 2:
+        new_words = {description[i:i+2] for i in range(len(description) - 1)}
+
+    best_match, best_ratio = None, 0.0
+    for row in rows:
+        existing_desc = row["description"] or ""
+        if len(existing_desc) < 2:
+            continue
+        existing_words = {existing_desc[i:i+2] for i in range(len(existing_desc) - 1)}
+        if not new_words or not existing_words:
+            continue
+        overlap = len(new_words & existing_words)
+        ratio = overlap / min(len(new_words), len(existing_words))
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = row
+
+    if best_ratio >= 0.5 and best_match is not None:
+        return dict(best_match)
+    return None
+
+
+def get_lessons(
+    limit: int = 20,
+    type: str | None = None,
+    min_confirmed: int = 1,
+) -> list[dict]:
+    """Get lessons ordered by confirmation count (most validated first).
+
+    Args:
+        limit: Max lessons to return.
+        type: Filter by type (success/mistake/insight). None for all.
+        min_confirmed: Minimum times_confirmed threshold.
+    """
+    conn = _get_conn()
+    conditions = ["times_confirmed >= ?"]
+    params: list = [min_confirmed]
+    if type:
+        conditions.append("type = ?")
+        params.append(type)
+    where = " AND ".join(conditions)
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM lessons WHERE {where} "
+        "ORDER BY times_confirmed DESC, last_confirmed DESC LIMIT ?",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def format_lessons_context(limit: int = 10) -> str:
+    """Format top lessons into a readable context string for agent prompts.
+
+    Returns a concise summary sorted by confirmation count.
+    """
+    lessons = get_lessons(limit=limit)
+    if not lessons:
+        return "暂无历史经验"
+
+    type_labels = {"success": "成功", "mistake": "错误", "insight": "洞察"}
+    lines = []
+    for l in lessons:
+        label = type_labels.get(l["type"], l["type"])
+        confirmed = l["times_confirmed"]
+        desc = l["description"]
+        actionable = l.get("actionable") or ""
+        entry = f"- [{label}×{confirmed}] {desc}"
+        if actionable:
+            entry += f" → 规则: {actionable}"
+        lines.append(entry)
+    return "\n".join(lines)

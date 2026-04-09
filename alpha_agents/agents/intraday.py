@@ -64,10 +64,13 @@ async def run_intraday_analysis(context: str, hooks=None) -> str:
     )
 
     logger.info("Intraday agent starting...")
+    if hooks is None:
+        from alpha_agents.agents.hooks import ToolEventHooks
+        hooks = ToolEventHooks(callback=None, agent_label="intraday")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, hooks=hooks, max_turns=100),
-            timeout=120,
+            Runner.run(agent, user_message, hooks=hooks, max_turns=30),
+            timeout=180,
         )
         output = result.final_output
         logger.info("Intraday agent finished, length=%d", len(output))

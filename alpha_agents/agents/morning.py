@@ -16,7 +16,7 @@ from alpha_agents.tools.registry import (
     search_stocks, get_sector_data, filter_stocks,
     get_stock_quotes, get_market_breadth, get_sector_ranking,
     get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    web_search, get_pizzint,
+    get_institutional_position, web_search, get_pizzint,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ MORNING_TOOLS = [
     search_stocks, get_sector_data, filter_stocks,
     get_stock_quotes, get_market_breadth, get_sector_ranking,
     get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    web_search, get_pizzint,
+    get_institutional_position, web_search, get_pizzint,
 ]
 
 
@@ -74,6 +74,9 @@ async def run_morning_analysis(
     )
 
     logger.info("Morning agent starting...")
+    if hooks is None:
+        from alpha_agents.agents.hooks import ToolEventHooks
+        hooks = ToolEventHooks(callback=None, agent_label="morning")
     try:
         result = await asyncio.wait_for(
             Runner.run(agent, user_message, hooks=hooks, max_turns=40),

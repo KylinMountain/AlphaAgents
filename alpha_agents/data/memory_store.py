@@ -57,6 +57,40 @@ CREATE TABLE IF NOT EXISTS market_cognition (
     UNIQUE(sector, date)
 );
 CREATE INDEX IF NOT EXISTS idx_cognition_sector ON market_cognition(sector);
+
+CREATE TABLE IF NOT EXISTS daily_snapshots (
+    id INTEGER PRIMARY KEY,
+    date TEXT NOT NULL,
+    data_type TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(date, data_type)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_date ON daily_snapshots(date);
+
+CREATE TABLE IF NOT EXISTS virtual_portfolio (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    theme TEXT,
+    open_date TEXT NOT NULL,
+    open_price REAL NOT NULL,
+    stop_loss REAL,
+    target_price REAL,
+    status TEXT DEFAULT 'open',
+    close_date TEXT,
+    close_price REAL,
+    holding_days INTEGER DEFAULT 0,
+    return_pct REAL,
+    peak_return_pct REAL DEFAULT 0,
+    max_drawdown_pct REAL DEFAULT 0,
+    source TEXT,
+    reason TEXT,
+    close_reason TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
+CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
 """
 
 _local = threading.local()
@@ -205,6 +239,19 @@ def get_pending_predictions(date: str) -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
         "SELECT * FROM predictions WHERE date = ? AND hit IS NULL", (date,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_today_intraday_predictions() -> list[dict]:
+    """Get today's intraday predictions for context continuity."""
+    conn = _get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT code, name, direction, confidence, theme_line, entry_price, reason "
+        "FROM predictions WHERE date = ? AND report_type = 'intraday' "
+        "ORDER BY id DESC",
+        (today,),
     ).fetchall()
     return [dict(r) for r in rows]
 

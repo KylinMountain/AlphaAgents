@@ -148,20 +148,25 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from datetime import time as dtime
     from alpha_agents.pipeline.scheduler import Task, TradingDayScheduler
     from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
-    from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
+    from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
+    from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor, set_scheduler
     from alpha_agents.pipeline.tasks.review import run_review
     from alpha_agents.pipeline.tasks.night_scan import run_night_scan
     from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
     scheduler = TradingDayScheduler()
+    set_scheduler(scheduler)
 
-    # Morning scan: 06:30, trading days only
-    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(6, 30)))
+    # Morning scan: 06:30, every day (non-trading days still useful for global news)
+    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(6, 30), trading_day_only=False))
 
-    # Intraday monitor: 09:30-15:00 every 15 min, trading days only
+    # Opening reminder: 09:15, trading days only
+    scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 15)))
+
+    # Intraday monitor: 09:30-15:00 every 5 min, boost to 2 min on anomaly
     scheduler.add_task(Task(
         "intraday_monitor", run_intraday_monitor,
-        dtime(9, 30), end_at=dtime(15, 0), interval_minutes=15,
+        dtime(9, 30), end_at=dtime(15, 0), interval_minutes=5,
     ))
 
     # Post-market review: 15:30, trading days only
@@ -176,7 +181,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     # Weekly report: Saturday 10:00
     scheduler.add_task(Task(
         "weekly_report", run_weekly_report,
-        dtime(10, 0), trading_day_only=False,
+        dtime(10, 0), trading_day_only=False, weekday=5,
     ))
 
     # --task: run a single task and exit
@@ -184,6 +189,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     if task_name:
         task_map = {
             "morning": run_morning_scan,
+            "opening": run_opening_reminder,
             "intraday": run_intraday_monitor,
             "review": run_review,
             "night": run_night_scan,
@@ -278,7 +284,7 @@ def main() -> None:
     # run-v2 — trading-day scheduler
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
     p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
-    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "night", "weekly"],
+    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "night", "weekly", "opening"],
                           help="Run a single task and exit (for testing)")
     p_run_v2.set_defaults(func=cmd_run_v2)
 

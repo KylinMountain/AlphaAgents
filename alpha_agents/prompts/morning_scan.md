@@ -64,8 +64,8 @@
 ```
 <!--RECOMMENDATIONS
 [
-  {"code": "000001", "name": "示例股票A", "theme": "主线名称", "reason": "推荐理由", "confidence": "high", "action": "回调至XX元可介入", "entry_low": null, "entry_high": 52.00, "stop_loss": 48.50},
-  {"code": "000002", "name": "示例股票B", "theme": "主线名称", "reason": "推荐理由", "confidence": "medium", "action": "突破XX元跟进", "entry_low": 33.00, "entry_high": null, "stop_loss": 30.00}
+  {"code": "000001", "name": "示例股票A", "theme": "主线名称", "reason": "推荐理由", "confidence": "high", "action": "回调至X元可介入", "entry_low": null, "entry_high": "从工具获取的价格", "stop_loss": "从工具获取的价格"},
+  {"code": "000002", "name": "示例股票B", "theme": "主线名称", "reason": "推荐理由", "confidence": "medium", "action": "突破X元跟进", "entry_low": "从工具获取的价格", "entry_high": null, "stop_loss": "从工具获取的价格"}
 ]
 RECOMMENDATIONS-->
 ```

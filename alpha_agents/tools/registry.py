@@ -35,6 +35,8 @@ from alpha_agents.tools.fund_flow import (
 )
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
+from alpha_agents.tools.market_snapshot import get_market_snapshot_fn
+from alpha_agents.tools.institutional_position import get_institutional_position_fn
 from alpha_agents.tools.global_market import (
     get_us_market_fn, get_bond_yields_fn, get_global_overview_fn,
 )
@@ -159,7 +161,12 @@ def get_pizzint() -> str:
 
 @function_tool
 def get_sector_data(sector_name: str) -> str:
-    """获取板块行情数据，包括涨跌幅和资金流向。"""
+    """获取板块行情数据，包括涨跌幅和资金流向。
+
+    注意：板块名称必须使用 get_sector_ranking 或 get_concept_ranking 返回的精确名称。
+    例如用"共封装光学(CPO)"而不是"光通信"，用"5G"而不是"通信设备"。
+    如果不确定名称，先调用 get_sector_ranking 查看实际的板块名。
+    """
     return get_sector_data_fn(sector_name=sector_name)
 
 
@@ -309,6 +316,33 @@ def get_anomaly_stocks(date: str = "") -> str:
 
 
 @function_tool
+def get_market_snapshot(min_volume_ratio: float = 3.0, min_turnover: float = 15.0) -> str:
+    """获取量比/换手率异常个股 — 发现盘中异动股。
+
+    量比 > 3 说明成交量远超近期平均，可能有资金异动或消息刺激。
+    换手率 > 15% 说明筹码交换活跃，可能有主力进出。
+    返回 Top 20 异动股，按量比降序。
+    """
+    return get_market_snapshot_fn(min_volume_ratio=min_volume_ratio, min_turnover=min_turnover)
+
+
+@function_tool
+def get_institutional_position(code: str, market: str = "") -> str:
+    """分析个股的机构持仓行为，输出量化买卖信号。
+
+    综合4个维度给出操作建议：
+    1. 资金流动量 — 主力资金连续流入/流出天数和强度
+    2. 机构成本区间 — 龙虎榜机构买入价、大宗交易价、北向持仓、融资余额
+    3. 相对强弱 — 近期涨幅、价格位置（高位/低位）、是否追高
+    4. 换手率状态 — 量价配合度、缩量洗盘/放量突破判断
+
+    输出包含: 综合评分(-10到+10)、多空信号列表、操作建议（介入区间+止损位）。
+    基于机构行为数据，不使用MACD/KDJ等散户技术指标。
+    """
+    return get_institutional_position_fn(code=code, market=market)
+
+
+@function_tool
 def get_us_market() -> str:
     """获取美股三大指数最新行情（道琼斯、标普500、纳斯达克）。
 
@@ -355,6 +389,7 @@ STOCK_TOOLS = [
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
     get_stock_fund_flow, get_sector_ranking, get_concept_ranking, get_anomaly_stocks,
+    get_market_snapshot, get_institutional_position,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
 ]

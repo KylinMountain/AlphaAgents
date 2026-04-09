@@ -13,6 +13,7 @@ from datetime import datetime
 from alpha_agents.data.memory_store import (
     get_active_themes, get_theme_by_name, upsert_theme, archive_theme,
 )
+from alpha_agents.data.market_data import get_stock_history
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,35 @@ NOISE_CONCEPTS = {
 }
 
 
+def check_leader_health(theme: dict) -> bool:
+    """Check if the leader stock is breaking down (price below 5-day MA).
+
+    Args:
+        theme: A theme dict from the DB (must have 'leader_code').
+
+    Returns:
+        True if the leader is breaking down (bearish), False otherwise.
+    """
+    leader_code = theme.get("leader_code")
+    if not leader_code:
+        return False
+    try:
+        history = get_stock_history(leader_code, days=7)
+        if not history or len(history) < 5:
+            return False
+        # Calculate 5-day moving average
+        recent_5 = history[-5:]
+        ma5 = sum(d["close"] for d in recent_5) / 5
+        latest_close = history[-1]["close"]
+        if latest_close < ma5:
+            logger.debug("Leader %s breaking down: close %.2f < MA5 %.2f",
+                         leader_code, latest_close, ma5)
+            return True
+    except Exception as e:
+        logger.debug("check_leader_health(%s) failed: %s", leader_code, e)
+    return False
+
+
 def evaluate_theme_signals(
     sector_name: str,
     sector_change_pct: float,
@@ -66,6 +96,7 @@ def evaluate_theme_signals(
     leader_hit_limit: bool = False,
     consecutive_inflow_days: int = 0,
     consecutive_outflow_days: int = 0,
+    leader_breaking_down: bool = False,
 ) -> dict:
     """Evaluate bullish/bearish signals for a potential or existing theme.
 
@@ -100,6 +131,12 @@ def evaluate_theme_signals(
     if consecutive_outflow_days >= 3:
         bearish += 2
         details.append(f"连续{consecutive_outflow_days}天资金流出")
+    elif consecutive_outflow_days >= 2:
+        bearish += 1
+        details.append(f"连续{consecutive_outflow_days}天资金流出")
+    if leader_breaking_down:
+        bearish += 1
+        details.append("龙头破位(跌破5日均线)")
 
     return {"bullish_signals": bullish, "bearish_signals": bearish, "details": details}
 

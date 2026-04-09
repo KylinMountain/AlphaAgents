@@ -17,6 +17,7 @@ from alpha_agents.config import (
 from alpha_agents.tools.registry import (
     get_stock_quotes, get_financial_data, get_market_breadth,
     get_earnings_calendar, get_stock_fund_flow, get_north_flow,
+    get_margin_data, get_lhb_detail,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ def _create_validator() -> Agent:
     tools = [
         get_stock_quotes, get_financial_data, get_market_breadth,
         get_earnings_calendar, get_stock_fund_flow, get_north_flow,
+        get_margin_data, get_lhb_detail,
     ]
     return Agent(
         name="cross_validator",

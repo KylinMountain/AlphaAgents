@@ -14,18 +14,36 @@ _ths_lock = threading.Lock()
 
 def _fetch_sector_fund_flow() -> pd.DataFrame:
     with _ths_lock:
-        return get_concept_fund_flow() or pd.DataFrame()
+        df = get_concept_fund_flow()
+        return df if df is not None and not df.empty else pd.DataFrame()
 
 
 def get_sector_data_fn(sector_name: str) -> str:
     try:
         df = _fetch_sector_fund_flow()
+        if df.empty:
+            return json.dumps({"sector_name": sector_name, "error": "无板块数据"}, ensure_ascii=False)
         # Column names vary by akshare version
-        name_col = "行业" if "行业" in df.columns else "名称"
+        if "行业" in df.columns:
+            name_col = "行业"
+        elif "名称" in df.columns:
+            name_col = "名称"
+        else:
+            return json.dumps({"sector_name": sector_name, "error": f"数据列不匹配: {list(df.columns[:5])}"}, ensure_ascii=False)
         row = df[df[name_col] == sector_name]
         if row.empty:
-            # Try fuzzy match
+            # Try fuzzy match: sector name contains query or query contains sector name
             row = df[df[name_col].str.contains(sector_name, na=False)]
+        if row.empty:
+            # Try reverse: query contains sector name (e.g. "光学光电" matches "光学")
+            row = df[df[name_col].apply(lambda x: x in sector_name if isinstance(x, str) and len(x) >= 2 else False)]
+        if row.empty:
+            # Try keyword split: "光学光电" → try "光学", "光电" separately
+            for i in range(0, len(sector_name) - 1, 2):
+                sub = sector_name[i:i+2]
+                row = df[df[name_col].str.contains(sub, na=False)]
+                if not row.empty:
+                    break
         if row.empty:
             return json.dumps({"sector_name": sector_name, "error": f"板块 '{sector_name}' 未找到"}, ensure_ascii=False)
 

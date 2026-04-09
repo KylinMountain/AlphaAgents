@@ -267,12 +267,21 @@ async def run_review() -> str | None:
     # 0. Verify yesterday's predictions against actual prices
     await asyncio.to_thread(_verify_predictions)
 
-    # 1. Get data
-    pending = get_pending_predictions(today)
+    # 1. Get data — deduplicate predictions by code (keep latest per code)
+    all_pending = get_pending_predictions(today)
+    seen_codes = set()
+    pending = []
+    for p in reversed(all_pending):  # Reverse so latest comes first
+        if p["code"] not in seen_codes:
+            seen_codes.add(p["code"])
+            pending.append(p)
+    pending.reverse()
+
     themes = get_active_themes()
     stats = get_prediction_stats(days=7)
 
-    logger.info("Review: %d predictions, %d themes", len(pending), len(themes))
+    logger.info("Review: %d predictions (%d unique), %d themes",
+                len(all_pending), len(pending), len(themes))
 
     # 2. Auto-discover/update themes from real sector data
     await asyncio.to_thread(_update_themes_from_market_data, themes)

@@ -70,10 +70,13 @@ async def run_review_analysis(
     )
 
     logger.info("Review agent starting...")
+    if hooks is None:
+        from alpha_agents.agents.hooks import ToolEventHooks
+        hooks = ToolEventHooks(callback=None, agent_label="review")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, hooks=hooks, max_turns=40),
-            timeout=300,
+            Runner.run(agent, user_message, hooks=hooks, max_turns=30),
+            timeout=600,
         )
         logger.info("Review agent finished, length=%d", len(result.final_output))
         return result.final_output

@@ -1,6 +1,7 @@
-"""Push notification support — DingTalk, WeCom (企业微信), Telegram.
+"""Push notification support — Feishu (飞书), DingTalk, WeCom (企业微信), Telegram.
 
-All three use simple webhook POST. Configure via env vars:
+Configure via env vars:
+  NOTIFY_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
   NOTIFY_DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
   NOTIFY_WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
   NOTIFY_TELEGRAM_BOT_TOKEN=123456:ABC-DEF
@@ -15,6 +16,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_FEISHU_WEBHOOK = os.environ.get("NOTIFY_FEISHU_WEBHOOK", "")
 _DINGTALK_WEBHOOK = os.environ.get("NOTIFY_DINGTALK_WEBHOOK", "")
 _WECOM_WEBHOOK = os.environ.get("NOTIFY_WECOM_WEBHOOK", "")
 _TELEGRAM_BOT_TOKEN = os.environ.get("NOTIFY_TELEGRAM_BOT_TOKEN", "")
@@ -33,6 +35,21 @@ def _post(url: str, payload: dict, timeout: int = 10) -> bool:
     except Exception as e:
         logger.warning("Notify POST error: %s", e)
         return False
+
+
+def send_feishu(title: str, text: str) -> bool:
+    """Send a Feishu (飞书) robot message (rich text format)."""
+    if not _FEISHU_WEBHOOK:
+        return False
+    # Feishu rich text supports bold title + content
+    content = f"**{title}**\n\n{text}"
+    if len(content) > 4000:
+        content = content[:3997] + "..."
+    payload = {
+        "msg_type": "text",
+        "content": {"text": content},
+    }
+    return _post(_FEISHU_WEBHOOK, payload)
 
 
 def send_dingtalk(title: str, text: str) -> bool:
@@ -84,6 +101,8 @@ def send_telegram(title: str, text: str) -> bool:
 def notify_all(title: str, text: str) -> dict[str, bool]:
     """Send to all configured channels. Returns {channel: success}."""
     results = {}
+    if _FEISHU_WEBHOOK:
+        results["feishu"] = send_feishu(title, text)
     if _DINGTALK_WEBHOOK:
         results["dingtalk"] = send_dingtalk(title, text)
     if _WECOM_WEBHOOK:

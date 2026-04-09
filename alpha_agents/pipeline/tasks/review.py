@@ -286,7 +286,7 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
 
         lines.append(
             f"| {code} | {name} | {direction} | "
-            f"{entry:.2f if entry else '—'} | {close:.2f} | "
+            f"{f'{entry:.2f}' if entry else '—'} | {close:.2f} | "
             f"{change_pct:+.2f}% | {result} | {theme} |"
         )
 

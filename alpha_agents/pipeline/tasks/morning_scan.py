@@ -22,10 +22,13 @@ from alpha_agents.tools.stock_search import search_stocks_fn
 from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.global_market import get_global_overview_fn
 from alpha_agents.tools.futures_quotes import get_futures_quotes_fn
+from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.data.memory_store import upsert_theme
 from alpha_agents.agents.morning import run_morning_analysis
+from alpha_agents.agents.cross_validate import run_cross_validation
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
+from alpha_agents.data.portfolio import open_position
 
 logger = logging.getLogger(__name__)
 
@@ -168,11 +171,13 @@ async def run_morning_scan() -> str | None:
             concept_name = gainer.get("concept", "")
             if not concept_name:
                 continue
+            leader_change = gainer.get("leader_change_pct", gainer.get("change_pct", 0))
             signals = evaluate_theme_signals(
                 sector_name=concept_name,
                 sector_change_pct=gainer.get("change_pct", 0),
                 sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
                 market_change_pct=0,
+                leader_hit_limit=leader_change >= 9.5,
             )
             leader = gainer.get("leader", "")
             if maybe_discover_theme(
@@ -193,9 +198,11 @@ async def run_morning_scan() -> str | None:
 
     # 3. Digest news
     events = await digest_news(news_items)
-    if not events:
-        logger.info("Morning scan: no significant events")
+    if not events and not themes:
+        logger.info("Morning scan: no significant events and no active themes")
         return None
+    if not events:
+        logger.info("Morning scan: no significant events, but %d active themes — continuing", len(themes))
 
     # Cache today's events for intraday agent to read
     try:
@@ -251,26 +258,123 @@ async def run_morning_scan() -> str | None:
         except Exception as e:
             logger.debug("Morning notification failed: %s", e)
 
-    # 6. Extract recommendations and save as predictions
+    # 6. Extract recommendations, cross-validate, and save as predictions
     if report and not report.startswith("["):
-        _save_recommendations(report)
+        recs = _extract_json_recommendations(report)
+        if not recs:
+            recs = _extract_table_recommendations(report)
+        if recs:
+            recs = await _cross_validate_recommendations(recs)
+            _save_recommendations_list(recs)
 
     print(report)
     return report
 
 
-def _save_recommendations(report: str) -> None:
-    """Extract recommendations from report and save as predictions.
+async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
+    """Run cross-validation on recommendations and filter by result.
 
-    Primary: parse <!--RECOMMENDATIONS ... RECOMMENDATIONS--> JSON block.
-    Fallback: regex parse the markdown table.
+    Sends all candidates to the cross-validation agent, then parses the
+    result to adjust confidence levels:
+      - 3+/4 dimensions pass → keep "high"
+      - 2/4 dimensions pass → downgrade to "medium"
+      - ≤1/4 dimensions pass → remove from recommendations
     """
-    today = time.strftime("%Y-%m-%d")
-    recs = _extract_json_recommendations(report)
     if not recs:
-        recs = _extract_table_recommendations(report)
+        return recs
+
+    # Build candidate text for the cross-validation agent
+    lines = []
+    for r in recs:
+        lines.append(
+            f"- {r.get('code', '')} {r.get('name', '')} "
+            f"(主线: {r.get('theme', '')}, 理由: {r.get('reason', '')})"
+        )
+    candidates_text = "\n".join(lines)
+
+    try:
+        result = await run_cross_validation(candidates=candidates_text)
+    except Exception as e:
+        logger.warning("Cross-validation failed, keeping raw recommendations: %s", e)
+        return recs
+
+    # Parse validation result to adjust confidence per stock
+    validated = []
+    for r in recs:
+        code = r.get("code", "")
+        name = r.get("name", "")
+        # Count how many dimensions passed for this stock in the result
+        # The validator output mentions each stock with pass/fail per dimension
+        stock_section = ""
+        for block in result.split(code):
+            if block:
+                stock_section += block[:500]  # grab context around code mentions
+
+        # Count positive signals: 通过/✓/pass
+        passes = 0
+        total_dims = 4
+        # Search for this stock's validation in the result
+        # Look for patterns like "通过" or "✓" or "pass" near the stock code
+        code_pattern = re.escape(code)
+        # Find the section for this stock
+        section_match = re.search(
+            rf"{code_pattern}.*?(?=\d{{6}}|\Z)", result, re.DOTALL
+        )
+        if section_match:
+            section = section_match.group()
+            passes = len(re.findall(r"通过|✓|✅|pass", section, re.IGNORECASE))
+            # Also count failures to validate we found the section
+            fails = len(re.findall(r"未通过|✗|❌|fail", section, re.IGNORECASE))
+            if passes + fails == 0:
+                # Could not parse — keep original confidence
+                validated.append(r)
+                continue
+
+        if passes >= 3:
+            r["confidence"] = "high"
+            validated.append(r)
+            logger.info("  Cross-validation: %s %s → high (%d/4 pass)", code, name, passes)
+        elif passes >= 2:
+            r["confidence"] = "medium"
+            validated.append(r)
+            logger.info("  Cross-validation: %s %s → medium (%d/4 pass)", code, name, passes)
+        else:
+            logger.info("  Cross-validation: %s %s → removed (%d/4 pass)", code, name, passes)
+            # ≤1 dimension passed — remove from recommendations
+
+    if not validated:
+        logger.info("Cross-validation removed all recommendations")
+    else:
+        logger.info("Cross-validation: %d/%d recommendations passed", len(validated), len(recs))
+    return validated
+
+
+def _parse_stop_loss(action_text: str) -> float | None:
+    """Extract stop loss price from action text like '止损50元' or '止损50.5'."""
+    match = re.search(r"止损[：:\s]*(\d+\.?\d*)\s*元?", action_text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _save_recommendations_list(recs: list[dict]) -> None:
+    """Save pre-validated recommendations as predictions, fetching entry prices."""
+    today = time.strftime("%Y-%m-%d")
     if not recs:
         return
+
+    # Batch-fetch latest close prices for all recommendation codes
+    entry_prices: dict[str, float | None] = {}
+    valid_codes = [r.get("code", "") for r in recs if re.match(r"^\d{6}$", r.get("code", ""))]
+    if valid_codes:
+        try:
+            quotes_raw = get_stock_quotes_fn(codes=",".join(valid_codes))
+            quotes_data = json.loads(quotes_raw)
+            for q in quotes_data.get("quotes", []):
+                if "price" in q and q["price"]:
+                    entry_prices[q["code"]] = q["price"]
+        except Exception as e:
+            logger.debug("Failed to fetch entry prices: %s", e)
 
     saved = 0
     for r in recs:
@@ -286,16 +390,47 @@ def _save_recommendations(report: str) -> None:
                 direction="bullish",
                 confidence=r.get("confidence", "medium"),
                 theme_line=r.get("theme", ""),
-                entry_price=None,
+                entry_price=entry_prices.get(code),
                 reason=r.get("reason", "")[:100],
             )
             saved += 1
-            logger.info("  Saved prediction: %s %s (%s)", code, r.get("name", ""), r.get("confidence", ""))
+            logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",
+                        code, r.get("name", ""), r.get("confidence", ""),
+                        entry_prices.get(code, 0) or 0)
+            # Open virtual position
+            try:
+                stop_loss_val = _parse_stop_loss(r.get("action", ""))
+                open_position(
+                    code=code,
+                    name=r.get("name", ""),
+                    theme=r.get("theme", ""),
+                    open_date=today,
+                    open_price=entry_prices.get(code) or 0,
+                    stop_loss=stop_loss_val,
+                    source="morning",
+                    reason=r.get("reason", "")[:100],
+                )
+            except Exception as e:
+                logger.debug("Failed to open position for %s: %s", code, e)
         except Exception as e:
             logger.debug("Failed to save prediction for %s: %s", code, e)
 
     if saved:
         logger.info("Saved %d predictions from morning report", saved)
+
+
+def _save_recommendations(report: str) -> None:
+    """Legacy wrapper — extract and save recommendations from report text.
+
+    Primary: parse <!--RECOMMENDATIONS ... RECOMMENDATIONS--> JSON block.
+    Fallback: regex parse the markdown table.
+    """
+    recs = _extract_json_recommendations(report)
+    if not recs:
+        recs = _extract_table_recommendations(report)
+    if not recs:
+        return
+    _save_recommendations_list(recs)
 
 
 def _extract_json_recommendations(report: str) -> list[dict]:

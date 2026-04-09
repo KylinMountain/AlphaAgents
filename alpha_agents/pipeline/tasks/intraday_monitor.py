@@ -1,23 +1,36 @@
-"""Intraday monitoring task — runs every 15 minutes during trading hours.
+"""Intraday monitoring task — runs every 5 minutes during trading hours.
 
 Pre-fetches sector ranking and anomaly data, then only invokes the
-intraday agent if something unusual is detected. This avoids wasting
-LLM calls on "nothing happened" cycles.
+intraday agent if something unusual is detected. On anomaly detection,
+boosts to 2-minute interval for faster follow-up.
 """
 
 import json
 import logging
+import re
+import time
 from datetime import datetime
 
-from alpha_agents.data.memory_store import get_active_themes
+from alpha_agents.data.memory_store import get_active_themes, save_prediction, get_today_intraday_predictions
 from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
+from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.agents.intraday import run_intraday_analysis
 from alpha_agents.notify import notify_all
+from alpha_agents.data.portfolio import open_position, check_positions, get_open_positions
+from alpha_agents.data.market_data import get_realtime_quotes
 
 logger = logging.getLogger(__name__)
+
+# Scheduler reference for boost — set by main.py before scheduler starts
+_scheduler = None
+
+def set_scheduler(scheduler) -> None:
+    """Allow main to inject the scheduler so we can boost on anomaly."""
+    global _scheduler
+    _scheduler = scheduler
 
 
 def _format_themes_for_monitoring(themes: list[dict]) -> str:
@@ -50,11 +63,11 @@ def _detect_anomalies() -> tuple[bool, str]:
         top_losers = ranking.get("losers", [])
         if top_gainers:
             best = top_gainers[0]
-            if best.get("change_pct", 0) > 2.0:
+            if best.get("change_pct", 0) > 1.5:
                 signals.append(f"板块异动: {best['sector']} 涨{best['change_pct']:.1f}%, 资金净流入{best['net_flow_yi']:.1f}亿, 领涨股{best.get('leader', '')}")
         if top_losers:
             worst = top_losers[0]
-            if worst.get("change_pct", 0) < -2.0:
+            if worst.get("change_pct", 0) < -1.5:
                 signals.append(f"板块下杀: {worst['sector']} 跌{abs(worst['change_pct']):.1f}%")
     except Exception as e:
         logger.debug("Sector ranking fetch failed: %s", e)
@@ -104,6 +117,30 @@ async def run_intraday_monitor() -> str | None:
     """
     import asyncio
 
+    # Skip during lunch break (11:30-13:00) — market is closed, data is stale
+    now = datetime.now()
+    hm = now.hour * 100 + now.minute
+    if 1130 <= hm < 1300:
+        logger.info("Intraday monitor: lunch break, skipping")
+        return None
+
+    # ── Check existing positions (T+1 constraint handled by check_positions) ──
+    today_str = now.strftime("%Y-%m-%d")
+    open_pos = get_open_positions()
+    if open_pos:
+        codes = [p["code"] for p in open_pos]
+        rt_prices = await asyncio.to_thread(get_realtime_quotes, codes)
+        if rt_prices:
+            price_map = {code: data["price"] for code, data in rt_prices.items()}
+            alerts = check_positions(realtime_prices=price_map, today=today_str)
+            for alert in alerts:
+                msg = _format_portfolio_alert(alert)
+                logger.info("Portfolio alert: %s", msg)
+                try:
+                    await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
+                except Exception:
+                    pass
+
     themes = get_active_themes()
     if not themes:
         logger.info("Intraday monitor: no active themes to watch")
@@ -126,6 +163,10 @@ async def run_intraday_monitor() -> str | None:
     logger.info("Intraday monitor: anomaly detected, calling agent for analysis...")
     logger.info(anomaly_context)
 
+    # Boost to 2-min interval for faster follow-up
+    if _scheduler:
+        _scheduler.boost_task("intraday_monitor", minutes=15)
+
     # Read today's events from morning scan (if available)
     events_context = ""
     try:
@@ -144,9 +185,24 @@ async def run_intraday_monitor() -> str | None:
     except Exception:
         pass
 
+    # Build context for prior intraday recommendations (continuity)
+    prior_context = ""
+    try:
+        prior_recs = get_today_intraday_predictions()
+        if prior_recs:
+            lines = []
+            for r in prior_recs:
+                price_str = f" @ {r['entry_price']:.2f}元" if r.get("entry_price") else ""
+                lines.append(f"  {r['code']} {r['name']}{price_str} ({r['confidence']}) — {r.get('reason', '')}")
+            prior_context = "【今日已推荐标的（保持一致性，如需改变判断请明确说明原因）】\n" + "\n".join(lines)
+    except Exception:
+        pass
+
     # Build full context for agent
     themes_context = _format_themes_for_monitoring(themes)
     parts = [themes_context, anomaly_context]
+    if prior_context:
+        parts.append(prior_context)
     if events_context:
         parts.append(events_context)
     full_context = "\n\n".join(parts)
@@ -157,11 +213,14 @@ async def run_intraday_monitor() -> str | None:
         logger.info("Intraday alert generated!")
         print(output)
 
+        # Save intraday recommendations with real-time prices
+        _save_intraday_recommendations(output)
+
         try:
-            now = datetime.now().strftime("%H:%M")
+            now_str = datetime.now().strftime("%H:%M")
             await asyncio.to_thread(
                 notify_all,
-                f"AlphaAgents 盘中提醒 | {now}",
+                f"AlphaAgents 盘中提醒 | {now_str}",
                 output[:500],
             )
         except Exception as e:
@@ -171,3 +230,97 @@ async def run_intraday_monitor() -> str | None:
 
     logger.info("Intraday monitor: agent found no actionable anomaly")
     return None
+
+
+def _parse_stop_loss(action_text: str) -> float | None:
+    """Extract stop loss price from action text like '止损50元' or '止损50.5'."""
+    match = re.search(r"止损[：:\s]*(\d+\.?\d*)\s*元?", action_text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _format_portfolio_alert(alert: dict) -> str:
+    """Format a portfolio alert for notification."""
+    code = alert["code"]
+    name = alert.get("name", "")
+    ret = alert.get("return_pct", 0)
+    reason = alert.get("reason", "")
+    close_price = alert.get("close_price", 0)
+    sign = "盈" if ret >= 0 else "亏"
+    return f"{reason} | {code} {name} 平仓价{close_price:.2f}元（{sign}{abs(ret):.1f}%）"
+
+
+def _save_intraday_recommendations(report: str) -> None:
+    """Extract recommendations from intraday report and save with real-time prices."""
+    match = re.search(r"<!--RECOMMENDATIONS\s*(.*?)\s*RECOMMENDATIONS-->", report, re.DOTALL)
+    if not match:
+        return
+    try:
+        from json_repair import repair_json
+        recs = repair_json(match.group(1), return_objects=True)
+        if not isinstance(recs, list):
+            return
+    except Exception:
+        return
+
+    today = time.strftime("%Y-%m-%d")
+    valid_recs = [r for r in recs if re.match(r"^\d{6}$", r.get("code", ""))]
+    if not valid_recs:
+        return
+
+    # Batch fetch real-time prices
+    prices = {}
+    try:
+        codes = ",".join(r["code"] for r in valid_recs)
+        result = json.loads(get_stock_quotes_fn(codes=codes))
+        for q in result.get("quotes", []):
+            prices[q["code"]] = q.get("price") or q.get("latest_close")
+    except Exception as e:
+        logger.debug("Failed to fetch prices for intraday recs: %s", e)
+
+    saved = 0
+    for r in valid_recs:
+        code = r["code"]
+        entry_price = prices.get(code)
+        rec_type = r.get("type", "actionable")
+        # signal = 涨停确认股, actionable = 可操作标的
+        report_type = "intraday_signal" if rec_type == "signal" else "intraday"
+        confidence = r.get("confidence", "medium") if rec_type != "signal" else "signal"
+        try:
+            save_prediction(
+                date=today,
+                report_type=report_type,
+                code=code,
+                name=r.get("name", ""),
+                direction="bullish",
+                confidence=confidence,
+                theme_line=r.get("theme", ""),
+                entry_price=entry_price,
+                reason=r.get("reason", "")[:100],
+            )
+            saved += 1
+            tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
+            logger.info("  Saved intraday %s: %s %s @ %.2f",
+                        tag, code, r.get("name", ""), entry_price or 0)
+            # Open virtual position for actionable recommendations (not signals)
+            if rec_type != "signal" and entry_price:
+                try:
+                    stop_loss_val = _parse_stop_loss(r.get("action", ""))
+                    open_position(
+                        code=code,
+                        name=r.get("name", ""),
+                        theme=r.get("theme", ""),
+                        open_date=today,
+                        open_price=entry_price,
+                        stop_loss=stop_loss_val,
+                        source="intraday",
+                        reason=r.get("reason", "")[:100],
+                    )
+                except Exception as e:
+                    logger.debug("Failed to open intraday position for %s: %s", code, e)
+        except Exception as e:
+            logger.debug("Failed to save intraday prediction for %s: %s", code, e)
+
+    if saved:
+        logger.info("Saved %d intraday predictions (signal + actionable)", saved)

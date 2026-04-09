@@ -332,9 +332,14 @@ def _save_intraday_recommendations(report: str) -> None:
             # Create pending order for actionable recommendations (not signals)
             if rec_type != "signal":
                 try:
-                    action = r.get("action", "")
-                    entry_low, entry_high = parse_entry_zone(action)
-                    stop_loss_val = parse_stop_loss(action)
+                    # Prefer structured JSON fields, fallback to regex
+                    entry_low = r.get("entry_low")
+                    entry_high = r.get("entry_high")
+                    stop_loss_val = r.get("stop_loss")
+                    if entry_low is None and entry_high is None:
+                        entry_low, entry_high = parse_entry_zone(r.get("action", ""))
+                    if stop_loss_val is None:
+                        stop_loss_val = parse_stop_loss(r.get("action", ""))
                     create_pending_order(
                         code=code,
                         name=r.get("name", ""),

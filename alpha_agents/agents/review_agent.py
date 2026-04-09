@@ -72,13 +72,21 @@ async def run_review_analysis(
         f"请执行收盘复盘分析。"
     )
 
+    from alpha_agents.pipeline.tracing import trace_agent_run
+    from alpha_agents.pipeline.retry import run_with_retry
+    ctx = trace_agent_run("review", "review_analyst", user_message)
+
     logger.info("Review agent starting...")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, hooks=hooks, max_turns=40),
+            run_with_retry(
+                lambda: Runner.run(agent, user_message, hooks=ctx.hooks(hooks), max_turns=40),
+                label="review_agent",
+            ),
             timeout=300,
         )
         logger.info("Review agent finished, length=%d", len(result.final_output))
+        ctx.save(result.final_output)
         return result.final_output
     except asyncio.TimeoutError:
         logger.error("Review agent timed out after 300s")

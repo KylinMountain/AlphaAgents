@@ -60,14 +60,18 @@ async def run_intraday_analysis(context: str, hooks=None) -> str:
         f"请检查是否有异动。如果无异动，直接输出\u201c无异动\u201d。"
     )
 
+    from alpha_agents.pipeline.tracing import trace_agent_run
+    ctx = trace_agent_run("intraday", "intraday_analyst", user_message)
+
     logger.info("Intraday agent starting...")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, hooks=hooks, max_turns=20),
+            Runner.run(agent, user_message, hooks=ctx.hooks(hooks), max_turns=20),
             timeout=120,
         )
         output = result.final_output
         logger.info("Intraday agent finished, length=%d", len(output))
+        ctx.save(output)
         return output
     except asyncio.TimeoutError:
         logger.warning("Intraday agent timed out")

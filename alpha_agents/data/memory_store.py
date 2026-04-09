@@ -226,27 +226,67 @@ def get_pending_predictions(date: str) -> list[dict]:
 
 
 def get_prediction_stats(days: int = 7) -> dict:
-    """Get hit rate statistics for recent predictions."""
+    """Get hit rate and P&L statistics for recent predictions.
+
+    Returns hit rate, profit factor, avg win/loss, and per-confidence breakdown.
+    """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT direction, confidence, hit FROM predictions "
-        "WHERE hit IS NOT NULL ORDER BY date DESC LIMIT ?",
+        "SELECT direction, confidence, hit, next_day_return, week_return "
+        "FROM predictions WHERE hit IS NOT NULL ORDER BY date DESC LIMIT ?",
         (days * 20,),
     ).fetchall()
     if not rows:
-        return {"total": 0, "hits": 0, "hit_rate": 0.0, "by_confidence": {}}
+        return {"total": 0, "hits": 0, "hit_rate": 0.0, "by_confidence": {},
+                "pnl": {"avg_win": 0, "avg_loss": 0, "profit_factor": 0, "avg_return": 0}}
     total = len(rows)
     hits = sum(1 for r in rows if r["hit"] == 1)
+
+    # P&L metrics from next_day_return
+    returns = [r["next_day_return"] for r in rows if r["next_day_return"] is not None]
+    pnl = _compute_pnl(returns)
+
     by_conf = {}
     for r in rows:
         c = r["confidence"] or "unknown"
-        by_conf.setdefault(c, {"total": 0, "hits": 0})
+        by_conf.setdefault(c, {"total": 0, "hits": 0, "returns": []})
         by_conf[c]["total"] += 1
         if r["hit"] == 1:
             by_conf[c]["hits"] += 1
+        if r["next_day_return"] is not None:
+            by_conf[c]["returns"].append(r["next_day_return"])
     for v in by_conf.values():
         v["hit_rate"] = round(v["hits"] / v["total"] * 100, 1) if v["total"] else 0
-    return {"total": total, "hits": hits, "hit_rate": round(hits / total * 100, 1), "by_confidence": by_conf}
+        v["pnl"] = _compute_pnl(v.pop("returns"))
+
+    return {
+        "total": total, "hits": hits,
+        "hit_rate": round(hits / total * 100, 1),
+        "by_confidence": by_conf,
+        "pnl": pnl,
+    }
+
+
+def _compute_pnl(returns: list[float]) -> dict:
+    """Compute P&L metrics from a list of return percentages."""
+    if not returns:
+        return {"avg_win": 0, "avg_loss": 0, "profit_factor": 0, "avg_return": 0}
+
+    wins = [r for r in returns if r > 0]
+    losses = [r for r in returns if r < 0]
+    avg_win = round(sum(wins) / len(wins), 2) if wins else 0
+    avg_loss = round(sum(losses) / len(losses), 2) if losses else 0
+    total_win = sum(wins)
+    total_loss = abs(sum(losses))
+    profit_factor = round(total_win / total_loss, 2) if total_loss > 0 else float("inf") if total_win > 0 else 0
+    avg_return = round(sum(returns) / len(returns), 2)
+
+    return {
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor,
+        "avg_return": avg_return,
+    }
 
 
 # ── Market Cognition ─────────────────────────────────────────

@@ -38,6 +38,20 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen-plus")
 MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))
 NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))
 
+# ---------------------------------------------------------------------------
+# Intraday anomaly detection thresholds
+# ---------------------------------------------------------------------------
+ANOMALY_SECTOR_CHANGE_PCT = float(os.environ.get("ANOMALY_SECTOR_CHANGE_PCT", "2.0"))
+ANOMALY_LIMIT_UP_COUNT = int(os.environ.get("ANOMALY_LIMIT_UP_COUNT", "30"))
+ANOMALY_BREADTH_EXTREME_HIGH = float(os.environ.get("ANOMALY_BREADTH_EXTREME_HIGH", "5.0"))
+ANOMALY_BREADTH_EXTREME_LOW = float(os.environ.get("ANOMALY_BREADTH_EXTREME_LOW", "0.3"))
+
+# ---------------------------------------------------------------------------
+# Agent retry settings
+# ---------------------------------------------------------------------------
+AGENT_MAX_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "2"))
+AGENT_RETRY_BASE_DELAY = float(os.environ.get("AGENT_RETRY_BASE_DELAY", "3.0"))
+
 
 @contextmanager
 def no_proxy():

@@ -110,10 +110,19 @@ def _format_stats(stats: dict) -> str:
         return "暂无预测记录"
     hit_rate = stats.get("hit_rate", 0)
     hits = stats.get("hits", 0)
+    pnl = stats.get("pnl", {})
     by_conf = stats.get("by_confidence", {})
     lines = [f"近7天命中率: {hit_rate:.1f}% ({hits}/{total})"]
+    if pnl.get("profit_factor"):
+        lines.append(
+            f"盈亏比: {pnl['profit_factor']} | "
+            f"平均盈利: {pnl['avg_win']:+.2f}% | 平均亏损: {pnl['avg_loss']:+.2f}% | "
+            f"平均收益: {pnl['avg_return']:+.2f}%"
+        )
     for conf, data in by_conf.items():
-        lines.append(f"  {conf}信心: {data['hit_rate']:.1f}% ({data['hits']}/{data['total']})")
+        conf_pnl = data.get("pnl", {})
+        pf_str = f", 盈亏比{conf_pnl['profit_factor']}" if conf_pnl.get("profit_factor") else ""
+        lines.append(f"  {conf}信心: {data['hit_rate']:.1f}% ({data['hits']}/{data['total']}){pf_str}")
     return "\n".join(lines)
 
 

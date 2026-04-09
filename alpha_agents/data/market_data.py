@@ -15,6 +15,8 @@ Backend selection:
 
 import json
 import logging
+import time
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -24,6 +26,55 @@ import pandas as pd
 from alpha_agents.config import no_proxy
 
 logger = logging.getLogger(__name__)
+
+
+# ── Data Freshness Tracking ────────────────────────────────────
+
+class FreshnessTracker:
+    """Tracks when each data source was last successfully fetched.
+
+    Allows downstream consumers (e.g., intraday monitor) to detect stale data.
+    """
+
+    def __init__(self):
+        self._timestamps: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def mark_fresh(self, source: str) -> None:
+        """Record that a data source just returned fresh data."""
+        with self._lock:
+            self._timestamps[source] = time.time()
+
+    def get_age_seconds(self, source: str) -> float | None:
+        """Get seconds since last fresh fetch. None if never fetched."""
+        ts = self._timestamps.get(source)
+        if ts is None:
+            return None
+        return time.time() - ts
+
+    def is_stale(self, source: str, max_age_seconds: float = 300) -> bool:
+        """Check if a source is stale (>max_age_seconds since last fetch)."""
+        age = self.get_age_seconds(source)
+        if age is None:
+            return True  # Never fetched = stale
+        return age > max_age_seconds
+
+    def get_status(self) -> dict[str, dict]:
+        """Get freshness status of all tracked sources."""
+        now = time.time()
+        status = {}
+        for source, ts in self._timestamps.items():
+            age = now - ts
+            status[source] = {
+                "age_seconds": round(age, 1),
+                "stale": age > 300,
+                "last_fetch": datetime.fromtimestamp(ts).strftime("%H:%M:%S"),
+            }
+        return status
+
+
+# Global tracker instance
+freshness = FreshnessTracker()
 
 # ── baostock helpers ─────────────────────────────────────────
 
@@ -146,13 +197,19 @@ def get_stock_latest_price(code: str) -> Optional[dict]:
 def get_industry_fund_flow() -> Optional[pd.DataFrame]:
     """Get industry-level fund flow ranking (90 sectors)."""
     import akshare as ak
-    return _ak_call(ak.stock_fund_flow_industry)
+    df = _ak_call(ak.stock_fund_flow_industry)
+    if df is not None and not df.empty:
+        freshness.mark_fresh("industry_fund_flow")
+    return df
 
 
 def get_concept_fund_flow() -> Optional[pd.DataFrame]:
     """Get concept-level fund flow ranking (387 concepts)."""
     import akshare as ak
-    return _ak_call(ak.stock_fund_flow_concept)
+    df = _ak_call(ak.stock_fund_flow_concept)
+    if df is not None and not df.empty:
+        freshness.mark_fresh("concept_fund_flow")
+    return df
 
 
 # ── LHB / Block Trade / Margin (akshare eastmoney) ──────────
@@ -205,7 +262,10 @@ def get_limit_up_pool(date: str = "") -> Optional[pd.DataFrame]:
     import akshare as ak
     if not date:
         date = datetime.now().strftime("%Y%m%d")
-    return _ak_call(ak.stock_zt_pool_em, date=date)
+    df = _ak_call(ak.stock_zt_pool_em, date=date)
+    if df is not None and not df.empty:
+        freshness.mark_fresh("limit_up_pool")
+    return df
 
 
 def get_broken_limit_pool(date: str = "") -> Optional[pd.DataFrame]:
@@ -229,7 +289,10 @@ def get_limit_down_pool(date: str = "") -> Optional[pd.DataFrame]:
 def get_market_activity() -> Optional[pd.DataFrame]:
     """Get A-share market activity (advance/decline/limit up-down)."""
     import akshare as ak
-    return _ak_call(ak.stock_market_activity_legu)
+    df = _ak_call(ak.stock_market_activity_legu)
+    if df is not None and not df.empty:
+        freshness.mark_fresh("market_activity")
+    return df
 
 
 # ── Financial Data (akshare THS) ────────────────────────────

@@ -85,6 +85,20 @@ CREATE INDEX IF NOT EXISTS idx_events_title ON events(title);
 CREATE INDEX IF NOT EXISTS idx_events_category ON events(category);
 CREATE INDEX IF NOT EXISTS idx_event_links_source ON event_links(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_event_links_target ON event_links(target_event_id);
+
+CREATE TABLE IF NOT EXISTS decision_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    report_type TEXT NOT NULL,        -- morning / intraday / review / night / weekly
+    agent_name TEXT,
+    input_context TEXT,               -- full user message sent to agent
+    tool_calls TEXT,                  -- JSON array of {tool, input_preview, output_preview}
+    final_output TEXT,                -- full agent output
+    duration_seconds REAL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_traces_date ON decision_traces(date);
+CREATE INDEX IF NOT EXISTS idx_traces_type ON decision_traces(report_type);
 """
 
 
@@ -246,5 +260,51 @@ def find_related_events(event_title: str, limit: int = 10) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM events WHERE title LIKE ? ORDER BY timestamp DESC LIMIT ?",
         (f"%{event_title[:20]}%", limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Decision Traces ---
+
+def save_decision_trace(
+    date: str,
+    report_type: str,
+    agent_name: str,
+    input_context: str,
+    tool_calls: list[dict],
+    final_output: str,
+    duration_seconds: float,
+) -> int:
+    """Persist a full decision trace for post-hoc analysis."""
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO decision_traces (date, report_type, agent_name, "
+            "input_context, tool_calls, final_output, duration_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (date, report_type, agent_name, input_context,
+             json.dumps(tool_calls, ensure_ascii=False),
+             final_output, duration_seconds),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_decision_traces(date: str | None = None, report_type: str | None = None,
+                         limit: int = 20) -> list[dict]:
+    """Retrieve decision traces with optional filters."""
+    conn = _get_conn()
+    conditions, params = [], []
+    if date:
+        conditions.append("date = ?")
+        params.append(date)
+    if report_type:
+        conditions.append("report_type = ?")
+        params.append(report_type)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM decision_traces {where} ORDER BY created_at DESC LIMIT ?",
+        params,
     ).fetchall()
     return [dict(r) for r in rows]

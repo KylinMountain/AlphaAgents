@@ -17,6 +17,7 @@ from alpha_agents.config import (
 )
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats, get_all_cognition_latest,
+    format_lessons_context, get_lessons,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,21 +68,28 @@ async def run_weekly_report() -> str | None:
         tools=[],  # No tools needed — purely summarization
     )
 
+    lessons_ctx = format_lessons_context(limit=20)
+
     now = datetime.now()
     user_message = (
         f"[当前时间: {now.strftime('%Y-%m-%d %H:%M')}]\n\n"
         f"【本周预测统计】\n{stats_text}\n"
         f"【活跃主线】\n{themes_text}\n"
+        f"【历史经验教训】\n{lessons_ctx}\n\n"
         f"请生成本周周报。"
     )
 
+    from alpha_agents.pipeline.tracing import trace_agent_run
+    ctx = trace_agent_run("weekly", "weekly_analyst", user_message)
+
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, max_turns=5),
+            Runner.run(agent, user_message, hooks=ctx.hooks(), max_turns=5),
             timeout=60,
         )
         report = result.final_output
         logger.info("Weekly report finished, length=%d", len(report))
+        ctx.save(report)
         print(report)
         return report
     except asyncio.TimeoutError:

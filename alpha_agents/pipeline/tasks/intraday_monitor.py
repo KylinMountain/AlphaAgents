@@ -9,8 +9,14 @@ import json
 import logging
 from datetime import datetime
 
-from alpha_agents.data.memory_store import get_active_themes
-from alpha_agents.config import DATA_DIR
+from alpha_agents.data.memory_store import get_active_themes, format_lessons_context
+from alpha_agents.config import (
+    DATA_DIR,
+    ANOMALY_SECTOR_CHANGE_PCT,
+    ANOMALY_LIMIT_UP_COUNT,
+    ANOMALY_BREADTH_EXTREME_HIGH,
+    ANOMALY_BREADTH_EXTREME_LOW,
+)
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
@@ -50,11 +56,11 @@ def _detect_anomalies() -> tuple[bool, str]:
         top_losers = ranking.get("losers", [])
         if top_gainers:
             best = top_gainers[0]
-            if best.get("change_pct", 0) > 2.0:
+            if best.get("change_pct", 0) > ANOMALY_SECTOR_CHANGE_PCT:
                 signals.append(f"板块异动: {best['sector']} 涨{best['change_pct']:.1f}%, 资金净流入{best['net_flow_yi']:.1f}亿, 领涨股{best.get('leader', '')}")
         if top_losers:
             worst = top_losers[0]
-            if worst.get("change_pct", 0) < -2.0:
+            if worst.get("change_pct", 0) < -ANOMALY_SECTOR_CHANGE_PCT:
                 signals.append(f"板块下杀: {worst['sector']} 跌{abs(worst['change_pct']):.1f}%")
     except Exception as e:
         logger.debug("Sector ranking fetch failed: %s", e)
@@ -67,7 +73,7 @@ def _detect_anomalies() -> tuple[bool, str]:
         consecutive = summary.get("consecutive_limit_stocks", [])
         top_sector = summary.get("top_sector", "")
 
-        if limit_up > 30:
+        if limit_up > ANOMALY_LIMIT_UP_COUNT:
             signals.append(f"涨停板活跃: {limit_up}家涨停, 集中在{top_sector}")
         if consecutive:
             names = ", ".join(f"{s['name']}({s['consecutive_limits']}板)" for s in consecutive[:5])
@@ -80,7 +86,7 @@ def _detect_anomalies() -> tuple[bool, str]:
         breadth = json.loads(get_market_breadth_fn())
         ad_ratio = breadth.get("advance_decline_ratio", 1)
         sentiment = breadth.get("sentiment", "")
-        if ad_ratio > 5 or ad_ratio < 0.3:
+        if ad_ratio > ANOMALY_BREADTH_EXTREME_HIGH or ad_ratio < ANOMALY_BREADTH_EXTREME_LOW:
             signals.append(f"市场情绪极端: 涨跌比{ad_ratio}, {sentiment}")
     except Exception as e:
         logger.debug("Market breadth failed: %s", e)
@@ -119,6 +125,16 @@ async def run_intraday_monitor() -> str | None:
     # Pre-fetch data to check for anomalies (cheap, no LLM)
     has_anomaly, anomaly_context = await asyncio.to_thread(_detect_anomalies)
 
+    # Check data freshness — warn if key sources are stale
+    try:
+        from alpha_agents.data.market_data import freshness
+        stale_sources = [s for s in ["industry_fund_flow", "limit_up_pool", "market_activity"]
+                         if freshness.is_stale(s, max_age_seconds=600)]
+        if stale_sources:
+            logger.warning("Intraday monitor: stale data sources: %s", stale_sources)
+    except Exception:
+        pass
+
     if not has_anomaly:
         logger.info("Intraday monitor: no anomaly detected (checked sectors + limit-up + breadth)")
         return None
@@ -146,9 +162,12 @@ async def run_intraday_monitor() -> str | None:
 
     # Build full context for agent
     themes_context = _format_themes_for_monitoring(themes)
+    lessons_context = format_lessons_context(limit=5)
     parts = [themes_context, anomaly_context]
     if events_context:
         parts.append(events_context)
+    if lessons_context and lessons_context != "暂无历史经验":
+        parts.append(f"【历史经验教训】\n{lessons_context}")
     full_context = "\n\n".join(parts)
 
     output = await run_intraday_analysis(full_context)

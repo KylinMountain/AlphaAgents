@@ -76,13 +76,21 @@ async def run_morning_analysis(
         f"请生成今日晨报。"
     )
 
+    from alpha_agents.pipeline.tracing import trace_agent_run
+    from alpha_agents.pipeline.retry import run_with_retry
+    ctx = trace_agent_run("morning", "morning_analyst", user_message)
+
     logger.info("Morning agent starting...")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, hooks=hooks, max_turns=40),
+            run_with_retry(
+                lambda: Runner.run(agent, user_message, hooks=ctx.hooks(hooks), max_turns=40),
+                label="morning_agent",
+            ),
             timeout=300,
         )
         logger.info("Morning agent finished, length=%d", len(result.final_output))
+        ctx.save(result.final_output)
         return result.final_output
     except asyncio.TimeoutError:
         logger.error("Morning agent timed out after 300s")

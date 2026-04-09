@@ -145,6 +145,13 @@ async def get_source_health():
     return JSONResponse({"sources": health_tracker.get_status()})
 
 
+@app.get("/api/data-freshness")
+async def get_data_freshness():
+    """Market data freshness status — shows age of each data source."""
+    from alpha_agents.data.market_data import freshness
+    return JSONResponse({"sources": freshness.get_status()})
+
+
 # --- Watchlist CRUD ---
 
 @app.get("/api/watchlist")

@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 from alpha_agents.config import (
     PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
-from alpha_agents.data.memory_store import get_active_themes
+from alpha_agents.data.memory_store import get_active_themes, format_lessons_context
 from alpha_agents.tools.registry import (
     get_global_overview, get_us_market, get_bond_yields,
     get_pizzint, web_search,
@@ -92,22 +92,29 @@ async def run_night_scan() -> str | None:
         tools=NIGHT_TOOLS,
     )
 
+    lessons_ctx = format_lessons_context(limit=10)
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user_message = (
         f"[当前时间: {now}]\n\n"
         f"{global_ctx}\n\n"
         f"【当前活跃主线】\n{themes_ctx}\n\n"
+        f"【历史经验教训】\n{lessons_ctx}\n\n"
         f"请生成今日夜报，分析外盘对明日A股的影响。"
     )
+
+    from alpha_agents.pipeline.tracing import trace_agent_run
+    ctx = trace_agent_run("night", "night_analyst", user_message)
 
     logger.info("Night agent starting...")
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, user_message, max_turns=20),
+            Runner.run(agent, user_message, hooks=ctx.hooks(), max_turns=20),
             timeout=120,
         )
         report = result.final_output
         logger.info("Night agent finished, length=%d", len(report))
+        ctx.save(report)
     except asyncio.TimeoutError:
         logger.warning("Night agent timed out")
         return None

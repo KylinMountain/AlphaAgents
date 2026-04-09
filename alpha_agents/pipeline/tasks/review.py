@@ -113,7 +113,12 @@ def _format_stats(stats: dict) -> str:
     total = stats.get("total", 0)
     if total == 0:
         return "暂无预测记录"
-    return f"近7天命中率: {stats.get('hit_rate', 0):.1f}% ({stats.get('hits', 0)}/{total})"
+    pnl = stats.get("pnl", {})
+    line = f"近7天命中率: {stats.get('hit_rate', 0):.1f}% ({stats.get('hits', 0)}/{total})"
+    if pnl.get("profit_factor"):
+        line += (f"\n盈亏比: {pnl['profit_factor']} | "
+                 f"平均盈利: {pnl['avg_win']:+.2f}% | 平均亏损: {pnl['avg_loss']:+.2f}%")
+    return line
 
 
 def _extract_lessons(report: str) -> list[dict]:

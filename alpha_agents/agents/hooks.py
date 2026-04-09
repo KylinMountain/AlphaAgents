@@ -34,6 +34,8 @@ class ToolEventHooks(RunHooks):
             })
 
     async def on_tool_start(self, context, agent, tool):
+        if context.context is None:
+            context.context = {}
         context.context.setdefault("_tool_timers", {})[tool.name] = time.time()
         logger.info("  🔧 %s → %s ...", agent.name, tool.name)
         if self._callback:
@@ -45,7 +47,8 @@ class ToolEventHooks(RunHooks):
             })
 
     async def on_tool_end(self, context, agent, tool, result):
-        elapsed = time.time() - context.context.get("_tool_timers", {}).get(tool.name, time.time())
+        timers = (context.context or {}).get("_tool_timers", {})
+        elapsed = time.time() - timers.get(tool.name, time.time())
         preview = str(result)[:100] if result else ""
         logger.info("  🔧 %s ← %s (%.1fs) %s", agent.name, tool.name, elapsed, preview[:60])
         if self._callback:

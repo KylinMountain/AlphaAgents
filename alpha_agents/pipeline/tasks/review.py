@@ -212,33 +212,33 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
 
 
 def _verify_today_predictions(predictions: list[dict]) -> str:
-    """Batch-verify today's predictions with actual prices. Returns formatted result.
+    """Batch-verify today's predictions: entry_price → close_price.
 
     All computation done in Python — no LLM calls needed.
+    Uses: first recommendation's entry_price vs today's actual close price.
     """
     if not predictions:
         return "今日无待验证预测"
 
-    # Deduplicate by code (keep latest)
+    # Deduplicate by code — keep FIRST occurrence (earliest entry_price)
     seen = set()
     unique = []
-    for p in reversed(predictions):
+    for p in predictions:
         if p["code"] not in seen:
             seen.add(p["code"])
             unique.append(p)
-    unique.reverse()
 
-    # Batch fetch today's close prices via Sina
+    # Batch fetch today's actual close prices via Sina
     codes = [p["code"] for p in unique]
     from alpha_agents.data.market_data import get_realtime_quotes
     prices = get_realtime_quotes(codes) or {}
 
     # Build verification table
-    lines = ["| 代码 | 名称 | 方向 | 推荐价 | 收盘价 | 涨跌 | 结果 | 主线 |",
-             "|------|------|------|-------|-------|------|------|------|"]
+    lines = ["| 代码 | 名称 | 方向 | 推荐价 | 收盘价 | 推荐→收盘 | 结果 | 主线 |",
+             "|------|------|------|-------|-------|----------|------|------|"]
 
     hits, misses, neutral = 0, 0, 0
-    by_theme: dict[str, dict] = {}  # theme → {hits, total}
+    by_theme: dict[str, dict] = {}
 
     for p in unique:
         code = p["code"]
@@ -248,14 +248,21 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
         theme = p.get("theme_line", "?")
         rt = prices.get(code)
 
-        if not rt:
+        if not rt or rt["price"] <= 0:
             lines.append(f"| {code} | {name} | {direction} | {entry or '—'} | — | — | 无数据 | {theme} |")
             continue
 
         close = rt["price"]
-        change_pct = rt["change_pct"]
 
-        # Determine hit/miss
+        # Calculate return: entry_price → close (not yesterday → today)
+        if entry and entry > 0:
+            change_pct = round((close - entry) / entry * 100, 2)
+        else:
+            # No entry price recorded — use today's change as fallback
+            change_pct = rt["change_pct"]
+            entry = None
+
+        # Determine hit/miss based on return from entry
         if direction == "bullish":
             if change_pct > 0:
                 result = "命中"
@@ -278,21 +285,20 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
                 neutral += 1
 
         lines.append(
-            f"| {code} | {name} | {direction} | {entry or '—'} | {close:.2f} | "
+            f"| {code} | {name} | {direction} | "
+            f"{entry:.2f if entry else '—'} | {close:.2f} | "
             f"{change_pct:+.2f}% | {result} | {theme} |"
         )
 
-        # Track by theme
         t = by_theme.setdefault(theme, {"hits": 0, "total": 0})
         t["total"] += 1
         if result == "命中":
             t["hits"] += 1
 
-    total = hits + misses + neutral
-    hit_rate = hits / (hits + misses) * 100 if (hits + misses) > 0 else 0
+    total_verified = hits + misses
+    hit_rate = hits / total_verified * 100 if total_verified > 0 else 0
 
-    # Summary
-    summary = f"命中率: {hits}/{hits + misses} ({hit_rate:.0f}%) | 中性{neutral}只\n"
+    summary = f"命中率: {hits}/{total_verified} ({hit_rate:.0f}%) | 中性{neutral}只 | 共{len(unique)}只\n"
     summary += "按主线:\n"
     for theme, data in by_theme.items():
         tr = data["hits"] / data["total"] * 100 if data["total"] else 0

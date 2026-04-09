@@ -18,6 +18,8 @@ from alpha_agents.config import (
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats, get_all_cognition_latest,
 )
+from alpha_agents.notify import notify_all
+from alpha_agents.data.portfolio import get_portfolio_stats, format_portfolio_stats
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,10 @@ async def run_weekly_report() -> str | None:
     for conf, data in stats.get("by_confidence", {}).items():
         stats_text += f"  {conf}信心: {data['hit_rate']:.1f}% ({data['hits']}/{data['total']})\n"
 
+    # Portfolio performance
+    portfolio_stats = get_portfolio_stats(days=7)
+    portfolio_text = format_portfolio_stats(portfolio_stats)
+
     # Generate report via LLM
     prompt_text = (PROMPTS_DIR / "weekly_report.md").read_text(encoding="utf-8")
     agent = Agent(
@@ -71,6 +77,7 @@ async def run_weekly_report() -> str | None:
     user_message = (
         f"[当前时间: {now.strftime('%Y-%m-%d %H:%M')}]\n\n"
         f"【本周预测统计】\n{stats_text}\n"
+        f"【本周策略表现（虚拟持仓）】\n{portfolio_text}\n"
         f"【活跃主线】\n{themes_text}\n"
         f"请生成本周周报。"
     )
@@ -83,6 +90,19 @@ async def run_weekly_report() -> str | None:
         report = result.final_output
         logger.info("Weekly report finished, length=%d", len(report))
         print(report)
+
+        # Push notification
+        if report:
+            try:
+                import time as _time
+                await asyncio.to_thread(
+                    notify_all,
+                    f"AlphaAgents 周报 | {_time.strftime('%m-%d')}",
+                    report[:500],
+                )
+            except Exception as e:
+                logger.debug("Weekly report notification failed: %s", e)
+
         return report
     except asyncio.TimeoutError:
         logger.warning("Weekly report timed out")

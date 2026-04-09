@@ -211,18 +211,94 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         logger.warning("Theme update from market data failed: %s", e)
 
 
-def _format_predictions(predictions: list[dict]) -> str:
-    """Format pending predictions for the review agent."""
+def _verify_today_predictions(predictions: list[dict]) -> str:
+    """Batch-verify today's predictions with actual prices. Returns formatted result.
+
+    All computation done in Python — no LLM calls needed.
+    """
     if not predictions:
         return "今日无待验证预测"
-    lines = []
-    for p in predictions:
+
+    # Deduplicate by code (keep latest)
+    seen = set()
+    unique = []
+    for p in reversed(predictions):
+        if p["code"] not in seen:
+            seen.add(p["code"])
+            unique.append(p)
+    unique.reverse()
+
+    # Batch fetch today's close prices via Sina
+    codes = [p["code"] for p in unique]
+    from alpha_agents.data.market_data import get_realtime_quotes
+    prices = get_realtime_quotes(codes) or {}
+
+    # Build verification table
+    lines = ["| 代码 | 名称 | 方向 | 推荐价 | 收盘价 | 涨跌 | 结果 | 主线 |",
+             "|------|------|------|-------|-------|------|------|------|"]
+
+    hits, misses, neutral = 0, 0, 0
+    by_theme: dict[str, dict] = {}  # theme → {hits, total}
+
+    for p in unique:
+        code = p["code"]
+        name = p.get("name", "?")
+        direction = p.get("direction", "bullish")
+        entry = p.get("entry_price")
+        theme = p.get("theme_line", "?")
+        rt = prices.get(code)
+
+        if not rt:
+            lines.append(f"| {code} | {name} | {direction} | {entry or '—'} | — | — | 无数据 | {theme} |")
+            continue
+
+        close = rt["price"]
+        change_pct = rt["change_pct"]
+
+        # Determine hit/miss
+        if direction == "bullish":
+            if change_pct > 0:
+                result = "命中"
+                hits += 1
+            elif change_pct < -2:
+                result = "未命中"
+                misses += 1
+            else:
+                result = "中性"
+                neutral += 1
+        else:
+            if change_pct < 0:
+                result = "命中"
+                hits += 1
+            elif change_pct > 2:
+                result = "未命中"
+                misses += 1
+            else:
+                result = "中性"
+                neutral += 1
+
         lines.append(
-            f"- {p['code']} {p.get('name', '?')} | 方向: {p['direction']} | "
-            f"信心: {p.get('confidence', '?')} | 推荐价: {p.get('entry_price', '?')} | "
-            f"主线: {p.get('theme_line', '?')} | 理由: {p.get('reason', '')[:50]}"
+            f"| {code} | {name} | {direction} | {entry or '—'} | {close:.2f} | "
+            f"{change_pct:+.2f}% | {result} | {theme} |"
         )
-    return "\n".join(lines)
+
+        # Track by theme
+        t = by_theme.setdefault(theme, {"hits": 0, "total": 0})
+        t["total"] += 1
+        if result == "命中":
+            t["hits"] += 1
+
+    total = hits + misses + neutral
+    hit_rate = hits / (hits + misses) * 100 if (hits + misses) > 0 else 0
+
+    # Summary
+    summary = f"命中率: {hits}/{hits + misses} ({hit_rate:.0f}%) | 中性{neutral}只\n"
+    summary += "按主线:\n"
+    for theme, data in by_theme.items():
+        tr = data["hits"] / data["total"] * 100 if data["total"] else 0
+        summary += f"  {theme}: {data['hits']}/{data['total']} ({tr:.0f}%)\n"
+
+    return "\n".join(lines) + "\n" + summary
 
 
 def _format_themes(themes: list[dict]) -> str:
@@ -267,21 +343,15 @@ async def run_review() -> str | None:
     # 0. Verify yesterday's predictions against actual prices
     await asyncio.to_thread(_verify_predictions)
 
-    # 1. Get data — deduplicate predictions by code (keep latest per code)
-    all_pending = get_pending_predictions(today)
-    seen_codes = set()
-    pending = []
-    for p in reversed(all_pending):  # Reverse so latest comes first
-        if p["code"] not in seen_codes:
-            seen_codes.add(p["code"])
-            pending.append(p)
-    pending.reverse()
-
+    # 1. Verify today's predictions in Python (batch, no LLM needed)
+    pending = get_pending_predictions(today)
     themes = get_active_themes()
     stats = get_prediction_stats(days=7)
 
-    logger.info("Review: %d predictions (%d unique), %d themes",
-                len(all_pending), len(pending), len(themes))
+    logger.info("Review: %d predictions, %d themes", len(pending), len(themes))
+
+    pred_ctx = await asyncio.to_thread(_verify_today_predictions, pending)
+    logger.info("Prediction verification done (Python batch)")
 
     # 2. Auto-discover/update themes from real sector data
     await asyncio.to_thread(_update_themes_from_market_data, themes)
@@ -289,8 +359,7 @@ async def run_review() -> str | None:
     # Re-read themes after update
     themes = get_active_themes()
 
-    # 3. Format contexts
-    pred_ctx = _format_predictions(pending)
+    # 3. Format contexts — Agent gets pre-computed results, doesn't need to call tools for verification
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
 

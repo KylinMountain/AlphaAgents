@@ -313,8 +313,11 @@ async def run_chat():
         title="AlphaAgents", border_style="blue",
     ))
 
+    from alpha_agents.agents.context_compressor import ContextCompressor
+
     agent = _create_chat_agent()
     conversation_history = []  # Accumulated conversation for context
+    compressor = ContextCompressor()
 
     # prompt_toolkit session with history (arrow up/down for previous inputs)
     session = PromptSession(history=InMemoryHistory())
@@ -374,15 +377,15 @@ async def run_chat():
 
             print()  # newline after streaming
 
-            # Save conversation history for next turn
+            # Save conversation history and compress if needed
             try:
                 conversation_history = streamed.to_input_list()
-                # Trim history if too long (keep last 20 turns to avoid token overflow)
-                if len(conversation_history) > 60:
-                    # Keep system context + last 20 exchanges
-                    conversation_history = conversation_history[:2] + conversation_history[-40:]
-            except Exception:
-                pass
+                if compressor.should_compress(conversation_history):
+                    console.print("[dim]对话历史较长，正在压缩...[/dim]")
+                    conversation_history = compressor.compress(conversation_history)
+                    console.print("[dim]压缩完成[/dim]")
+            except Exception as e:
+                logger.warning("Failed to update conversation history: %s", e)
 
             # Fallback display if streaming didn't produce text
             if not full_output:

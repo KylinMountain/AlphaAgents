@@ -143,9 +143,13 @@ async def run_chat():
 
     agent = _create_chat_agent()
 
+    loop = asyncio.get_event_loop()
+
     while True:
         try:
-            user_input = input("你: ").strip()
+            # Use run_in_executor so input() doesn't block the event loop
+            # (allows scheduler to keep running in background)
+            user_input = (await loop.run_in_executor(None, lambda: input("你: "))).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见")
             break

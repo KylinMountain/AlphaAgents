@@ -54,6 +54,7 @@ def _do_institutional_position(code: str, market: str) -> str:
     result = {
         "code": code,
         "realtime_price": realtime_price,
+        "price_source": "realtime" if realtime_price else "historical",
         "fund_flow": None,
         "institutional_cost": None,
         "relative_strength": None,

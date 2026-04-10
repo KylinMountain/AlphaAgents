@@ -229,29 +229,30 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
     name = order.get("name", "")
     theme = order.get("theme", "")
 
-    # Capital checks (including sentiment-based total exposure limit)
-    available = get_available_capital()
-    sentiment_cap = get_sentiment_exposure_limit()
-    invested = TOTAL_CAPITAL - available
-    sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
-
-    max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
-    max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
-    max_amount = min(available, max_per_stock, max(0, max_for_theme), sentiment_room)
-
-    shares = _calc_shares(fill_price, max_amount)
-    if shares == 0:
-        _cancel_order(order["id"], f"资金不足(需{fill_price * LOT_SIZE:.0f}元/手, 可用{max_amount:.0f}元)")
-        return {
-            "type": "cancelled",
-            "code": code,
-            "name": name,
-            "reason": f"资金不足",
-        }
-
-    cost = shares * fill_price
-
     with _write_lock:
+        # Capital checks (including sentiment-based total exposure limit)
+        # Must be inside lock to prevent race conditions with concurrent fills
+        available = get_available_capital()
+        sentiment_cap = get_sentiment_exposure_limit()
+        invested = TOTAL_CAPITAL - available
+        sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
+
+        max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
+        max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
+        max_amount = min(available, max_per_stock, max(0, max_for_theme), sentiment_room)
+
+        shares = _calc_shares(fill_price, max_amount)
+        if shares == 0:
+            _cancel_order_unlocked(order["id"], f"资金不足(需{fill_price * LOT_SIZE:.0f}元/手, 可用{max_amount:.0f}元)")
+            return {
+                "type": "cancelled",
+                "code": code,
+                "name": name,
+                "reason": f"资金不足",
+            }
+
+        cost = shares * fill_price
+
         conn = _get_conn()
         conn.execute(
             "UPDATE virtual_portfolio SET "
@@ -277,16 +278,21 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
     }
 
 
-def _cancel_order(order_id: int, reason: str) -> None:
-    """Cancel a pending order."""
-    with _write_lock:
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE virtual_portfolio SET status = 'cancelled', close_reason = ? WHERE id = ?",
-            (reason, order_id),
-        )
-        conn.commit()
+def _cancel_order_unlocked(order_id: int, reason: str) -> None:
+    """Cancel a pending order. Caller must already hold _write_lock."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE virtual_portfolio SET status = 'cancelled', close_reason = ? WHERE id = ?",
+        (reason, order_id),
+    )
+    conn.commit()
     logger.info("Cancelled order #%d: %s", order_id, reason)
+
+
+def _cancel_order(order_id: int, reason: str) -> None:
+    """Cancel a pending order (acquires _write_lock)."""
+    with _write_lock:
+        _cancel_order_unlocked(order_id, reason)
 
 
 def get_pending_orders() -> list[dict]:
@@ -492,49 +498,58 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
     code = pos["code"]
     name = pos.get("name", "")
     theme_name = pos.get("theme", "")
-    open_price = pos.get("open_price", 0)
-    existing_shares = pos.get("shares", 0)
-    existing_cost = open_price * existing_shares
 
-    # Check theme health
+    # Check theme health (read-only, safe outside lock)
     if theme_name:
         theme = get_theme_by_name(theme_name)
         if theme and theme.get("strength", 0) < 4:
             return None  # Theme too weak, don't throw good money after bad
 
-    # Check position limit (30% with add)
-    max_total_cost = TOTAL_CAPITAL * MAX_POSITION_WITH_ADD
-    room = max_total_cost - existing_cost
-    if room <= 0:
-        return None  # Already at max
-
-    # Check available capital (sentiment limit does NOT apply to add-positions —
-    # bearish markets are exactly when you want to average down)
-    available = get_available_capital()
-    room = min(room, available)
-
-    add_shares = _calc_shares(price, room)
-    if add_shares == 0:
-        return None
-
-    add_cost = add_shares * price
-
-    # Execute add: update shares and recalculate avg open_price
-    new_total_shares = existing_shares + add_shares
-    new_avg_price = round((existing_cost + add_cost) / new_total_shares, 2)
-
     with _write_lock:
+        open_price = pos.get("open_price", 0)
+        existing_shares = pos.get("shares", 0)
+        existing_cost = open_price * existing_shares
+
+        # Check position limit (30% with add)
+        max_total_cost = TOTAL_CAPITAL * MAX_POSITION_WITH_ADD
+        room = max_total_cost - existing_cost
+        if room <= 0:
+            return None  # Already at max
+
+        # Check available capital (sentiment limit does NOT apply to add-positions —
+        # bearish markets are exactly when you want to average down)
+        available = get_available_capital()
+        room = min(room, available)
+
+        add_shares = _calc_shares(price, room)
+        if add_shares == 0:
+            return None
+
+        add_cost = add_shares * price
+
+        # Execute add: update shares and recalculate avg open_price
+        new_total_shares = existing_shares + add_shares
+        new_avg_price = round((existing_cost + add_cost) / new_total_shares, 2)
+
+        # Recalculate stop_loss to maintain original percentage distance from new avg price
+        old_stop = pos.get("stop_loss") or 0
+        if open_price > 0 and old_stop > 0:
+            original_stop_pct = (open_price - old_stop) / open_price  # e.g. 0.10 for 10% distance
+            new_stop_loss = round(new_avg_price * (1 - original_stop_pct), 2)
+        else:
+            new_stop_loss = old_stop
+
         conn = _get_conn()
         conn.execute(
-            "UPDATE virtual_portfolio SET open_price = ?, shares = ? WHERE id = ?",
-            (new_avg_price, new_total_shares, pos["id"]),
+            "UPDATE virtual_portfolio SET open_price = ?, shares = ?, stop_loss = ? WHERE id = ?",
+            (new_avg_price, new_total_shares, new_stop_loss, pos["id"]),
         )
         conn.commit()
 
-    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f→%.2f, 总%d股, 总成本%.0f元)",
+    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f→%.2f, 止损 %.2f→%.2f, 总%d股, 总成本%.0f元)",
                 code, name, add_shares, price,
-                open_price, new_avg_price, new_total_shares,
-                new_avg_price * new_total_shares)
+                open_price, new_avg_price, old_stop, new_stop_loss,
+                new_total_shares, new_avg_price * new_total_shares)
 
     return {
         "type": "add_position",
@@ -543,6 +558,7 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
         "add_shares": add_shares,
         "add_price": price,
         "new_avg_price": new_avg_price,
+        "new_stop_loss": new_stop_loss,
         "total_shares": new_total_shares,
         "total_cost": round(new_avg_price * new_total_shares),
     }

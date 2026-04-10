@@ -203,19 +203,15 @@ def check_pending_orders(
                     continue
                 # Theme healthy → keep order alive regardless of days
             else:
-                # Theme not found in DB → use fixed expiry
-                expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
-                if days_pending > expire_days:
-                    _cancel_order(order["id"], f"挂单过期({days_pending}天，主线未知)")
-                    alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"挂单过期"})
-                    continue
-        else:
-            # No theme → fixed expiry
-            expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
-            if days_pending > expire_days:
-                _cancel_order(order["id"], f"挂单过期({days_pending}天)")
-                alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"挂单过期"})
+                # Theme not found in DB → no logical basis, cancel
+                _cancel_order(order["id"], f"关联主线'{theme_name}'不存在")
+                alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"主线不存在"})
                 continue
+        else:
+            # No theme at all → no logical basis, cancel
+            _cancel_order(order["id"], "无关联主线，缺乏持仓逻辑")
+            alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": "无关联主线"})
+            continue
 
         if price is None or price <= 0:
             continue

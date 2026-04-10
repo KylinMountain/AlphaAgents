@@ -7,13 +7,15 @@ Non-trading days (weekends, holidays) only run overnight scans.
 """
 
 import asyncio
+import json as _json_mod
 import logging
 from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
 from typing import Callable, Awaitable
 
 import akshare as ak
 
-from alpha_agents.config import no_proxy
+from alpha_agents.config import no_proxy, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,8 @@ class Task:
 class TradingDayScheduler:
     """Main scheduler that dispatches tasks based on trading day schedule."""
 
+    _STATE_FILE = DATA_DIR / "scheduler_state.json"
+
     def __init__(self, event_bus=None):
         self._tasks: list[Task] = []
         self._bus = event_bus
@@ -112,6 +116,37 @@ class TradingDayScheduler:
         """Register a task with the scheduler."""
         self._tasks.append(task)
         logger.info("Registered task: %s at %s", task.name, task.run_at)
+
+    def _load_state(self) -> None:
+        """Restore task _last_run from disk so restarts don't re-run today's tasks."""
+        try:
+            if self._STATE_FILE.exists():
+                state = _json_mod.loads(self._STATE_FILE.read_text(encoding="utf-8"))
+                today = datetime.now().strftime("%Y-%m-%d")
+                for task in self._tasks:
+                    ts = state.get(task.name)
+                    if ts:
+                        last = datetime.fromisoformat(ts)
+                        # Only restore if from today (stale state from yesterday is useless)
+                        if last.strftime("%Y-%m-%d") == today:
+                            task._last_run = last
+                            logger.info("Restored task '%s' last_run=%s", task.name, ts)
+        except Exception as e:
+            logger.warning("Failed to load scheduler state: %s", e)
+
+    def _save_state(self) -> None:
+        """Persist task _last_run to disk."""
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            state = {}
+            for task in self._tasks:
+                if task._last_run:
+                    state[task.name] = task._last_run.isoformat()
+            self._STATE_FILE.write_text(
+                _json_mod.dumps(state, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Failed to save scheduler state: %s", e)
 
     def is_trading_day(self, date: datetime | None = None) -> bool:
         """Check trading day with daily cache."""
@@ -127,6 +162,9 @@ class TradingDayScheduler:
         is_trading = self.is_trading_day()
         logger.info("Trading day scheduler started (today is %s)",
                      "trading day" if is_trading else "non-trading day")
+
+        # Restore state from previous run (prevents re-running today's tasks on restart)
+        self._load_state()
 
         # Show active themes on startup
         try:
@@ -162,6 +200,7 @@ class TradingDayScheduler:
                     except Exception:
                         logger.exception("Task %s failed", task.name)
                         task._last_run = datetime.now()
+                    self._save_state()
 
             await asyncio.sleep(30)
 
@@ -188,6 +227,7 @@ class TradingDayScheduler:
                 except Exception:
                     logger.exception("Catch-up: task %s failed", task.name)
                     task._last_run = datetime.now()
+                self._save_state()
 
     def boost_task(self, name: str, minutes: int = 15) -> None:
         """Temporarily shorten a task's polling interval after anomaly detection."""

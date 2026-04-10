@@ -26,6 +26,47 @@ MAX_POSITION_PCT = 0.15          # 单票最多占总资金 15%
 MAX_THEME_PCT = 0.30             # 同主线最多占总资金 30%
 LOT_SIZE = 100                   # A股一手 = 100股
 
+# Sentiment-based total exposure limits
+SENTIMENT_EXPOSURE = {
+    "extreme_bullish": 0.70,  # 涨跌比 > 5: max 70% invested
+    "bullish": 0.60,          # 涨跌比 3-5: max 60%
+    "neutral": 0.50,          # 涨跌比 1-3: max 50%
+    "bearish": 0.30,          # 涨跌比 0.5-1: max 30%
+    "extreme_bearish": 0.15,  # 涨跌比 < 0.5: max 15% (almost all cash)
+}
+
+
+def get_sentiment_exposure_limit() -> float:
+    """Get max total exposure based on current market sentiment."""
+    try:
+        from alpha_agents.tools.market_breadth import get_market_breadth_fn
+        import json as _json
+        breadth = _json.loads(get_market_breadth_fn())
+        ratio = breadth.get("advance_decline_ratio", 1.5)
+
+        if ratio > 5:
+            limit = SENTIMENT_EXPOSURE["extreme_bullish"]
+            label = f"极度乐观(涨跌比{ratio:.1f})"
+        elif ratio > 3:
+            limit = SENTIMENT_EXPOSURE["bullish"]
+            label = f"乐观(涨跌比{ratio:.1f})"
+        elif ratio > 1:
+            limit = SENTIMENT_EXPOSURE["neutral"]
+            label = f"中性(涨跌比{ratio:.1f})"
+        elif ratio > 0.5:
+            limit = SENTIMENT_EXPOSURE["bearish"]
+            label = f"悲观(涨跌比{ratio:.1f})"
+        else:
+            limit = SENTIMENT_EXPOSURE["extreme_bearish"]
+            label = f"极度悲观(涨跌比{ratio:.1f})"
+
+        max_invest = TOTAL_CAPITAL * limit
+        logger.debug("Sentiment exposure: %s → max %.0f元 (%.0f%%)", label, max_invest, limit * 100)
+        return max_invest
+    except Exception:
+        # Default to 50% if can't fetch sentiment
+        return TOTAL_CAPITAL * 0.50
+
 
 def _calc_shares(price: float, max_amount: float) -> int:
     """Calculate how many shares to buy (must be multiple of 100).
@@ -186,11 +227,15 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
     name = order.get("name", "")
     theme = order.get("theme", "")
 
-    # Capital checks
+    # Capital checks (including sentiment-based total exposure limit)
     available = get_available_capital()
+    sentiment_cap = get_sentiment_exposure_limit()
+    invested = TOTAL_CAPITAL - available
+    sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
+
     max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
     max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
-    max_amount = min(available, max_per_stock, max(0, max_for_theme))
+    max_amount = min(available, max_per_stock, max(0, max_for_theme), sentiment_room)
 
     shares = _calc_shares(fill_price, max_amount)
     if shares == 0:

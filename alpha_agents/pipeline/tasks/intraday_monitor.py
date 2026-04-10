@@ -231,6 +231,10 @@ async def run_intraday_monitor() -> str | None:
 
     if output and output.strip() != "无异动":
         logger.info("Intraday alert generated!")
+
+        # Fix hallucinated prices in output with real data
+        output = _fix_prices_in_report(output)
+
         print(output)
 
         # Save intraday recommendations with real-time prices
@@ -250,6 +254,48 @@ async def run_intraday_monitor() -> str | None:
 
     logger.info("Intraday monitor: agent found no actionable anomaly")
     return None
+
+
+def _fix_prices_in_report(report: str) -> str:
+    """Replace hallucinated prices in the report table with real Sina data.
+
+    Finds the 【可操作标的】 table, extracts stock codes, fetches real prices,
+    and rewrites the table rows with correct data.
+    """
+    if "【可操作标的】" not in report:
+        return report
+
+    # Extract stock codes from the table rows
+    codes_in_table = re.findall(r"\|\s*(\d{6})\s*\|", report)
+    if not codes_in_table:
+        return report
+
+    # Fetch real prices
+    rt = get_realtime_quotes(codes_in_table)
+    if not rt:
+        return report
+
+    # Replace each table row with corrected prices
+    lines = report.split("\n")
+    fixed_lines = []
+    for line in lines:
+        match = re.match(r"\|\s*(\d{6})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|", line)
+        if match:
+            code = match.group(1)
+            name = match.group(2).strip()
+            # old_price = match.group(3).strip()  # Agent's hallucinated price
+            # old_change = match.group(4).strip()
+            action = match.group(5).strip()
+            if code in rt:
+                real = rt[code]
+                fixed_lines.append(
+                    f"| {code} | {name} | {real['price']:.2f}元 | "
+                    f"{real['change_pct']:+.2f}% | {action} |"
+                )
+                continue
+        fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
 
 
 def _format_order_alert(alert: dict) -> str:

@@ -209,8 +209,8 @@ async def run_morning_scan() -> str | None:
         cache_path = DATA_DIR / "today_events.json"
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump({"date": time.strftime("%Y-%m-%d"), "events": events}, f, ensure_ascii=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to write event cache: %s", e)
 
     # 4. Pre-fetch global market data
     global_ctx = ""
@@ -256,7 +256,7 @@ async def run_morning_scan() -> str | None:
                 report[:500],
             )
         except Exception as e:
-            logger.debug("Morning notification failed: %s", e)
+            logger.warning("Morning notification failed: %s", e)
 
     # 6. Extract recommendations, cross-validate, and save as predictions
     if report and not report.startswith("["):

@@ -190,7 +190,8 @@ async def run_intraday_monitor() -> str | None:
                     logger.info("Order alert: %s", msg)
                     try:
                         await asyncio.to_thread(notify_all, "AlphaAgents 订单提醒", msg)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("Notification failed: %s", e)
                         pass
 
             # Check open positions — stop loss / take profit / expiry
@@ -201,7 +202,8 @@ async def run_intraday_monitor() -> str | None:
                     logger.info("Portfolio alert: %s", msg)
                     try:
                         await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("Notification failed: %s", e)
                         pass
 
     # ── Lightweight theme strength refresh (uses sector ranking, no LLM) ──
@@ -294,7 +296,7 @@ async def run_intraday_monitor() -> str | None:
                 output[:500],
             )
         except Exception as e:
-            logger.debug("Intraday notification failed: %s", e)
+            logger.warning("Intraday notification failed: %s", e)
 
         return output
 
@@ -336,24 +338,29 @@ def _fix_prices_in_report(report: str) -> str:
         match = re.match(r"\|\s*(\d{6})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|", line)
         if match and in_actionable_table:
             code = match.group(1)
-            name = match.group(2).strip()
-            action = match.group(5).strip()
+            try:
+                name = match.group(2).strip()
+                action = match.group(5).strip()
 
-            if code in rt:
-                real = rt[code]
-                # If at limit-up (>=9.8%), remove from actionable, add to signals
-                if real["change_pct"] >= 9.8:
-                    limit_up_moves.append(
-                        f"• {code} {name} 涨停封板({real['change_pct']:+.2f}%) "
-                        f"— 实际已涨停，从可操作移至信号确认"
+                if code in rt:
+                    real = rt[code]
+                    price = real.get("price", 0)
+                    change_pct = real.get("change_pct", 0)
+                    # If at limit-up (>=9.8%), remove from actionable, add to signals
+                    if change_pct >= 9.8:
+                        limit_up_moves.append(
+                            f"• {code} {name} 涨停封板({change_pct:+.2f}%) "
+                            f"— 实际已涨停，从可操作移至信号确认"
+                        )
+                        continue  # Skip this row from actionable table
+
+                    fixed_lines.append(
+                        f"| {code} | {name} | {price:.2f}元 | "
+                        f"{change_pct:+.2f}% | {action} |"
                     )
-                    continue  # Skip this row from actionable table
-
-                fixed_lines.append(
-                    f"| {code} | {name} | {real['price']:.2f}元 | "
-                    f"{real['change_pct']:+.2f}% | {action} |"
-                )
-                continue
+                    continue
+            except Exception as e:
+                logger.warning("Failed to fix price for %s in report: %s", code, e)
 
         fixed_lines.append(line)
 

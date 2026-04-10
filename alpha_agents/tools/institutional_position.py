@@ -159,11 +159,13 @@ def _analyze_institutional_cost_lite(code: str) -> dict:
     Skip LHB and block trades which require multiple date lookups."""
     cost_refs = []
     bullish, bearish = 0, 0
+    sources_ok = 0
 
     # North flow
     try:
         df = get_north_holdings()
         if df is not None and not df.empty:
+            sources_ok += 1
             match = df[df["代码"] == code]
             if not match.empty:
                 row = match.iloc[0]
@@ -175,13 +177,14 @@ def _analyze_institutional_cost_lite(code: str) -> dict:
                     bullish += 1
                 elif change == "减持":
                     bearish += 1
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost_lite north flow failed for %s: %s", code, e)
 
     # Margin
     try:
         df = get_margin_detail()
         if df is not None and not df.empty:
+            sources_ok += 1
             match = df[df["标的证券代码"] == code]
             if not match.empty:
                 row = match.iloc[0]
@@ -194,8 +197,11 @@ def _analyze_institutional_cost_lite(code: str) -> dict:
                     bullish += 1
                 else:
                     bearish += 1
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost_lite margin failed for %s: %s", code, e)
+
+    if sources_ok == 0:
+        return {"error": "所有数据源失败", "institutional_bullish": 0, "institutional_bearish": 0, "consensus": "数据缺失", "details": []}
 
     return {
         "institutional_bullish": bullish,
@@ -208,6 +214,7 @@ def _analyze_institutional_cost_lite(code: str) -> dict:
 def _analyze_institutional_cost(code: str) -> dict:
     """Estimate institutional cost basis from LHB, block trades, north flow."""
     cost_refs = []
+    sources_ok = 0
 
     # LHB: institutional buy price ≈ close price on LHB day
     try:
@@ -215,6 +222,7 @@ def _analyze_institutional_cost(code: str) -> dict:
         for attempt in range(3):
             df = get_lhb(date)
             if df is not None and not df.empty:
+                sources_ok += 1
                 match = df[df["代码"] == code]
                 if not match.empty:
                     row = match.iloc[0]
@@ -230,8 +238,8 @@ def _analyze_institutional_cost(code: str) -> dict:
                         })
                 break
             date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost LHB failed for %s: %s", code, e)
 
     # Block trades: actual trade price (more precise than close)
     try:
@@ -239,6 +247,7 @@ def _analyze_institutional_cost(code: str) -> dict:
         for attempt in range(3):
             df = get_block_trades(date)
             if df is not None and not df.empty:
+                sources_ok += 1
                 match = df[df["证券代码"] == code]
                 if not match.empty:
                     row = match.iloc[0]
@@ -256,13 +265,14 @@ def _analyze_institutional_cost(code: str) -> dict:
                         })
                 break
             date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost block trades failed for %s: %s", code, e)
 
     # North flow: position value / shares → implied cost
     try:
         df = get_north_holdings()
         if df is not None and not df.empty:
+            sources_ok += 1
             match = df[df["代码"] == code]
             if not match.empty:
                 row = match.iloc[0]
@@ -277,13 +287,14 @@ def _analyze_institutional_cost(code: str) -> dict:
                         "change_today": "增持" if change_pct > 0 else "减持" if change_pct < 0 else "持平",
                         "change_pct": change_pct,
                     })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost north flow failed for %s: %s", code, e)
 
     # Margin: leverage direction
     try:
         df = get_margin_detail()
         if df is not None and not df.empty:
+            sources_ok += 1
             match = df[df["标的证券代码"] == code]
             if not match.empty:
                 row = match.iloc[0]
@@ -297,8 +308,11 @@ def _analyze_institutional_cost(code: str) -> dict:
                     "net_buy_wan": round(net / 1e4, 1),
                     "signal": "加杠杆" if net > 0 else "去杠杆",
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("institutional_cost margin failed for %s: %s", code, e)
+
+    if sources_ok == 0:
+        return {"error": "所有数据源失败", "institutional_bullish": 0, "institutional_bearish": 0, "consensus": "数据缺失", "details": []}
 
     # Count bullish/bearish institutional signals
     bullish = 0
@@ -355,10 +369,10 @@ def _analyze_price_position(code: str, realtime_price: float | None = None) -> d
         range_20d = high_20d - low_20d
         position_pct = ((latest - low_20d) / range_20d * 100) if range_20d > 0 else 50
 
-        # Recent returns
-        ret_1d = (closes[-1] / closes[-2] - 1) * 100 if len(closes) >= 2 else 0
-        ret_5d = (closes[-1] / closes[-5] - 1) * 100 if len(closes) >= 5 else 0
-        ret_10d = (closes[-1] / closes[-10] - 1) * 100 if len(closes) >= 10 else 0
+        # Recent returns (use latest which may be realtime price)
+        ret_1d = (latest / closes[-2] - 1) * 100 if len(closes) >= 2 else 0
+        ret_5d = (latest / closes[-5] - 1) * 100 if len(closes) >= 5 else 0
+        ret_10d = (latest / closes[-10] - 1) * 100 if len(closes) >= 10 else 0
 
         # Volume-weighted average price (VWAP) as cost proxy
         if all("volume" in d for d in history[-5:]):
@@ -462,6 +476,15 @@ def _synthesize(
 
     bullish_signals = []
     bearish_signals = []
+    confidence_penalty = 0
+
+    # Check if sub-analyzers returned errors
+    if fund_flow.get("error"):
+        bearish_signals.append(f"资金流数据缺失: {fund_flow['error']}")
+        confidence_penalty += 2
+    if inst_cost.get("error"):
+        bearish_signals.append(f"机构持仓数据缺失: {inst_cost['error']}")
+        confidence_penalty += 2
 
     # Fund flow signals
     ff_momentum = fund_flow.get("momentum_score", 0)
@@ -502,6 +525,7 @@ def _synthesize(
     # Overall score: -10 to +10
     score = len(bullish_signals) * 2 - len(bearish_signals) * 2
     score += ff_momentum
+    score -= confidence_penalty
     score = min(10, max(-10, score))
 
     summary = {
@@ -510,6 +534,9 @@ def _synthesize(
         "bearish_signals": bearish_signals,
         "verdict": "强烈看多" if score >= 6 else "看多" if score >= 2 else "中性" if score > -2 else "看空" if score > -6 else "强烈看空",
     }
+    if confidence_penalty > 0:
+        summary["data_incomplete"] = True
+        summary["verdict"] += "（数据不完整，置信度降低）"
 
     # Generate action
     latest_price = price_info.get("latest_price")

@@ -133,7 +133,7 @@ def _update_market_cognition(themes: list[dict], today: str) -> None:
                 assessment=assessment,
             )
         except Exception as e:
-            logger.debug("Failed to upsert cognition for %s: %s", name, e)
+            logger.warning("Failed to upsert cognition for %s: %s", name, e)
 
     logger.info("Updated market cognition for %d themes", len(themes))
 
@@ -295,7 +295,7 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
         if result == "命中":
             t["hits"] += 1
 
-    total_verified = hits + misses
+    total_verified = hits + misses + neutral
     hit_rate = hits / total_verified * 100 if total_verified > 0 else 0
 
     summary = f"命中率: {hits}/{total_verified} ({hit_rate:.0f}%) | 中性{neutral}只 | 共{len(unique)}只\n"
@@ -381,7 +381,7 @@ async def run_review() -> str | None:
             f"【近7天策略表现】\n{perf_stats}"
         )
     except Exception as e:
-        logger.debug("Failed to build portfolio context: %s", e)
+        logger.warning("Failed to build portfolio context: %s", e)
 
     # 4. Run review agent (append portfolio context to stats)
     full_stats_ctx = stats_ctx
@@ -407,7 +407,7 @@ async def run_review() -> str | None:
                 report[:500],
             )
         except Exception as e:
-            logger.debug("Review notification failed: %s", e)
+            logger.warning("Review notification failed: %s", e)
 
     # Archive today's market data for future backtesting
     try:

@@ -90,10 +90,12 @@ class Task:
                 return elapsed >= interval
             return True
         else:
+            # One-shot task: run once per day, at or after scheduled time
             if self._last_run and self._last_run.date() == now.date():
                 return False
             scheduled = now.replace(hour=self.run_at.hour, minute=self.run_at.minute, second=0)
-            return 0 <= (now - scheduled).total_seconds() < 300
+            # Trigger if we're past the scheduled time (handles sleep/resume)
+            return (now - scheduled).total_seconds() >= 0
 
 
 class TradingDayScheduler:

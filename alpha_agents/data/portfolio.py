@@ -17,8 +17,7 @@ from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_
 
 logger = logging.getLogger(__name__)
 
-MAX_HOLDING_DAYS = 5
-PENDING_EXPIRE_DAYS = 2  # 挂单有效期（交易日）
+PENDING_EXPIRE_DAYS = 2  # 挂单有效期（仅用于无主线的挂单，有主线的跟随主线生命周期）
 
 # ── Capital Management ──────────────────────────────────────
 TOTAL_CAPITAL = 100_000          # 总资金 10万
@@ -467,7 +466,7 @@ def check_positions(
         elif target_price and price >= target_price:
             alert = {"type": "target_hit", "reason": "止盈触发"}
 
-        # Theme-aware holding + early exit
+        # Theme-driven exit — no fixed holding days, ride the theme lifecycle
         if not alert and pos.get("theme"):
             theme = get_theme_by_name(pos["theme"])
             if theme:
@@ -475,20 +474,16 @@ def check_positions(
                 theme_strength = theme.get("strength", 0)
 
                 if theme_status in ("declining", "archived"):
-                    # 主线衰退 → 立刻走
-                    alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme_status})"}
-                elif theme_status == "peak" and theme_strength >= 8:
-                    # 主线 peak + 强度高 → 可以多拿几天，最多 10 天
-                    if holding_days >= 10:
-                        alert = {"type": "expired", "reason": f"持仓到期({holding_days}天，主线peak允许延长)"}
+                    # 主线衰退 → 清仓
+                    alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme_status})，持仓{holding_days}天"}
                 elif theme_strength <= 3:
-                    # 主线弱（但没到 declining）→ 缩短到 3 天
-                    if holding_days >= 3:
-                        alert = {"type": "expired", "reason": f"主线走弱(强度{theme_strength})，提前平仓({holding_days}天)"}
+                    # 主线走弱 → 清仓（不等到 declining，提前走）
+                    alert = {"type": "expired", "reason": f"主线走弱({pos['theme']}强度{theme_strength})，持仓{holding_days}天"}
+                # peak/active + strength >= 4 → 继续持有，不设天数上限
+                # 靠移动止损保护利润
 
-        # Default max holding: 5 days
-        if not alert and holding_days >= MAX_HOLDING_DAYS:
-            alert = {"type": "expired", "reason": f"持仓到期({holding_days}天)"}
+        # No theme → fallback to moving stop only (no fixed day limit)
+        # The trailing stop + theme lifecycle is the exit mechanism, not calendar days
 
         if alert:
             success = close_position(pos["id"], close_price=price, close_reason=alert["reason"])

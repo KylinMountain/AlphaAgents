@@ -386,21 +386,45 @@ def check_positions(
         except ValueError:
             holding_days = pos.get("holding_days", 0)
 
+        # ── Trailing stop (移动止损) ──
+        # When stock hits new highs, raise stop_loss to protect profits
+        stop_loss = pos.get("stop_loss") or 0
+        peak_price = open_price * (1 + peak / 100) if open_price else 0
+
+        if peak_price > open_price and stop_loss > 0:
+            # Trailing stop = peak price * (1 - trailing_pct)
+            # trailing_pct starts at original stop distance, tightens as profit grows
+            original_stop_pct = (open_price - stop_loss) / open_price if open_price else 0.05
+            trailing_pct = min(original_stop_pct, 0.05)  # Tighten to max 5% from peak
+
+            if current_return >= 5:
+                # Once up 5%+, trail at 5% from peak (lock in most of the gain)
+                new_stop = round(peak_price * (1 - trailing_pct), 2)
+            elif current_return >= 3:
+                # Up 3-5%, trail at original stop distance from peak
+                new_stop = round(peak_price * (1 - original_stop_pct), 2)
+            else:
+                new_stop = stop_loss  # Keep original stop
+
+            if new_stop > stop_loss:
+                logger.info("Trailing stop: %s %s 止损 %.2f → %.2f (峰值%.2f, 当前%.2f)",
+                            code, pos.get("name", ""), stop_loss, new_stop, peak_price, price)
+                stop_loss = new_stop
+
         with _write_lock:
             conn.execute(
                 "UPDATE virtual_portfolio SET peak_return_pct = ?, "
-                "max_drawdown_pct = ?, holding_days = ? WHERE id = ?",
-                (peak, drawdown, holding_days, pos["id"]),
+                "max_drawdown_pct = ?, holding_days = ?, stop_loss = ? WHERE id = ?",
+                (peak, drawdown, holding_days, stop_loss, pos["id"]),
             )
             conn.commit()
 
         # Check triggers (priority order)
         alert = None
-        stop_loss = pos.get("stop_loss")
         target_price = pos.get("target_price")
 
         if stop_loss and price <= stop_loss:
-            alert = {"type": "stopped", "reason": "止损触发"}
+            alert = {"type": "stopped", "reason": f"{'移动' if stop_loss > (pos.get('stop_loss') or 0) else ''}止损触发"}
         elif target_price and price >= target_price:
             alert = {"type": "target_hit", "reason": "止盈触发"}
         elif pos.get("theme"):

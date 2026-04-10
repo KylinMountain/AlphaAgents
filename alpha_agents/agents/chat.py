@@ -19,10 +19,13 @@ from openai import AsyncOpenAI
 from alpha_agents.config import (
     PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
+from agents import function_tool
 from alpha_agents.tools.registry import STOCK_TOOLS
 from alpha_agents.data.portfolio import (
-    get_open_positions_summary, get_pending_orders,
+    get_open_positions_summary, get_pending_orders, get_open_positions,
     get_portfolio_stats, format_portfolio_stats,
+    create_pending_order, close_position, parse_entry_zone, parse_stop_loss,
+    get_available_capital, TOTAL_CAPITAL,
 )
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats,
@@ -36,12 +39,28 @@ CHAT_SYSTEM_PROMPT = """你是 AlphaAgents 的交互式分析师，用户可以�
 你是用户的量化分析搭档。系统在后台自动运行（晨扫、盘中监控、复盘），你负责回答用户关于持仓、推荐、市场的任何问题。
 
 ## 你能做的事
-1. **解释持仓** — 为什么买了某只票、当前逻辑是否还成立
-2. **分析个股** — 用户问"能不能买 XXX"，你调工具分析后给出建议
-3. **回顾推荐** — 之前推荐的票表现如何、为什么对/错
-4. **讨论主线** — 当前有哪些活跃主线、强度如何、趋势判断
-5. **风险评估** — 当前持仓整体风险、哪些该减仓
-6. **市场观点** — 大盘情绪、板块轮动、资金流向
+1. **分析个股** — 用户问"能不能买 XXX"，调 get_institutional_position 分析后给出详细建议（资金流、机构动向、价格位置、操作建议）
+2. **执行买入** — 用户确认要买时，调 place_buy_order 创建挂单（必须先分析再买，不能盲买）
+3. **执行卖出** — 用户说"卖掉 XXX"，调 place_sell_order 平仓
+4. **解释持仓** — 为什么买了某只票、当前逻辑是否还成立
+5. **回顾推荐** — 之前推荐的票表现如何、为什么对/错
+6. **讨论主线** — 当前有哪些活跃主线、强度如何、趋势判断
+7. **风险评估** — 当前持仓整体风险、哪些该减仓
+8. **市场观点** — 大盘情绪、板块轮动、资金流向
+
+## 买入流程
+用户说"买 XXX"时，你必须：
+1. 先调 get_institutional_position 分析该股票
+2. 告诉用户分析结果（资金流、机构共识、价格位置、风险）
+3. 给出操作建议（介入区间、止损位）
+4. 用户确认后，调 place_buy_order 下单
+不要跳过分析直接下单。
+
+## 卖出流程
+用户说"卖 XXX"时：
+1. 查看当前持仓和浮盈
+2. 告诉用户当前盈亏情况
+3. 用户确认后，调 place_sell_order 平仓
 
 ## 当前状态
 {portfolio_summary}
@@ -61,6 +80,149 @@ CHAT_SYSTEM_PROMPT = """你是 AlphaAgents 的交互式分析师，用户可以�
 - 如果不确定，说"我查一下"然后调工具
 - 不使用emoji
 """
+
+
+@function_tool
+def place_buy_order(code: str, name: str, theme: str, entry_low: float = 0, entry_high: float = 0, stop_loss: float = 0, reason: str = "") -> str:
+    """创建买入挂单。价格到达介入区间自动建仓。
+
+    Args:
+        code: 股票代码，如 "002384"
+        name: 股票名称，如 "东山精密"
+        theme: 关联主线，如 "铜缆高速连接"
+        entry_low: 介入区间下限（突破型买入，价格涨到此处买入）。回调型填0
+        entry_high: 介入区间上限（回调型买入，价格跌到此处买入）。突破型填0
+        stop_loss: 止损价（必填）
+        reason: 买入理由
+    """
+    import time
+    today = time.strftime("%Y-%m-%d")
+
+    if not stop_loss:
+        return json.dumps({"error": "必须设置止损价"}, ensure_ascii=False)
+    if not entry_low and not entry_high:
+        return json.dumps({"error": "必须设置介入区间（entry_low 或 entry_high 至少填一个）"}, ensure_ascii=False)
+
+    result = create_pending_order(
+        code=code, name=name, theme=theme,
+        order_date=today,
+        entry_low=entry_low or None,
+        entry_high=entry_high or None,
+        stop_loss=stop_loss,
+        source="chat",
+        reason=reason[:100],
+    )
+    if result:
+        available = get_available_capital()
+        zone = f"{entry_low}-{entry_high}" if entry_low and entry_high else f"≤{entry_high}" if entry_high else f"≥{entry_low}"
+        return json.dumps({
+            "status": "挂单已创建",
+            "code": code, "name": name,
+            "entry_zone": zone,
+            "stop_loss": stop_loss,
+            "available_capital": f"{available:,.0f}元",
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({"status": "挂单创建失败（可能已有同名挂单或持仓）"}, ensure_ascii=False)
+
+
+@function_tool
+def place_sell_order(code: str) -> str:
+    """卖出/平仓指定股票。
+
+    Args:
+        code: 要卖出的股票代码，如 "002384"
+    """
+    from alpha_agents.data.market_data import get_realtime_quotes
+
+    positions = get_open_positions()
+    target = None
+    for p in positions:
+        if p["code"] == code:
+            target = p
+            break
+
+    if not target:
+        return json.dumps({"error": f"未找到 {code} 的持仓"}, ensure_ascii=False)
+
+    # Get realtime price for closing
+    rt = get_realtime_quotes([code])
+    if rt and code in rt:
+        close_price = rt[code]["price"]
+    else:
+        return json.dumps({"error": f"无法获取 {code} 的实时价格"}, ensure_ascii=False)
+
+    shares = target.get("shares", 0)
+    open_price = target.get("open_price", 0)
+    pnl = round((close_price - open_price) * shares, 2)
+    pnl_pct = round((close_price - open_price) / open_price * 100, 2) if open_price else 0
+
+    success = close_position(target["id"], close_price=close_price, close_reason="用户手动平仓")
+    if success:
+        return json.dumps({
+            "status": "已平仓",
+            "code": code,
+            "name": target.get("name", ""),
+            "shares": shares,
+            "open_price": open_price,
+            "close_price": close_price,
+            "pnl": f"{pnl:+,.0f}元",
+            "pnl_pct": f"{pnl_pct:+.2f}%",
+        }, ensure_ascii=False)
+    else:
+        return json.dumps({"error": "平仓失败"}, ensure_ascii=False)
+
+
+@function_tool
+def show_portfolio() -> str:
+    """查看当前持仓、挂单和资金状况。"""
+    from alpha_agents.data.market_data import get_realtime_quotes
+
+    positions = get_open_positions()
+    pending = get_pending_orders()
+    available = get_available_capital()
+
+    lines = [f"总资金 {TOTAL_CAPITAL:,}元 | 已投 {TOTAL_CAPITAL - available:,.0f}元 | 可用 {available:,.0f}元"]
+
+    if positions:
+        codes = [p["code"] for p in positions]
+        rt = get_realtime_quotes(codes) or {}
+        lines.append(f"\n持仓 {len(positions)} 笔:")
+        total_pnl = 0
+        for p in positions:
+            code = p["code"]
+            shares = p.get("shares", 0)
+            open_price = p.get("open_price", 0)
+            real = rt.get(code, {})
+            price = real.get("price", 0)
+            if price and open_price:
+                pnl = (price - open_price) * shares
+                pnl_pct = (price - open_price) / open_price * 100
+                total_pnl += pnl
+                lines.append(
+                    f"  {code} {p.get('name','')} {shares}股 @ {open_price:.2f} → {price:.2f} "
+                    f"({pnl_pct:+.1f}%, {pnl:+,.0f}元) 止损{p.get('stop_loss') or '无'}"
+                )
+            else:
+                lines.append(f"  {code} {p.get('name','')} {shares}股 @ {open_price:.2f} 止损{p.get('stop_loss') or '无'}")
+        lines.append(f"  总浮盈: {total_pnl:+,.0f}元")
+
+    if pending:
+        lines.append(f"\n挂单 {len(pending)} 笔:")
+        for p in pending:
+            zone = ""
+            if p.get("entry_high") and p.get("entry_low"):
+                zone = f"{p['entry_low']:.2f}-{p['entry_high']:.2f}"
+            elif p.get("entry_high"):
+                zone = f"≤{p['entry_high']:.2f}"
+            elif p.get("entry_low"):
+                zone = f"≥{p['entry_low']:.2f}"
+            lines.append(f"  {p['code']} {p.get('name','')} 介入{zone} 止损{p.get('stop_loss') or '无'}")
+
+    if not positions and not pending:
+        lines.append("无持仓/挂单")
+
+    return "\n".join(lines)
 
 
 def _build_context() -> str:
@@ -124,7 +286,7 @@ def _create_chat_agent() -> Agent:
         name="chat_analyst",
         instructions=_build_context(),
         model=model,
-        tools=STOCK_TOOLS,
+        tools=STOCK_TOOLS + [place_buy_order, place_sell_order, show_portfolio],
     )
 
 

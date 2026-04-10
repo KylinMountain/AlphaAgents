@@ -257,43 +257,84 @@ async def run_intraday_monitor() -> str | None:
 
 
 def _fix_prices_in_report(report: str) -> str:
-    """Replace hallucinated prices in the report table with real Sina data.
+    """Replace hallucinated prices with real Sina data.
 
-    Finds the 【可操作标的】 table, extracts stock codes, fetches real prices,
-    and rewrites the table rows with correct data.
+    Also moves stocks that are at limit-up (>=9.8%) from 可操作标的 to 信号确认,
+    since you can't buy a stock that's already at the daily limit.
     """
-    if "【可操作标的】" not in report:
+    # Extract all stock codes mentioned in table rows
+    codes_in_report = re.findall(r"\|\s*(\d{6})\s*\|", report)
+    if not codes_in_report:
         return report
 
-    # Extract stock codes from the table rows
-    codes_in_table = re.findall(r"\|\s*(\d{6})\s*\|", report)
-    if not codes_in_table:
-        return report
-
-    # Fetch real prices
-    rt = get_realtime_quotes(codes_in_table)
+    rt = get_realtime_quotes(list(set(codes_in_report)))
     if not rt:
         return report
 
-    # Replace each table row with corrected prices
+    # Collect stocks that are actually at limit-up but listed as actionable
+    limit_up_moves = []
+
     lines = report.split("\n")
     fixed_lines = []
+    in_actionable_table = False
+
     for line in lines:
+        # Detect we're in the actionable table
+        if "【可操作标的】" in line:
+            in_actionable_table = True
+            fixed_lines.append(line)
+            continue
+        if in_actionable_table and line.strip() and not line.strip().startswith("|"):
+            in_actionable_table = False
+
         match = re.match(r"\|\s*(\d{6})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|", line)
-        if match:
+        if match and in_actionable_table:
             code = match.group(1)
             name = match.group(2).strip()
-            # old_price = match.group(3).strip()  # Agent's hallucinated price
-            # old_change = match.group(4).strip()
             action = match.group(5).strip()
+
             if code in rt:
                 real = rt[code]
+                # If at limit-up (>=9.8%), remove from actionable, add to signals
+                if real["change_pct"] >= 9.8:
+                    limit_up_moves.append(
+                        f"• {code} {name} 涨停封板({real['change_pct']:+.2f}%) "
+                        f"— 实际已涨停，从可操作移至信号确认"
+                    )
+                    continue  # Skip this row from actionable table
+
                 fixed_lines.append(
                     f"| {code} | {name} | {real['price']:.2f}元 | "
                     f"{real['change_pct']:+.2f}% | {action} |"
                 )
                 continue
+
         fixed_lines.append(line)
+
+    # Append limit-up stocks to signal section
+    if limit_up_moves:
+        result = "\n".join(fixed_lines)
+        insert_text = "\n".join(limit_up_moves)
+        # Try to append after existing signal section
+        if "【信号确认】" in result:
+            # Find last line of signal section and append
+            signal_idx = result.index("【信号确认】")
+            # Find next section after signal
+            next_section = None
+            for marker in ["【可操作标的】", "【主线状态变化】"]:
+                pos = result.find(marker, signal_idx + 10)
+                if pos > 0:
+                    next_section = pos
+                    break
+            if next_section:
+                result = result[:next_section] + insert_text + "\n\n" + result[next_section:]
+            else:
+                result += "\n" + insert_text
+        else:
+            # No signal section exists, add one before actionable
+            result = result.replace("【可操作标的】",
+                                    "【信号确认】（已涨停，系统自动识别）\n" + insert_text + "\n\n【可操作标的】")
+        return result
 
     return "\n".join(fixed_lines)
 
@@ -348,6 +389,7 @@ def _save_intraday_recommendations(report: str) -> None:
         result = json.loads(get_stock_quotes_fn(codes=codes))
         for q in result.get("quotes", []):
             prices[q["code"]] = q.get("price") or q.get("latest_close")
+            prices[q["code"] + "_chg"] = q.get("change_pct", 0)
     except Exception as e:
         logger.debug("Failed to fetch prices for intraday recs: %s", e)
 
@@ -375,8 +417,9 @@ def _save_intraday_recommendations(report: str) -> None:
             tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
             logger.info("  Saved intraday %s: %s %s @ %.2f",
                         tag, code, r.get("name", ""), entry_price or 0)
-            # Create pending order for actionable recommendations (not signals)
-            if rec_type != "signal":
+            # Create pending order for actionable recommendations (not signals, not at limit-up)
+            price_chg = prices.get(code + "_chg", 0)
+            if rec_type != "signal" and price_chg < 9.8:
                 try:
                     # Prefer structured JSON fields, fallback to regex
                     entry_low = r.get("entry_low")

@@ -35,9 +35,15 @@ def get_stock_quotes_fn(codes: str) -> str:
     Args:
         codes: Comma-separated stock codes, e.g. "000858,600519,002594"
     """
-    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    import re
+    raw_list = [c.strip() for c in codes.split(",") if c.strip()]
+    # Filter: only keep valid 6-digit stock codes, skip names/garbage
+    code_list = [c for c in raw_list if re.match(r"^\d{6}$", c)]
     if not code_list:
-        return json.dumps({"error": "no stock codes provided", "quotes": []}, ensure_ascii=False)
+        return json.dumps({
+            "error": f"无有效股票代码。请传入6位数字代码（如000858），不要传股票名称。收到: {raw_list[:5]}",
+            "quotes": [],
+        }, ensure_ascii=False)
 
     # Use Sina when available (trading hours + after close on weekdays)
     realtime = None

@@ -89,10 +89,10 @@ def create_pending_order(
 
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "
-            "(code, name, theme, order_date, entry_low, entry_high, "
+            "(code, name, theme, order_date, open_date, open_price, entry_low, entry_high, "
             " stop_loss, target_price, expire_days, status, source, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-            (code, name, theme, order_date, entry_low, entry_high,
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (code, name, theme, order_date, order_date, entry_low, entry_high,
              stop_loss, target_price, PENDING_EXPIRE_DAYS, source, reason),
         )
         conn.commit()

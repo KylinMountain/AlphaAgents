@@ -171,7 +171,9 @@ def check_pending_orders(
             today_dt = datetime.strptime(today, "%Y-%m-%d")
             days_pending = (today_dt - order_dt).days
         except ValueError:
-            days_pending = 0
+            logger.warning("Invalid date in order #%d: order_date=%r — cancelling", order["id"], order.get("order_date"))
+            _cancel_order(order["id"], "日期解析失败")
+            continue
 
         expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
         if days_pending > expire_days:
@@ -320,8 +322,8 @@ def close_position(
     *,
     close_price: float,
     close_reason: str,
-) -> None:
-    """Close an open position."""
+) -> bool:
+    """Close an open position. Returns True on success, False if not found."""
     with _write_lock:
         conn = _get_conn()
         row = conn.execute(
@@ -329,7 +331,8 @@ def close_position(
             (position_id,),
         ).fetchone()
         if not row:
-            return
+            logger.warning("close_position: position #%d not found", position_id)
+            return False
 
         open_price = row["open_price"] or 0
         shares = row["shares"] or 0
@@ -348,6 +351,7 @@ def close_position(
         logger.info("Closed #%d: %d股 @ %.2f → %.2f (%+.2f%%, %+.0f元) %s",
                      position_id, shares, open_price, close_price,
                      return_pct, return_amount, close_reason)
+        return True
 
 
 def _status_from_reason(reason: str) -> str:
@@ -460,7 +464,9 @@ def check_positions(
             alert = {"type": "expired", "reason": f"持仓到期({holding_days}天)"}
 
         if alert:
-            close_position(pos["id"], close_price=price, close_reason=alert["reason"])
+            success = close_position(pos["id"], close_price=price, close_reason=alert["reason"])
+            if not success:
+                continue
             shares = pos.get("shares", 0)
             pnl = round((price - open_price) * shares, 2) if shares else 0
             alert.update({

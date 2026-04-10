@@ -13,9 +13,10 @@ from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes, save_prediction, get_today_intraday_predictions
 from alpha_agents.config import DATA_DIR
-from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
+from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, update_theme_strength, maybe_discover_theme
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.agents.intraday import run_intraday_analysis
 from alpha_agents.notify import notify_all
@@ -51,6 +52,48 @@ def _format_themes_for_monitoring(themes: list[dict]) -> str:
             f"  监控标的: {stock_list}"
         )
     return "\n".join(lines)
+
+
+def _refresh_theme_strengths() -> None:
+    """Lightweight theme strength update using current sector ranking data.
+
+    Runs every intraday cycle (5 min). No LLM, just data + rules.
+    Also discovers new themes from top gainers.
+    """
+    try:
+        ranking = json.loads(get_concept_ranking_fn(top_n=10))
+        all_concepts = ranking.get("gainers", []) + ranking.get("losers", [])
+        concept_lookup = {c.get("concept", ""): c for c in all_concepts}
+
+        themes = get_active_themes()
+        for theme in themes:
+            if theme["name"] in concept_lookup:
+                c = concept_lookup[theme["name"]]
+                signals = evaluate_theme_signals(
+                    sector_name=theme["name"],
+                    sector_change_pct=c.get("change_pct", 0),
+                    sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
+                    market_change_pct=0,
+                )
+                update_theme_strength(theme["name"], signals)
+
+        # Try to discover new themes from top gainers
+        for gainer in ranking.get("gainers", [])[:5]:
+            concept_name = gainer.get("concept", "")
+            if not concept_name:
+                continue
+            signals = evaluate_theme_signals(
+                sector_name=concept_name,
+                sector_change_pct=gainer.get("change_pct", 0),
+                sector_fund_flow=gainer.get("net_flow_yi", 0) * 1e8,
+                market_change_pct=0,
+            )
+            maybe_discover_theme(
+                concept_name, signals,
+                catalyst=f"盘中发现: 涨{gainer.get('change_pct', 0):.1f}%, 净流入{gainer.get('net_flow_yi', 0):.1f}亿",
+            )
+    except Exception as e:
+        logger.debug("Theme strength refresh failed: %s", e)
 
 
 def _detect_anomalies() -> tuple[bool, str]:
@@ -160,6 +203,9 @@ async def run_intraday_monitor() -> str | None:
                         await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
                     except Exception:
                         pass
+
+    # ── Lightweight theme strength refresh (uses sector ranking, no LLM) ──
+    await asyncio.to_thread(_refresh_theme_strengths)
 
     themes = get_active_themes()
     if not themes:

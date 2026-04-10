@@ -350,12 +350,13 @@ async def run_chat():
         console.print("[dim]分析中...[/dim]")
 
         try:
-            # Streaming output with conversation history
-            from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
+            from agents.stream_events import RawResponsesStreamEvent
             from openai.types.responses import ResponseTextDeltaEvent
 
+            # Pass conversation history so agent remembers prior exchanges
             streamed = Runner.run_streamed(
-                agent, message,
+                agent,
+                input=conversation_history + [{"role": "user", "content": message}],
                 hooks=hooks, max_turns=30,
             )
 
@@ -373,9 +374,22 @@ async def run_chat():
 
             print()  # newline after streaming
 
-            # Store final output for display
+            # Save conversation history for next turn
+            try:
+                conversation_history = streamed.to_input_list()
+                # Trim history if too long (keep last 20 turns to avoid token overflow)
+                if len(conversation_history) > 60:
+                    # Keep system context + last 20 exchanges
+                    conversation_history = conversation_history[:2] + conversation_history[-40:]
+            except Exception:
+                pass
+
+            # Fallback display if streaming didn't produce text
             if not full_output:
-                full_output = streamed.final_output if hasattr(streamed, 'final_output') else ""
+                try:
+                    full_output = streamed.final_output or ""
+                except Exception:
+                    full_output = ""
                 if full_output:
                     console.print(Panel(full_output, title="分析师", border_style="cyan"))
 

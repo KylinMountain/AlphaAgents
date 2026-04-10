@@ -29,6 +29,7 @@ from alpha_agents.data.portfolio import (
 )
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats,
+    save_chat_memory, get_recent_chat_memories,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,11 +74,15 @@ CHAT_SYSTEM_PROMPT = """你是 AlphaAgents 的交互式分析师，用户可以�
 你有完整的市场数据工具，包括：实时行情、板块排名、龙虎榜、北向资金、融资融券、个股资金流、机构持仓分析等。
 需要数据时直接调用工具，不要凭记忆编造数字。
 
+## 历史对话记忆
+{chat_memories}
+
 ## 重要原则
 - **所有价格必须来自工具返回值**，绝不凭记忆编造
 - 直接回答问题，不要废话
 - 给出操作建议时要有数据支撑
 - 如果不确定，说"我查一下"然后调工具
+- 用户提到之前讨论过的股票/操作，参考历史对话记忆
 - 不使用emoji
 """
 
@@ -271,10 +276,21 @@ def _build_context() -> str:
     except Exception:
         stats_text = "统计数据不可用"
 
+    # Load cross-session memories
+    try:
+        memories = get_recent_chat_memories(days=7)
+        if memories:
+            memories_text = "\n---\n".join(memories[-3:])  # Last 3 session summaries
+        else:
+            memories_text = "无历史对话记忆"
+    except Exception:
+        memories_text = "无法加载历史记忆"
+
     return CHAT_SYSTEM_PROMPT.format(
         portfolio_summary=portfolio,
         themes_summary=themes_text,
         stats_summary=stats_text,
+        chat_memories=memories_text,
     )
 
 
@@ -402,6 +418,17 @@ async def run_chat():
             console.print("[red]回答超时，请重试[/red]")
         except Exception as e:
             console.print(f"[red]错误: {e}[/red]")
+
+    # ── Session end: save memory for next time ──
+    if conversation_history and len(conversation_history) > 3:
+        console.print("[dim]保存对话记忆...[/dim]")
+        try:
+            summary = compressor._generate_summary(conversation_history)
+            if summary:
+                save_chat_memory(summary)
+                console.print("[dim]记忆已保存，下次对话可回忆[/dim]")
+        except Exception as e:
+            console.print(f"[dim]记忆保存失败: {e}[/dim]")
 
 
 def _setup_chat_logging():

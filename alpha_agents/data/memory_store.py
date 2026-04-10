@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
 CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
+
+CREATE TABLE IF NOT EXISTS chat_memory (
+    id INTEGER PRIMARY KEY,
+    date TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 _local = threading.local()
@@ -118,6 +125,32 @@ def _get_conn() -> sqlite3.Connection:
         conn.executescript(_SCHEMA)
         _local.conn = conn
     return conn
+
+
+# ── Chat Memory ─────────────────────────────────────────────
+
+def save_chat_memory(summary: str) -> None:
+    """Save chat session summary for cross-session memory."""
+    from datetime import datetime
+    with _write_lock:
+        conn = _get_conn()
+        today = datetime.now().strftime("%Y-%m-%d")
+        # Upsert: one summary per day (latest wins)
+        conn.execute(
+            "INSERT INTO chat_memory (date, summary) VALUES (?, ?) ",
+            (today, summary),
+        )
+        conn.commit()
+
+
+def get_recent_chat_memories(days: int = 7) -> list[str]:
+    """Get recent chat session summaries for context."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT summary FROM chat_memory ORDER BY id DESC LIMIT ?",
+        (days,),
+    ).fetchall()
+    return [r["summary"] for r in rows]
 
 
 # ── Theme Lines ──────────────────────────────────────────────

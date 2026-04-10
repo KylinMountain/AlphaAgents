@@ -44,6 +44,13 @@ def get_stock_quotes_fn(codes: str) -> str:
     if _is_sina_available():
         realtime = get_realtime_quotes(code_list[:10])
 
+    if realtime:
+        # Verify Sina returned today's data (not stale holiday data)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        sample = next(iter(realtime.values()), {})
+        if sample.get("date") and sample["date"] != today_str:
+            realtime = None  # Stale data from holiday/weekend
+
     results = []
     for code in code_list[:10]:
         # Prefer real-time data if available

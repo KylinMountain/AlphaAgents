@@ -217,12 +217,27 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             logging.info("--now flag set, running morning scan immediately...")
             await run_morning_scan()
 
-        # Run scheduler until signal received
+        # Run scheduler in background
         scheduler_task = asyncio.create_task(scheduler.run())
-        await stop.wait()
+
+        # If --chat, run interactive chat alongside scheduler
+        if getattr(args, 'chat', False):
+            from alpha_agents.agents.chat import run_chat
+            logging.info("Interactive chat mode enabled — scheduler runs in background")
+            chat_task = asyncio.create_task(run_chat())
+            # Wait for either chat exit or signal
+            done, pending = await asyncio.wait(
+                [chat_task, asyncio.create_task(stop.wait())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+        else:
+            await stop.wait()
+
         scheduler.stop()
         scheduler_task.cancel()
-        logging.info("Scheduler stopped by user.")
+        logging.info("Scheduler stopped.")
 
     try:
         asyncio.run(_run())
@@ -296,6 +311,7 @@ def main() -> None:
     # run-v2 — trading-day scheduler
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
     p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
+    p_run_v2.add_argument("--chat", action="store_true", help="启动交互模式（后台调度+前台对话）")
     p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "night", "weekly", "opening"],
                           help="Run a single task and exit (for testing)")
     p_run_v2.set_defaults(func=cmd_run_v2)

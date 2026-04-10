@@ -173,6 +173,7 @@ def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
                 "amount_yi": round(amount / 1e8, 2),
                 "volume_ratio": 0,  # Sina doesn't provide this
                 "turnover_rate": 0,  # Need float shares to compute
+                "date": fields[30] if len(fields) > 30 else "",
             }
         except (ValueError, IndexError):
             continue

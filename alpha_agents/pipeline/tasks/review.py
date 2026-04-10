@@ -68,13 +68,13 @@ def _verify_predictions() -> None:
         if not today_close:
             continue
 
-        # Use entry_price as baseline; fall back to yesterday's close if unavailable
+        # Use entry_price as baseline; fall back to yesterday's actual close
         entry_price = pred.get("entry_price")
         if not entry_price:
-            # Approximate: today_close / (1 + change_pct/100) gives yesterday's close
-            change_pct = quote.get("change_pct", 0)
-            if change_pct and change_pct != 0:
-                entry_price = today_close / (1 + change_pct / 100)
+            from alpha_agents.data.market_data import get_stock_history
+            hist = get_stock_history(code, days=3)
+            if hist and len(hist) >= 2:
+                entry_price = hist[-2]["close"]  # Yesterday's close
             else:
                 continue
 
@@ -369,19 +369,33 @@ async def run_review() -> str | None:
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
 
-    # Portfolio context
-    portfolio_ctx = ""
+    # Portfolio context — each call independent so failures are isolated
+    pos_summary = ""
+    changes_summary = ""
+    perf_stats = ""
     try:
         pos_summary = get_open_positions_summary()
-        changes_summary = get_today_changes_summary(today)
-        perf_stats = format_portfolio_stats(get_portfolio_stats(days=7))
-        portfolio_ctx = (
-            f"【虚拟持仓状态】\n{pos_summary}\n\n"
-            f"【今日持仓变动】\n{changes_summary}\n\n"
-            f"【近7天策略表现】\n{perf_stats}"
-        )
     except Exception as e:
-        logger.warning("Failed to build portfolio context: %s", e)
+        logger.warning("Failed to get positions summary: %s", e)
+    try:
+        changes_summary = get_today_changes_summary(today)
+    except Exception as e:
+        logger.warning("Failed to get today changes: %s", e)
+    try:
+        perf_stats = format_portfolio_stats(get_portfolio_stats(days=7))
+    except Exception as e:
+        logger.warning("Failed to get portfolio stats: %s", e)
+
+    portfolio_ctx = ""
+    if pos_summary or changes_summary or perf_stats:
+        parts = []
+        if pos_summary:
+            parts.append(f"【虚拟持仓状态】\n{pos_summary}")
+        if changes_summary:
+            parts.append(f"【今日持仓变动】\n{changes_summary}")
+        if perf_stats:
+            parts.append(f"【近7天策略表现】\n{perf_stats}")
+        portfolio_ctx = "\n\n".join(parts)
 
     # 4. Run review agent (append portfolio context to stats)
     full_stats_ctx = stats_ctx

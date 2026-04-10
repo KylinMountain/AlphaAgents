@@ -291,51 +291,108 @@ def _create_chat_agent() -> Agent:
 
 
 async def run_chat():
-    """Interactive chat loop."""
+    """Interactive chat loop with conversation history and rich output."""
     from alpha_agents.agents.hooks import ToolEventHooks
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+
+    console = Console()
     hooks = ToolEventHooks(callback=None, agent_label="chat")
 
-    print("=" * 60)
-    print("AlphaAgents 交互模式")
-    print("你可以问任何关于持仓、推荐、市场的问题")
-    print("输入 'quit' 或 'exit' 退出")
-    print("输入 'refresh' 刷新系统状态")
-    print("=" * 60)
-    print()
+    # Redirect logging to file in chat mode so it doesn't pollute the UI
+    _setup_chat_logging()
+
+    console.print(Panel.fit(
+        "[bold]AlphaAgents 交互模式[/bold]\n"
+        "问任何关于持仓、推荐、市场的问题\n"
+        "支持: 分析个股 / 买卖操作 / 查看持仓 / 讨论主线\n"
+        "命令: [dim]quit[/dim] 退出 | [dim]refresh[/dim] 刷新状态 | [dim]portfolio[/dim] 查看持仓",
+        title="AlphaAgents", border_style="blue",
+    ))
 
     agent = _create_chat_agent()
+    conversation_history = []  # Accumulated conversation for context
 
+    # prompt_toolkit session with history (arrow up/down for previous inputs)
+    session = PromptSession(history=InMemoryHistory())
     loop = asyncio.get_event_loop()
 
     while True:
         try:
-            # Use run_in_executor so input() doesn't block the event loop
-            # (allows scheduler to keep running in background)
-            user_input = (await loop.run_in_executor(None, lambda: input("你: "))).strip()
+            user_input = (await loop.run_in_executor(
+                None, lambda: session.prompt("你: ")
+            )).strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见")
+            console.print("\n[dim]再见[/dim]")
             break
 
         if not user_input:
             continue
         if user_input.lower() in ("quit", "exit", "q"):
-            print("再见")
+            console.print("[dim]再见[/dim]")
             break
         if user_input.lower() == "refresh":
             agent = _create_chat_agent()
-            print("[系统状态已刷新]")
+            conversation_history = []
+            console.print("[dim]系统状态已刷新，对话历史已清空[/dim]")
+            continue
+        if user_input.lower() in ("portfolio", "持仓", "仓位"):
+            # Quick shortcut: show portfolio without LLM call
+            console.print(Panel(show_portfolio(), title="持仓概览", border_style="green"))
             continue
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"[{now}] {user_input}"
 
+        console.print("[dim]分析中...[/dim]")
+
         try:
             result = await asyncio.wait_for(
-                Runner.run(agent, message, hooks=hooks, max_turns=30),
+                Runner.run(
+                    agent, message,
+                    hooks=hooks, max_turns=30,
+                ),
                 timeout=120,
             )
-            print(f"\n分析师: {result.final_output}\n")
+
+            output = result.final_output
+            console.print(Panel(output, title="分析师", border_style="cyan"))
+
         except asyncio.TimeoutError:
-            print("\n[回答超时，请重试]\n")
+            console.print("[red]回答超时，请重试[/red]")
         except Exception as e:
-            print(f"\n[错误: {e}]\n")
+            console.print(f"[red]错误: {e}[/red]")
+
+
+def _setup_chat_logging():
+    """In chat mode, redirect scheduler/pipeline logs to file instead of terminal."""
+    import logging
+    from alpha_agents.config import DATA_DIR
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = DATA_DIR / "scheduler.log"
+
+    # Remove existing console handlers from root logger
+    root = logging.getLogger()
+    for handler in root.handlers[:]:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            root.removeHandler(handler)
+
+    # Add file handler
+    fh = logging.FileHandler(str(log_file), encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root.addHandler(fh)
+
+    # Keep a minimal console handler for errors only
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.ERROR)
+    root.addHandler(ch)
+
+    logger.info("Chat mode: logs redirected to %s", log_file)

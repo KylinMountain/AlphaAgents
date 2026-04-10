@@ -65,8 +65,8 @@ async def run_cross_validation(candidates: str, hooks=None) -> str:
         logger.info("Cross-validation complete, length=%d", len(result.final_output))
         return result.final_output
     except asyncio.TimeoutError:
-        logger.warning("Cross-validation timed out after 180s")
-        return "交叉验证超时，候选股票未经验证。"
+        logger.warning("Cross-validation timed out")
+        raise RuntimeError("Cross-validation timed out")
     except Exception as e:
         logger.warning("Cross-validation failed: %s", e)
-        return f"交叉验证失败: {e}"
+        raise

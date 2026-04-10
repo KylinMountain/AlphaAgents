@@ -75,6 +75,7 @@ def run_daily_archive() -> int:
     try:
         themes = get_active_themes()
         theme_flows = {}
+        failed_codes = []
         for theme in themes:
             stocks = json.loads(theme["core_stocks"]) if theme.get("core_stocks") else []
             for stock in stocks[:5]:
@@ -83,8 +84,11 @@ def run_daily_archive() -> int:
                     try:
                         raw = get_stock_fund_flow_fn(code)
                         theme_flows[code] = json.loads(raw)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        failed_codes.append(code)
+                        logger.debug("Fund flow fetch failed for %s: %s", code, e)
+        if failed_codes:
+            logger.warning("Fund flow fetch failed for %d stocks: %s", len(failed_codes), ", ".join(failed_codes))
         if theme_flows:
             save_snapshot(today, "theme_fund_flow", theme_flows)
             archived += 1

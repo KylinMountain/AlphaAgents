@@ -508,15 +508,10 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
     if room <= 0:
         return None  # Already at max
 
-    # Check available capital + sentiment limit
+    # Check available capital (sentiment limit does NOT apply to add-positions —
+    # bearish markets are exactly when you want to average down)
     available = get_available_capital()
-    try:
-        sentiment_cap = get_sentiment_exposure_limit()
-        invested = TOTAL_CAPITAL - available
-        sentiment_room = max(0, sentiment_cap - invested)
-        room = min(room, available, sentiment_room)
-    except Exception:
-        room = min(room, available)
+    room = min(room, available)
 
     add_shares = _calc_shares(price, room)
     if add_shares == 0:

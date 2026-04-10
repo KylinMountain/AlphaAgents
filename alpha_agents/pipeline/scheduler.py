@@ -142,6 +142,9 @@ class TradingDayScheduler:
         except Exception:
             pass
 
+        # On startup, check for missed tasks today and run them
+        await self._catch_up_missed(is_trading)
+
         while self._running:
             now = datetime.now()
             is_trading = self.is_trading_day(now)
@@ -158,6 +161,30 @@ class TradingDayScheduler:
                         task._last_run = datetime.now()
 
             await asyncio.sleep(30)
+
+    async def _catch_up_missed(self, is_trading: bool) -> None:
+        """Run any non-interval tasks that should have run today but were missed."""
+        now = datetime.now()
+        for task in self._tasks:
+            # Skip interval tasks (intraday monitor) — only catch up one-shot tasks
+            if task.interval_minutes:
+                continue
+            if task.trading_day_only and not is_trading:
+                continue
+            if task.weekday is not None and now.weekday() != task.weekday:
+                continue
+            # If the task's scheduled time has passed today and it hasn't run yet
+            scheduled = now.replace(hour=task.run_at.hour, minute=task.run_at.minute, second=0)
+            if now > scheduled and task._last_run is None:
+                logger.info("Catch-up: running missed task '%s' (was scheduled at %s)",
+                            task.name, task.run_at)
+                try:
+                    await task.run_fn()
+                    task._last_run = datetime.now()
+                    logger.info("Catch-up: task %s completed", task.name)
+                except Exception:
+                    logger.exception("Catch-up: task %s failed", task.name)
+                    task._last_run = datetime.now()
 
     def boost_task(self, name: str, minutes: int = 15) -> None:
         """Temporarily shorten a task's polling interval after anomaly detection."""

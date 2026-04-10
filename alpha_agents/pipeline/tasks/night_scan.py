@@ -62,6 +62,7 @@ async def run_night_scan() -> str | None:
 
     # 1. Pre-fetch global market data
     global_ctx = ""
+    overview = {}
     try:
         overview = json.loads(await asyncio.to_thread(get_global_overview_fn))
         lines = []
@@ -142,8 +143,9 @@ async def run_night_scan() -> str | None:
                 if abs(idx.get("change_pct", 0)) >= 1.5:
                     significant = True
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Significance check failed, defaulting to significant: %s", e)
+            significant = True
         # Also check report text for high-impact keywords
         high_impact_kw = ("重大", "剧烈", "暴跌", "暴涨", "熔断", "危机")
         low_impact_kw = ("影响有限", "平稳", "波澜不惊")
@@ -159,8 +161,8 @@ async def run_night_scan() -> str | None:
                     f"AlphaAgents 夜报 | {time.strftime('%m-%d')}",
                     report[:500],
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Night scan notification failed: %s", e)
         else:
             logger.info("Night scan: no significant moves, skipping push notification")
 

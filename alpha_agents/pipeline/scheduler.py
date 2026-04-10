@@ -30,7 +30,8 @@ def _is_trading_day(date: datetime | None = None) -> bool:
         date_b = date.strftime("%Y%m%d")
         return date_a in trade_dates or date_b in trade_dates
     except Exception as e:
-        logger.warning("Failed to check trading calendar, using weekday fallback: %s", e)
+        logger.warning("Trading calendar API failed — falling back to weekday check. "
+                       "This may incorrectly treat Chinese holidays as trading days: %s", e)
         return (date or datetime.now()).weekday() < 5
 
 
@@ -142,7 +143,7 @@ class TradingDayScheduler:
             else:
                 logger.info("No active themes yet")
         except Exception:
-            pass
+            logger.exception("Failed to load active themes on startup")
 
         # On startup, check for missed tasks today and run them
         await self._catch_up_missed(is_trading)

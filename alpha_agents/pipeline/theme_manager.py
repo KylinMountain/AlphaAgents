@@ -198,7 +198,6 @@ def maybe_discover_theme(
                       sector_name, new_cat, same_cat_count)
         return False
 
-    active = get_active_themes()
     if len(active) >= MAX_ACTIVE_THEMES:
         weakest = min(active, key=lambda t: t["strength"])
         if weakest["strength"] < signals["bullish_signals"]:

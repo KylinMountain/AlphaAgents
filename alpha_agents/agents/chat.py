@@ -350,16 +350,36 @@ async def run_chat():
         console.print("[dim]分析中...[/dim]")
 
         try:
-            result = await asyncio.wait_for(
-                Runner.run(
-                    agent, message,
-                    hooks=hooks, max_turns=30,
-                ),
-                timeout=120,
+            # Streaming output with conversation history
+            from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
+            from openai.types.responses import ResponseTextDeltaEvent
+
+            streamed = Runner.run_streamed(
+                agent, message,
+                hooks=hooks, max_turns=30,
             )
 
-            output = result.final_output
-            console.print(Panel(output, title="分析师", border_style="cyan"))
+            console.print("[cyan]分析师:[/cyan] ", end="")
+            full_output = ""
+
+            async for event in streamed.stream_events():
+                if isinstance(event, RawResponsesStreamEvent):
+                    data = event.data
+                    if isinstance(data, ResponseTextDeltaEvent):
+                        chunk = data.delta
+                        if chunk:
+                            print(chunk, end="", flush=True)
+                            full_output += chunk
+
+            print()  # newline after streaming
+
+            # Store final output for display
+            if not full_output:
+                full_output = streamed.final_output if hasattr(streamed, 'final_output') else ""
+                if full_output:
+                    console.print(Panel(full_output, title="分析师", border_style="cyan"))
+
+            print()
 
         except asyncio.TimeoutError:
             console.print("[red]回答超时，请重试[/red]")

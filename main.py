@@ -249,6 +249,18 @@ def cmd_review(args: argparse.Namespace) -> None:
             print(f"\n{result['review_text']}")
 
 
+def cmd_chat(args: argparse.Namespace) -> None:
+    """Interactive chat with the trading analyst."""
+    _ensure_index()
+    _ensure_embeddings()
+
+    from alpha_agents.agents.chat import run_chat
+    try:
+        asyncio.run(run_chat())
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_build_index(args: argparse.Namespace) -> None:
     """Force rebuild stock index (even if it exists)."""
     logging.info("Building stock concept index...")
@@ -303,6 +315,10 @@ def main() -> None:
     # build-index — force rebuild
     p_index = subparsers.add_parser("build-index", help="强制重建股票概念索引")
     p_index.set_defaults(func=cmd_build_index)
+
+    # chat — interactive analyst
+    p_chat = subparsers.add_parser("chat", help="交互式分析师（随时问持仓/推荐/市场问题）")
+    p_chat.set_defaults(func=cmd_chat)
 
     # build-embeddings — force rebuild
     p_embed = subparsers.add_parser("build-embeddings", help="强制重建概念语义搜索向量")

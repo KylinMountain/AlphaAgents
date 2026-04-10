@@ -175,16 +175,47 @@ def check_pending_orders(
             _cancel_order(order["id"], "日期解析失败")
             continue
 
-        expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
-        if days_pending > expire_days:
-            _cancel_order(order["id"], f"挂单过期({days_pending}天未触发)")
-            alerts.append({
-                "type": "cancelled",
-                "code": code,
-                "name": order.get("name", ""),
-                "reason": f"挂单过期({days_pending}天)",
-            })
-            continue
+        # Dynamic expiry based on theme health:
+        # - Theme healthy (strength >= 4) → keep the order alive, no expiry
+        # - Theme weak (strength < 4) or declining/archived → cancel
+        # - No theme → fall back to fixed expiry
+        theme_name = order.get("theme", "")
+        if theme_name:
+            theme = get_theme_by_name(theme_name)
+            if theme:
+                if theme.get("status") in ("declining", "archived"):
+                    _cancel_order(order["id"], f"主线衰退({theme_name}已{theme['status']})")
+                    alerts.append({
+                        "type": "cancelled",
+                        "code": code,
+                        "name": order.get("name", ""),
+                        "reason": f"主线衰退({theme_name})",
+                    })
+                    continue
+                if theme.get("strength", 0) < 4:
+                    _cancel_order(order["id"], f"主线走弱({theme_name}强度{theme['strength']})")
+                    alerts.append({
+                        "type": "cancelled",
+                        "code": code,
+                        "name": order.get("name", ""),
+                        "reason": f"主线走弱({theme_name})",
+                    })
+                    continue
+                # Theme healthy → keep order alive regardless of days
+            else:
+                # Theme not found in DB → use fixed expiry
+                expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
+                if days_pending > expire_days:
+                    _cancel_order(order["id"], f"挂单过期({days_pending}天，主线未知)")
+                    alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"挂单过期"})
+                    continue
+        else:
+            # No theme → fixed expiry
+            expire_days = order.get("expire_days") or PENDING_EXPIRE_DAYS
+            if days_pending > expire_days:
+                _cancel_order(order["id"], f"挂单过期({days_pending}天)")
+                alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"挂单过期"})
+                continue
 
         if price is None or price <= 0:
             continue

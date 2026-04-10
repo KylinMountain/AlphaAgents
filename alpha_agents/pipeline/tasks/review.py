@@ -43,16 +43,15 @@ def _verify_predictions() -> None:
         logger.info("No pending predictions from %s to verify", yesterday)
         return
 
-    # Collect all stock codes to fetch quotes
+    # Collect unique stock codes
     codes = list({p["code"] for p in predictions if p.get("code")})
     if not codes:
         return
 
+    # Batch fetch via Sina (fast, no baostock login/logout per stock)
+    from alpha_agents.data.market_data import get_realtime_quotes
     try:
-        quotes_raw = get_stock_quotes_fn(",".join(codes))
-        quotes_data = json.loads(quotes_raw)
-        # Build lookup: code -> quote dict
-        quote_lookup = {q["code"]: q for q in quotes_data.get("quotes", []) if "error" not in q}
+        rt = get_realtime_quotes(codes) or {}
     except Exception as e:
         logger.warning("Failed to fetch quotes for prediction verification: %s", e)
         return
@@ -60,21 +59,20 @@ def _verify_predictions() -> None:
     verified = 0
     for pred in predictions:
         code = pred.get("code")
-        if not code or code not in quote_lookup:
+        if not code or code not in rt:
             continue
 
-        quote = quote_lookup[code]
-        today_close = quote.get("price")
-        if not today_close:
+        today_close = rt[code].get("price")
+        if not today_close or today_close <= 0:
             continue
 
-        # Use entry_price as baseline; fall back to yesterday's actual close
+        # Use entry_price as baseline; fall back to deriving from Sina's change_pct
         entry_price = pred.get("entry_price")
         if not entry_price:
-            from alpha_agents.data.market_data import get_stock_history
-            hist = get_stock_history(code, days=3)
-            if hist and len(hist) >= 2:
-                entry_price = hist[-2]["close"]  # Yesterday's close
+            change_pct = rt[code].get("change_pct", 0)
+            prev_close = rt[code].get("prev_close", 0)
+            if prev_close and prev_close > 0:
+                entry_price = prev_close
             else:
                 continue
 

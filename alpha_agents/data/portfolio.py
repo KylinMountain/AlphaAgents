@@ -22,9 +22,11 @@ PENDING_EXPIRE_DAYS = 2  # 挂单有效期（交易日）
 
 # ── Capital Management ──────────────────────────────────────
 TOTAL_CAPITAL = 100_000          # 总资金 10万
-MAX_POSITION_PCT = 0.15          # 单票最多占总资金 15%
+MAX_POSITION_PCT = 0.15          # 单票初始建仓最多占总资金 15%
+MAX_POSITION_WITH_ADD = 0.30     # 补仓后单票最多占总资金 30%
 MAX_THEME_PCT = 0.30             # 同主线最多占总资金 30%
 LOT_SIZE = 100                   # A股一手 = 100股
+ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 
 # Sentiment-based total exposure limits
 SENTIMENT_EXPOSURE = {
@@ -466,8 +468,89 @@ def check_positions(
                 "holding_days": holding_days,
             })
             alerts.append(alert)
+        else:
+            # ── Check for add-position opportunity (补仓) ──
+            add_alert = _check_add_position(pos, price, current_return)
+            if add_alert:
+                alerts.append(add_alert)
 
     return alerts
+
+
+def _check_add_position(pos: dict, price: float, current_return: float) -> dict | None:
+    """Check if we should add to an existing position (补仓).
+
+    Conditions:
+    - Price dropped >= ADD_POSITION_DROP_PCT from entry
+    - Theme still healthy (strength >= 4)
+    - Current position < MAX_POSITION_WITH_ADD (30%)
+    - Have available capital
+    """
+    if current_return > -ADD_POSITION_DROP_PCT:
+        return None  # Not down enough
+
+    code = pos["code"]
+    name = pos.get("name", "")
+    theme_name = pos.get("theme", "")
+    open_price = pos.get("open_price", 0)
+    existing_shares = pos.get("shares", 0)
+    existing_cost = open_price * existing_shares
+
+    # Check theme health
+    if theme_name:
+        theme = get_theme_by_name(theme_name)
+        if theme and theme.get("strength", 0) < 4:
+            return None  # Theme too weak, don't throw good money after bad
+
+    # Check position limit (30% with add)
+    max_total_cost = TOTAL_CAPITAL * MAX_POSITION_WITH_ADD
+    room = max_total_cost - existing_cost
+    if room <= 0:
+        return None  # Already at max
+
+    # Check available capital + sentiment limit
+    available = get_available_capital()
+    try:
+        sentiment_cap = get_sentiment_exposure_limit()
+        invested = TOTAL_CAPITAL - available
+        sentiment_room = max(0, sentiment_cap - invested)
+        room = min(room, available, sentiment_room)
+    except Exception:
+        room = min(room, available)
+
+    add_shares = _calc_shares(price, room)
+    if add_shares == 0:
+        return None
+
+    add_cost = add_shares * price
+
+    # Execute add: update shares and recalculate avg open_price
+    new_total_shares = existing_shares + add_shares
+    new_avg_price = round((existing_cost + add_cost) / new_total_shares, 2)
+
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE virtual_portfolio SET open_price = ?, shares = ? WHERE id = ?",
+            (new_avg_price, new_total_shares, pos["id"]),
+        )
+        conn.commit()
+
+    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f→%.2f, 总%d股, 总成本%.0f元)",
+                code, name, add_shares, price,
+                open_price, new_avg_price, new_total_shares,
+                new_avg_price * new_total_shares)
+
+    return {
+        "type": "add_position",
+        "code": code,
+        "name": name,
+        "add_shares": add_shares,
+        "add_price": price,
+        "new_avg_price": new_avg_price,
+        "total_shares": new_total_shares,
+        "total_cost": round(new_avg_price * new_total_shares),
+    }
 
 
 # ── Summaries ───────────────────────────────────────────────

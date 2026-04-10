@@ -403,6 +403,16 @@ def _format_portfolio_alert(alert: dict) -> str:
     """Format a portfolio alert for notification."""
     code = alert["code"]
     name = alert.get("name", "")
+    alert_type = alert.get("type", "")
+
+    if alert_type == "add_position":
+        add_shares = alert.get("add_shares", 0)
+        add_price = alert.get("add_price", 0)
+        new_avg = alert.get("new_avg_price", 0)
+        total = alert.get("total_shares", 0)
+        return (f"补仓 | {code} {name} +{add_shares}股 @ {add_price:.2f}元 "
+                f"(均价{new_avg:.2f}, 共{total}股)")
+
     ret = alert.get("return_pct", 0)
     reason = alert.get("reason", "")
     close_price = alert.get("close_price", 0)

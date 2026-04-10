@@ -427,10 +427,27 @@ def check_positions(
             alert = {"type": "stopped", "reason": f"{'移动' if stop_loss > (pos.get('stop_loss') or 0) else ''}止损触发"}
         elif target_price and price >= target_price:
             alert = {"type": "target_hit", "reason": "止盈触发"}
-        elif pos.get("theme"):
+
+        # Theme-aware holding + early exit
+        if not alert and pos.get("theme"):
             theme = get_theme_by_name(pos["theme"])
-            if theme and theme.get("status") in ("declining", "archived"):
-                alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme['status']})"}
+            if theme:
+                theme_status = theme.get("status", "watching")
+                theme_strength = theme.get("strength", 0)
+
+                if theme_status in ("declining", "archived"):
+                    # 主线衰退 → 立刻走
+                    alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme_status})"}
+                elif theme_status == "peak" and theme_strength >= 8:
+                    # 主线 peak + 强度高 → 可以多拿几天，最多 10 天
+                    if holding_days >= 10:
+                        alert = {"type": "expired", "reason": f"持仓到期({holding_days}天，主线peak允许延长)"}
+                elif theme_strength <= 3:
+                    # 主线弱（但没到 declining）→ 缩短到 3 天
+                    if holding_days >= 3:
+                        alert = {"type": "expired", "reason": f"主线走弱(强度{theme_strength})，提前平仓({holding_days}天)"}
+
+        # Default max holding: 5 days
         if not alert and holding_days >= MAX_HOLDING_DAYS:
             alert = {"type": "expired", "reason": f"持仓到期({holding_days}天)"}
 

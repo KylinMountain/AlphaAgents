@@ -218,13 +218,19 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
     if not predictions:
         return "今日无待验证预测"
 
+    # Filter out signal-type predictions (涨停确认股 — not actionable recommendations)
+    actionable = [p for p in predictions if p.get("report_type") not in ("intraday_signal",)]
+
     # Deduplicate by code — keep FIRST occurrence (earliest entry_price)
     seen = set()
     unique = []
-    for p in predictions:
+    for p in actionable:
         if p["code"] not in seen:
             seen.add(p["code"])
             unique.append(p)
+
+    logger.info("Verify predictions: %d total, %d actionable, %d unique",
+                len(predictions), len(actionable), len(unique))
 
     # Batch fetch today's actual close prices via Sina
     codes = [p["code"] for p in unique]

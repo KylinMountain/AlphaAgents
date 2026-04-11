@@ -702,7 +702,7 @@ async def run_chat():
         console.print("[dim]分析中...[/dim]")
 
         try:
-            from agents.stream_events import RawResponsesStreamEvent
+            from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
             from openai.types.responses import ResponseTextDeltaEvent
 
             # Pass conversation history so agent remembers prior exchanges
@@ -712,15 +712,30 @@ async def run_chat():
                 hooks=hooks, max_turns=30,
             )
 
-            console.print("[cyan]分析师:[/cyan] ", end="")
             full_output = ""
+            streaming_text = False  # Track if we've started printing text
 
             async for event in streamed.stream_events():
+                # Show tool calls in real-time
+                if isinstance(event, RunItemStreamEvent):
+                    item = event.item
+                    # Detect tool call start
+                    if hasattr(item, "type") and item.type == "tool_call_item":
+                        tool_name = getattr(item, "name", None) or ""
+                        if tool_name:
+                            if streaming_text:
+                                print()  # Newline if we were mid-stream
+                                streaming_text = False
+                            console.print(f"  [dim]🔧 {tool_name}...[/dim]")
+
                 if isinstance(event, RawResponsesStreamEvent):
                     data = event.data
                     if isinstance(data, ResponseTextDeltaEvent):
                         chunk = data.delta
                         if chunk:
+                            if not streaming_text:
+                                console.print("[cyan]分析师:[/cyan] ", end="")
+                                streaming_text = True
                             print(chunk, end="", flush=True)
                             full_output += chunk
 

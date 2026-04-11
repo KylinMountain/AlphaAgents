@@ -202,7 +202,80 @@ class TradingDayScheduler:
                         task._last_run = datetime.now()
                     self._save_state()
 
+            # Check custom tasks from DB
+            await self._check_custom_tasks(now, is_trading)
+
             await asyncio.sleep(30)
+
+    async def _run_custom_task(self, task: dict) -> None:
+        """Execute a custom task by running its prompt through an Agent."""
+        from alpha_agents.agents.chat import _create_chat_agent
+        from agents import Runner
+
+        agent = _create_chat_agent()
+        prompt = task["prompt"]
+        logger.info("Custom task #%d: %s", task["id"], prompt[:80])
+
+        try:
+            result = await asyncio.wait_for(
+                Runner.run(agent, prompt, max_turns=15),
+                timeout=120,
+            )
+            output = result.final_output
+            logger.info("Custom task #%d result: %s", task["id"], output[:200])
+
+            # Push result to notification
+            from alpha_agents.notify import notify_all
+            notify_all(
+                f"AlphaAgents 自定义任务 #{task['id']}",
+                f"{prompt}\n\n{output[:500]}",
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Custom task #%d timed out", task["id"])
+        except Exception as e:
+            logger.warning("Custom task #%d failed: %s", task["id"], e)
+
+    async def _check_custom_tasks(self, now: datetime, is_trading: bool) -> None:
+        """Check and run any due custom tasks."""
+        try:
+            from alpha_agents.data.memory_store import get_active_custom_tasks, update_custom_task_last_run
+            tasks = get_active_custom_tasks()
+        except Exception:
+            return
+
+        today = now.strftime("%Y-%m-%d")
+        current_hm = now.strftime("%H:%M")
+
+        for task in tasks:
+            schedule_time = task.get("schedule_time", "")
+            interval = task.get("interval", "once")
+            last_run = task.get("last_run", "")
+
+            # Skip if not the right time (check within 1-minute window)
+            if not schedule_time or abs(self._time_diff_minutes(current_hm, schedule_time)) > 1:
+                continue
+
+            # Skip weekday-only tasks on non-trading days
+            if interval == "weekday" and not is_trading:
+                continue
+
+            # Skip if already ran today
+            if last_run and last_run[:10] == today:
+                continue
+
+            # Run it
+            await self._run_custom_task(task)
+            update_custom_task_last_run(task["id"])
+
+    @staticmethod
+    def _time_diff_minutes(t1: str, t2: str) -> float:
+        """Difference in minutes between two HH:MM strings."""
+        try:
+            h1, m1 = map(int, t1.split(":"))
+            h2, m2 = map(int, t2.split(":"))
+            return (h1 * 60 + m1) - (h2 * 60 + m2)
+        except Exception:
+            return 999
 
     async def _catch_up_missed(self, is_trading: bool) -> None:
         """Run any non-interval tasks that should have run today but were missed."""

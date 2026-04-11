@@ -548,6 +548,7 @@ async def run_chat():
                 "  morning / 晨扫 | opening / 开盘 | intraday / 盘中\n"
                 "  review / 复盘 | night / 夜扫 | weekly / 周报\n"
                 "\n[bold]系统:[/bold]\n"
+                "  tasks / 任务         — 查看定时任务运行状态\n"
                 "  refresh | quit | help\n"
                 "\n[bold]自然语言（调AI分析）:[/bold]\n"
                 "  分析一下东山精密 / 帮我买002384止损124元\n"
@@ -592,6 +593,40 @@ async def run_chat():
                 console.print(Panel("\n".join(lines) if lines else "无活跃主线", title="活跃主线", border_style="magenta"))
             except Exception as e:
                 console.print(f"[red]获取主线失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("tasks", "任务", "定时"):
+            try:
+                from alpha_agents.config import DATA_DIR
+                import json as _j2
+                state_file = DATA_DIR / "scheduler_state.json"
+                state = {}
+                if state_file.exists():
+                    state = _j2.loads(state_file.read_text(encoding="utf-8"))
+
+                from datetime import datetime as _dt
+                now = _dt.now()
+                today = now.strftime("%Y-%m-%d")
+                tasks_info = [
+                    ("morning_scan", "06:30", "晨扫分析"),
+                    ("opening_reminder", "09:15", "开盘提醒"),
+                    ("intraday_monitor", "09:30-15:00", "盘中监控(每5分钟)"),
+                    ("review", "15:30", "收盘复盘"),
+                    ("night_scan", "20:00", "夜扫分析"),
+                    ("weekly_report", "周六 10:00", "周报"),
+                ]
+                lines = []
+                for name, schedule, desc in tasks_info:
+                    last_run = state.get(name, "")
+                    if last_run and last_run.startswith(today):
+                        status = f"[green]已完成[/green] ({last_run[11:16]})"
+                    elif last_run:
+                        status = f"[dim]上次: {last_run[:16]}[/dim]"
+                    else:
+                        status = "[yellow]未运行[/yellow]"
+                    lines.append(f"  {schedule:15s} {desc:18s} {status}")
+                console.print(Panel("\n".join(lines), title=f"定时任务 ({today})", border_style="blue"))
+            except Exception as e:
+                console.print(f"[red]获取任务状态失败: {e}[/red]")
             continue
         if user_input.lower() in ("market", "大盘"):
             console.print(Panel(show_market_overview(), title="大盘概览", border_style="blue"))

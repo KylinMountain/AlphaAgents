@@ -34,6 +34,18 @@ from alpha_agents.data.memory_store import (
 
 logger = logging.getLogger(__name__)
 
+
+class _SuppressPrint:
+    """Context manager to suppress print() calls from task functions in chat mode."""
+    def __enter__(self):
+        import sys, io
+        self._old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        return self
+    def __exit__(self, *args):
+        import sys
+        sys.stdout = self._old_stdout
+
 CHAT_SYSTEM_PROMPT = """你是 AlphaAgents 的交互式分析师，用户可以随时向你提问。
 
 ## 你的角色
@@ -666,7 +678,8 @@ async def run_chat():
             console.print("[dim]正在运行晨扫...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
-                report = await run_morning_scan()
+                with _SuppressPrint():
+                    report = await run_morning_scan()
                 if report:
                     console.print(Panel(report, title="晨报", border_style="green"))
                 else:
@@ -777,7 +790,8 @@ async def run_chat():
             console.print("[dim]正在运行开盘提醒...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
-                report = await run_opening_reminder()
+                with _SuppressPrint():
+                    report = await run_opening_reminder()
                 if report:
                     console.print(Panel(report, title="开盘提醒", border_style="green"))
                 else:
@@ -789,7 +803,8 @@ async def run_chat():
             console.print("[dim]正在检测盘中异动...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
-                report = await run_intraday_monitor()
+                with _SuppressPrint():
+                    report = await run_intraday_monitor()
                 if report:
                     console.print(Panel(report, title="盘中提醒", border_style="yellow"))
                 else:
@@ -801,7 +816,8 @@ async def run_chat():
             console.print("[dim]正在运行复盘分析...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.review import run_review
-                report = await run_review()
+                with _SuppressPrint():
+                    report = await run_review()
                 if report:
                     console.print(Panel(report, title="复盘报告", border_style="cyan"))
                 else:
@@ -813,7 +829,8 @@ async def run_chat():
             console.print("[dim]正在运行夜扫...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.night_scan import run_night_scan
-                report = await run_night_scan()
+                with _SuppressPrint():
+                    report = await run_night_scan()
                 if report:
                     console.print(Panel(report, title="夜报", border_style="blue"))
                 else:
@@ -825,7 +842,8 @@ async def run_chat():
             console.print("[dim]正在生成周报...[/dim]")
             try:
                 from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
-                report = await run_weekly_report()
+                with _SuppressPrint():
+                    report = await run_weekly_report()
                 if report:
                     console.print(Panel(report, title="周报", border_style="magenta"))
                 else:

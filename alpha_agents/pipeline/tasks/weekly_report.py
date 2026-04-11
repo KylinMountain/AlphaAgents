@@ -103,6 +103,15 @@ async def run_weekly_report() -> str | None:
             except Exception as e:
                 logger.debug("Weekly report notification failed: %s", e)
 
+        # Calculate sector betas for all active themes (weekly refresh)
+        try:
+            from alpha_agents.data.beta_calculator import run_weekly_beta_calculation
+            import asyncio as _asyncio
+            beta_count = await _asyncio.to_thread(run_weekly_beta_calculation)
+            logger.info("Weekly beta calculation: %d betas computed", beta_count)
+        except Exception as e:
+            logger.warning("Weekly beta calculation failed: %s", e)
+
         return report
     except asyncio.TimeoutError:
         logger.warning("Weekly report timed out")

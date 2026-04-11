@@ -230,6 +230,175 @@ def show_portfolio() -> str:
     return "\n".join(lines)
 
 
+@function_tool
+def show_market_overview() -> str:
+    """查看大盘概览：主要指数、涨跌比、市场情绪。用于快速了解当前市场状态。"""
+    from alpha_agents.tools.market_breadth import get_market_breadth_fn
+    from alpha_agents.tools.global_market import get_global_overview_fn
+    lines = []
+    try:
+        breadth = json.loads(get_market_breadth_fn())
+        adv = breadth.get("advances", 0)
+        dec = breadth.get("declines", 0)
+        ratio = breadth.get("advance_decline_ratio", 1)
+        sentiment = breadth.get("sentiment", "")
+        lines.append(f"涨: {adv} | 跌: {dec} | 涨跌比: {ratio:.2f} ({sentiment})")
+        lines.append(f"涨停: {breadth.get('limit_up', 0)} | 跌停: {breadth.get('limit_down', 0)}")
+    except Exception as e:
+        lines.append(f"市场情绪: 获取失败 ({e})")
+    try:
+        overview = json.loads(get_global_overview_fn())
+        for idx in overview.get("us_indices", []):
+            lines.append(f"{idx['name']}: {idx['close']} ({idx['change_pct']:+.2f}%)")
+        bonds = overview.get("bond_yields", {})
+        if bonds.get("cn_us_spread"):
+            lines.append(f"中美利差: {bonds['cn_us_spread']}%")
+    except Exception:
+        pass
+    return "\n".join(lines) if lines else "无数据"
+
+
+@function_tool
+def show_sector_ranking(top_n: int = 10) -> str:
+    """查看今日板块资金排名。显示资金流入最多和流出最多的板块。"""
+    from alpha_agents.tools.sector_ranking import get_sector_ranking_fn
+    data = json.loads(get_sector_ranking_fn(top_n=top_n))
+    lines = ["资金流入 Top:"]
+    for s in data.get("gainers", [])[:top_n]:
+        lines.append(f"  {s['sector']} {s['change_pct']:+.2f}% 净流入{s['net_flow_yi']:.1f}亿")
+    lines.append("资金流出 Top:")
+    for s in data.get("losers", [])[:5]:
+        lines.append(f"  {s['sector']} {s['change_pct']:+.2f}% 净流出{abs(s['net_flow_yi']):.1f}亿")
+    return "\n".join(lines)
+
+
+@function_tool
+def show_stock_quote(code: str) -> str:
+    """快速查看个股实时行情。输入6位股票代码。
+
+    Args:
+        code: 股票代码，如 "002384"
+    """
+    from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
+    data = json.loads(get_stock_quotes_fn(code))
+    quotes = data.get("quotes", [])
+    if not quotes:
+        return f"未找到 {code} 的行情数据"
+    q = quotes[0]
+    if q.get("error"):
+        return f"{code}: {q['error']}"
+    rt = "实时" if q.get("realtime") else "收盘"
+    return (f"{code} {q.get('name', '')} | {q['price']:.2f}元 ({q['change_pct']:+.2f}%) [{rt}]\n"
+            f"周涨跌: {q.get('week_change_pct', 0):+.2f}% | "
+            f"周高: {q.get('week_high', 0):.2f} 周低: {q.get('week_low', 0):.2f}")
+
+
+@function_tool
+def show_lhb() -> str:
+    """查看今日龙虎榜——哪些股票有机构大额买卖。"""
+    from alpha_agents.tools.fund_flow import get_lhb_detail_fn
+    data = json.loads(get_lhb_detail_fn())
+    items = data.get("data", [])[:15]
+    if not items:
+        return "今日无龙虎榜数据"
+    lines = [f"龙虎榜 ({data.get('count', 0)}只，机构买入{data.get('institutional_buys', 0)}只):"]
+    for item in items:
+        tag = "机构" if item.get("is_institutional") else "游资"
+        lines.append(f"  {item['code']} {item['name']} {item['change_pct']:+.1f}% "
+                      f"净买{item['net_buy_yi']:+.2f}亿 [{tag}]")
+    return "\n".join(lines)
+
+
+@function_tool
+def show_north_flow() -> str:
+    """查看今日北向资金流向——外资在买什么。"""
+    from alpha_agents.tools.fund_flow import get_north_flow_fn
+    data = json.loads(get_north_flow_fn("today"))
+    items = data.get("data", [])[:10]
+    if not items:
+        return "无北向资金数据"
+    lines = ["北向资金持仓 Top 10:"]
+    for item in items:
+        chg = item.get("change_value_wan", 0)
+        direction = "增持" if chg > 0 else "减持" if chg < 0 else "持平"
+        lines.append(f"  {item['code']} {item['name']} 持仓{item.get('pct_of_float', 0):.2f}% "
+                      f"{direction}{abs(chg)/10000:.2f}亿")
+    return "\n".join(lines)
+
+
+@function_tool
+def show_limit_up() -> str:
+    """查看今日涨停板分布——哪些方向最强。"""
+    from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
+    data = json.loads(get_anomaly_stocks_fn())
+    summary = data.get("summary", {})
+    lines = [f"涨停: {summary.get('limit_up_count', 0)}家 | "
+             f"跌停: {summary.get('limit_down_count', 0)}家 | "
+             f"炸板: {summary.get('broken_limit_count', 0)}家"]
+    if summary.get("top_sector"):
+        lines.append(f"涨停集中: {summary['top_sector']}")
+    consecutive = summary.get("consecutive_limit_stocks", [])
+    if consecutive:
+        lines.append("连板股:")
+        for s in consecutive[:8]:
+            lines.append(f"  {s['name']}({s['consecutive_limits']}板)")
+    return "\n".join(lines)
+
+
+@function_tool
+def cancel_pending_order(code: str) -> str:
+    """取消指定股票的挂单。
+
+    Args:
+        code: 要取消挂单的股票代码，如 "002384"
+    """
+    from alpha_agents.data.portfolio import get_pending_orders, _cancel_order
+    orders = get_pending_orders()
+    target = None
+    for o in orders:
+        if o["code"] == code:
+            target = o
+            break
+    if not target:
+        return f"未找到 {code} 的挂单"
+    _cancel_order(target["id"], "用户手动取消")
+    return f"已取消 {code} {target.get('name', '')} 的挂单"
+
+
+@function_tool
+def show_trade_history(days: int = 7) -> str:
+    """查看最近的交易记录和盈亏。
+
+    Args:
+        days: 查看最近几天，默认7天
+    """
+    from alpha_agents.data.portfolio import get_portfolio_stats, format_portfolio_stats
+    from alpha_agents.data.memory_store import _get_conn
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT code, name, shares, open_price, close_price, return_pct, "
+        "return_amount, close_reason, open_date, close_date "
+        "FROM virtual_portfolio WHERE status NOT IN ('open', 'pending', 'cancelled') "
+        "ORDER BY close_date DESC LIMIT ?",
+        (days * 5,),
+    ).fetchall()
+    if not rows:
+        return "暂无交易记录"
+    lines = ["最近交易:"]
+    for r in rows:
+        ret = r["return_pct"] or 0
+        amt = r["return_amount"] or 0
+        lines.append(
+            f"  {r['code']} {r['name']} {r['shares']}股 "
+            f"{r['open_price']:.2f}→{r['close_price']:.2f} "
+            f"({ret:+.1f}%, {amt:+,.0f}元) {r['close_reason']} "
+            f"[{r['open_date']}~{r['close_date']}]"
+        )
+    stats = get_portfolio_stats(days=days)
+    lines.append(f"\n{format_portfolio_stats(stats)}")
+    return "\n".join(lines)
+
+
 def _build_context() -> str:
     """Build current system context for the chat agent."""
     # Portfolio
@@ -302,7 +471,12 @@ def _create_chat_agent() -> Agent:
         name="chat_analyst",
         instructions=_build_context(),
         model=model,
-        tools=STOCK_TOOLS + [place_buy_order, place_sell_order, show_portfolio],
+        tools=STOCK_TOOLS + [
+            place_buy_order, place_sell_order, show_portfolio,
+            show_market_overview, show_sector_ranking, show_stock_quote,
+            show_lhb, show_north_flow, show_limit_up,
+            cancel_pending_order, show_trade_history,
+        ],
     )
 
 
@@ -355,25 +529,29 @@ async def run_chat():
             break
         if user_input.lower() in ("help", "帮助", "?"):
             console.print(Panel(
-                "[bold]快捷命令:[/bold]\n"
-                "  portfolio / 持仓     — 查看持仓和挂单\n"
-                "  news / 新闻          — 查看最新新闻\n"
-                "  themes / 主线        — 查看活跃主线\n"
+                "[bold]行情查看（秒出，不调LLM）:[/bold]\n"
+                "  market / 大盘        — 大盘指数+涨跌比+情绪\n"
+                "  sectors / 板块       — 板块资金排名 Top10\n"
+                "  查 002384            — 快速查个股实时行情\n"
+                "  lhb / 龙虎榜         — 今日龙虎榜机构动向\n"
+                "  north / 北向         — 北向资金流向\n"
+                "  limitup / 涨停       — 涨停板分布\n"
+                "\n[bold]持仓管理:[/bold]\n"
+                "  portfolio / 持仓     — 持仓+挂单+资金\n"
+                "  trades / 历史        — 最近交易记录和盈亏\n"
+                "  risk / 风险          — 当前风险评估\n"
+                "  撤单 002384          — 取消某只挂单\n"
+                "\n[bold]数据源:[/bold]\n"
+                "  news / 新闻          — 最新新闻\n"
+                "  themes / 主线        — 活跃主线状态\n"
                 "\n[bold]手动运行任务:[/bold]\n"
-                "  morning / 晨扫       — 运行晨扫分析\n"
-                "  opening / 开盘       — 运行开盘提醒\n"
-                "  intraday / 盘中      — 检测盘中异动\n"
-                "  review / 复盘        — 运行收盘复盘\n"
-                "  night / 夜扫         — 运行夜扫分析\n"
-                "  weekly / 周报        — 生成周报\n"
+                "  morning / 晨扫 | opening / 开盘 | intraday / 盘中\n"
+                "  review / 复盘 | night / 夜扫 | weekly / 周报\n"
                 "\n[bold]系统:[/bold]\n"
-                "  refresh              — 刷新系统状态\n"
-                "  quit                 — 退出\n"
-                "\n[bold]对话示例:[/bold]\n"
-                "  分析一下东山精密\n"
-                "  帮我买 002384 止损 124 元\n"
-                "  通鼎互联要不要卖？\n"
-                "  现在市场情绪怎么样？",
+                "  refresh | quit | help\n"
+                "\n[bold]自然语言（调AI分析）:[/bold]\n"
+                "  分析一下东山精密 / 帮我买002384止损124元\n"
+                "  通鼎互联要不要卖？ / 今天哪些板块资金流入最多？",
                 title="帮助", border_style="yellow",
             ))
             continue
@@ -414,6 +592,39 @@ async def run_chat():
                 console.print(Panel("\n".join(lines) if lines else "无活跃主线", title="活跃主线", border_style="magenta"))
             except Exception as e:
                 console.print(f"[red]获取主线失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("market", "大盘"):
+            console.print(Panel(show_market_overview(), title="大盘概览", border_style="blue"))
+            continue
+        if user_input.lower() in ("sectors", "板块"):
+            console.print(Panel(show_sector_ranking(top_n=10), title="板块排名", border_style="yellow"))
+            continue
+        if user_input.lower() in ("lhb", "龙虎榜"):
+            console.print(Panel(show_lhb(), title="龙虎榜", border_style="red"))
+            continue
+        if user_input.lower() in ("north", "北向"):
+            console.print(Panel(show_north_flow(), title="北向资金", border_style="green"))
+            continue
+        if user_input.lower() in ("limitup", "涨停"):
+            console.print(Panel(show_limit_up(), title="涨停板", border_style="red"))
+            continue
+        if user_input.lower() in ("trades", "历史"):
+            console.print(Panel(show_trade_history(), title="交易记录", border_style="cyan"))
+            continue
+        # Quick stock quote: "查 002384" or "quote 002384"
+        import re as _re
+        quote_match = _re.match(r"^(?:查|quote)\s+(\d{6})$", user_input.strip())
+        if quote_match:
+            console.print(Panel(show_stock_quote(code=quote_match.group(1)), title="个股行情", border_style="green"))
+            continue
+        # Cancel order: "撤单 002384" or "cancel 002384"
+        cancel_match = _re.match(r"^(?:撤单|cancel)\s+(\d{6})$", user_input.strip())
+        if cancel_match:
+            console.print(Panel(cancel_pending_order(code=cancel_match.group(1)), title="撤单", border_style="yellow"))
+            continue
+        if user_input.lower() in ("risk", "风险"):
+            # Quick risk: show portfolio with unrealized P&L
+            console.print(Panel(show_portfolio(), title="持仓风险", border_style="red"))
             continue
         if user_input.lower() in ("opening", "开盘"):
             console.print("[dim]正在运行开盘提醒...[/dim]")

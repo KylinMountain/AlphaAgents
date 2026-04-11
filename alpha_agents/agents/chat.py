@@ -356,12 +356,19 @@ async def run_chat():
         if user_input.lower() in ("help", "帮助", "?"):
             console.print(Panel(
                 "[bold]快捷命令:[/bold]\n"
-                "  portfolio / 持仓  — 查看持仓和挂单\n"
-                "  morning / 晨扫    — 立即运行晨扫分析\n"
-                "  news / 新闻       — 查看最新新闻摘要\n"
-                "  themes / 主线     — 查看活跃主线状态\n"
-                "  refresh           — 刷新系统状态\n"
-                "  quit              — 退出\n"
+                "  portfolio / 持仓     — 查看持仓和挂单\n"
+                "  news / 新闻          — 查看最新新闻\n"
+                "  themes / 主线        — 查看活跃主线\n"
+                "\n[bold]手动运行任务:[/bold]\n"
+                "  morning / 晨扫       — 运行晨扫分析\n"
+                "  opening / 开盘       — 运行开盘提醒\n"
+                "  intraday / 盘中      — 检测盘中异动\n"
+                "  review / 复盘        — 运行收盘复盘\n"
+                "  night / 夜扫         — 运行夜扫分析\n"
+                "  weekly / 周报        — 生成周报\n"
+                "\n[bold]系统:[/bold]\n"
+                "  refresh              — 刷新系统状态\n"
+                "  quit                 — 退出\n"
                 "\n[bold]对话示例:[/bold]\n"
                 "  分析一下东山精密\n"
                 "  帮我买 002384 止损 124 元\n"
@@ -407,6 +414,66 @@ async def run_chat():
                 console.print(Panel("\n".join(lines) if lines else "无活跃主线", title="活跃主线", border_style="magenta"))
             except Exception as e:
                 console.print(f"[red]获取主线失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("opening", "开盘"):
+            console.print("[dim]正在运行开盘提醒...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
+                report = await run_opening_reminder()
+                if report:
+                    console.print(Panel(report, title="开盘提醒", border_style="green"))
+                else:
+                    console.print("[dim]无开盘提醒（可能无预测数据）[/dim]")
+            except Exception as e:
+                console.print(f"[red]开盘提醒失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("intraday", "盘中", "异动"):
+            console.print("[dim]正在检测盘中异动...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
+                report = await run_intraday_monitor()
+                if report:
+                    console.print(Panel(report, title="盘中提醒", border_style="yellow"))
+                else:
+                    console.print("[dim]当前无异动[/dim]")
+            except Exception as e:
+                console.print(f"[red]盘中监控失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("review", "复盘"):
+            console.print("[dim]正在运行复盘分析...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.review import run_review
+                report = await run_review()
+                if report:
+                    console.print(Panel(report, title="复盘报告", border_style="cyan"))
+                else:
+                    console.print("[dim]复盘未产生报告[/dim]")
+            except Exception as e:
+                console.print(f"[red]复盘失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("night", "夜扫"):
+            console.print("[dim]正在运行夜扫...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.night_scan import run_night_scan
+                report = await run_night_scan()
+                if report:
+                    console.print(Panel(report, title="夜报", border_style="blue"))
+                else:
+                    console.print("[dim]夜扫未产生报告[/dim]")
+            except Exception as e:
+                console.print(f"[red]夜扫失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("weekly", "周报"):
+            console.print("[dim]正在生成周报...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
+                report = await run_weekly_report()
+                if report:
+                    console.print(Panel(report, title="周报", border_style="magenta"))
+                else:
+                    console.print("[dim]周报未产生报告[/dim]")
+            except Exception as e:
+                console.print(f"[red]周报失败: {e}[/red]")
             continue
         if user_input.lower() == "refresh":
             agent = _create_chat_agent()

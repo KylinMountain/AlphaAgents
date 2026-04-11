@@ -308,6 +308,15 @@ def cmd_build_index(args: argparse.Namespace) -> None:
     logging.info("Index built successfully at %s", DB_PATH)
 
 
+def cmd_build_beta(args: argparse.Namespace) -> None:
+    """Manually trigger beta calculation for all active themes."""
+    _ensure_index()
+    from alpha_agents.data.beta_calculator import run_weekly_beta_calculation
+    logging.info("Starting manual beta calculation...")
+    total = run_weekly_beta_calculation()
+    logging.info("Beta calculation complete: %d betas", total)
+
+
 def cmd_build_embeddings(args: argparse.Namespace) -> None:
     """Force rebuild concept embeddings."""
     from alpha_agents.data.embeddings import build_concept_embeddings
@@ -359,6 +368,10 @@ def main() -> None:
     # chat — interactive analyst
     p_chat = subparsers.add_parser("chat", help="交互式分析师（随时问持仓/推荐/市场问题）")
     p_chat.set_defaults(func=cmd_chat)
+
+    # build-beta — manual beta calculation
+    p_beta = subparsers.add_parser("build-beta", help="手动计算所有活跃主线的板块beta系数")
+    p_beta.set_defaults(func=cmd_build_beta)
 
     # build-embeddings — force rebuild
     p_embed = subparsers.add_parser("build-embeddings", help="强制重建概念语义搜索向量")

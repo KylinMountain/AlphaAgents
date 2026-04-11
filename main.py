@@ -154,7 +154,31 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.night_scan import run_night_scan
     from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
-    scheduler = TradingDayScheduler()
+    # In chat mode, show task results in the terminal
+    _chat_console = None
+    if getattr(args, 'chat', False):
+        from rich.console import Console
+        from rich.panel import Panel
+        _chat_console = Console()
+
+        _TASK_TITLES = {
+            "morning_scan": ("晨报", "green"),
+            "opening_reminder": ("开盘提醒", "green"),
+            "intraday_monitor": ("盘中提醒", "yellow"),
+            "review": ("复盘报告", "cyan"),
+            "night_scan": ("夜报", "blue"),
+            "weekly_report": ("周报", "magenta"),
+        }
+
+        def _on_task_output(task_name: str, output: str):
+            title, color = _TASK_TITLES.get(task_name, (task_name, "white"))
+            _chat_console.print()
+            _chat_console.print(Panel(output[:2000], title=f"[后台] {title}", border_style=color))
+            _chat_console.print()
+
+        scheduler = TradingDayScheduler(on_task_output=_on_task_output)
+    else:
+        scheduler = TradingDayScheduler()
     set_scheduler(scheduler)
 
     # Morning scan: 06:30, every day (non-trading days still useful for global news)

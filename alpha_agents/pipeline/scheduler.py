@@ -106,11 +106,12 @@ class TradingDayScheduler:
 
     _STATE_FILE = DATA_DIR / "scheduler_state.json"
 
-    def __init__(self, event_bus=None):
+    def __init__(self, event_bus=None, on_task_output=None):
         self._tasks: list[Task] = []
         self._bus = event_bus
         self._running = False
         self._trading_day_cache: dict[str, bool] = {}
+        self._on_task_output = on_task_output  # Callback: (task_name, output_text) -> None
 
     def add_task(self, task: Task) -> None:
         """Register a task with the scheduler."""
@@ -194,9 +195,12 @@ class TradingDayScheduler:
                 if task.should_run(now, is_trading):
                     logger.info("Running task: %s", task.name)
                     try:
-                        await task.run_fn()
+                        result = await task.run_fn()
                         task._last_run = datetime.now()
                         logger.info("Task %s completed", task.name)
+                        # Notify chat terminal if callback is set
+                        if self._on_task_output and result and isinstance(result, str):
+                            self._on_task_output(task.name, result)
                     except Exception:
                         logger.exception("Task %s failed", task.name)
                         task._last_run = datetime.now()
@@ -294,9 +298,11 @@ class TradingDayScheduler:
                 logger.info("Catch-up: running missed task '%s' (was scheduled at %s)",
                             task.name, task.run_at)
                 try:
-                    await task.run_fn()
+                    result = await task.run_fn()
                     task._last_run = datetime.now()
                     logger.info("Catch-up: task %s completed", task.name)
+                    if self._on_task_output and result and isinstance(result, str):
+                        self._on_task_output(task.name, result)
                 except Exception:
                     logger.exception("Catch-up: task %s failed", task.name)
                     task._last_run = datetime.now()

@@ -324,8 +324,8 @@ async def run_chat():
     console.print(Panel.fit(
         "[bold]AlphaAgents 交互模式[/bold]\n"
         "问任何关于持仓、推荐、市场的问题\n"
-        "支持: 分析个股 / 买卖操作 / 查看持仓 / 讨论主线\n"
-        "命令: [dim]quit[/dim] 退出 | [dim]refresh[/dim] 刷新状态 | [dim]portfolio[/dim] 查看持仓",
+        "支持: 分析个股 / 买卖操作 / 查看持仓 / 讨论主线 / 查看新闻 / 手动晨扫\n"
+        "输入 [dim]help[/dim] 查看所有命令",
         title="AlphaAgents", border_style="blue",
     ))
 
@@ -353,6 +353,61 @@ async def run_chat():
         if user_input.lower() in ("quit", "exit", "q"):
             console.print("[dim]再见[/dim]")
             break
+        if user_input.lower() in ("help", "帮助", "?"):
+            console.print(Panel(
+                "[bold]快捷命令:[/bold]\n"
+                "  portfolio / 持仓  — 查看持仓和挂单\n"
+                "  morning / 晨扫    — 立即运行晨扫分析\n"
+                "  news / 新闻       — 查看最新新闻摘要\n"
+                "  themes / 主线     — 查看活跃主线状态\n"
+                "  refresh           — 刷新系统状态\n"
+                "  quit              — 退出\n"
+                "\n[bold]对话示例:[/bold]\n"
+                "  分析一下东山精密\n"
+                "  帮我买 002384 止损 124 元\n"
+                "  通鼎互联要不要卖？\n"
+                "  现在市场情绪怎么样？",
+                title="帮助", border_style="yellow",
+            ))
+            continue
+        if user_input.lower() in ("morning", "晨扫"):
+            console.print("[dim]正在运行晨扫...[/dim]")
+            try:
+                from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
+                report = await run_morning_scan()
+                if report:
+                    console.print(Panel(report, title="晨报", border_style="green"))
+                else:
+                    console.print("[dim]晨扫未产生报告[/dim]")
+            except Exception as e:
+                console.print(f"[red]晨扫失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("news", "新闻"):
+            console.print("[dim]获取最新新闻...[/dim]")
+            try:
+                from alpha_agents.tools.registry import get_news
+                import json as _j
+                raw = get_news(limit=20)
+                news = _j.loads(raw)
+                lines = []
+                for item in news.get("news", [])[:15]:
+                    lines.append(f"  {item.get('time', '')} {item.get('title', '')}")
+                console.print(Panel("\n".join(lines) if lines else "无新闻", title="最新新闻", border_style="yellow"))
+            except Exception as e:
+                console.print(f"[red]获取新闻失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("themes", "主线"):
+            try:
+                themes = get_active_themes()
+                lines = []
+                for t in themes:
+                    stocks = json.loads(t["core_stocks"]) if t.get("core_stocks") else []
+                    leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
+                    lines.append(f"  {t['name']} (强度{t['strength']}/10, {t['status']}) 龙头: {leader}")
+                console.print(Panel("\n".join(lines) if lines else "无活跃主线", title="活跃主线", border_style="magenta"))
+            except Exception as e:
+                console.print(f"[red]获取主线失败: {e}[/red]")
+            continue
         if user_input.lower() == "refresh":
             agent = _create_chat_agent()
             conversation_history = []

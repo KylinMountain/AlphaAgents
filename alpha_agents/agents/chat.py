@@ -719,12 +719,23 @@ async def run_chat():
                 # Show tool calls in real-time
                 if isinstance(event, RunItemStreamEvent):
                     item = event.item
-                    # Detect tool call start
-                    if hasattr(item, "type") and item.type == "tool_call_item":
-                        tool_name = getattr(item, "name", None) or ""
+                    if getattr(item, "type", "") == "tool_call_item":
+                        # Extract tool name from raw_item
+                        raw = getattr(item, "raw_item", None)
+                        tool_name = ""
+                        if raw:
+                            # Could be dict or object
+                            if isinstance(raw, dict):
+                                tool_name = raw.get("name", "") or raw.get("function", {}).get("name", "")
+                            else:
+                                tool_name = getattr(raw, "name", "") or ""
+                                if not tool_name:
+                                    fn = getattr(raw, "function", None)
+                                    if fn:
+                                        tool_name = getattr(fn, "name", "") or ""
                         if tool_name:
                             if streaming_text:
-                                print()  # Newline if we were mid-stream
+                                print()
                                 streaming_text = False
                             console.print(f"  [dim]🔧 {tool_name}...[/dim]")
 

@@ -16,7 +16,7 @@ from alpha_agents.tools.registry import (
     search_stocks, get_sector_data, filter_stocks,
     get_stock_quotes, get_market_breadth, get_sector_ranking,
     get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    get_institutional_position, web_search, get_pizzint,
+    get_institutional_position, get_sector_best_stocks, web_search, get_pizzint,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ MORNING_TOOLS = [
     search_stocks, get_sector_data, filter_stocks,
     get_stock_quotes, get_market_breadth, get_sector_ranking,
     get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    get_institutional_position, web_search, get_pizzint,
+    get_institutional_position, get_sector_best_stocks, web_search, get_pizzint,
 ]
 
 

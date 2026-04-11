@@ -37,6 +37,7 @@ from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_snapshot import get_market_snapshot_fn
 from alpha_agents.tools.institutional_position import get_institutional_position_fn
+from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
 from alpha_agents.tools.global_market import (
     get_us_market_fn, get_bond_yields_fn, get_global_overview_fn,
 )
@@ -343,6 +344,21 @@ def get_institutional_position(code: str, market: str = "") -> str:
 
 
 @function_tool
+def get_sector_best_stocks(concept_name: str, top_n: int = 10) -> str:
+    """获取板块内综合评分最高的标的（基于历史beta跟涨弹性+实时多因子打分）。
+
+    输入概念板块名，返回该板块内 Top N 标的。评分维度：
+    1. 板块beta（40%）— 历史上板块涨时该股涨多少
+    2. 当日涨幅位置（25%）— 还没涨的优先（补涨机会）
+    3. 机构认可度（20%）— 北向增持+龙虎榜机构买入
+    4. 流动性（15%）— 日均成交额
+
+    用于：板块异动时选最佳标的，替代语义搜索+主观判断。
+    """
+    return get_sector_best_stocks_fn(concept_name=concept_name, top_n=top_n)
+
+
+@function_tool
 def get_us_market() -> str:
     """获取美股三大指数最新行情（道琼斯、标普500、纳斯达克）。
 
@@ -390,6 +406,7 @@ STOCK_TOOLS = [
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
     get_stock_fund_flow, get_sector_ranking, get_concept_ranking, get_anomaly_stocks,
     get_market_snapshot, get_institutional_position,
+    get_sector_best_stocks,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
 ]

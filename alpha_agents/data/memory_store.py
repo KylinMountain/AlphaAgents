@@ -123,6 +123,20 @@ CREATE TABLE IF NOT EXISTS price_alerts (
     triggered_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS sector_betas (
+    id INTEGER PRIMARY KEY,
+    concept TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    beta_20d REAL,
+    beta_60d REAL,
+    beta_120d REAL,
+    beta_weighted REAL,
+    avg_daily_amount REAL,
+    updated_at TEXT,
+    UNIQUE(concept, code)
+);
+
 CREATE TABLE IF NOT EXISTS chat_memory (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,

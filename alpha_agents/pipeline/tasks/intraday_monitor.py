@@ -173,9 +173,12 @@ async def run_intraday_monitor() -> str | None:
 
     # ── Portfolio monitoring: check pending orders + open positions ──
     today_str = now.strftime("%Y-%m-%d")
+    from alpha_agents.data.memory_store import get_active_price_alerts, trigger_price_alert
+
     pending = get_pending_orders()
     open_pos = get_open_positions()
-    all_codes = list({p["code"] for p in pending + open_pos})
+    price_alerts = get_active_price_alerts()
+    all_codes = list({p["code"] for p in pending + open_pos} | {a["code"] for a in price_alerts})
 
     if all_codes:
         rt_prices = await asyncio.to_thread(get_realtime_quotes, all_codes)
@@ -205,6 +208,31 @@ async def run_intraday_monitor() -> str | None:
                     except Exception as e:
                         logger.warning("Notification failed: %s", e)
                         pass
+
+            # Check price alerts
+            if price_alerts:
+                for alert in price_alerts:
+                    code = alert["code"]
+                    price = price_map.get(code)
+                    if not price:
+                        continue
+                    triggered = False
+                    if alert["condition"] == "above" and price >= alert["target_price"]:
+                        triggered = True
+                    elif alert["condition"] == "below" and price <= alert["target_price"]:
+                        triggered = True
+                    if triggered:
+                        trigger_price_alert(alert["id"])
+                        direction = "涨到" if alert["condition"] == "above" else "跌到"
+                        msg = (f"价格提醒 | {code} {alert.get('name', '')} "
+                               f"{direction}{price:.2f}元 (目标{alert['target_price']:.2f})")
+                        if alert.get("reason"):
+                            msg += f" — {alert['reason']}"
+                        logger.info("Price alert: %s", msg)
+                        try:
+                            await asyncio.to_thread(notify_all, "AlphaAgents 价格提醒", msg)
+                        except Exception as e:
+                            logger.warning("Notification failed: %s", e)
 
     # ── Lightweight theme strength refresh (uses sector ranking, no LLM) ──
     await asyncio.to_thread(_refresh_theme_strengths)

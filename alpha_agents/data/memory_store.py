@@ -101,6 +101,16 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
 CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
 
+CREATE TABLE IF NOT EXISTS custom_tasks (
+    id INTEGER PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    schedule_time TEXT,
+    interval TEXT DEFAULT 'once',
+    status TEXT DEFAULT 'active',
+    last_run TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS price_alerts (
     id INTEGER PRIMARY KEY,
     code TEXT NOT NULL,
@@ -137,6 +147,56 @@ def _get_conn() -> sqlite3.Connection:
         conn.executescript(_SCHEMA)
         _local.conn = conn
     return conn
+
+
+# ── Custom Tasks ─────────────────────────────────────────────
+
+def create_custom_task(prompt: str, schedule_time: str, interval: str = "once") -> int:
+    """Create a custom scheduled task.
+
+    Args:
+        prompt: Natural language instruction for the agent
+        schedule_time: Time to run, e.g. "14:00"
+        interval: "once" / "daily" / "weekday" (trading days)
+    """
+    with _write_lock:
+        conn = _get_conn()
+        cursor = conn.execute(
+            "INSERT INTO custom_tasks (prompt, schedule_time, interval) VALUES (?, ?, ?)",
+            (prompt, schedule_time, interval),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_active_custom_tasks() -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM custom_tasks WHERE status = 'active' ORDER BY schedule_time"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_custom_task_last_run(task_id: int) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE custom_tasks SET last_run = datetime('now') WHERE id = ?",
+            (task_id,),
+        )
+        # If one-time task, mark as done
+        conn.execute(
+            "UPDATE custom_tasks SET status = 'done' WHERE id = ? AND interval = 'once'",
+            (task_id,),
+        )
+        conn.commit()
+
+
+def delete_custom_task(task_id: int) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute("DELETE FROM custom_tasks WHERE id = ?", (task_id,))
+        conn.commit()
 
 
 # ── Price Alerts ─────────────────────────────────────────────

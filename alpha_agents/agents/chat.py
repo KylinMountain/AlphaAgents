@@ -451,6 +451,55 @@ def remove_price_alert(alert_id: int) -> str:
     return json.dumps({"status": f"提醒 #{alert_id} 已删除"}, ensure_ascii=False)
 
 
+@function_tool
+def create_scheduled_task(prompt: str, schedule_time: str, interval: str = "daily") -> str:
+    """创建自定义定时任务。到时间后系统会自动执行 prompt 并推送结果。
+
+    Args:
+        prompt: 要执行的指令，如 "查东山精密的资金流" 或 "分析今日北向资金变化"
+        schedule_time: 执行时间，格式 HH:MM，如 "14:00"
+        interval: "once"（只跑一次）/ "daily"（每天）/ "weekday"（交易日）
+    """
+    from alpha_agents.data.memory_store import create_custom_task
+    task_id = create_custom_task(prompt, schedule_time, interval)
+    interval_cn = {"once": "仅一次", "daily": "每天", "weekday": "每个交易日"}.get(interval, interval)
+    return json.dumps({
+        "status": "任务已创建",
+        "id": task_id,
+        "prompt": prompt,
+        "schedule": f"{schedule_time} ({interval_cn})",
+    }, ensure_ascii=False)
+
+
+@function_tool
+def list_scheduled_tasks() -> str:
+    """查看所有自定义定时任务。"""
+    from alpha_agents.data.memory_store import get_active_custom_tasks
+    tasks = get_active_custom_tasks()
+    if not tasks:
+        return "无自定义定时任务"
+    lines = [f"自定义任务 {len(tasks)} 条:"]
+    interval_cn = {"once": "仅一次", "daily": "每天", "weekday": "交易日"}
+    for t in tasks:
+        last = f" (上次: {t['last_run'][:16]})" if t.get("last_run") else ""
+        lines.append(f"  #{t['id']} [{t['schedule_time']}] "
+                     f"({interval_cn.get(t['interval'], t['interval'])}) "
+                     f"{t['prompt'][:50]}{last}")
+    return "\n".join(lines)
+
+
+@function_tool
+def delete_scheduled_task(task_id: int) -> str:
+    """删除一条自定义定时任务。
+
+    Args:
+        task_id: 任务ID，可通过 list_scheduled_tasks 查看
+    """
+    from alpha_agents.data.memory_store import delete_custom_task
+    delete_custom_task(task_id)
+    return json.dumps({"status": f"任务 #{task_id} 已删除"}, ensure_ascii=False)
+
+
 def _build_context() -> str:
     """Build current system context for the chat agent."""
     # Portfolio
@@ -529,6 +578,7 @@ def _create_chat_agent() -> Agent:
             show_lhb, show_north_flow, show_limit_up,
             cancel_pending_order, show_trade_history,
             set_price_alert, show_price_alerts, remove_price_alert,
+            create_scheduled_task, list_scheduled_tasks, delete_scheduled_task,
         ],
     )
 
@@ -600,8 +650,11 @@ async def run_chat():
                 "\n[bold]手动运行任务:[/bold]\n"
                 "  morning / 晨扫 | opening / 开盘 | intraday / 盘中\n"
                 "  review / 复盘 | night / 夜扫 | weekly / 周报\n"
+                "\n[bold]自动化:[/bold]\n"
+                "  alerts / 提醒        — 查看价格提醒\n"
+                "  scheduled / 自定义   — 查看自定义定时任务\n"
                 "\n[bold]系统:[/bold]\n"
-                "  tasks / 任务         — 查看定时任务运行状态\n"
+                "  tasks / 任务         — 查看系统定时任务状态\n"
                 "  refresh | quit | help\n"
                 "\n[bold]自然语言（调AI分析）:[/bold]\n"
                 "  分析一下东山精密 / 帮我买002384止损124元\n"
@@ -680,6 +733,9 @@ async def run_chat():
                 console.print(Panel("\n".join(lines), title=f"定时任务 ({today})", border_style="blue"))
             except Exception as e:
                 console.print(f"[red]获取任务状态失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("scheduled", "自定义任务", "自定义"):
+            console.print(Panel(list_scheduled_tasks(), title="自定义定时任务", border_style="blue"))
             continue
         if user_input.lower() in ("alerts", "提醒"):
             console.print(Panel(show_price_alerts(), title="价格提醒", border_style="yellow"))

@@ -648,6 +648,7 @@ async def run_chat():
                 "  market / 大盘        — 大盘指数+涨跌比+情绪\n"
                 "  sectors / 板块       — 板块资金排名 Top10\n"
                 "  查 002384            — 快速查个股实时行情\n"
+                "  选股 电池 / best 电池 — 板块内多因子选股\n"
                 "  lhb / 龙虎榜         — 今日龙虎榜机构动向\n"
                 "  north / 北向         — 北向资金流向\n"
                 "  limitup / 涨停       — 涨停板分布\n"
@@ -781,6 +782,13 @@ async def run_chat():
         cancel_match = _re.match(r"^(?:撤单|cancel)\s+(\d{6})$", user_input.strip())
         if cancel_match:
             console.print(Panel(cancel_pending_order(code=cancel_match.group(1)), title="撤单", border_style="yellow"))
+            continue
+        # Quick sector best stocks: "选股 电池" or "best 电池"
+        best_match = _re.match(r"^(?:选股|best)\s+(.+)$", user_input.strip())
+        if best_match:
+            from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
+            result = get_sector_best_stocks_fn(best_match.group(1).strip())
+            console.print(Panel(result, title="板块选股", border_style="cyan"))
             continue
         if user_input.lower() in ("risk", "风险"):
             # Quick risk: show portfolio with unrealized P&L

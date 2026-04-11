@@ -14,7 +14,8 @@ from alpha_agents.config import (
 from alpha_agents.tools.registry import (
     get_sector_data, get_sector_ranking, get_anomaly_stocks,
     get_stock_quotes, get_stock_fund_flow, get_north_flow,
-    get_lhb_detail, get_institutional_position, web_search,
+    get_lhb_detail, get_institutional_position, get_sector_best_stocks,
+    web_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ logger = logging.getLogger(__name__)
 INTRADAY_TOOLS = [
     get_sector_data, get_sector_ranking, get_anomaly_stocks,
     get_stock_quotes, get_stock_fund_flow, get_north_flow,
-    get_lhb_detail, get_institutional_position, web_search,
+    get_lhb_detail, get_institutional_position, get_sector_best_stocks,
+    web_search,
 ]
 
 

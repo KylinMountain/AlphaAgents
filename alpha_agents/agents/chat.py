@@ -399,6 +399,58 @@ def show_trade_history(days: int = 7) -> str:
     return "\n".join(lines)
 
 
+@function_tool
+def set_price_alert(code: str, name: str, condition: str, target_price: float, reason: str = "") -> str:
+    """设置价格提醒。当股票价格达到目标时推送通知。
+
+    Args:
+        code: 股票代码，如 "002384"
+        name: 股票名称，如 "东山精密"
+        condition: "above"（涨到目标价提醒）或 "below"（跌到目标价提醒）
+        target_price: 目标价格
+        reason: 提醒原因，如 "到止损位" 或 "到介入区间"
+    """
+    from alpha_agents.data.memory_store import create_price_alert
+    if condition not in ("above", "below"):
+        return json.dumps({"error": "condition 必须是 'above' 或 'below'"}, ensure_ascii=False)
+    alert_id = create_price_alert(code, name, condition, target_price, reason)
+    direction = "涨到" if condition == "above" else "跌到"
+    return json.dumps({
+        "status": "提醒已设置",
+        "id": alert_id,
+        "code": code, "name": name,
+        "condition": f"{direction}{target_price:.2f}元",
+        "reason": reason,
+    }, ensure_ascii=False)
+
+
+@function_tool
+def show_price_alerts() -> str:
+    """查看所有活跃的价格提醒。"""
+    from alpha_agents.data.memory_store import get_active_price_alerts
+    alerts = get_active_price_alerts()
+    if not alerts:
+        return "无活跃价格提醒"
+    lines = [f"价格提醒 {len(alerts)} 条:"]
+    for a in alerts:
+        direction = "涨到" if a["condition"] == "above" else "跌到"
+        lines.append(f"  #{a['id']} {a['code']} {a.get('name', '')} {direction}{a['target_price']:.2f}元"
+                     + (f" — {a['reason']}" if a.get("reason") else ""))
+    return "\n".join(lines)
+
+
+@function_tool
+def remove_price_alert(alert_id: int) -> str:
+    """删除一条价格提醒。
+
+    Args:
+        alert_id: 提醒ID，可通过 show_price_alerts 查看
+    """
+    from alpha_agents.data.memory_store import delete_price_alert
+    delete_price_alert(alert_id)
+    return json.dumps({"status": f"提醒 #{alert_id} 已删除"}, ensure_ascii=False)
+
+
 def _build_context() -> str:
     """Build current system context for the chat agent."""
     # Portfolio
@@ -476,6 +528,7 @@ def _create_chat_agent() -> Agent:
             show_market_overview, show_sector_ranking, show_stock_quote,
             show_lhb, show_north_flow, show_limit_up,
             cancel_pending_order, show_trade_history,
+            set_price_alert, show_price_alerts, remove_price_alert,
         ],
     )
 
@@ -627,6 +680,9 @@ async def run_chat():
                 console.print(Panel("\n".join(lines), title=f"定时任务 ({today})", border_style="blue"))
             except Exception as e:
                 console.print(f"[red]获取任务状态失败: {e}[/red]")
+            continue
+        if user_input.lower() in ("alerts", "提醒"):
+            console.print(Panel(show_price_alerts(), title="价格提醒", border_style="yellow"))
             continue
         if user_input.lower() in ("market", "大盘"):
             console.print(Panel(show_market_overview(), title="大盘概览", border_style="blue"))

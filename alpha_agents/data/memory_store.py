@@ -101,6 +101,18 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
 CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
 
+CREATE TABLE IF NOT EXISTS price_alerts (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    condition TEXT NOT NULL,
+    target_price REAL NOT NULL,
+    reason TEXT,
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    triggered_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS chat_memory (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,
@@ -125,6 +137,46 @@ def _get_conn() -> sqlite3.Connection:
         conn.executescript(_SCHEMA)
         _local.conn = conn
     return conn
+
+
+# ── Price Alerts ─────────────────────────────────────────────
+
+def create_price_alert(code: str, name: str, condition: str, target_price: float, reason: str = "") -> int:
+    """Create a price alert. condition: 'above' or 'below'."""
+    with _write_lock:
+        conn = _get_conn()
+        cursor = conn.execute(
+            "INSERT INTO price_alerts (code, name, condition, target_price, reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (code, name, condition, target_price, reason),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_active_price_alerts() -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM price_alerts WHERE status = 'active' ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def trigger_price_alert(alert_id: int) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE price_alerts SET status = 'triggered', triggered_at = datetime('now') WHERE id = ?",
+            (alert_id,),
+        )
+        conn.commit()
+
+
+def delete_price_alert(alert_id: int) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute("DELETE FROM price_alerts WHERE id = ?", (alert_id,))
+        conn.commit()
 
 
 # ── Chat Memory ─────────────────────────────────────────────

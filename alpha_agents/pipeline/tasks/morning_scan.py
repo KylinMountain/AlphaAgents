@@ -238,12 +238,29 @@ async def run_morning_scan() -> str | None:
     except Exception as e:
         logger.debug("Morning scan: global overview failed: %s", e)
 
-    # 5. Run morning agent with context
+    # 5. Sentiment cycle context
+    sentiment_ctx = ""
+    try:
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        cycle = get_sentiment_cycle()
+        phase = cycle.get("phase", "?")
+        strat = cycle.get("strategy", {})
+        sentiment_ctx = (
+            f"【市场情绪周期: {phase}】\n"
+            f"  买入策略: {strat.get('buy_style', '')}\n"
+            f"  卖出策略: {strat.get('sell_style', '')}"
+        )
+    except Exception:
+        pass
+
+    # 6. Run morning agent with context
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)
     events_ctx = _format_events(events)
     if global_ctx:
         events_ctx = global_ctx + "\n\n" + events_ctx
+    if sentiment_ctx:
+        events_ctx = sentiment_ctx + "\n\n" + events_ctx
 
     report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
 

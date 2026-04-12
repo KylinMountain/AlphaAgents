@@ -41,6 +41,7 @@ from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
 from alpha_agents.tools.global_market import (
     get_us_market_fn, get_bond_yields_fn, get_global_overview_fn,
 )
+from alpha_agents.data.sentiment_cycle import get_sentiment_cycle as _get_sentiment_cycle, format_sentiment_cycle
 
 
 @function_tool
@@ -359,6 +360,18 @@ def get_sector_best_stocks(concept_name: str, top_n: int = 10) -> str:
 
 
 @function_tool
+def get_sentiment_phase() -> str:
+    """获取当前市场情绪周期阶段（冰点/修复/升温/狂热/分歧/退潮）。
+
+    基于近3日涨停板数量趋势、炸板率、连板高度、涨跌比趋势综合判断。
+    返回当前阶段、置信度、指标数据和对应的交易策略建议（仓位上限、买入风格、卖出风格）。
+    """
+    import json
+    result = _get_sentiment_cycle()
+    return json.dumps(result, ensure_ascii=False)
+
+
+@function_tool
 def get_us_market() -> str:
     """获取美股三大指数最新行情（道琼斯、标普500、纳斯达克）。
 
@@ -409,6 +422,7 @@ STOCK_TOOLS = [
     get_sector_best_stocks,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
+    get_sentiment_phase,
 ]
 
 @function_tool

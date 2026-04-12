@@ -652,6 +652,7 @@ async def run_chat():
                 "  lhb / 龙虎榜         — 今日龙虎榜机构动向\n"
                 "  north / 北向         — 北向资金流向\n"
                 "  limitup / 涨停       — 涨停板分布\n"
+                "  sentiment / 情绪    — 当前情绪周期和策略建议\n"
                 "\n[bold]持仓管理:[/bold]\n"
                 "  portfolio / 持仓     — 持仓+挂单+资金\n"
                 "  trades / 历史        — 最近交易记录和盈亏\n"
@@ -768,6 +769,14 @@ async def run_chat():
             continue
         if user_input.lower() in ("limitup", "涨停"):
             console.print(Panel(show_limit_up(), title="涨停板", border_style="red"))
+            continue
+        if user_input.lower() in ("sentiment", "情绪", "情绪周期"):
+            from alpha_agents.data.sentiment_cycle import get_sentiment_cycle, format_sentiment_cycle
+            try:
+                cycle = get_sentiment_cycle()
+                console.print(Panel(format_sentiment_cycle(cycle), title=f"情绪周期: {cycle['phase']}", border_style="magenta"))
+            except Exception as e:
+                console.print(f"[red]获取情绪周期失败: {e}[/red]")
             continue
         if user_input.lower() in ("trades", "历史"):
             console.print(Panel(show_trade_history(), title="交易记录", border_style="cyan"))

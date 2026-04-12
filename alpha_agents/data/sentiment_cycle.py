@@ -300,47 +300,88 @@ def backfill_snapshots(days: int = 10) -> int:
     return filled
 
 
-def get_sentiment_cycle(use_cache: bool = True) -> dict:
-    """Get current market sentiment cycle phase.
+def _save_phase_to_db(date: str, result: dict) -> None:
+    """Save computed sentiment phase to DB for the given date."""
+    from alpha_agents.data.memory_store import _get_conn, _write_lock
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT INTO sentiment_phase (date, phase, phase_en, confidence, indicators, strategy) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET "
+            "phase=excluded.phase, phase_en=excluded.phase_en, confidence=excluded.confidence, "
+            "indicators=excluded.indicators, strategy=excluded.strategy, created_at=datetime('now')",
+            (date, result["phase"], result["phase_en"], result["confidence"],
+             json.dumps(result.get("indicators", {}), ensure_ascii=False),
+             json.dumps(result.get("strategy", {}), ensure_ascii=False)),
+        )
+        conn.commit()
+    logger.info("Saved sentiment phase for %s: %s (confidence %.0f%%)",
+                date, result["phase"], result["confidence"] * 100)
 
-    Reads last 3 days from daily_snapshots + today's realtime data.
-    Runs backfill if insufficient historical data.
 
-    Returns:
-        {"phase": ..., "confidence": ..., "indicators": ..., "strategy": ...}
+def _load_phase_from_db(date: str) -> dict | None:
+    """Load saved sentiment phase from DB."""
+    from alpha_agents.data.memory_store import _get_conn
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM sentiment_phase WHERE date = ?", (date,)
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "phase": row["phase"],
+        "phase_en": row["phase_en"],
+        "confidence": row["confidence"],
+        "indicators": json.loads(row["indicators"]) if row["indicators"] else {},
+        "strategy": get_phase_strategy(row["phase"]),
+    }
+
+
+def compute_and_save_sentiment(target_date: str = "") -> dict:
+    """Compute sentiment phase from historical data and save to DB.
+
+    Called by the review task (15:30) to set tomorrow's sentiment.
+    Uses the last 3 days of daily_snapshots (no realtime data needed).
+
+    Args:
+        target_date: The date this sentiment applies to (default: tomorrow for weekday, next Monday for Friday)
     """
     from alpha_agents.data.daily_archive import get_snapshot
 
-    # Collect last 3 days of data
-    dates = _get_recent_trading_dates(5)  # Get 5 to have buffer
+    if not target_date:
+        # Determine next trading day
+        today = datetime.now()
+        if today.weekday() == 4:  # Friday → next Monday
+            next_day = today + timedelta(days=3)
+        elif today.weekday() == 5:  # Saturday → next Monday
+            next_day = today + timedelta(days=2)
+        else:
+            next_day = today + timedelta(days=1)
+        target_date = next_day.strftime("%Y-%m-%d")
+
+    # Collect last 3 days of data from snapshots
+    dates = _get_recent_trading_dates(5)
     limit_up_trend = []
     broken_rates = []
     max_boards = []
     ad_ratios = []
 
     for date_str in dates[-3:]:
-        # Limit up data
         snap = get_snapshot(date_str, "limit_up_pool")
         if snap:
             ind = _extract_indicators_from_snapshot(snap)
             limit_up_trend.append(ind["limit_up_count"])
             broken_rates.append(ind["broken_rate"])
             max_boards.append(ind["max_board"])
-
-        # Market breadth
         breadth = get_snapshot(date_str, "market_breadth")
         if breadth:
             ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
 
-    # If not enough historical data, try backfill
+    # Backfill if not enough data
     if len(limit_up_trend) < 2:
-        logger.info("Insufficient snapshot data (%d days), attempting backfill...", len(limit_up_trend))
         backfill_snapshots(days=10)
-        # Retry after backfill
-        limit_up_trend = []
-        broken_rates = []
-        max_boards = []
-        ad_ratios = []
+        limit_up_trend, broken_rates, max_boards, ad_ratios = [], [], [], []
         for date_str in dates[-3:]:
             snap = get_snapshot(date_str, "limit_up_pool")
             if snap:
@@ -352,46 +393,48 @@ def get_sentiment_cycle(use_cache: bool = True) -> dict:
             if breadth:
                 ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
 
-    # Add today's realtime data
-    try:
-        from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
-        from alpha_agents.tools.market_breadth import get_market_breadth_fn
-        import json as _j
-
-        anomaly = _j.loads(get_anomaly_stocks_fn())
-        summary = anomaly.get("summary", {})
-        today_lu = summary.get("limit_up_count", 0) or 0
-        today_broken = summary.get("broken_limit_count", 0) or 0
-        today_br = today_broken / today_lu if today_lu > 0 else 0
-        consec = summary.get("consecutive_limit_stocks", [])
-        today_mb = max((s.get("consecutive_limits", 0) for s in consec), default=0) if consec else 0
-
-        limit_up_trend.append(today_lu)
-        broken_rates.append(round(today_br, 3))
-        max_boards.append(today_mb)
-
-        breadth = _j.loads(get_market_breadth_fn())
-        ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
-    except Exception as e:
-        logger.warning("Failed to fetch today's realtime sentiment data: %s", e)
-
-    # Fallback if still not enough data
     if not limit_up_trend:
-        logger.warning("No sentiment data available, defaulting to 修复")
-        return {
-            "phase": "修复",
-            "phase_en": "recovery",
-            "confidence": 0.0,
-            "indicators": {},
-            "strategy": get_phase_strategy("修复"),
+        result = {
+            "phase": "修复", "phase_en": "recovery", "confidence": 0.0,
+            "indicators": {}, "strategy": get_phase_strategy("修复"),
         }
+    else:
+        # Get previous phase for inertia
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        prev = _load_phase_from_db(today_str)
+        previous_phase = prev["phase"] if prev else ""
 
-    return detect_phase(
-        limit_up_trend=limit_up_trend,
-        broken_rates=broken_rates,
-        max_boards=max_boards,
-        ad_ratios=ad_ratios,
-    )
+        result = detect_phase(
+            limit_up_trend=limit_up_trend,
+            broken_rates=broken_rates,
+            max_boards=max_boards,
+            ad_ratios=ad_ratios,
+            previous_phase=previous_phase,
+        )
+
+    _save_phase_to_db(target_date, result)
+    return result
+
+
+def get_sentiment_cycle() -> dict:
+    """Get today's sentiment cycle phase.
+
+    Reads from DB (pre-computed by review task). If not found,
+    falls back to computing from historical data.
+
+    Returns:
+        {"phase": ..., "confidence": ..., "indicators": ..., "strategy": ...}
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Try DB first (set by previous day's review)
+    cached = _load_phase_from_db(today)
+    if cached:
+        return cached
+
+    # Fallback: compute on-the-fly (first run or missed review)
+    logger.info("No pre-computed sentiment for %s, computing on-the-fly...", today)
+    return compute_and_save_sentiment(target_date=today)
 
 
 def format_sentiment_cycle(result: dict) -> str:

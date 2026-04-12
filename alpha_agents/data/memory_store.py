@@ -137,6 +137,17 @@ CREATE TABLE IF NOT EXISTS sector_betas (
     UNIQUE(concept, code)
 );
 
+CREATE TABLE IF NOT EXISTS sentiment_phase (
+    id INTEGER PRIMARY KEY,
+    date TEXT NOT NULL UNIQUE,
+    phase TEXT NOT NULL,
+    phase_en TEXT,
+    confidence REAL,
+    indicators TEXT,
+    strategy TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS chat_memory (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,

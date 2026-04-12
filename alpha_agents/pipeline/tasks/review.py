@@ -433,5 +433,14 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Daily archive failed: %s", e)
 
+    # Compute and save tomorrow's sentiment phase (uses today's archived data)
+    try:
+        from alpha_agents.data.sentiment_cycle import compute_and_save_sentiment
+        cycle = await asyncio.to_thread(compute_and_save_sentiment)
+        logger.info("Tomorrow's sentiment: %s (confidence %.0f%%)",
+                     cycle.get("phase", "?"), cycle.get("confidence", 0) * 100)
+    except Exception as e:
+        logger.warning("Sentiment cycle computation failed: %s", e)
+
     print(report)
     return report

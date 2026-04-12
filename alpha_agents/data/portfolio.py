@@ -27,45 +27,18 @@ MAX_THEME_PCT = 0.30             # 同主线最多占总资金 30%
 LOT_SIZE = 100                   # A股一手 = 100股
 ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 
-# Sentiment-based total exposure limits
-SENTIMENT_EXPOSURE = {
-    "extreme_bullish": 0.70,  # 涨跌比 > 5: max 70% invested
-    "bullish": 0.60,          # 涨跌比 3-5: max 60%
-    "neutral": 0.50,          # 涨跌比 1-3: max 50%
-    "bearish": 0.30,          # 涨跌比 0.5-1: max 30%
-    "extreme_bearish": 0.15,  # 涨跌比 < 0.5: max 15% (almost all cash)
-}
-
-
 def get_sentiment_exposure_limit() -> float:
-    """Get max total exposure based on current market sentiment."""
+    """Get max total exposure based on sentiment cycle phase."""
     try:
-        from alpha_agents.tools.market_breadth import get_market_breadth_fn
-        import json as _json
-        breadth = _json.loads(get_market_breadth_fn())
-        ratio = breadth.get("advance_decline_ratio", 1.5)
-
-        if ratio > 5:
-            limit = SENTIMENT_EXPOSURE["extreme_bullish"]
-            label = f"极度乐观(涨跌比{ratio:.1f})"
-        elif ratio > 3:
-            limit = SENTIMENT_EXPOSURE["bullish"]
-            label = f"乐观(涨跌比{ratio:.1f})"
-        elif ratio > 1:
-            limit = SENTIMENT_EXPOSURE["neutral"]
-            label = f"中性(涨跌比{ratio:.1f})"
-        elif ratio > 0.5:
-            limit = SENTIMENT_EXPOSURE["bearish"]
-            label = f"悲观(涨跌比{ratio:.1f})"
-        else:
-            limit = SENTIMENT_EXPOSURE["extreme_bearish"]
-            label = f"极度悲观(涨跌比{ratio:.1f})"
-
-        max_invest = TOTAL_CAPITAL * limit
-        logger.debug("Sentiment exposure: %s → max %.0f元 (%.0f%%)", label, max_invest, limit * 100)
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        cycle = get_sentiment_cycle()
+        phase = cycle.get("phase", "修复")
+        pct = cycle["strategy"]["max_exposure_pct"]
+        max_invest = TOTAL_CAPITAL * pct / 100
+        logger.debug("Sentiment cycle: %s → max %.0f元 (%.0f%%)", phase, max_invest, pct)
         return max_invest
-    except Exception:
-        # Default to 50% if can't fetch sentiment
+    except Exception as e:
+        logger.warning("Sentiment cycle failed, defaulting to 50%%: %s", e)
         return TOTAL_CAPITAL * 0.50
 
 
@@ -433,7 +406,14 @@ def check_positions(
             # Trailing stop = peak price * (1 - trailing_pct)
             # trailing_pct starts at original stop distance, tightens as profit grows
             original_stop_pct = (open_price - stop_loss) / open_price if open_price else 0.05
-            trailing_pct = min(original_stop_pct, 0.05)  # Tighten to max 5% from peak
+            # Get dynamic trailing stop from sentiment cycle
+            try:
+                from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+                _cycle = get_sentiment_cycle()
+                _trailing_pct_from_cycle = _cycle["strategy"]["trailing_stop_pct"] / 100
+            except Exception:
+                _trailing_pct_from_cycle = 0.05
+            trailing_pct = min(original_stop_pct, _trailing_pct_from_cycle)
 
             if current_return >= 5:
                 # Once up 5%+, trail at 5% from peak (lock in most of the gain)
@@ -473,12 +453,20 @@ def check_positions(
                 theme_status = theme.get("status", "watching")
                 theme_strength = theme.get("strength", 0)
 
+                # Dynamic exit threshold from sentiment cycle
+                try:
+                    from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+                    _cycle = get_sentiment_cycle()
+                    _exit_threshold = _cycle["strategy"]["theme_exit_threshold"]
+                except Exception:
+                    _exit_threshold = 3
+
                 if theme_status in ("declining", "archived"):
                     # 主线衰退 → 清仓
                     alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme_status})，持仓{holding_days}天"}
-                elif theme_strength <= 3:
+                elif theme_strength <= _exit_threshold:
                     # 主线走弱 → 清仓（不等到 declining，提前走）
-                    alert = {"type": "expired", "reason": f"主线走弱({pos['theme']}强度{theme_strength})，持仓{holding_days}天"}
+                    alert = {"type": "expired", "reason": f"主线走弱({pos['theme']}强度{theme_strength}，阈值{_exit_threshold})，持仓{holding_days}天"}
                 # peak/active + strength >= 4 → 继续持有，不设天数上限
                 # 靠移动止损保护利润
 

@@ -294,9 +294,26 @@ async def run_intraday_monitor() -> str | None:
     except Exception:
         pass
 
+    # ── Sentiment cycle context ──
+    sentiment_ctx = ""
+    try:
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        cycle = get_sentiment_cycle()
+        phase = cycle.get("phase", "?")
+        strat = cycle.get("strategy", {})
+        sentiment_ctx = (
+            f"【市场情绪周期: {phase}】\n"
+            f"  买入策略: {strat.get('buy_style', '')}\n"
+            f"  卖出策略: {strat.get('sell_style', '')}"
+        )
+    except Exception:
+        pass
+
     # Build full context for agent
     themes_context = _format_themes_for_monitoring(themes)
     parts = [themes_context, anomaly_context]
+    if sentiment_ctx:
+        parts.append(sentiment_ctx)
     if prior_context:
         parts.append(prior_context)
     if events_context:

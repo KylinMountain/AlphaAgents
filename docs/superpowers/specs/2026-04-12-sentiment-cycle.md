@@ -84,10 +84,16 @@ breadth = get_market_breadth_fn()  # 涨跌比
 anomaly = get_anomaly_stocks_fn()  # 涨停/炸板/连板
 ```
 
+### 历史数据回填
+
+首次运行时，一次性拉最近 10 个交易日的涨停池和涨跌比数据，存到 daily_snapshots。akshare 的 `stock_zt_pool_em(date)` 支持按日期查询历史涨停池，`stock_market_activity_legu` 或盘后数据可以回补涨跌比。
+
+之后每天复盘时增量更新（已有的 daily_archive 机制）。
+
 ### 数据不足时的降级
 
-系统刚启动时 daily_snapshots 可能不足 3 天。降级策略：
-- 1 天数据：只用当天数据，不判断趋势，默认"中性"
+如果回填也失败，降级策略：
+- 1 天数据：只用当天数据，不判断趋势，默认"修复"（中性偏保守）
 - 2 天数据：用 2 天趋势，精度降低但可用
 - 3 天及以上：正常判断
 

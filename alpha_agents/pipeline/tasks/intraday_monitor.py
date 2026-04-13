@@ -346,50 +346,185 @@ async def run_intraday_monitor() -> str | None:
     except Exception as e:
         logger.debug("Sector picks pre-fetch failed: %s", e)
 
-    # Build full context for agent
-    themes_context = _format_themes_for_monitoring(themes)
-    parts = [themes_context, anomaly_context]
-    if sector_picks_ctx:
-        parts.append(sector_picks_ctx)
-    if sentiment_ctx:
-        parts.append(sentiment_ctx)
-    if prior_context:
-        parts.append(prior_context)
-    if events_context:
-        parts.append(events_context)
-    full_context = "\n\n".join(parts)
+    # ══════════════════════════════════════════════════════════
+    # CODE-DRIVEN REPORT: code does selection, LLM only writes cause
+    # ══════════════════════════════════════════════════════════
 
-    output = await run_intraday_analysis(full_context)
+    now_str = datetime.now().strftime("%H:%M")
 
-    if output and output.strip() != "无异动":
-        logger.info("Intraday alert generated!")
+    # ── Step 1: Code selects signal stocks (涨停确认) ──
+    signals = []
+    try:
+        anomaly_data = json.loads(get_anomaly_stocks_fn())
+        for stock in anomaly_data.get("limit_up", [])[:10]:
+            signals.append({
+                "code": stock.get("code", ""),
+                "name": stock.get("name", ""),
+                "change_pct": stock.get("change_pct", 0),
+                "consecutive": stock.get("consecutive_limits", 1),
+            })
+    except Exception:
+        pass
 
-        # Fix hallucinated prices in output with real data
-        output = _fix_prices_in_report(output)
-
-        # If actionable table is empty but we have sector picks, auto-fill it
-        if sector_picks_ctx and "【可操作标的】" in output:
-            output = _auto_fill_actionable(output, candidate_sectors[:3] if 'candidate_sectors' in dir() else [])
-
-        print(output)
-
-        # Save intraday recommendations with real-time prices
-        _save_intraday_recommendations(output)
-
+    # ── Step 2: Code selects actionable stocks (beta + institutional) ──
+    actionable = []
+    candidate_sectors_used = candidate_sectors[:3] if candidate_sectors else []
+    for sector in candidate_sectors_used:
         try:
-            now_str = datetime.now().strftime("%H:%M")
-            await asyncio.to_thread(
-                notify_all,
-                f"AlphaAgents 盘中提醒 | {now_str}",
-                output[:500],
-            )
+            from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
+            result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
+            for s in result.get("top", []):
+                if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
+                    # Get institutional analysis for entry/stop
+                    try:
+                        from alpha_agents.tools.institutional_position import get_institutional_position_fn
+                        inst = json.loads(get_institutional_position_fn(s["code"]))
+                        action_info = inst.get("action", {})
+                        entry_zone = action_info.get("entry_zone", "")
+                        stop_loss = action_info.get("stop_loss", "")
+                        recommendation = action_info.get("recommendation", "观望")
+                        if recommendation in ("回避", "观望") and inst.get("signal_summary", {}).get("score", 0) < 0:
+                            continue  # Skip negative scores
+                    except Exception:
+                        entry_zone = ""
+                        stop_loss = ""
+                        recommendation = ""
+
+                    actionable.append({
+                        "code": s["code"],
+                        "name": s["name"],
+                        "price": s.get("price", 0),
+                        "change_pct": s.get("today_change_pct", 0),
+                        "score": s.get("score", 0),
+                        "beta": s.get("beta_weighted", 0),
+                        "note": s.get("note", ""),
+                        "theme": sector,
+                        "entry_zone": entry_zone,
+                        "stop_loss": stop_loss,
+                        "recommendation": recommendation,
+                    })
         except Exception as e:
-            logger.warning("Intraday notification failed: %s", e)
+            logger.debug("Sector best stocks failed for %s: %s", sector, e)
 
-        return output
+    # Sort by score, take top 5
+    actionable.sort(key=lambda x: x["score"], reverse=True)
+    actionable = actionable[:5]
 
-    logger.info("Intraday monitor: agent found no actionable anomaly")
-    return None
+    # ── Step 3: Code computes theme changes ──
+    theme_changes = []
+    for t in themes:
+        # Strength already updated by _refresh_theme_strengths
+        theme_changes.append(f"• {t['name']}: 强度 {t['strength']}/10 ({t['status']})")
+
+    # ── Step 4: LLM only writes cause analysis (50-100 words) ──
+    cause_text = ""
+    try:
+        cause_context = anomaly_context
+        if events_context:
+            cause_context += "\n" + events_context
+        cause_text = await _get_cause_analysis(cause_context)
+    except Exception as e:
+        logger.warning("LLM cause analysis failed: %s", e)
+        cause_text = anomaly_context  # Fallback to raw anomaly data
+
+    # ── Step 5: Code assembles the final report ──
+    report_lines = [f"=== 盘中提醒 | {now_str} ===", ""]
+
+    # Cause analysis (from LLM)
+    report_lines.append(cause_text)
+    report_lines.append("")
+
+    # Signal stocks (code-generated)
+    if signals:
+        report_lines.append("【信号确认】（已涨停，不可买入，仅作主线强度参考）")
+        for s in signals[:5]:
+            board = f"({s['consecutive']}连板)" if s['consecutive'] >= 2 else ""
+            report_lines.append(f"• {s['code']} {s['name']} 涨停封板{board}")
+        report_lines.append("")
+
+    # Actionable stocks (code-generated, zero hallucination)
+    report_lines.append("【可操作标的】")
+    report_lines.append("| 代码 | 名称 | 现价 | 涨幅 | 评分 | 操作建议 |")
+    report_lines.append("|------|------|------|------|------|---------|")
+    if actionable:
+        for a in actionable:
+            action = a.get("entry_zone", "") or a.get("recommendation", "")
+            sl = f"止损{a['stop_loss']}" if a.get("stop_loss") else ""
+            report_lines.append(
+                f"| {a['code']} | {a['name']} | {a['price']:.2f}元 | "
+                f"{a['change_pct']:+.2f}% | {a['score']:.0f} | "
+                f"{action} {sl} |"
+            )
+    else:
+        report_lines.append("| — | 暂无符合条件的候选 | — | — | — | — |")
+    report_lines.append("")
+
+    # Theme changes (code-generated)
+    if theme_changes:
+        report_lines.append("【主线状态变化】")
+        report_lines.extend(theme_changes)
+        report_lines.append("")
+
+    # Sentiment context
+    if sentiment_ctx:
+        report_lines.append(sentiment_ctx)
+        report_lines.append("")
+
+    # Build RECOMMENDATIONS JSON (code-generated)
+    recs_json = []
+    for s in signals[:5]:
+        recs_json.append({
+            "code": s["code"], "name": s["name"],
+            "theme": "", "type": "signal",
+            "reason": f"涨停封板",
+        })
+    for a in actionable:
+        entry_high = None
+        entry_low = None
+        sl = None
+        try:
+            if a.get("stop_loss"):
+                sl = float(str(a["stop_loss"]).replace("元", ""))
+            ez = a.get("entry_zone", "")
+            if "-" in str(ez):
+                parts_ez = ez.split("-")
+                entry_low = float(parts_ez[0].strip().replace("元", ""))
+                entry_high = float(parts_ez[1].strip().replace("元", ""))
+            elif a.get("price"):
+                entry_high = round(a["price"] * 0.97, 2)  # Default: 3% below current
+        except (ValueError, IndexError):
+            pass
+
+        recs_json.append({
+            "code": a["code"], "name": a["name"],
+            "theme": a.get("theme", ""), "type": "actionable",
+            "reason": a.get("note", ""),
+            "confidence": "high" if a["score"] >= 70 else "medium",
+            "action": a.get("entry_zone", ""),
+            "entry_low": entry_low, "entry_high": entry_high,
+            "stop_loss": sl,
+        })
+
+    report_lines.append(f"<!--RECOMMENDATIONS\n{json.dumps(recs_json, ensure_ascii=False)}\nRECOMMENDATIONS-->")
+
+    output = "\n".join(report_lines)
+    logger.info("Code-driven intraday report generated: %d signals, %d actionable", len(signals), len(actionable))
+
+    print(output)
+
+    # Save recommendations
+    _save_intraday_recommendations(output)
+
+    try:
+        await asyncio.to_thread(
+            notify_all,
+            f"AlphaAgents 盘中提醒 | {now_str}",
+            output[:500],
+        )
+    except Exception as e:
+        logger.warning("Intraday notification failed: %s", e)
+
+    return output
 
 
 def _fix_prices_in_report(report: str) -> str:
@@ -478,6 +613,38 @@ def _fix_prices_in_report(report: str) -> str:
         return result
 
     return "\n".join(fixed_lines)
+
+
+async def _get_cause_analysis(context: str) -> str:
+    """LLM's ONLY job: explain WHY the anomaly happened in 2-3 sentences."""
+    import asyncio
+    from agents import Agent, Runner
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+    from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+
+    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+    model = OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
+    agent = Agent(
+        name="cause_analyst",
+        instructions=(
+            "你是盘中异动追因分析师。你只需要做一件事：用2-3句话解释异动的原因。"
+            "不要推荐股票，不要给操作建议，不要生成表格。只写原因分析。"
+            "格式：【异动】{板块名} {描述}\n• 催化: {原因}\n• 判断: {一日游/持续行情}\n• 失效条件: {什么情况下判断不成立}"
+        ),
+        model=model,
+        tools=[],  # No tools — just analyze the context we give it
+    )
+
+    try:
+        result = await asyncio.wait_for(
+            Runner.run(agent, f"请分析以下异动的原因:\n\n{context}"),
+            timeout=30,
+        )
+        return result.final_output
+    except Exception as e:
+        logger.warning("Cause analysis failed: %s", e)
+        return context  # Fallback to raw anomaly data
 
 
 def _auto_fill_actionable(report: str, sectors: list[str]) -> str:

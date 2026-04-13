@@ -367,6 +367,10 @@ async def run_intraday_monitor() -> str | None:
         # Fix hallucinated prices in output with real data
         output = _fix_prices_in_report(output)
 
+        # If actionable table is empty but we have sector picks, auto-fill it
+        if sector_picks_ctx and "【可操作标的】" in output:
+            output = _auto_fill_actionable(output, candidate_sectors[:3] if 'candidate_sectors' in dir() else [])
+
         print(output)
 
         # Save intraday recommendations with real-time prices
@@ -474,6 +478,80 @@ def _fix_prices_in_report(report: str) -> str:
         return result
 
     return "\n".join(fixed_lines)
+
+
+def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
+    """If the actionable table is empty, auto-fill it from sector beta picks.
+
+    LLM sometimes only recommends limit-up stocks. This fallback ensures
+    the report always has non-limit-up candidates.
+    """
+    # Check if actionable table is empty (only header/separator, no data rows)
+    lines = report.split("\n")
+    in_table = False
+    has_data_rows = False
+    for line in lines:
+        if "【可操作标的】" in line:
+            in_table = True
+            continue
+        if in_table and line.strip().startswith("|") and "代码" not in line and "---" not in line:
+            # Found a data row
+            has_data_rows = True
+            break
+        if in_table and line.strip() and not line.strip().startswith("|"):
+            break  # End of table section
+
+    if has_data_rows:
+        return report  # Table already has data, don't override
+
+    # Fetch beta picks and build table rows
+    try:
+        from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
+        from alpha_agents.data.market_data import get_realtime_quotes
+
+        all_picks = []
+        for sector in sectors:
+            result = json.loads(get_sector_best_stocks_fn(sector, top_n=3))
+            for s in result.get("top", []):
+                if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
+                    all_picks.append(s)
+
+        if not all_picks:
+            return report
+
+        # Build table rows
+        table_rows = []
+        for s in all_picks[:5]:
+            code = s["code"]
+            name = s["name"]
+            price = s.get("price", 0)
+            chg = s.get("today_change_pct", 0)
+            beta = s.get("beta_weighted", 0)
+            note = s.get("note", "")
+            table_rows.append(
+                f"| {code} | {name} | {price:.2f}元 | {chg:+.2f}% | "
+                f"高beta={beta:.2f}, {note} (系统预选) |"
+            )
+
+        if table_rows:
+            # Insert after the table header
+            new_lines = []
+            inserted = False
+            for line in lines:
+                new_lines.append(line)
+                if not inserted and "可操作标的" in line:
+                    # Skip to after header/separator
+                    pass
+                if not inserted and line.strip().startswith("|---"):
+                    new_lines.extend(table_rows)
+                    inserted = True
+            if inserted:
+                report = "\n".join(new_lines)
+                logger.info("Auto-filled %d actionable stocks from sector beta picks", len(table_rows))
+    except Exception as e:
+        logger.debug("Auto-fill actionable failed: %s", e)
+
+    return report
 
 
 def _format_order_alert(alert: dict) -> str:

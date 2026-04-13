@@ -182,7 +182,16 @@ def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
 
 
 def get_stock_history(code: str, days: int = 5) -> Optional[list[dict]]:
-    """Get recent daily OHLCV for a stock. Returns list of dicts or None."""
+    """Get recent daily OHLCV for a stock. Checks local DB first, falls back to baostock."""
+    # Try local market history DB first (fast, no network)
+    try:
+        from alpha_agents.data.market_history import get_local_history
+        local = get_local_history(code, days)
+        if local:
+            return local
+    except Exception:
+        pass
+
     with _bs_lock:
         try:
             _bs_login()

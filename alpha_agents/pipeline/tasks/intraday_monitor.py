@@ -309,9 +309,48 @@ async def run_intraday_monitor() -> str | None:
     except Exception:
         pass
 
+    # ── Pre-fetch best stocks for anomaly sectors (code-level, not LLM-dependent) ──
+    sector_picks_ctx = ""
+    try:
+        from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
+        # Extract sector names from anomaly context and active themes
+        candidate_sectors = []
+        for t in themes:
+            if t.get("strength", 0) >= 6:
+                candidate_sectors.append(t["name"])
+        # Also try to extract sector from anomaly text (e.g. "板块异动: 电池 涨3.5%")
+        import re as _re2
+        sector_match = _re2.search(r"板块异动:\s*(\S+)\s*涨", anomaly_context)
+        if sector_match:
+            anomaly_sector = sector_match.group(1)
+            if anomaly_sector not in candidate_sectors:
+                candidate_sectors.insert(0, anomaly_sector)
+
+        pick_lines = []
+        for sector in candidate_sectors[:3]:  # Max 3 sectors to avoid slowness
+            try:
+                result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
+                top = result.get("top", [])
+                if top:
+                    stocks = ", ".join(
+                        f"{s['code']} {s['name']}(score={s['score']}, beta={s['beta_weighted']}, {s['today_change_pct']:+.1f}%)"
+                        for s in top if s.get("today_change_pct", 0) < 9.8  # Exclude limit-up
+                    )
+                    if stocks:
+                        pick_lines.append(f"  {sector}: {stocks}")
+            except Exception:
+                pass
+        if pick_lines:
+            sector_picks_ctx = "【板块高beta候选股（系统预选，优先从这里选可操作标的）】\n" + "\n".join(pick_lines)
+            logger.info("Pre-fetched sector picks for %d sectors", len(pick_lines))
+    except Exception as e:
+        logger.debug("Sector picks pre-fetch failed: %s", e)
+
     # Build full context for agent
     themes_context = _format_themes_for_monitoring(themes)
     parts = [themes_context, anomaly_context]
+    if sector_picks_ctx:
+        parts.append(sector_picks_ctx)
     if sentiment_ctx:
         parts.append(sentiment_ctx)
     if prior_context:

@@ -250,8 +250,19 @@ def _get_recent_trading_dates(n: int = 5) -> list[str]:
 def backfill_snapshots(days: int = 10) -> int:
     """Backfill daily_snapshots with historical limit-up pool data.
 
-    Uses akshare to fetch historical data for dates not yet in the DB.
+    Tries local market_history.db first (fast, covers months).
+    Falls back to akshare API (slow, covers ~1 month).
     """
+    # Try local market history first (fast, covers months of data)
+    try:
+        from alpha_agents.data.market_history import backfill_sentiment_snapshots
+        filled = backfill_sentiment_snapshots(days=days)
+        if filled > 0:
+            logger.info("Backfilled %d days from local market history", filled)
+            return filled
+    except Exception as e:
+        logger.debug("Local backfill unavailable, using akshare: %s", e)
+
     from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
     from alpha_agents.data.market_data import _ak_call
 

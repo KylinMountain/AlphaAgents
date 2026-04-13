@@ -133,7 +133,7 @@ def detect_phase(
     if lu_increasing and lu < 50:
         scores["修复"] += 10
 
-    # 升温: increasing limit-ups above 50
+    # 升温: increasing limit-ups above 50, but NOT if broken rate is high
     scores["升温"] = 0
     if lu > 50:
         scores["升温"] += 30
@@ -141,6 +141,8 @@ def detect_phase(
         scores["升温"] += 20
     if br < 0.15:
         scores["升温"] += 15
+    elif br > 0.25:
+        scores["升温"] -= 30  # High broken rate kills warming signal
     if 3 <= mb <= 5:
         scores["升温"] += 15
     if ar > 1.5:
@@ -152,32 +154,36 @@ def detect_phase(
         scores["狂热"] += 35
     if br < 0.10:
         scores["狂热"] += 20
+    elif br > 0.20:
+        scores["狂热"] -= 20  # Broken rate rising → not frenzy, it's divergence
     if mb >= 5:
         scores["狂热"] += 20
     if ar > 3:
         scores["狂热"] += 25
 
-    # 分歧: still many limit-ups but broken rate rising
+    # 分歧: high broken rate + still many limit-ups (key: market is fighting itself)
     scores["分歧"] = 0
     if lu > 40 and br > 0.25:
-        scores["分歧"] += 40
-    if br_rising:
-        scores["分歧"] += 15
+        scores["分歧"] += 40  # Many limit-ups but many breaking = classic divergence
+    elif lu > 30 and br > 0.30:
+        scores["分歧"] += 35
+    if br_rising and br > 0.20:
+        scores["分歧"] += 20  # Broken rate rising is THE divergence signal
     if mb_declining:
         scores["分歧"] += 15
-    if 1 <= ar <= 3:
-        scores["分歧"] += 15
-    if lu > 60 and br > 0.20:
-        scores["分歧"] += 15
+    if 0.5 <= ar <= 3:
+        scores["分歧"] += 10
 
-    # 退潮: decreasing limit-ups, high broken rate
+    # 退潮: decreasing limit-ups, high broken rate, declining boards
     scores["退潮"] = 0
     if lu_decreasing:
-        scores["退潮"] += 20
+        scores["退潮"] += 25
     if lu_2d_decrease:
-        scores["退潮"] += 15
+        scores["退潮"] += 20
     if br > 0.30:
         scores["退潮"] += 25
+    elif br > 0.20:
+        scores["退潮"] += 10
     if mb_declining:
         scores["退潮"] += 15
     if ar < 1:

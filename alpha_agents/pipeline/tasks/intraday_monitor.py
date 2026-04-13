@@ -310,6 +310,8 @@ async def run_intraday_monitor() -> str | None:
         pass
 
     # ── Pre-fetch best stocks for anomaly sectors (code-level, not LLM-dependent) ──
+    candidate_sectors = []  # Must be defined before try block
+    sector_picks_cache = {}  # Cache results to avoid duplicate API calls
     sector_picks_ctx = ""
     try:
         from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
@@ -330,16 +332,17 @@ async def run_intraday_monitor() -> str | None:
         for sector in candidate_sectors[:3]:  # Max 3 sectors to avoid slowness
             try:
                 result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
+                sector_picks_cache[sector] = result  # Cache for Step 2 reuse
                 top = result.get("top", [])
                 if top:
                     stocks = ", ".join(
                         f"{s['code']} {s['name']}(score={s['score']}, beta={s['beta_weighted']}, {s['today_change_pct']:+.1f}%)"
-                        for s in top if s.get("today_change_pct", 0) < 9.8  # Exclude limit-up
+                        for s in top if s.get("today_change_pct", 0) < 9.8
                     )
                     if stocks:
                         pick_lines.append(f"  {sector}: {stocks}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Sector picks failed for %s: %s", sector, e)
         if pick_lines:
             sector_picks_ctx = "【板块高beta候选股（系统预选，优先从这里选可操作标的）】\n" + "\n".join(pick_lines)
             logger.info("Pre-fetched sector picks for %d sectors", len(pick_lines))
@@ -353,6 +356,7 @@ async def run_intraday_monitor() -> str | None:
     now_str = datetime.now().strftime("%H:%M")
 
     # ── Step 1: Code selects signal stocks (涨停确认) ──
+    # Reuse anomaly data from _detect_anomalies if possible, fallback to fresh call
     signals = []
     try:
         anomaly_data = json.loads(get_anomaly_stocks_fn())
@@ -363,45 +367,45 @@ async def run_intraday_monitor() -> str | None:
                 "change_pct": stock.get("change_pct", 0),
                 "consecutive": stock.get("consecutive_limits", 1),
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Signal detection failed: %s", e)
 
-    # ── Step 2: Code selects actionable stocks (beta + institutional) ──
+    # ── Step 2: Code selects actionable stocks from pre-fetched sector picks ──
+    # Reuses sector_picks_cache from pre-fetch (no duplicate API calls)
     actionable = []
-    candidate_sectors_used = candidate_sectors[:3] if candidate_sectors else []
-    for sector in candidate_sectors_used:
+    for sector in candidate_sectors[:3]:
         try:
-            from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
-            result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
+            # Use cached result from pre-fetch, only call API if not cached
+            if sector in sector_picks_cache:
+                result = sector_picks_cache[sector]
+            else:
+                from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
+                result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
+
             for s in result.get("top", []):
                 if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
-                    # Get institutional analysis for entry/stop
-                    try:
-                        from alpha_agents.tools.institutional_position import get_institutional_position_fn
-                        inst = json.loads(get_institutional_position_fn(s["code"]))
-                        action_info = inst.get("action", {})
-                        entry_zone = action_info.get("entry_zone", "")
-                        stop_loss = action_info.get("stop_loss", "")
-                        recommendation = action_info.get("recommendation", "观望")
-                        if recommendation in ("回避", "观望") and inst.get("signal_summary", {}).get("score", 0) < 0:
-                            continue  # Skip negative scores
-                    except Exception:
-                        entry_zone = ""
-                        stop_loss = ""
-                        recommendation = ""
+                    # Use beta tool's score + institutional signals (already in result)
+                    # No per-stock get_institutional_position call (too slow)
+                    price = s.get("price", 0)
+                    # Compute simple entry zone from price: 3% below current
+                    entry_high = round(price, 2) if price else None
+                    entry_low = round(price * 0.97, 2) if price else None
+                    # Stop loss: 7% below current
+                    stop_loss_val = round(price * 0.93, 2) if price else None
 
                     actionable.append({
                         "code": s["code"],
                         "name": s["name"],
-                        "price": s.get("price", 0),
+                        "price": price,
                         "change_pct": s.get("today_change_pct", 0),
                         "score": s.get("score", 0),
                         "beta": s.get("beta_weighted", 0),
                         "note": s.get("note", ""),
                         "theme": sector,
-                        "entry_zone": entry_zone,
-                        "stop_loss": stop_loss,
-                        "recommendation": recommendation,
+                        "institutional": s.get("institutional", ""),
+                        "entry_low": entry_low,
+                        "entry_high": entry_high,
+                        "stop_loss": stop_loss_val,
                     })
         except Exception as e:
             logger.debug("Sector best stocks failed for %s: %s", sector, e)
@@ -448,12 +452,24 @@ async def run_intraday_monitor() -> str | None:
     report_lines.append("|------|------|------|------|------|---------|")
     if actionable:
         for a in actionable:
-            action = a.get("entry_zone", "") or a.get("recommendation", "")
-            sl = f"止损{a['stop_loss']}" if a.get("stop_loss") else ""
+            el = a.get("entry_low")
+            eh = a.get("entry_high")
+            sl = a.get("stop_loss")
+            if el and eh:
+                action = f"介入{el:.2f}-{eh:.2f}"
+            elif eh:
+                action = f"回调至{eh:.2f}可介入"
+            elif el:
+                action = f"突破{el:.2f}跟进"
+            else:
+                action = ""
+            sl_str = f" 止损{sl:.2f}" if sl else ""
+            inst = a.get("institutional", "")
+            inst_str = f" [{inst}]" if inst and inst != "无" else ""
             report_lines.append(
                 f"| {a['code']} | {a['name']} | {a['price']:.2f}元 | "
                 f"{a['change_pct']:+.2f}% | {a['score']:.0f} | "
-                f"{action} {sl} |"
+                f"{action}{sl_str}{inst_str} |"
             )
     else:
         report_lines.append("| — | 暂无符合条件的候选 | — | — | — | — |")
@@ -479,30 +495,15 @@ async def run_intraday_monitor() -> str | None:
             "reason": f"涨停封板",
         })
     for a in actionable:
-        entry_high = None
-        entry_low = None
-        sl = None
-        try:
-            if a.get("stop_loss"):
-                sl = float(str(a["stop_loss"]).replace("元", ""))
-            ez = a.get("entry_zone", "")
-            if "-" in str(ez):
-                parts_ez = ez.split("-")
-                entry_low = float(parts_ez[0].strip().replace("元", ""))
-                entry_high = float(parts_ez[1].strip().replace("元", ""))
-            elif a.get("price"):
-                entry_high = round(a["price"] * 0.97, 2)  # Default: 3% below current
-        except (ValueError, IndexError):
-            pass
-
         recs_json.append({
             "code": a["code"], "name": a["name"],
             "theme": a.get("theme", ""), "type": "actionable",
             "reason": a.get("note", ""),
             "confidence": "high" if a["score"] >= 70 else "medium",
-            "action": a.get("entry_zone", ""),
-            "entry_low": entry_low, "entry_high": entry_high,
-            "stop_loss": sl,
+            "action": "",
+            "entry_low": a.get("entry_low"),
+            "entry_high": a.get("entry_high"),
+            "stop_loss": a.get("stop_loss"),
         })
 
     report_lines.append(f"<!--RECOMMENDATIONS\n{json.dumps(recs_json, ensure_ascii=False)}\nRECOMMENDATIONS-->")

@@ -433,6 +433,14 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Daily archive failed: %s", e)
 
+    # Update local market history DB with today's data
+    try:
+        from alpha_agents.data.market_history import update_daily
+        updated = await asyncio.to_thread(update_daily)
+        logger.info("Market history daily update: %d rows", updated)
+    except Exception as e:
+        logger.warning("Market history update failed: %s", e)
+
     # Compute and save tomorrow's sentiment phase (uses today's archived data)
     try:
         from alpha_agents.data.sentiment_cycle import compute_and_save_sentiment

@@ -317,6 +317,15 @@ def cmd_build_beta(args: argparse.Namespace) -> None:
     logging.info("Beta calculation complete: %d betas", total)
 
 
+def cmd_init_history(args: argparse.Namespace) -> None:
+    """Initialize full-market history database."""
+    from alpha_agents.data.market_history import init_history
+    months = getattr(args, 'months', 6)
+    logging.info("Initializing market history (%d months)...", months)
+    total = init_history(months=months)
+    logging.info("Init complete: %d rows", total)
+
+
 def cmd_build_embeddings(args: argparse.Namespace) -> None:
     """Force rebuild concept embeddings."""
     from alpha_agents.data.embeddings import build_concept_embeddings
@@ -372,6 +381,11 @@ def main() -> None:
     # build-beta — manual beta calculation
     p_beta = subparsers.add_parser("build-beta", help="手动计算所有活跃主线的板块beta系数")
     p_beta.set_defaults(func=cmd_build_beta)
+
+    # init-history — batch init full-market daily K-lines
+    p_init_hist = subparsers.add_parser("init-history", help="初始化全市场历史日线数据（支持断点续传）")
+    p_init_hist.add_argument("--months", type=int, default=6, help="拉取几个月历史（默认6）")
+    p_init_hist.set_defaults(func=cmd_init_history)
 
     # build-embeddings — force rebuild
     p_embed = subparsers.add_parser("build-embeddings", help="强制重建概念语义搜索向量")

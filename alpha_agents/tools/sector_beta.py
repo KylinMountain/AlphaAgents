@@ -81,6 +81,43 @@ def _normalize_beta_scores(betas: list[dict]) -> dict[str, float]:
     }
 
 
+def _fuzzy_match_concept(name: str) -> str | None:
+    """Fuzzy match a concept name against cached beta concepts and stocks.db concepts.
+
+    E.g., "电池" → "锂电池概念", "芯片" → "芯片概念"
+    """
+    from alpha_agents.data.memory_store import _get_conn
+
+    # First try beta cache
+    conn = _get_conn()
+    rows = conn.execute("SELECT DISTINCT concept FROM sector_betas").fetchall()
+    cached_concepts = [r["concept"] for r in rows]
+
+    # Exact substring match in cached concepts
+    for c in cached_concepts:
+        if name in c or c in name:
+            return c
+
+    # Try stocks.db concepts table
+    try:
+        from alpha_agents.data.db import get_connection
+        from alpha_agents.config import DB_PATH
+        sconn = get_connection(DB_PATH)
+        rows2 = sconn.execute("SELECT name FROM concepts WHERE name LIKE ?", (f"%{name}%",)).fetchall()
+        sconn.close()
+        if rows2:
+            # Prefer concepts that also have beta data
+            for r in rows2:
+                if r["name"] in cached_concepts:
+                    return r["name"]
+            # Otherwise return first match
+            return rows2[0]["name"]
+    except Exception:
+        pass
+
+    return None
+
+
 def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
     """Get top stocks in a concept sector by multi-factor score.
 
@@ -90,8 +127,16 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
         concept_name: Concept sector name, e.g. "电池", "芯片概念"
         top_n: Number of top stocks to return
     """
-    # 1. Get cached betas (or compute on-the-fly if missing)
+    # 1. Get cached betas — try exact match first, then fuzzy
     betas = get_cached_betas(concept_name)
+    if not betas:
+        # Fuzzy match: "电池" → "锂电池概念", "芯片" → "芯片概念"
+        matched_name = _fuzzy_match_concept(concept_name)
+        if matched_name and matched_name != concept_name:
+            logger.info("Fuzzy matched '%s' → '%s'", concept_name, matched_name)
+            betas = get_cached_betas(matched_name)
+            concept_name = matched_name  # Use matched name for rest of function
+
     if not betas:
         logger.info("No cached betas for '%s', computing on-the-fly...", concept_name)
         try:

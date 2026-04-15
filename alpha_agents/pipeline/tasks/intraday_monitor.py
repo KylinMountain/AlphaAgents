@@ -284,9 +284,16 @@ async def run_intraday_monitor() -> str | None:
             # Check open positions — stop loss / take profit / expiry
             if open_pos:
                 pos_alerts = check_positions(realtime_prices=price_map, today=today_str)
+                # Split by notification importance:
+                #   - stop_tightened: bearish pre-alert, log only (avoids spam;
+                #     user sees it in the daily review / logs)
+                #   - stopped/target_hit/expired/add_position: actual P/L event,
+                #     push to notify channels
                 for alert in pos_alerts:
                     msg = _format_portfolio_alert(alert)
                     logger.info("Portfolio alert: %s", msg)
+                    if alert.get("type") == "stop_tightened":
+                        continue  # log only, don't spam push channels
                     try:
                         await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
                     except Exception as e:
@@ -1019,6 +1026,16 @@ def _format_portfolio_alert(alert: dict) -> str:
         total = alert.get("total_shares", 0)
         return (f"补仓 | {code} {name} +{add_shares}股 @ {add_price:.2f}元 "
                 f"(均价{new_avg:.2f}, 共{total}股)")
+
+    if alert_type == "stop_tightened":
+        # Bearish signal pre-alert — stop raised, not yet a close
+        price = alert.get("price", 0)
+        old_stop = alert.get("old_stop", 0)
+        new_stop = alert.get("new_stop", 0)
+        cur_ret = alert.get("current_return", 0)
+        reason = alert.get("reason", "")
+        return (f"{reason} | {code} {name} 现价{price:.2f} ({cur_ret:+.1f}%) "
+                f"止损 {old_stop:.2f}→{new_stop:.2f}")
 
     ret = alert.get("return_pct", 0)
     reason = alert.get("reason", "")

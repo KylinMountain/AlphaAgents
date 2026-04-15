@@ -382,6 +382,17 @@ async def run_review() -> str | None:
     # Re-read themes after update
     themes = get_active_themes()
 
+    # 2b. Snapshot theme strengths for velocity detection (end-of-day state)
+    # Used by portfolio.check_positions to detect rapid theme decay
+    # (e.g., strength dropping 9→5 in 2 days triggers a bearish stop tighten).
+    # INSERT OR REPLACE on (date, data_type) makes this idempotent within a day.
+    try:
+        from alpha_agents.data.memory_store import save_theme_snapshot
+        await asyncio.to_thread(save_theme_snapshot, today, themes)
+        logger.info("Theme snapshot saved: %d themes", len(themes))
+    except Exception as e:
+        logger.warning("Failed to save theme snapshot: %s", e)
+
     # 3. Format contexts — Agent gets pre-computed results, doesn't need to call tools for verification
     themes_ctx = _format_themes(themes)
     stats_ctx = _format_stats(stats)

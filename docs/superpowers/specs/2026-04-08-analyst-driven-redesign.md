@@ -62,18 +62,26 @@
 
 ### 模式 1：异动追因（盘中主要模式）
 
-触发条件：板块或主线标的出现异动（涨跌幅/资金流/量比超阈值）
+> **UPDATE v2.3**: 异动检测升级为资金优先（5 种量价模式）；追因恢复 4 工具；加入 VPA 过滤和深度分析；盘中实时 bar 支持信号确认。
 
-思维链路：
-1. **观察**：检测到什么异动？（板块突然放量、龙头涨停、资金异常流入）
-2. **追因**：为什么？查新闻催化、查资金来源（北向/机构/游资）、查关联板块联动
-3. **判断**：一日游还是持续行情？根据资金类型（机构 vs 游资）、催化力度、板块联动度
-4. **决策**：是否纳入/升级主线？推荐什么标的？
-5. **交叉验证**：通过验证清单确认信心水平（见下方）
+触发条件：资金异动（量价确认/背离/暗流涌动/出逃/逆势吸筹，见 v2.3）
 
-异动阈值：
-- 板块：15分钟涨幅 > 1.5%，或资金净流入 > 板块均值 2 倍
-- 个股（主线标的）：涨停、跌停、量比 > 3
+完整思维链路：
+1. **检测**（代码）：资金异动检测 — 5 种量价模式，资金行为优先于价格变动
+2. **追因**（LLM + 4 工具）：web_search 搜催化、get_lhb_detail 查资金来源、get_stock_fund_flow 查主力方向、get_sector_data 查板块联动
+3. **判断**（LLM）：机构资金 + 催化 + 联动 → 持续；游资 + 无催化 → 一日游；资金先行无新闻 → 主力提前布局
+4. **选股**（代码）：candidate_sectors（3 来源）→ sector_beta 排序 → 非涨停过滤
+5. **VPA 过滤**（LLM）：Anna Coulling 量价分析 — bearish 排除、深度报告附在盘中提醒
+6. **盘中实时 bar**：今日 partial K 线追加到历史数据，VPA 可判断"昨天的信号今天正在被确认"
+7. **价格/止损**（代码）：entry_low/entry_high/stop_loss 全部代码计算
+
+异动阈值（v2.3 资金驱动）：
+- 板块涨>1% + 资金净流入>5 亿 = 量价确认
+- 板块涨>2% + 资金净流出>2 亿 = 量价背离（出货警告）
+- 板块涨<1% + 资金净流入>8 亿 = 暗流涌动（主力暗中布局）
+- 概念板块资金净流入>10 亿 = 概念资金涌入
+- 涨停>30 家 = 涨停板活跃
+- 涨跌比>5 或<0.3 = 情绪极端
 
 ### 模式 2：预判验证（晨扫 → 开盘）
 
@@ -124,6 +132,37 @@
 ```
 
 每个 Agent 有自己的 prompt 和工具集，但共享记忆系统。
+
+### VPA 在决策链中的位置（v2.2+）
+
+```
+晨报流程：
+  新闻 digest → LLM 推荐 → [5维交叉验证(含VPA第5维)] → 推荐股附VPA深度报告 → 输出
+
+盘中流程：
+  资金异动检测(代码) → 追因(LLM+4工具) → 代码选股(sector_beta)
+  → [VPA过滤: bearish排除](LLM) → 代码算价格止损
+  → [VPA深度分析: 前3只](LLM) → 盘中提醒
+
+复盘流程：
+  验证命中率(代码) → 更新主线(代码) → [VPA信号追踪: 确认/否定/过期](代码+LLM)
+  → 复盘报告
+
+Chat：
+  用户: vpa 002364 → 完整Anna Coulling报告(LLM) → 信号存入追踪表
+```
+
+### 信号确认定义（Anna Coulling "耐心"理念的工程化）
+
+| 状态 | 定义 | 触发条件 |
+|------|------|---------|
+| **信号** (signal) | 量价异常被 LLM 识别 | VPA 分析输出 signals 数组 |
+| **确认** (confirmed) | 后续 K 线验证了信号方向 | LLM 判断 confirmed=true，或涨跌幅>2%（资金面辅助确认） |
+| **否定** (denied) | 后续 K 线否定了信号 | LLM 判断或反向运动>3% |
+| **过期** (expired) | 3 天内无确认也无否定 | signal_date + 3 > today |
+| **持续跟踪** | 每次分析传入上次报告 | vpa_analysis_history 表自动关联 |
+
+LLM 的确认推理要求输出：确认的 K 线是哪一根、逻辑是什么、或者需要什么样的 K 线来确认/否定。这让用户能读懂 LLM 的判断依据，不是黑盒。
 
 ---
 
@@ -202,12 +241,48 @@ CREATE TABLE market_cognition (
 );
 ```
 
+### 表 4：VPA 分析历史（vpa_analysis_history）— v2.2 新增
+
+```sql
+CREATE TABLE vpa_analysis_history (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    analysis_date TEXT NOT NULL,
+    verdict TEXT,               -- 看多/偏多/中性/偏空/看空
+    confidence REAL,            -- 0.0-1.0
+    phase TEXT,                 -- Wyckoff: 吸筹/拉升/派发/下跌/震荡
+    confirmed INTEGER,          -- 是否所有信号已确认
+    reason TEXT,
+    report TEXT,                -- 完整 Anna Coulling 分析报告
+    signals_json TEXT           -- 信号级确认状态 JSON
+);
+```
+
+### 表 5：VPA 待确认信号（vpa_pending_signals）— v2.2 新增
+
+```sql
+CREATE TABLE vpa_pending_signals (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    signal_type TEXT NOT NULL,   -- 射击十字星/放量突破/...
+    signal_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    expected_confirmation TEXT,  -- "放量阴线跌破04-14低点"
+    expected_denial TEXT,        -- "放量阳线收复04-14实体"
+    status TEXT DEFAULT 'pending', -- pending/confirmed/denied/expired
+    expire_date TEXT,
+    source_analysis_id INTEGER
+);
+```
+
 ### 记忆的使用方式
 
 - **晨扫 Agent** 读取主线池 + 市场认知，生成预判
 - **盘中 Agent** 读取主线池，只关注活跃主线标的的异动
-- **复盘 Agent** 更新全部三张表
+- **复盘 Agent** 更新全部三张表 + 检查 VPA 待确认信号
 - **验证 Agent** 读取市场认知（判断位置），读取预测记录（参考历史命中率）
+- **VPA 分析** 自动读取同一股票的上次分析作为上下文（持续跟踪叙事）
 
 ---
 
@@ -221,7 +296,7 @@ CREATE TABLE market_cognition (
 |------|-------------|------|
 | get_lhb_detail | stock_lhb_detail_em | 龙虎榜机构/游资席位明细 |
 | get_margin_data | stock_margin_detail_szse | 融资融券余额变化 |
-| get_north_flow | stock_hsgt_north_net_flow_in_em | 北向资金净流入（含个股明细） |
+| get_north_flow | stock_hsgt_fund_flow_summary_em | 北向资金净流入（**仅汇总**，个股级数据自2024-08-19起港交所停止公布） |
 | get_block_trade | stock_dzjy_mrtj | 大宗交易折价率 |
 | get_stock_fund_flow | stock_individual_fund_flow | 个股主力/散户资金流 |
 

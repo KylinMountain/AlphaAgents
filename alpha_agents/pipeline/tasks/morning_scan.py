@@ -325,13 +325,19 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
     Replaces the old LLM+regex approach with deterministic rules + VPA.
 
     5 dimensions:
-      1. 资金面: 主力资金方向（get_stock_fund_flow）
-      2. 基本面: ROE + 业绩预告（get_financial_data + get_earnings_calendar）
-      3. 位置面: 近5日涨幅（get_stock_quotes）
-      4. 情绪面: 大盘涨跌比（get_market_breadth）
+      1. 资金面: 主力资金方向（get_stock_fund_flow_fn）
+      2. 基本面: ROE / 净利润增长 / 负债率（get_financial_data_fn, 30d 缓存）
+      3. 位置面: 近5日涨幅（get_stock_quotes_fn）
+      4. 情绪面: 大盘涨跌比（get_market_breadth_fn）
       5. VPA面: Anna Coulling 量价分析（compute_vpa_with_llm）
 
     Scoring: 4+/5 pass → high, 3/5 → medium, ≤2 → removed.
+
+    **Strict mode** (fixed 2026-04-15): Data-unavailable dimensions count as
+    "unknown" (?) and DO NOT contribute to passes. Previously they were
+    default-pass, which meant a stock with all 5 tool failures could score
+    5/5 → high confidence (hallucination amplifier). VPA "中性" also no
+    longer counts as pass — must be explicit 看多/偏多 to contribute.
     """
     import asyncio
 
@@ -339,14 +345,18 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
         return recs
 
     # ── Dimension 4: 情绪面 (shared across all stocks) ──
-    emotion_pass = True
+    # If tool fails, we genuinely don't know market sentiment — don't grant
+    # a free pass to every stock in the batch.
+    emotion_known = False
+    emotion_pass = False
     try:
         from alpha_agents.tools.market_breadth import get_market_breadth_fn
         breadth = json.loads(await asyncio.to_thread(get_market_breadth_fn))
         ad_ratio = breadth.get("advance_decline_ratio", 1)
         emotion_pass = ad_ratio > 0.8  # V2 原始标准
+        emotion_known = True
     except Exception:
-        pass  # Default: pass
+        pass  # emotion_known stays False → dim marked as "?"
 
     validated = []
     for r in recs:
@@ -370,26 +380,43 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
             else:
                 dims.append("资金❌")
         except Exception:
-            passes += 1  # Data unavailable → pass by default
-            dims.append("资金?")
+            dims.append("资金?")  # No default pass — unknown stays unknown
 
-        # ── Dim 2: 基本面 ──
+        # ── Dim 2: 基本面 (real financials, 30d cached) ──
+        # Pass: 优质 (ROE>15 + 低杠杆) or 一般. Fail: 盈利能力弱 (ROE<5).
+        # The "一般" bucket passes because A-share median ROE sits ~8%, so
+        # requiring "优质" for every recommendation would remove most picks.
+        # "盈利能力弱" catches the real dog stocks (ST candidates, 亏损股).
         try:
-            from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
-            # Simple check: stock is tradeable and not ST
-            quotes = json.loads(await asyncio.to_thread(get_stock_quotes_fn, code))
-            q = quotes.get("quotes", [{}])[0]
-            if q.get("price", 0) > 0 and "ST" not in (q.get("name", "") or ""):
-                passes += 1
-                dims.append("基本面✅")
+            from alpha_agents.tools.financial_data import get_financial_data_fn
+            fd = json.loads(await asyncio.to_thread(get_financial_data_fn, code))
+            if fd.get("error"):
+                dims.append("基本面?")
             else:
-                dims.append("基本面❌")
+                quality = fd.get("quality_flag", "一般")
+                roe = fd.get("roe_pct")
+                np_growth = fd.get("net_profit_growth_pct")
+                roe_str = f"ROE{roe:.1f}%" if roe is not None else "ROE?"
+                if quality == "优质":
+                    passes += 1
+                    dims.append(f"基本面✅({roe_str})")
+                elif quality == "盈利能力弱":
+                    dims.append(f"基本面❌({roe_str})")
+                else:  # 一般 — acceptable median
+                    passes += 1
+                    dims.append(f"基本面~({roe_str})")
+                # Hard override: 净利润同比下滑>50% 直接判定为基本面差
+                if np_growth is not None and np_growth < -50:
+                    # Retract the pass if we granted one
+                    if dims[-1].startswith("基本面✅") or dims[-1].startswith("基本面~"):
+                        passes -= 1
+                    dims[-1] = f"基本面❌({roe_str} 净利{np_growth:.0f}%)"
         except Exception:
-            passes += 1
             dims.append("基本面?")
 
         # ── Dim 3: 位置面 ──
         try:
+            from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
             quotes = json.loads(await asyncio.to_thread(get_stock_quotes_fn, code))
             q = quotes.get("quotes", [{}])[0]
             week_chg = q.get("week_change_pct", 0)
@@ -399,17 +426,19 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
             else:
                 dims.append(f"位置❌(追高{week_chg:+.1f}%)")
         except Exception:
-            passes += 1
             dims.append("位置?")
 
         # ── Dim 4: 情绪面 ──
-        if emotion_pass:
+        if not emotion_known:
+            dims.append("情绪?")
+        elif emotion_pass:
             passes += 1
             dims.append("情绪✅")
         else:
             dims.append("情绪❌")
 
         # ── Dim 5: VPA 量价分析 ──
+        # Only 看多/偏多 contributes. 中性 = no signal = no pass.
         try:
             from alpha_agents.tools.vpa import compute_vpa_with_llm
             vpa_r = await asyncio.to_thread(compute_vpa_with_llm, code, name)
@@ -421,13 +450,10 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
                 elif verdict in ("看空", "偏空"):
                     dims.append(f"VPA❌({verdict})")
                 else:
-                    passes += 1  # 中性 = 不扣分
-                    dims.append(f"VPA~({verdict})")
+                    dims.append(f"VPA~({verdict})")  # 中性 no pass
             else:
-                passes += 1
                 dims.append("VPA?")
         except Exception:
-            passes += 1
             dims.append("VPA?")
 
         # ── Scoring ──

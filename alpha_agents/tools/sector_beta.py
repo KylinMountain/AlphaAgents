@@ -20,16 +20,25 @@ W_LIQUIDITY = 0.15
 
 
 def _score_position(change_pct: float) -> float:
-    """Score based on intraday change — prefer stocks that haven't run yet."""
+    """Score based on intraday change — prefer stocks with moderate gains (2-6%).
+
+    V2 design: "从板块内选涨幅中段（2-6%）、还没涨停的标的"
+    Logic: stocks actively being bought (rising) but not yet overextended.
+    Negative change = market is buying the sector but not this stock = weak, avoid.
+    """
     if change_pct >= 9.8:
         return 0    # Limit up, can't buy
     if change_pct >= 6:
-        return 20
+        return 30   # Rising fast, getting expensive
     if change_pct >= 3:
-        return 50
+        return 100  # Sweet spot: actively rising, confirmed by market
+    if change_pct >= 1:
+        return 80   # Starting to move, good entry
     if change_pct >= 0:
-        return 80
-    return 100  # Negative = hasn't started, best entry
+        return 50   # Flat while sector rises — lukewarm
+    if change_pct >= -2:
+        return 20   # Falling while sector rises — weak, market doesn't want it
+    return 0        # Falling hard — something wrong, avoid
 
 
 def _score_liquidity(avg_daily_amount: float) -> float:

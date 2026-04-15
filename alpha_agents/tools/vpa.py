@@ -283,6 +283,24 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
     recent = df.tail(5)
     last = df.iloc[-1]
 
+    # #9 Climax position weighting — compute 20-day range so climax detectors
+    # can distinguish "selling climax at 20-day LOW" (real panic bottom) from
+    # "selling climax at 20-day mid" (likely just mid-trend capitulation).
+    # Same logic applies for buying_climax (top of range = real distribution
+    # climax; mid-range = likely just pullback noise).
+    if len(df) >= 20:
+        _range_high = float(df["high"].tail(20).max())
+        _range_low = float(df["low"].tail(20).min())
+        _range_span = max(_range_high - _range_low, 1e-9)
+    else:
+        _range_high = float(df["high"].max())
+        _range_low = float(df["low"].min())
+        _range_span = max(_range_high - _range_low, 1e-9)
+
+    def _range_position(close_price: float) -> float:
+        """Return close position within 20-day range, 0 = range low, 1 = range high."""
+        return max(0.0, min(1.0, (close_price - _range_low) / _range_span))
+
     # ── 5-day trend divergence ──
     first_close = recent["close"].iloc[0]
     last_close = recent["close"].iloc[-1]
@@ -328,6 +346,8 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         })
 
     # ── Selling Climax: last 3 bars ──
+    # #9: position-aware — climax at range LOW is the real panic bottom;
+    # climax at range MID is mid-trend continuation, often a faux signal.
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
@@ -338,16 +358,42 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         # Selling Climax: 急跌 + 巨量 + 收回过半
         if vr > 2.0 and pct < -0.03 and cp > 0.5:
             date_str = str(row.get("date", ""))[-5:]
+            range_pos = _range_position(float(row["close"]))
+            base_strength = scores["selling_climax"]
+            # Strength adjustment by range position
+            if range_pos < 0.2:
+                # Climax at range low = real panic bottom, highest reversal value
+                strength_adjust = +2
+                pos_label = f"区间低位(底部{range_pos*100:.0f}%)"
+                interpretation = "经典恐慌见底信号"
+            elif range_pos < 0.4:
+                strength_adjust = +1
+                pos_label = f"区间中低位({range_pos*100:.0f}%)"
+                interpretation = "较强反转信号"
+            elif range_pos > 0.7:
+                # At range top — likely just profit-taking or a trap, not a real climax
+                strength_adjust = -2
+                pos_label = f"区间高位({range_pos*100:.0f}%)"
+                interpretation = "高位放量急跌，可能是派发开始而非恐慌见底"
+            else:
+                strength_adjust = 0
+                pos_label = f"区间中位({range_pos*100:.0f}%)"
+                interpretation = "中位climax可信度一般"
             patterns.append({
                 "pattern": "selling_climax",
                 "label": "卖出高潮",
                 "bullish": True,
-                "strength": scores["selling_climax"],
-                "detail": f"{date_str} 急跌{pct*100:.1f}% 量比{vr:.1f} 收盘位置{cp:.2f}，可能恐慌见底",
+                "strength": base_strength + strength_adjust,
+                "detail": (
+                    f"{date_str} 急跌{pct*100:.1f}% 量比{vr:.1f} 收盘位置{cp:.2f}，"
+                    f"{pos_label} — {interpretation}"
+                ),
             })
             break
 
     # ── Buying Climax: last 3 bars ──
+    # #9: position-aware — climax at range HIGH is the real distribution top;
+    # climax at mid-range is often a pause before continuation, not a top.
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
@@ -358,12 +404,35 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         # Buying Climax: 急涨 + 巨量 + 长上影线 + 收在下半区
         if vr > 2.0 and pct > 0.03 and upper > 0.4 and cp < 0.5:
             date_str = str(row.get("date", ""))[-5:]
+            range_pos = _range_position(float(row["close"]))
+            base_strength = scores["buying_climax"]
+            if range_pos > 0.8:
+                # Climax at range high = real distribution top
+                strength_adjust = -2  # More bearish
+                pos_label = f"区间高位(顶部{range_pos*100:.0f}%)"
+                interpretation = "经典派发顶信号"
+            elif range_pos > 0.6:
+                strength_adjust = -1
+                pos_label = f"区间中高位({range_pos*100:.0f}%)"
+                interpretation = "较强顶部信号"
+            elif range_pos < 0.3:
+                # Mid-low range climax — likely just bounce failure, not top
+                strength_adjust = +2  # Less bearish
+                pos_label = f"区间低位({range_pos*100:.0f}%)"
+                interpretation = "低位冲高回落，可能只是反弹失败而非派发顶"
+            else:
+                strength_adjust = 0
+                pos_label = f"区间中位({range_pos*100:.0f}%)"
+                interpretation = "中位climax可信度一般"
             patterns.append({
                 "pattern": "buying_climax",
                 "label": "买入高潮",
                 "bullish": False,
-                "strength": scores["buying_climax"],
-                "detail": f"{date_str} 急涨{pct*100:.1f}% 量比{vr:.1f} 长上影收低位，冲高回落",
+                "strength": base_strength + strength_adjust,
+                "detail": (
+                    f"{date_str} 急涨{pct*100:.1f}% 量比{vr:.1f} 长上影收低位，"
+                    f"{pos_label} — {interpretation}"
+                ),
             })
             break
 
@@ -759,6 +828,54 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
     else:
         ctx["consolidation_strength"] = f"未形成整理 ({consolidation_days}日)"
 
+    # ── #10: Re-accumulation vs primary accumulation disambiguation ──
+    # Anna Coulling + Wyckoff: consolidations look the same on the chart but
+    # imply VERY different target sizes depending on what came BEFORE:
+    #   - After a downtrend → PRIMARY accumulation → big move up (2-3× range)
+    #   - After an uptrend   → RE-accumulation → modest continuation (1.2-1.5×)
+    #   - After a flat range → just noise, low conviction either way
+    # This directly informs the target_zone multiplier the LLM uses.
+    if consolidation_days >= 7 and median_n > 0:
+        # The consolidation began at index `-consolidation_days` (newest-first).
+        # We want the trend over the ~30 bars IMMEDIATELY before that — i.e.
+        # from index `-(consolidation_days + 30)` to `-consolidation_days`.
+        look_back_span = 30
+        look_back_start = consolidation_days + look_back_span
+        look_back_end = consolidation_days  # exactly where consolidation began
+        if len(closes) >= look_back_start:
+            prior_start = closes.iloc[-look_back_start]
+            prior_end = closes.iloc[-look_back_end]
+            prior_trend_pct = (prior_end - prior_start) / prior_start * 100 if prior_start > 0 else 0
+            ctx["consolidation_prior_trend_pct"] = round(float(prior_trend_pct), 1)
+            if prior_trend_pct < -15:
+                ctx["accumulation_type"] = "primary_accumulation"
+                ctx["accumulation_note"] = (
+                    f"整理之前（约 {look_back_end}~{look_back_start} 根 bar 前）下跌 "
+                    f"{prior_trend_pct:.1f}% — 这是 PRIMARY accumulation（底部吸筹），"
+                    f"突破目标乘数 2-3×（因果定律：下跌越深，反弹越大）"
+                )
+            elif prior_trend_pct > 15:
+                ctx["accumulation_type"] = "re_accumulation"
+                ctx["accumulation_note"] = (
+                    f"整理之前上涨 {prior_trend_pct:+.1f}% — 这是 RE-accumulation（中继平台），"
+                    f"突破目标乘数 1.2-1.5×（主升浪已过，二段相对有限）"
+                )
+            elif prior_trend_pct < -5:
+                ctx["accumulation_type"] = "shallow_bottom"
+                ctx["accumulation_note"] = (
+                    f"整理前轻微下跌 {prior_trend_pct:.1f}%，乘数 1.5-2×（浅底吸筹）"
+                )
+            elif prior_trend_pct > 5:
+                ctx["accumulation_type"] = "shallow_re_accumulation"
+                ctx["accumulation_note"] = (
+                    f"整理前轻微上涨 {prior_trend_pct:+.1f}%，乘数 1.0-1.3×"
+                )
+            else:
+                ctx["accumulation_type"] = "flat"
+                ctx["accumulation_note"] = (
+                    f"整理前价格接近平衡（{prior_trend_pct:+.1f}%），低 conviction，乘数 ~1×"
+                )
+
     # ── Trend strength (10-day, 20-day) ──
     if len(closes) >= 20:
         chg_10d = (closes.iloc[-1] - closes.iloc[-10]) / closes.iloc[-10] * 100
@@ -815,23 +932,34 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
             from alpha_agents.data.market_data import get_market_index_history
             idx_rows = get_market_index_history("sh000001", days=window + 5)
             if idx_rows:
-                # Build market change_pct lookup
-                mkt = {r["date"]: r["change_pct"] for r in idx_rows}
+                # Build market lookup (change_pct AND volume for #8)
+                mkt_chg = {r["date"]: r["change_pct"] for r in idx_rows}
                 # Stock change_pct (already in df.pct_change column)
                 stock_pcts = []
                 mkt_pcts = []
+                stock_vol_ratios = []  # stock volume_ratio on same day
                 for _, row in df.tail(window).iterrows():
                     d = str(row.get("date", ""))
-                    if d in mkt:
+                    if d in mkt_chg:
                         stock_pct = row.get("pct_change", 0)
                         if pd.notna(stock_pct):
                             stock_pcts.append(float(stock_pct) * 100)
-                            mkt_pcts.append(mkt[d])
+                            mkt_pcts.append(mkt_chg[d])
+                            stock_vr = row.get("volume_ratio", 1)
+                            stock_vol_ratios.append(
+                                float(stock_vr) if pd.notna(stock_vr) else 1.0
+                            )
                 # Filter to market down days (< -0.5%)
                 down_day_stock_pcts = [
                     s for s, m in zip(stock_pcts, mkt_pcts) if m < -0.5
                 ]
                 down_day_mkt_pcts = [m for m in mkt_pcts if m < -0.5]
+                down_day_stock_vols = [
+                    vr for vr, m in zip(stock_vol_ratios, mkt_pcts) if m < -0.5
+                ]
+                up_day_stock_vols = [
+                    vr for vr, m in zip(stock_vol_ratios, mkt_pcts) if m > 0.5
+                ]
                 if down_day_stock_pcts:
                     avg_stock = sum(down_day_stock_pcts) / len(down_day_stock_pcts)
                     avg_mkt = sum(down_day_mkt_pcts) / len(down_day_mkt_pcts)
@@ -858,6 +986,48 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
                         )
                     else:
                         ctx["relative_strength_label"] = "与市场同步"
+
+                # #8 Volume relative strength on market-down days
+                # Anna Coulling: "on market down days, stocks being accumulated
+                # by insiders hold elevated volume — sellers meet buyers, both
+                # are active." A stock whose volume stays firm/grows on down
+                # days is more interesting than one showing price strength —
+                # price can be manipulated by a few trades, volume cannot.
+                if down_day_stock_vols:
+                    avg_down_vol = sum(down_day_stock_vols) / len(down_day_stock_vols)
+                    ctx["down_day_stock_vol_ratio"] = round(avg_down_vol, 2)
+                    # Also compute up-day vol ratio for comparison
+                    if up_day_stock_vols:
+                        avg_up_vol = sum(up_day_stock_vols) / len(up_day_stock_vols)
+                        ctx["up_day_stock_vol_ratio"] = round(avg_up_vol, 2)
+                        vol_asymmetry = avg_down_vol - avg_up_vol
+                        ctx["down_vs_up_vol_asymmetry"] = round(vol_asymmetry, 2)
+                    else:
+                        avg_up_vol = None
+                        vol_asymmetry = None
+
+                    # Label: what does the volume pattern tell us?
+                    if avg_down_vol > 1.3:
+                        # Volume significantly elevated on down days
+                        if vol_asymmetry is not None and vol_asymmetry > 0.2:
+                            ctx["volume_rel_strength_label"] = (
+                                f"成交量异常（下跌日放量 {avg_down_vol:.1f}× > 上涨日 {avg_up_vol:.1f}×，"
+                                f"非对称放量 — 机构在下跌日悄悄接货的经典信号）"
+                            )
+                        else:
+                            ctx["volume_rel_strength_label"] = (
+                                f"下跌日放量 {avg_down_vol:.1f}×（高于自身20日均量）— "
+                                f"有买盘承接，不是单向抛售"
+                            )
+                    elif avg_down_vol < 0.7:
+                        ctx["volume_rel_strength_label"] = (
+                            f"下跌日缩量 {avg_down_vol:.1f}×（低于20日均量）— "
+                            f"抛压不重，但也缺乏买盘兴趣"
+                        )
+                    else:
+                        ctx["volume_rel_strength_label"] = (
+                            f"下跌日量能 {avg_down_vol:.1f}×（正常）"
+                        )
         except Exception:
             pass  # Best-effort signal — don't fail VPA if index data unavailable
 
@@ -949,13 +1119,19 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
         # P0.1: explicit duration for cause-and-effect law
         if "consolidation_strength" in ctx:
             lines.append(f"- **整理时长**: {ctx['consolidation_strength']}")
+        # #10: re-accumulation vs primary disambiguation
+        if "accumulation_note" in ctx:
+            lines.append(f"- **吸筹类型**: {ctx['accumulation_note']}")
         if "hl_trend" in ctx:
             lines.append(f"- **高低点趋势**: {ctx['hl_trend']}")
         if "high_5d" in ctx:
             lines.append(f"- **5日高点**: {ctx['high_5d']}  **5日低点**: {ctx['low_5d']}")
         # P1.2: relative strength on market down days
         if "relative_strength_label" in ctx:
-            lines.append(f"- **相对强弱**: {ctx['relative_strength_label']}")
+            lines.append(f"- **相对强弱（价格）**: {ctx['relative_strength_label']}")
+        # #8: volume relative strength on market down days
+        if "volume_rel_strength_label" in ctx:
+            lines.append(f"- **相对强弱（成交量）**: {ctx['volume_rel_strength_label']}")
         # P2.1: 20-day phase sequence (heuristic, LLM should refine)
         if "phase_sequence" in ctx:
             lines.append(f"- **20日 phase 序列（启发式，仅供参考）**: {ctx['phase_sequence']}")
@@ -1369,8 +1545,13 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
   - 派发可加细分: 派发初期 / 派发中期 / 派发尾声 / 抛售高峰 / 买入高峰
 - reason: 一句话结论
 - target_low / target_high: 量价维度的目标价区间（基于 Wyckoff 因果定律）
-  - 看多/偏多: 突破后的目标涨幅区间，以"整理区间宽度 × 1.5-3"为基础（蓄势越久倍数越大）
-  - 看空/偏空: 跌破后的目标跌幅区间
+  - 看多/偏多: 突破后的目标涨幅区间，乘数由「吸筹类型」决定（见结构性上下文）：
+    - primary_accumulation (整理前深跌): 2-3× 区间宽度
+    - shallow_bottom (浅底): 1.5-2×
+    - re_accumulation (上升途中): 1.2-1.5×
+    - flat (前期无趋势): ~1×
+    整理时长也影响乘数：长期整理 (>30日) 取上限；短期整理 (<15日) 取下限
+  - 看空/偏空: 跌破后的目标跌幅区间（类似逻辑，终极派发幅度 > 再派发）
   - 中性: 可省略 target_low/target_high
   - 数值是绝对价格（元），不是百分比
 - signals: 数组，每个信号一个对象（单根K线或短期模式）：

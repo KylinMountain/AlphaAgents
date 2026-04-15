@@ -408,8 +408,11 @@ _INDEX_CACHE: dict[str, tuple[str, list[dict]]] = {}  # symbol → (date, rows)
 def get_market_index_history(symbol: str = "sh000001", days: int = 30) -> list[dict]:
     """Get daily history for a market index (for VPA relative strength).
 
-    Returns last N days of [{date, close, change_pct}, ...] sorted oldest→newest.
-    Cached per-day in-process to avoid repeated akshare hits.
+    Returns last N days of [{date, close, change_pct, volume}, ...],
+    sorted oldest→newest. Cached per-day in-process.
+
+    volume is included for Anna Coulling problem #8 — "volume-vs-market"
+    comparison reveals when insiders are accumulating on market-down days.
 
     Args:
         symbol: "sh000001" (上证指数, default), "sz399001" (深证), "sz399006" (创业板)
@@ -431,12 +434,14 @@ def get_market_index_history(symbol: str = "sh000001", days: int = 30) -> list[d
     # Normalize columns and compute change_pct from close diff
     df = df.tail(max(days * 2, 60)).copy()  # extra buffer for the diff
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce")
     df["change_pct"] = df["close"].pct_change() * 100
     df = df.dropna(subset=["close"])
 
     rows = [
         {"date": str(r["date"]), "close": float(r["close"]),
-         "change_pct": float(r["change_pct"]) if pd.notna(r["change_pct"]) else 0.0}
+         "change_pct": float(r["change_pct"]) if pd.notna(r["change_pct"]) else 0.0,
+         "volume": float(r["volume"]) if pd.notna(r["volume"]) else 0.0}
         for _, r in df.iterrows()
     ]
     _INDEX_CACHE[symbol] = (today, rows)

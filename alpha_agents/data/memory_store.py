@@ -167,6 +167,8 @@ CREATE TABLE IF NOT EXISTS vpa_analysis_history (
     reason TEXT,
     report TEXT,
     signals_json TEXT,
+    target_low REAL,                 -- v2.5: VPA推导目标价区间下限
+    target_high REAL,                -- v2.5: VPA推导目标价区间上限
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_vpa_history_code_date ON vpa_analysis_history(code, analysis_date);
@@ -214,6 +216,17 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        # Schema migrations for older DBs — CREATE IF NOT EXISTS doesn't add
+        # columns to existing tables. Each ALTER is wrapped in try/except to
+        # ignore "duplicate column" errors on already-migrated DBs.
+        for migration in (
+            "ALTER TABLE vpa_analysis_history ADD COLUMN target_low REAL",
+            "ALTER TABLE vpa_analysis_history ADD COLUMN target_high REAL",
+        ):
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         _local.conn = conn
     return conn
 
@@ -552,16 +565,26 @@ def get_all_cognition_latest() -> list[dict]:
 def save_vpa_analysis(code: str, name: str, analysis_date: str,
                       verdict: str, confidence: float, phase: str,
                       confirmed: bool, reason: str, report: str,
-                      signals_json: str = "") -> int:
-    """Save a VPA analysis report to history. Returns row id."""
+                      signals_json: str = "",
+                      target_low: float | None = None,
+                      target_high: float | None = None) -> int:
+    """Save a VPA analysis report to history. Returns row id.
+
+    target_low/target_high (v2.5): Optional VPA-derived target price zone,
+    used by portfolio.py to set take-profit on positions opened from this
+    analysis. Based on Wyckoff cause-and-effect: longer accumulation →
+    larger target.
+    """
     with _write_lock:
         conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO vpa_analysis_history "
-            "(code, name, analysis_date, verdict, confidence, phase, confirmed, reason, report, signals_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(code, name, analysis_date, verdict, confidence, phase, "
+            " confirmed, reason, report, signals_json, target_low, target_high) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (code, name, analysis_date, verdict, confidence, phase,
-             1 if confirmed else 0, reason, report, signals_json),
+             1 if confirmed else 0, reason, report, signals_json,
+             target_low, target_high),
         )
         conn.commit()
         return cur.lastrowid

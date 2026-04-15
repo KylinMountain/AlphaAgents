@@ -1120,6 +1120,9 @@ def _save_intraday_recommendations(report: str) -> None:
                         entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                     if stop_loss_val is None:
                         stop_loss_val = parse_stop_loss(r.get("action", ""))
+                    # P0.2: pull VPA-derived take-profit target if available
+                    from alpha_agents.data.portfolio import get_vpa_target_for_code
+                    target_price = get_vpa_target_for_code(code)
                     create_pending_order(
                         code=code,
                         name=r.get("name", ""),
@@ -1128,6 +1131,7 @@ def _save_intraday_recommendations(report: str) -> None:
                         entry_low=entry_low,
                         entry_high=entry_high,
                         stop_loss=stop_loss_val,
+                        target_price=target_price,
                         source="intraday",
                         reason=r.get("reason", "")[:100],
                     )

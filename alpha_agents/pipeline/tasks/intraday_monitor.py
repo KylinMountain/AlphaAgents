@@ -491,7 +491,17 @@ async def run_intraday_monitor() -> str | None:
         logger.warning("Signal detection failed: %s", e)
 
     # ── Step 2: Code selects actionable stocks, then parallel VPA filter ──
-    # Phase A: Collect all non-limit-up candidates (fast, no LLM)
+    # Phase A: Collect candidates that match the fund-flow anomaly direction.
+    #
+    # V2 principle #2: 资金行为优先. Intraday anomaly = sector with fund inflow.
+    # Within such a sector, the right picks are stocks THE MONEY IS BUYING —
+    # meaning change_pct > 0. Falling stocks (change_pct < 0) contradict the
+    # anomaly story: money is selling those, not buying. We reject them
+    # regardless of beta/liquidity score, otherwise the system will recommend
+    # "best of the worst" when a sector lacks good gainers.
+    #
+    # Threshold: change_pct > 0.3% to filter out noise (stocks sitting at 0).
+    # Upper bound 9.8% excludes limit-up (can't buy).
     raw_candidates = []
     for sector in candidate_sectors[:3]:
         try:
@@ -502,8 +512,13 @@ async def run_intraday_monitor() -> str | None:
                 result = json.loads(get_sector_best_stocks_fn(sector, top_n=5))
 
             for s in result.get("top", []):
-                if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
+                chg = s.get("today_change_pct", 0)
+                # Must be rising (money buying) but not yet limit-up
+                if 0.3 < chg < 9.8:
                     raw_candidates.append((sector, s))
+                else:
+                    logger.debug("Rejected %s %s: chg=%.2f%% not in (0.3, 9.8)",
+                                 s.get("code"), s.get("name"), chg)
         except Exception as e:
             logger.debug("Sector best stocks failed for %s: %s", sector, e)
 

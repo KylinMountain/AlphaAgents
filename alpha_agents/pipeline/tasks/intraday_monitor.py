@@ -557,6 +557,17 @@ async def run_intraday_monitor() -> str | None:
     actionable.sort(key=lambda x: x["score"], reverse=True)
     actionable = actionable[:5]
 
+    # ── Step 2b: Ensure actionable stocks' themes exist in theme_lines ──
+    # Intraday anomaly may discover new sectors not yet in theme_lines.
+    # Without this, pending orders get cancelled 2 min later ("主线不存在").
+    if actionable:
+        from alpha_agents.data.memory_store import get_theme_by_name, upsert_theme
+        for a in actionable:
+            theme = a.get("theme", "")
+            if theme and not get_theme_by_name(theme):
+                upsert_theme(theme, catalyst=f"盘中异动发现 {now_str}")
+                logger.info("Auto-created theme '%s' from intraday anomaly", theme)
+
     # ── Step 3: Code computes theme changes ──
     theme_changes = []
     for t in themes:
@@ -997,14 +1008,25 @@ def _save_intraday_recommendations(report: str) -> None:
     if not valid_recs:
         return
 
-    # Batch fetch real-time prices
+    # Batch fetch real-time prices (try Sina realtime first, then stock_quotes fallback)
     prices = {}
     try:
-        codes = ",".join(r["code"] for r in valid_recs)
-        result = json.loads(get_stock_quotes_fn(codes=codes))
-        for q in result.get("quotes", []):
-            prices[q["code"]] = q.get("price") or q.get("latest_close")
-            prices[q["code"] + "_chg"] = q.get("change_pct", 0)
+        code_list = [r["code"] for r in valid_recs]
+        rt = get_realtime_quotes(code_list)
+        if rt:
+            for code, data in rt.items():
+                if data.get("price", 0) > 0:
+                    prices[code] = data["price"]
+                    prices[code + "_chg"] = data.get("change_pct", 0)
+
+        # Fallback for any missing
+        missing = [r["code"] for r in valid_recs if r["code"] not in prices]
+        if missing:
+            result = json.loads(get_stock_quotes_fn(codes=",".join(missing)))
+            for q in result.get("quotes", []):
+                if q.get("price", 0) > 0:
+                    prices[q["code"]] = q["price"]
+                    prices[q["code"] + "_chg"] = q.get("change_pct", 0)
     except Exception as e:
         logger.debug("Failed to fetch prices for intraday recs: %s", e)
 

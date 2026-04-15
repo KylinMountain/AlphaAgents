@@ -229,12 +229,30 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
     logging.info("Starting AlphaAgents 2.0 scheduler...")
 
+    import os
     import signal
+
+    # ── Two-stage shutdown ──
+    # First Ctrl+C: graceful — set stop event, let scheduler drain.
+    # Second Ctrl+C: hard kill via os._exit — bypasses Python's shutdown
+    # (which would otherwise wait for the ThreadPoolExecutor used by
+    # asyncio.to_thread — and LLM HTTP calls can sit in there for minutes).
+    _sigint_count = {"n": 0}
 
     async def _run():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
-        loop.add_signal_handler(signal.SIGINT, stop.set)
+
+        def _on_sigint():
+            _sigint_count["n"] += 1
+            if _sigint_count["n"] == 1:
+                logging.info("Ctrl+C received — shutting down (press again to force kill)")
+                stop.set()
+            else:
+                logging.warning("Second Ctrl+C — force killing")
+                os._exit(130)  # 128 + SIGINT(2)
+
+        loop.add_signal_handler(signal.SIGINT, _on_sigint)
         loop.add_signal_handler(signal.SIGTERM, stop.set)
 
         if getattr(args, 'now', False):
@@ -262,8 +280,12 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         scheduler.stop()
         scheduler_task.cancel()
         try:
-            await scheduler_task
-        except asyncio.CancelledError:
+            # Bounded wait — if scheduler is stuck in a long LLM call via
+            # asyncio.to_thread, the CancelledError propagates but the
+            # thread keeps running until its HTTP request finishes. Don't
+            # let cleanup block indefinitely.
+            await asyncio.wait_for(scheduler_task, timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         logging.info("Scheduler stopped.")
 
@@ -272,9 +294,12 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     except (KeyboardInterrupt, SystemExit):
         logging.info("Shutdown by user.")
     finally:
-        # Force kill any lingering LLM calls
-        import sys
-        sys.exit(0)
+        # os._exit bypasses asyncio.run's shutdown_default_executor, which
+        # otherwise waits for every ThreadPoolExecutor worker to finish —
+        # and an LLM HTTP call in a to_thread wrapper will stall that wait
+        # for minutes. sys.exit raises SystemExit which Python catches and
+        # still runs shutdown; os._exit terminates immediately.
+        os._exit(0)
 
 
 def cmd_review(args: argparse.Namespace) -> None:

@@ -652,30 +652,35 @@ async def run_intraday_monitor() -> str | None:
 
     # ── LLM VPA deep analysis for top actionable stocks ──
     # Code VPA does fast filtering; LLM VPA adds Anna Coulling narrative for user.
+    # Run all 3 deep analyses in PARALLEL.
     if actionable:
         try:
             from alpha_agents.tools.vpa import compute_vpa_with_llm
             report_lines.append("【量价深度分析】（Anna Coulling VPA, 仅对可操作标的前 3 只）")
-            for a in actionable[:3]:
+
+            async def _deep_vpa(a):
                 try:
-                    vpa_r = await asyncio.to_thread(
-                        compute_vpa_with_llm, a["code"], a["name"]
-                    )
-                    if vpa_r.get("ok") and vpa_r.get("llm_report"):
-                        verdict = vpa_r.get("llm_verdict", "?")
-                        conf = vpa_r.get("llm_confidence", 0)
-                        phase = vpa_r.get("llm_phase", "?")
-                        confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
-                        report_lines.append(
-                            f"\n▶ {a['code']} {a['name']} [{verdict} 信心{conf} {phase} {confirmed}]"
-                        )
-                        # Truncate report to key sections (skip full table to save space)
-                        llm_text = vpa_r["llm_report"]
-                        if len(llm_text) > 1500:
-                            llm_text = llm_text[:1500] + "\n...(完整报告请用 chat: vpa " + a["code"] + ")"
-                        report_lines.append(llm_text)
+                    return a, await asyncio.to_thread(compute_vpa_with_llm, a["code"], a["name"])
                 except Exception as e:
                     logger.debug("LLM VPA for %s failed: %s", a["code"], e)
+                    return a, None
+
+            deep_results = await asyncio.gather(*[_deep_vpa(a) for a in actionable[:3]])
+
+            for a, vpa_r in deep_results:
+                if not vpa_r or not vpa_r.get("ok") or not vpa_r.get("llm_report"):
+                    continue
+                verdict = vpa_r.get("llm_verdict", "?")
+                conf = vpa_r.get("llm_confidence", 0)
+                phase = vpa_r.get("llm_phase", "?")
+                confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
+                report_lines.append(
+                    f"\n▶ {a['code']} {a['name']} [{verdict} 信心{conf} {phase} {confirmed}]"
+                )
+                llm_text = vpa_r["llm_report"]
+                if len(llm_text) > 1500:
+                    llm_text = llm_text[:1500] + "\n...(完整报告请用 chat: vpa " + a["code"] + ")"
+                report_lines.append(llm_text)
             report_lines.append("")
         except Exception as e:
             logger.debug("LLM VPA section failed: %s", e)
@@ -869,12 +874,13 @@ async def _get_cause_analysis(context: str) -> str:
 
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, f"以下是刚检测到的市场异动，请按思维链路追因分析：\n\n{context}"),
-            timeout=60,  # More time — agent needs to call tools
+            Runner.run(agent, f"以下是刚检测到的市场异动，请按思维链路追因分析：\n\n{context}",
+                       max_turns=10),  # Limit tool call rounds to avoid runaway
+            timeout=90,
         )
         return result.final_output
     except asyncio.TimeoutError:
-        logger.warning("Cause analysis timed out (60s)")
+        logger.warning("Cause analysis timed out (90s)")
         return context
     except Exception as e:
         logger.warning("Cause analysis failed: %s", e)

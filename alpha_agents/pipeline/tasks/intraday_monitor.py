@@ -878,7 +878,20 @@ async def _get_cause_analysis(context: str) -> str:
                        max_turns=30),
             timeout=90,
         )
-        return result.final_output
+        output = result.final_output or ""
+
+        # Clean up LLM tool call tags that leak into output (LongCat compatibility)
+        import re as _re_clean
+        output = _re_clean.sub(r'</?longcat_tool_call>', '', output)
+        output = _re_clean.sub(r'</?tool_call>', '', output)
+        output = _re_clean.sub(r'\{"name":\s*"[^"]+",\s*"arguments":\s*\{[^}]*\}\}', '', output)
+        output = output.strip()
+
+        if not output or len(output) < 20:
+            logger.warning("Cause analysis returned empty/garbage, using fallback")
+            return context
+
+        return output
     except asyncio.TimeoutError:
         logger.warning("Cause analysis timed out (90s)")
         return context

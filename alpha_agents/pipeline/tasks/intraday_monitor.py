@@ -835,6 +835,7 @@ async def _get_cause_analysis(context: str) -> str:
     from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
     from alpha_agents.tools.registry import (
         web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data,
+        get_cls_telegraph, get_news,
     )
 
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
@@ -846,7 +847,9 @@ async def _get_cause_analysis(context: str) -> str:
             "## 思维链路（严格按步骤执行）\n\n"
             "1. **观察**：阅读传入的异动数据，识别核心异动（哪个板块、什么类型的资金异动）\n"
             "2. **追因**：\n"
-            "   - 调用 web_search 搜索相关板块/个股的最新新闻，寻找催化事件（政策、业绩、行业事件）\n"
+            "   - **优先**调用 get_cls_telegraph（财联社电报）搜索最新快讯，关键词用板块名或龙头股名\n"
+            "   - 如果财联社没有，调用 get_news（东方财富新闻）搜索\n"
+            "   - 如果国内源都没有，再调用 web_search 搜索（注意：web_search 对中文新闻效果有限）\n"
             "   - 调用 get_lhb_detail 查看龙虎榜，判断资金来源是机构还是游资\n"
             "   - 如果有明确的龙头股，调用 get_stock_fund_flow 查看主力资金方向\n"
             "   - 调用 get_sector_data 查看关联板块是否联动\n"
@@ -869,7 +872,7 @@ async def _get_cause_analysis(context: str) -> str:
             "- 每个工具最多调用一次，不要重复调用"
         ),
         model=model,
-        tools=[web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data],
+        tools=[get_cls_telegraph, get_news, web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data],
     )
 
     try:

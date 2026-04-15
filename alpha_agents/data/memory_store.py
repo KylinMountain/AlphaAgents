@@ -193,6 +193,30 @@ CREATE TABLE IF NOT EXISTS vpa_pending_signals (
 CREATE INDEX IF NOT EXISTS idx_vpa_signals_status ON vpa_pending_signals(status);
 CREATE INDEX IF NOT EXISTS idx_vpa_signals_code ON vpa_pending_signals(code);
 
+-- v2.5 (problem 7): Scenario layer — a Wyckoff story told by multiple
+-- signals together. Confirmation happens at scenario level (holistic price
+-- action + signal consensus), not per individual bar.
+CREATE TABLE IF NOT EXISTS vpa_scenarios (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,                       -- 股票名
+    scenario_name TEXT NOT NULL,     -- 如"终极派发"/"初期吸筹"
+    phase TEXT,                      -- 对应 Wyckoff 阶段
+    signal_names TEXT,               -- JSON array: 组成该 scenario 的底层信号名
+    confirmation_criteria TEXT,      -- scenario整体确认条件
+    denial_criteria TEXT,            -- scenario整体否定条件
+    status TEXT DEFAULT 'pending',   -- pending/confirmed/denied/expired
+    scenario_date TEXT NOT NULL,     -- 首次提出日期
+    resolved_date TEXT,
+    resolved_by TEXT,
+    expire_date TEXT,
+    source_analysis_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (source_analysis_id) REFERENCES vpa_analysis_history(id)
+);
+CREATE INDEX IF NOT EXISTS idx_vpa_scenarios_status ON vpa_scenarios(status);
+CREATE INDEX IF NOT EXISTS idx_vpa_scenarios_code ON vpa_scenarios(code);
+
 CREATE TABLE IF NOT EXISTS financial_cache (
     code TEXT PRIMARY KEY,
     data TEXT NOT NULL,          -- JSON blob from get_financial_data_fn
@@ -674,6 +698,104 @@ def expire_old_vpa_signals(today: str) -> int:
         conn = _get_conn()
         cur = conn.execute(
             "UPDATE vpa_pending_signals SET status = 'expired', resolved_date = ? "
+            "WHERE status = 'pending' AND expire_date < ?",
+            (today, today),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+# ── VPA Scenarios (problem 7: signal-group-level confirmation) ─────
+
+def save_vpa_scenario(code: str, name: str, scenario_name: str,
+                      phase: str, signal_names: list[str],
+                      confirmation: str, denial: str,
+                      scenario_date: str,
+                      source_analysis_id: int | None = None,
+                      expire_days: int = 10) -> int | None:
+    """Record a Wyckoff scenario hypothesis for later confirmation.
+
+    Scenarios are DEDUPLICATED on (code, scenario_name, status='pending') —
+    re-running VPA on the same day for the same stock that re-proposes the
+    same scenario is a no-op, not a duplicate row. Expiry defaults to 10
+    days (scenarios tell longer stories than per-bar signals).
+
+    Returns row id, or None if duplicate.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        expire = (_dt.strptime(scenario_date, "%Y-%m-%d") + _td(days=expire_days)).strftime("%Y-%m-%d")
+    except ValueError:
+        expire = scenario_date
+
+    with _write_lock:
+        conn = _get_conn()
+        # Dedup: same stock + same scenario_name still pending
+        existing = conn.execute(
+            "SELECT id FROM vpa_scenarios "
+            "WHERE code = ? AND scenario_name = ? AND status = 'pending'",
+            (code, scenario_name),
+        ).fetchone()
+        if existing:
+            return None
+        cur = conn.execute(
+            "INSERT INTO vpa_scenarios "
+            "(code, name, scenario_name, phase, signal_names, "
+            " confirmation_criteria, denial_criteria, scenario_date, "
+            " source_analysis_id, expire_date, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (code, name, scenario_name, phase,
+             json.dumps(signal_names, ensure_ascii=False),
+             confirmation, denial, scenario_date,
+             source_analysis_id, expire),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_pending_vpa_scenarios(code: str = "") -> list[dict]:
+    """Get pending scenarios. If code is given, filter to that code."""
+    conn = _get_conn()
+    if code:
+        rows = conn.execute(
+            "SELECT * FROM vpa_scenarios WHERE code = ? AND status = 'pending' "
+            "ORDER BY scenario_date DESC",
+            (code,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM vpa_scenarios WHERE status = 'pending' "
+            "ORDER BY scenario_date DESC",
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["signal_names"] = json.loads(d.get("signal_names") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            d["signal_names"] = []
+        out.append(d)
+    return out
+
+
+def resolve_vpa_scenario(scenario_id: int, status: str, resolved_by: str = "") -> None:
+    """Mark a scenario as confirmed/denied/expired."""
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE vpa_scenarios SET status = ?, resolved_date = date('now'), "
+            "resolved_by = ? WHERE id = ?",
+            (status, resolved_by, scenario_id),
+        )
+        conn.commit()
+
+
+def expire_old_vpa_scenarios(today: str) -> int:
+    """Expire scenarios past their expire_date. Returns count expired."""
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE vpa_scenarios SET status = 'expired', resolved_date = ? "
             "WHERE status = 'pending' AND expire_date < ?",
             (today, today),
         )

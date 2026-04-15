@@ -193,6 +193,31 @@ def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True) -> Opt
     return df if len(df) >= 25 else None
 
 
+def _load_ohlcv_60min(code: str, bars: int = 80) -> Optional[pd.DataFrame]:
+    """Fetch 60-min OHLCV bars for multi-timeframe VPA (Anna Coulling problem 5).
+
+    Daily bars compress A-share intraday info (±10% caps make daily extremes
+    common). 60-min bars let VPA see whether insiders are accumulating
+    throughout the day or only at the open/close, whether gaps up/down have
+    follow-through, etc.
+
+    Returns None if data unavailable or too few bars.
+    """
+    try:
+        from alpha_agents.data.market_data import get_stock_minute_history
+        rows = get_stock_minute_history(code, period="60", bars=bars)
+    except Exception as e:
+        logger.debug("60-min data for %s failed: %s", code, e)
+        return None
+    if not rows or len(rows) < 25:
+        return None
+    df = pd.DataFrame(rows)
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"]).reset_index(drop=True)
+    return df if len(df) >= 25 else None
+
+
 def _compute_derived(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """Compute per-bar derived metrics: volume ratio, close position, spread, shadows."""
     df = df.copy()
@@ -562,6 +587,104 @@ def _volume_regime(df: pd.DataFrame) -> dict:
     return {"regime": regime, "ratio_5d_vs_20d": round(float(ratio), 2)}
 
 
+def _detect_test_phase(df: pd.DataFrame) -> dict:
+    """Detect Wyckoff supply/demand tests in the last 10 bars.
+
+    Anna Coulling chapter 5: after accumulation/distribution, insiders run
+    a TEST to verify the opposite side is exhausted:
+
+      Supply test (after accumulation):
+        - Recent up-move (say bar T-7 to T-4, price rose Y%)
+        - Then a pullback (T-3 to T-0, price fell X% where X < Y)
+        - During pullback, volume < up-move volume × 0.7
+        - Close holds above the up-move's start → supply IS exhausted, bullish
+
+      Demand test (after distribution):
+        - Recent down-move
+        - Then a rally
+        - Rally volume < down-move volume × 0.7
+        - Close fails to recover → demand IS exhausted, bearish
+
+    This is distinct from no_supply/no_demand single-bar detection: tests
+    are multi-bar SEQUENCES that confirm or deny the preceding phase.
+
+    Returns {"test_status": str, "test_note": str, "bullish": bool | None}
+    or empty dict if no test pattern detected.
+    """
+    if len(df) < 12:
+        return {}
+
+    recent = df.tail(10).reset_index(drop=True)
+    if "volume" not in recent.columns or "close" not in recent.columns:
+        return {}
+
+    # Split into two halves: earlier (impulse move) vs later (test move)
+    mid = len(recent) // 2
+    impulse = recent.iloc[:mid]
+    test = recent.iloc[mid:]
+
+    impulse_price_chg = (impulse["close"].iloc[-1] - impulse["close"].iloc[0]) / impulse["close"].iloc[0]
+    test_price_chg = (test["close"].iloc[-1] - test["close"].iloc[0]) / test["close"].iloc[0]
+
+    impulse_vol = float(impulse["volume"].mean())
+    test_vol = float(test["volume"].mean())
+    if impulse_vol <= 0:
+        return {}
+    vol_ratio = test_vol / impulse_vol
+
+    # Supply test: impulse up, test down, test volume shrunk, test didn't break below impulse start
+    if (impulse_price_chg > 0.03 and test_price_chg < 0
+            and vol_ratio < 0.7
+            and test["close"].iloc[-1] > impulse["close"].iloc[0] * 0.98):
+        return {
+            "test_status": "supply_test",
+            "bullish": True,
+            "test_note": (
+                f"疑似 supply test：前段 {mid}根 bar 上涨 {impulse_price_chg*100:.1f}%，"
+                f"后段回抽 {test_price_chg*100:+.1f}% 但量能缩至 {vol_ratio*100:.0f}%，"
+                f"支撑未破——卖压可能已被吸尽（Anna Coulling：低量测试 = 好消息）"
+            ),
+        }
+
+    # Demand test: impulse down, test up, test volume shrunk, test didn't recover impulse start
+    if (impulse_price_chg < -0.03 and test_price_chg > 0
+            and vol_ratio < 0.7
+            and test["close"].iloc[-1] < impulse["close"].iloc[0] * 1.02):
+        return {
+            "test_status": "demand_test",
+            "bullish": False,
+            "test_note": (
+                f"疑似 demand test：前段 {mid}根 bar 下跌 {impulse_price_chg*100:.1f}%，"
+                f"后段反弹 {test_price_chg*100:+.1f}% 但量能缩至 {vol_ratio*100:.0f}%，"
+                f"阻力未破——买盘可能已被耗尽（Anna Coulling：低量反弹 = 坏消息）"
+            ),
+        }
+
+    # Failed supply test: pullback with HIGH volume = accumulation NOT complete
+    if (impulse_price_chg > 0.03 and test_price_chg < -0.02 and vol_ratio > 1.2):
+        return {
+            "test_status": "failed_supply_test",
+            "bullish": False,
+            "test_note": (
+                f"供给测试失败：前段上涨 {impulse_price_chg*100:.1f}% 后回抽放量至 {vol_ratio*100:.0f}%，"
+                f"卖压仍强——吸筹未完成，需继续震仓"
+            ),
+        }
+
+    # Failed demand test: rally with HIGH volume = distribution NOT complete
+    if (impulse_price_chg < -0.03 and test_price_chg > 0.02 and vol_ratio > 1.2):
+        return {
+            "test_status": "failed_demand_test",
+            "bullish": True,
+            "test_note": (
+                f"需求测试失败：前段下跌 {impulse_price_chg*100:.1f}% 后反弹放量至 {vol_ratio*100:.0f}%，"
+                f"买盘仍强——派发未完成，需继续抛售"
+            ),
+        }
+
+    return {}
+
+
 def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict:
     """Compute structural context for LLM: support/resistance, consolidation, trend.
 
@@ -738,6 +861,16 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
         except Exception:
             pass  # Best-effort signal — don't fail VPA if index data unavailable
 
+    # ── Problem 4: Supply/Demand test detection (Wyckoff phase 2 & 4) ──
+    # After吸筹, 测试 supply is exhausted. After派发, 测试 demand is exhausted.
+    # Multi-bar sequences, NOT single-bar patterns.
+    test_result = _detect_test_phase(df)
+    if test_result:
+        ctx["test_status"] = test_result.get("test_status", "")
+        ctx["test_note"] = test_result.get("test_note", "")
+        if test_result.get("bullish") is not None:
+            ctx["test_bullish"] = test_result["bullish"]
+
     # ── P2.1 Phase sequence (past 20 days, daily heuristic guess) ──
     # Anna Coulling teaches phase IDENTIFICATION as a process of multiple
     # bars together telling a story. Single-bar pattern matching can't tell
@@ -826,6 +959,9 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
         # P2.1: 20-day phase sequence (heuristic, LLM should refine)
         if "phase_sequence" in ctx:
             lines.append(f"- **20日 phase 序列（启发式，仅供参考）**: {ctx['phase_sequence']}")
+        # 问题4: Wyckoff supply/demand test detection
+        if "test_note" in ctx:
+            lines.append(f"- **Wyckoff 测试**: {ctx['test_note']}")
         lines.append("")
 
     # ── OBV + volume regime ──
@@ -878,6 +1014,58 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
             lines.append(f"- [{marker}] **{p['label']}**（{p['pattern']}, 强度{p['strength']:+d}）: {p['detail']}")
     else:
         lines.append("- 近期无显著量价异常模式")
+
+    return "\n".join(lines)
+
+
+def _format_60min_section(df_60min: pd.DataFrame, patterns_60min: list[dict]) -> str:
+    """Format 60-min VPA data as a supplemental section for the LLM.
+
+    Daily bars tell us TREND (problem 5 from Anna Coulling review). 60-min
+    bars tell us ENTRY TIMING and intraday accumulation/distribution. A-share
+    ±10% caps compress daily extremes, so hourly volume-price matters more
+    than in unrestricted markets.
+
+    Returns a markdown section, or empty string if no useful data.
+    """
+    if df_60min is None or len(df_60min) < 10:
+        return ""
+
+    lines = ["\n### 60分钟级别量价上下文（用于入场时机判断，日线负责趋势）\n"]
+
+    # Show last 12 60-min bars (≈3 trading days of intraday action)
+    recent = df_60min.tail(12).reset_index(drop=True)
+    lines.append("| 时间 | 类型 | 涨跌幅 | 收盘位置 | 量比 | 量价关系 |")
+    lines.append("|------|------|--------|----------|------|----------|")
+    for _, row in recent.iterrows():
+        dt = str(row.get("date", ""))[-8:-3] if len(str(row.get("date", ""))) >= 8 else str(row.get("date", ""))
+        # Need change_pct — compute if missing
+        pct = (row.get("pct_change", 0) * 100) if pd.notna(row.get("pct_change", 0)) else 0
+        spread = row.get("bar_spread", 0)
+        cp = row.get("close_position", 0.5) or 0.5
+        cp_label = "高" if cp > 0.7 else ("低" if cp < 0.3 else "中")
+        vol_r = row.get("volume_ratio", 1) or 1
+        vr_label = f"{vol_r:.1f}"
+        if vol_r > 1.8:
+            vr_label += "(放量)"
+        elif vol_r < 0.6:
+            vr_label += "(缩量)"
+        bar_type = row.get("bar_type", "")
+        vp_harmony = row.get("vp_harmony", "")
+        lines.append(
+            f"| {dt} | {bar_type} | {pct:+.2f}% | {cp_label}({cp:.2f}) | {vr_label} | {vp_harmony} |"
+        )
+
+    # 60-min patterns
+    lines.append("\n**60分钟模式**:")
+    if patterns_60min:
+        for p in patterns_60min:
+            marker = "✓" if p["bullish"] else "✗"
+            lines.append(f"- [{marker}] {p['label']}: {p['detail']}")
+    else:
+        lines.append("- 近12根60分钟bar无显著异常模式")
+
+    lines.append("\n> 使用指南：60分钟 bar 揭示当日盘中资金行为。如日线看多但60分钟显示 shooting_star，说明入场时机未到；日线横盘但60分钟连续缩量 no_supply，说明底部可能已到。")
 
     return "\n".join(lines)
 
@@ -1172,7 +1360,7 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 
 ### 七、机读摘要（格式固定，不可省略，不可改动键名）
 报告末尾追加（JSON 必须合法，用双引号）：
-<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}]} -->
+<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}], "scenarios": [{"name": "初期吸筹", "phase": "吸筹", "signal_names": ["锤头线", "放量止跌"], "confirmation": "scenario级的确认条件（放量突破26.5）", "denial": "scenario级的否定条件（跌破23.0支撑）", "status": "pending"}]} -->
 
 字段说明：
 - direction: 看多 / 偏多 / 中性 / 偏空 / 看空
@@ -1185,13 +1373,24 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
   - 看空/偏空: 跌破后的目标跌幅区间
   - 中性: 可省略 target_low/target_high
   - 数值是绝对价格（元），不是百分比
-- signals: 数组，每个信号一个对象：
+- signals: 数组，每个信号一个对象（单根K线或短期模式）：
   - name: 信号名称（如"射击十字星"、"放量突破"）
   - date: 信号出现日期
   - confirmed: true/false
   - by: 确认该信号的K线描述（仅 confirmed=true 时）
   - need: 确认所需条件（仅 confirmed=false 时）
   - deny: 否定该信号的条件（仅 confirmed=false 时）
+- scenarios: 数组，每个 scenario 是一个完整 Wyckoff 故事（跨多根K线）：
+  - 与 signals 的关系：**signals 是证据，scenarios 是假设**。例如 signals=[射击十字星,
+    放量不涨, 高实体低量] 共同支持 scenario="终极派发假设"。一个 scenario 被**整体**
+    确认或否定，而不是 per-signal。这是 Anna Coulling "耐心" 理念的更高层次体现。
+  - name: scenario 名称（"初期吸筹" / "终极派发" / "重新吸筹" / "假突破陷阱" / etc.）
+  - phase: 对应的 Wyckoff 阶段
+  - signal_names: 支持该 scenario 的底层 signal 名称列表（必须来自本报告 signals 数组）
+  - confirmation: scenario **整体**确认的条件（多个 signal 综合 + 价格行为，不是单 K 线）
+  - denial: scenario **整体**否定的条件
+  - status: pending / confirmed / denied (首次提出=pending，后续分析可以更新)
+  - 如果本次分析没有足够证据形成 scenario，scenarios 可以为空数组 []
 """
 
 
@@ -1215,6 +1414,21 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
     vr = _volume_regime(df)
     text = _format_text(code, name, df, patterns, window=window)
 
+    # Step 1b: 60-min VPA (multi-timeframe, problem 5). Best-effort —
+    # network issues to sina should not block the daily analysis.
+    try:
+        df_60min = _load_ohlcv_60min(code, bars=80)
+        if df_60min is not None and len(df_60min) >= 20:
+            # Use a smaller window (12 bars ≈ 3 trading days at 60-min) for the
+            # baseline — matches the human intuition of "recent" at this tf.
+            df_60min = _compute_derived(df_60min, window=12)
+            patterns_60min = _detect_patterns(df_60min)
+            section_60 = _format_60min_section(df_60min, patterns_60min)
+            if section_60:
+                text = text + section_60
+    except Exception as e:
+        logger.debug("60-min VPA for %s failed (non-fatal): %s", code, e)
+
     # Step 2: Fetch previous analysis for context continuity
     previous_report = ""
     try:
@@ -1232,7 +1446,9 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
     # Step 4: Save analysis to history
     import time as _time
     try:
-        from alpha_agents.data.memory_store import save_vpa_analysis, save_vpa_signal
+        from alpha_agents.data.memory_store import (
+            save_vpa_analysis, save_vpa_signal, save_vpa_scenario,
+        )
         analysis_id = save_vpa_analysis(
             code=code, name=name,
             analysis_date=_time.strftime("%Y-%m-%d"),
@@ -1260,6 +1476,25 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
                     expected_denial=sig.get("deny", ""),
                     source_analysis_id=analysis_id,
                 )
+
+        # Problem 7: Auto-create pending scenarios from VERDICT
+        # Scenarios take LONGER to play out than signals (10 day default expiry
+        # vs 3 for signals) — they describe a complete Wyckoff story.
+        scenarios = llm_result.get("scenarios", [])
+        for sc in scenarios:
+            status = sc.get("status", "pending")
+            if status != "pending":
+                continue  # Already confirmed/denied by LLM — no need to track
+            save_vpa_scenario(
+                code=code, name=name,
+                scenario_name=sc.get("name", "unknown"),
+                phase=sc.get("phase", ""),
+                signal_names=sc.get("signal_names", []),
+                confirmation=sc.get("confirmation", ""),
+                denial=sc.get("denial", ""),
+                scenario_date=_time.strftime("%Y-%m-%d"),
+                source_analysis_id=analysis_id,
+            )
     except Exception as e:
         logger.debug("Failed to save VPA analysis: %s", e)
 
@@ -1278,6 +1513,7 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
         "llm_reason": llm_result.get("reason", ""),
         "llm_target_low": llm_result.get("target_low"),
         "llm_target_high": llm_result.get("target_high"),
+        "llm_scenarios": llm_result.get("scenarios", []),
         "text": text,
     }
 
@@ -1317,6 +1553,7 @@ def _extract_verdict(report: str) -> dict:
         data.setdefault("phase", "")
         data.setdefault("reason", "")
         data.setdefault("signals", [])
+        data.setdefault("scenarios", [])
 
         # P0.2 Target zone — optional. Coerce to float or None.
         for k in ("target_low", "target_high"):
@@ -1329,6 +1566,32 @@ def _extract_verdict(report: str) -> dict:
                 except (ValueError, TypeError):
                     data[k] = None
 
+        # Problem 7 scenarios: defensive normalization. Each must have name
+        # and at least one signal_name — otherwise it's just a stray fragment
+        # from the LLM and we drop it.
+        scenarios = data.get("scenarios", [])
+        if not isinstance(scenarios, list):
+            scenarios = []
+        normalized_scenarios = []
+        for sc in scenarios:
+            if not isinstance(sc, dict):
+                continue
+            name = sc.get("name", "").strip() if isinstance(sc.get("name"), str) else ""
+            if not name:
+                continue
+            signal_names = sc.get("signal_names", []) or []
+            if not isinstance(signal_names, list):
+                signal_names = [str(signal_names)]
+            normalized_scenarios.append({
+                "name": name,
+                "phase": sc.get("phase", "") or "",
+                "signal_names": [str(s) for s in signal_names],
+                "confirmation": sc.get("confirmation", "") or "",
+                "denial": sc.get("denial", "") or "",
+                "status": sc.get("status", "pending") or "pending",
+            })
+        data["scenarios"] = normalized_scenarios
+
         # Derive confirmed from signals: true only if ALL signals confirmed
         signals = data.get("signals", [])
         if signals:
@@ -1340,7 +1603,7 @@ def _extract_verdict(report: str) -> dict:
 
     return {"direction": "中性", "confidence": 0.0, "phase": "", "confirmed": False,
             "signals": [], "reason": "verdict_parse_failed",
-            "target_low": None, "target_high": None}
+            "target_low": None, "target_high": None, "scenarios": []}
 
 
 def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict:
@@ -1412,6 +1675,7 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
             "reason": verdict_data.get("reason", ""),
             "target_low": verdict_data.get("target_low"),
             "target_high": verdict_data.get("target_high"),
+            "scenarios": verdict_data.get("scenarios", []),
         }
     except Exception as e:
         logger.debug("LLM VPA failed for %s: %s", code, e)

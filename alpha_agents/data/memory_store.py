@@ -190,6 +190,14 @@ CREATE TABLE IF NOT EXISTS vpa_pending_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_vpa_signals_status ON vpa_pending_signals(status);
 CREATE INDEX IF NOT EXISTS idx_vpa_signals_code ON vpa_pending_signals(code);
+
+CREATE TABLE IF NOT EXISTS financial_cache (
+    code TEXT PRIMARY KEY,
+    data TEXT NOT NULL,          -- JSON blob from get_financial_data_fn
+    report_date TEXT,            -- 最新报告日 (e.g. "20241231")
+    cached_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_financial_cached_at ON financial_cache(cached_at);
 """
 
 _local = threading.local()
@@ -648,3 +656,50 @@ def expire_old_vpa_signals(today: str) -> int:
         )
         conn.commit()
         return cur.rowcount
+
+
+# ── Financial data cache ────────────────────────────────────
+# Quarterly financials rarely change — cache for 30 days to avoid
+# hammering akshare on every cross-validation run.
+
+def get_cached_financials(code: str, max_age_days: int = 30) -> dict | None:
+    """Return cached financial data if fresh, else None.
+
+    Args:
+        code: 6-digit stock code
+        max_age_days: TTL in days. Default 30 covers a quarterly cycle;
+            new quarterly reports should prompt manual cache invalidation
+            or natural expiry.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT data, cached_at FROM financial_cache WHERE code = ?", (code,)
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        cached_at = datetime.fromisoformat(row["cached_at"])
+    except (ValueError, TypeError):
+        return None
+    age_days = (datetime.now() - cached_at).days
+    if age_days > max_age_days:
+        return None
+    try:
+        return json.loads(row["data"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def save_cached_financials(code: str, data: dict) -> None:
+    """Save financial data to cache. Overwrites existing entry."""
+    with _write_lock:
+        conn = _get_conn()
+        report_date = data.get("report_date", "") if isinstance(data, dict) else ""
+        conn.execute(
+            "INSERT OR REPLACE INTO financial_cache (code, data, report_date, cached_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (code, json.dumps(data, ensure_ascii=False), report_date),
+        )
+        conn.commit()
+
+

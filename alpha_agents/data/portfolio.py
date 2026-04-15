@@ -74,6 +74,36 @@ def get_theme_exposure(theme: str) -> float:
 
 # ── Pending Orders (挂单) ───────────────────────────────────
 
+def get_vpa_target_for_code(code: str) -> float | None:
+    """Look up the latest VPA-derived target price (take-profit) for a code.
+
+    Reads vpa_analysis_history.target_low/target_high and returns their
+    midpoint — a balance between conservative (target_low: first profit
+    pause) and stretch (target_high: full Wyckoff projection).
+
+    Returns None if no recent VPA target zone is available. Callers should
+    treat this as best-effort; positions without a target_price still work
+    with trailing-stop only.
+    """
+    try:
+        from alpha_agents.data.memory_store import get_latest_vpa_analysis
+        vpa = get_latest_vpa_analysis(code)
+        if not vpa:
+            return None
+        tl = vpa.get("target_low")
+        th = vpa.get("target_high")
+        if tl and th and tl > 0 and th > 0:
+            return round((tl + th) / 2, 2)
+        # Partial data: use whichever is present
+        if th and th > 0:
+            return float(th)
+        if tl and tl > 0:
+            return float(tl)
+        return None
+    except Exception:
+        return None
+
+
 def create_pending_order(
     *,
     code: str,
@@ -378,16 +408,54 @@ def _is_phase_bearish() -> tuple[bool, str]:
         return False, ""
 
 
+def _vpa_phase_action(phase: str, verdict: str) -> tuple[float | None, str]:
+    """Map VPA phase to a stop-tightening factor (Anna Coulling phase priority).
+
+    Phase is more decisive than verdict in Wyckoff theory:
+      - 派发 (initial/middle): insiders are selling → tighten aggressively (96%)
+      - 派发尾声 / 抛售高峰: terminal exhaustion → DO NOT tighten
+        (these are reversal/buy signals, not sell signals — even if verdict
+         appears bearish because the panic isn't done)
+      - 下跌: trend in progress → tighten moderately (97%)
+      - 吸筹 / 拉升: bullish phases → never tighten on phase alone
+      - 震荡: ambiguous → defer to verdict-based logic (return None)
+      - 买入高峰: bottom reversal → DO NOT tighten
+
+    Returns (factor, reason) or (None, "") if phase is non-decisive.
+    factor is what to multiply current price by; lower = tighter stop.
+    """
+    if not phase:
+        return None, ""
+    # Order matters — check more specific labels first
+    if "买入高峰" in phase:
+        return None, ""  # Strong bottom reversal; do not tighten
+    if "抛售高峰" in phase or "派发尾声" in phase:
+        return None, ""  # Terminal exhaustion; possible reversal up
+    if "派发" in phase:
+        # Catches "派发", "派发初期", "派发中期"
+        return 0.96, f"VPA派发({phase})"
+    if "下跌" in phase:
+        return 0.97, f"VPA下跌phase"
+    if "吸筹" in phase or "拉升" in phase:
+        return None, ""  # Bullish phases — let trailing stop work normally
+    # 震荡 or unrecognized — fall through to verdict-based logic
+    return None, ""
+
+
 def _check_bearish_signals(
     pos: dict, price: float, phase_bearish: bool, phase_name: str
 ) -> tuple[float, list[str]]:
     """Detect bearish signals on a position and compute a tightened stop.
 
-    Implements V2 principle #2 (资金行为优先) on the sell side. Four signals:
-      1. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
-      2. P1 VPA：派发phase或看空verdict → 97% of current price
-      3. P2 情绪周期：分歧/退潮 phase → 97% of current price
-      4. P3 主线速率：2日内强度下降≥3 → 98% of current price
+    Implements V2 principle #2 (资金行为优先) on the sell side. Five signals,
+    in priority order:
+      1. **VPA phase (NEW v2.5)**: Wyckoff phase decides direction first.
+         派发 → 96%; 下跌 → 97%; 派发尾声/抛售高峰/吸筹/拉升 → DO NOT tighten.
+         Only fall through to verdict if phase is ambiguous (震荡).
+      2. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
+      3. P1 VPA verdict (fallback when phase didn't decide)
+      4. P2 情绪周期：分歧/退潮 phase → 97% of current price
+      5. P3 主线速率：2日内强度下降≥3 → 98% of current price
 
     Returns (tightest_stop, reasons). tightest_stop is 0 if no signal.
     The caller integrates this with trailing stop logic (take the max).
@@ -410,7 +478,41 @@ def _check_bearish_signals(
             tightest_stop = candidate
         reasons.append(label)
 
-    # ── Signal 1: 资金流 ──
+    # ── Signal 1 (highest priority): VPA phase + verdict ──
+    # Anna Coulling: phase IS the direction. A "中性" verdict in 派发 phase is
+    # actually a sell signal — insiders are unwinding even if the bar-by-bar
+    # indicators look ambiguous. Conversely, "偏空" verdict in 抛售高峰 is a
+    # buy signal — the panic isn't done but the bottom is forming.
+    try:
+        from alpha_agents.data.memory_store import get_latest_vpa_analysis
+        vpa = get_latest_vpa_analysis(code)
+        if vpa:
+            verdict = vpa.get("verdict", "") or ""
+            phase = vpa.get("phase", "") or ""
+            analysis_date = vpa.get("analysis_date", "")
+            analysis_fresh = False
+            try:
+                a_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
+                now_dt = datetime.now()
+                analysis_fresh = (now_dt - a_dt).days <= 3
+            except (ValueError, TypeError):
+                pass
+            if analysis_fresh:
+                # Phase first
+                phase_factor, phase_reason = _vpa_phase_action(phase, verdict)
+                if phase_factor is not None:
+                    _apply(phase_factor, phase_reason)
+                else:
+                    # Phase didn't decide (震荡 or 吸筹/拉升 or terminal phase) —
+                    # fall back to verdict-based check, but ONLY in 震荡.
+                    # In 吸筹/拉升 or terminal phases, even bearish verdict is
+                    # likely noise — skip.
+                    if (not phase or "震荡" in phase) and verdict in ("看空", "偏空"):
+                        _apply(0.97, f"VPA{verdict}(震荡)")
+    except Exception as e:
+        logger.debug("VPA phase check failed for %s: %s", code, e)
+
+    # ── Signal 2: 资金流 ──
     try:
         from alpha_agents.tools.fund_flow import get_stock_fund_flow_fn
         ff = _json.loads(get_stock_fund_flow_fn(code))
@@ -421,33 +523,6 @@ def _check_bearish_signals(
             _apply(0.97, f"主力{out_days}日净流出")
     except Exception as e:
         logger.debug("Fund flow check failed for %s: %s", code, e)
-
-    # ── Signal 2: VPA 派发/看空 ──
-    # Uses cached analysis (from morning/intraday scans), not on-the-fly LLM.
-    # If no recent analysis, this signal is silent — not a default-pass.
-    try:
-        from alpha_agents.data.memory_store import get_latest_vpa_analysis
-        vpa = get_latest_vpa_analysis(code)
-        if vpa:
-            verdict = vpa.get("verdict", "") or ""
-            phase = vpa.get("phase", "") or ""
-            # Only recent analyses matter (within 3 days)
-            analysis_date = vpa.get("analysis_date", "")
-            analysis_fresh = False
-            try:
-                a_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
-                now_dt = datetime.now()
-                analysis_fresh = (now_dt - a_dt).days <= 3
-            except (ValueError, TypeError):
-                pass
-            if analysis_fresh:
-                if verdict in ("看空", "偏空"):
-                    _apply(0.97, f"VPA{verdict}")
-                elif "派发" in phase and "尾声" not in phase:
-                    # 派发尾声往往是抛售高峰→反转，不算纯看空信号
-                    _apply(0.97, f"VPA派发({phase})")
-    except Exception as e:
-        logger.debug("VPA check failed for %s: %s", code, e)
 
     # ── Signal 3: 情绪周期 分歧/退潮 ──
     if phase_bearish:

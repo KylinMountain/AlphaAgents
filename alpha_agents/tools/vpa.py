@@ -562,11 +562,16 @@ def _volume_regime(df: pd.DataFrame) -> dict:
     return {"regime": regime, "ratio_5d_vs_20d": round(float(ratio), 2)}
 
 
-def _compute_context(df: pd.DataFrame, window: int = 20) -> dict:
+def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict:
     """Compute structural context for LLM: support/resistance, consolidation, trend.
 
     This gives LLM the "where are we" information that Anna Coulling's
     three-step analysis (micro → macro → global) requires.
+
+    Args:
+        df: OHLCV dataframe
+        window: lookback window (default 20)
+        code: stock code (used for relative strength on down days)
     """
     ctx = {}
     if len(df) < window:
@@ -608,6 +613,28 @@ def _compute_context(df: pd.DataFrame, window: int = 20) -> dict:
         else:
             ctx["consolidation"] = False
             ctx["consolidation_note"] = f"未检测到整理区间（近10日波动率{vol_10d*100:.2f}% vs 20日{vol_20d*100:.2f}%）"
+
+    # ── P0.1 Consolidation DURATION (Anna Coulling 因果定律 — 量化版) ──
+    # 静态波动率检测只告诉是/否，但因果定律的关键是"多久"。这里数出连续多少
+    # 日 close 在 20 日 median ±5% 区间内——8 天和 80 天的整理含义截然不同。
+    median_n = float(closes.tail(window).median())
+    consolidation_days = 0
+    if median_n > 0:
+        for i in range(len(closes) - 1, -1, -1):
+            c = float(closes.iloc[i])
+            if abs(c - median_n) / median_n <= 0.05:
+                consolidation_days += 1
+            else:
+                break
+    ctx["consolidation_days"] = consolidation_days
+    if consolidation_days >= 30:
+        ctx["consolidation_strength"] = f"长期整理 ({consolidation_days}日)，蓄势充分，突破后空间大"
+    elif consolidation_days >= 15:
+        ctx["consolidation_strength"] = f"中期整理 ({consolidation_days}日)，蓄势中等"
+    elif consolidation_days >= 7:
+        ctx["consolidation_strength"] = f"短期整理 ({consolidation_days}日)"
+    else:
+        ctx["consolidation_strength"] = f"未形成整理 ({consolidation_days}日)"
 
     # ── Trend strength (10-day, 20-day) ──
     if len(closes) >= 20:
@@ -655,6 +682,112 @@ def _compute_context(df: pd.DataFrame, window: int = 20) -> dict:
         ctx["high_5d"] = round(float(highs.tail(5).max()), 2)
         ctx["low_5d"] = round(float(lows.tail(5).min()), 2)
 
+    # ── P1.2 Relative strength on market down days ──
+    # Anna Coulling: stocks accumulated by insiders show comparative strength
+    # during market weakness — they refuse to fall when everything else does.
+    # Compare stock daily change_pct vs market on days where market < -0.5%.
+    # Need stock to have a 'date' column so we can align with market index.
+    if "date" in df.columns and len(df) >= 10:
+        try:
+            from alpha_agents.data.market_data import get_market_index_history
+            idx_rows = get_market_index_history("sh000001", days=window + 5)
+            if idx_rows:
+                # Build market change_pct lookup
+                mkt = {r["date"]: r["change_pct"] for r in idx_rows}
+                # Stock change_pct (already in df.pct_change column)
+                stock_pcts = []
+                mkt_pcts = []
+                for _, row in df.tail(window).iterrows():
+                    d = str(row.get("date", ""))
+                    if d in mkt:
+                        stock_pct = row.get("pct_change", 0)
+                        if pd.notna(stock_pct):
+                            stock_pcts.append(float(stock_pct) * 100)
+                            mkt_pcts.append(mkt[d])
+                # Filter to market down days (< -0.5%)
+                down_day_stock_pcts = [
+                    s for s, m in zip(stock_pcts, mkt_pcts) if m < -0.5
+                ]
+                down_day_mkt_pcts = [m for m in mkt_pcts if m < -0.5]
+                if down_day_stock_pcts:
+                    avg_stock = sum(down_day_stock_pcts) / len(down_day_stock_pcts)
+                    avg_mkt = sum(down_day_mkt_pcts) / len(down_day_mkt_pcts)
+                    excess = avg_stock - avg_mkt  # positive = strong, outperforms
+                    ctx["down_day_count"] = len(down_day_stock_pcts)
+                    ctx["down_day_stock_avg_pct"] = round(avg_stock, 2)
+                    ctx["down_day_mkt_avg_pct"] = round(avg_mkt, 2)
+                    ctx["down_day_excess_pct"] = round(excess, 2)
+                    if excess > 1.5:
+                        ctx["relative_strength_label"] = (
+                            f"显著强于市场（市场跌时本股票多涨{excess:+.2f}%，机构疑似在接货）"
+                        )
+                    elif excess > 0.5:
+                        ctx["relative_strength_label"] = (
+                            f"略强于市场（多{excess:+.2f}%）"
+                        )
+                    elif excess < -1.5:
+                        ctx["relative_strength_label"] = (
+                            f"显著弱于市场（市场跌时本股票还多跌{abs(excess):.2f}%，可能被抛售）"
+                        )
+                    elif excess < -0.5:
+                        ctx["relative_strength_label"] = (
+                            f"略弱于市场（{excess:+.2f}%）"
+                        )
+                    else:
+                        ctx["relative_strength_label"] = "与市场同步"
+        except Exception:
+            pass  # Best-effort signal — don't fail VPA if index data unavailable
+
+    # ── P2.1 Phase sequence (past 20 days, daily heuristic guess) ──
+    # Anna Coulling teaches phase IDENTIFICATION as a process of multiple
+    # bars together telling a story. Single-bar pattern matching can't tell
+    # 吸筹 from 派发 reliably. Show the LLM a 20-day timeline of cheap
+    # heuristic phase guesses so it sees the evolution, not just snapshot.
+    #
+    # Heuristic per bar (NOT a verdict — just suggestive labels for LLM):
+    #   - High position (>70%) + 放量横盘     → 派发?
+    #   - Low position  (<30%) + 缩量横盘     → 吸筹?
+    #   - High position + 放量上涨            → 拉升
+    #   - Low position  + 放量下跌            → 下跌
+    #   - 中位 + 缩量                          → 震荡
+    if len(df) >= window:
+        seq = []
+        recent = df.tail(window)
+        # Use 20-day high/low for position, not full df (more local context)
+        local_high = float(highs.tail(window).max())
+        local_low = float(lows.tail(window).min())
+        local_range = local_high - local_low if local_high > local_low else 1
+        for _, row in recent.iterrows():
+            c = float(row.get("close", 0))
+            pos = (c - local_low) / local_range if local_range > 0 else 0.5
+            vr = float(row.get("volume_ratio", 1) or 1)
+            pct = float(row.get("pct_change", 0) or 0)
+            phase = "?"
+            if pos > 0.7 and vr > 1.3 and abs(pct) < 0.015:
+                phase = "派发?"  # high + volume + flat
+            elif pos > 0.7 and vr > 1.3 and pct > 0.02:
+                phase = "拉升"
+            elif pos < 0.3 and vr < 0.8 and abs(pct) < 0.015:
+                phase = "吸筹?"  # low + low volume + flat
+            elif pos < 0.3 and vr > 1.3 and pct < -0.02:
+                phase = "下跌"
+            elif vr < 0.7:
+                phase = "缩量"
+            else:
+                phase = "震荡"
+            seq.append(phase)
+        # Compress consecutive duplicates: ['吸筹?','吸筹?','震荡'] → ['吸筹?(2)','震荡']
+        compressed = []
+        for p in seq:
+            if compressed and compressed[-1].split("(")[0] == p:
+                base = compressed[-1].split("(")[0]
+                count_str = compressed[-1].split("(")[1].rstrip(")") if "(" in compressed[-1] else "1"
+                count = int(count_str) + 1
+                compressed[-1] = f"{base}({count})"
+            else:
+                compressed.append(p)
+        ctx["phase_sequence"] = " → ".join(compressed)
+
     return ctx
 
 
@@ -667,7 +800,7 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
     lines = [f"## {code} {name} VPA 预计算数据（基于 {window} 日均量基准）\n"]
 
     # ── Structural context (for Anna Coulling's three-step analysis) ──
-    ctx = _compute_context(df, window=window)
+    ctx = _compute_context(df, window=window, code=code)
     if ctx:
         lines.append("### 结构性上下文（全局视角）\n")
         if "resistance_20d" in ctx:
@@ -680,10 +813,19 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
             lines.append(f"- **趋势**: {ctx['trend_label']}（{trend_str}）")
         if "consolidation" in ctx:
             lines.append(f"- **整理区间**: {ctx['consolidation_note']}")
+        # P0.1: explicit duration for cause-and-effect law
+        if "consolidation_strength" in ctx:
+            lines.append(f"- **整理时长**: {ctx['consolidation_strength']}")
         if "hl_trend" in ctx:
             lines.append(f"- **高低点趋势**: {ctx['hl_trend']}")
         if "high_5d" in ctx:
             lines.append(f"- **5日高点**: {ctx['high_5d']}  **5日低点**: {ctx['low_5d']}")
+        # P1.2: relative strength on market down days
+        if "relative_strength_label" in ctx:
+            lines.append(f"- **相对强弱**: {ctx['relative_strength_label']}")
+        # P2.1: 20-day phase sequence (heuristic, LLM should refine)
+        if "phase_sequence" in ctx:
+            lines.append(f"- **20日 phase 序列（启发式，仅供参考）**: {ctx['phase_sequence']}")
         lines.append("")
 
     # ── OBV + volume regime ──
@@ -1030,13 +1172,19 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 
 ### 七、机读摘要（格式固定，不可省略，不可改动键名）
 报告末尾追加（JSON 必须合法，用双引号）：
-<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "reason": "不超过30字", "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}]} -->
+<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}]} -->
 
 字段说明：
 - direction: 看多 / 偏多 / 中性 / 偏空 / 看空
 - confidence: 0.0-1.0（所有关键信号都已确认=高值，有未确认信号=低值）
 - phase: 吸筹 / 拉升 / 派发 / 下跌 / 震荡
+  - 派发可加细分: 派发初期 / 派发中期 / 派发尾声 / 抛售高峰 / 买入高峰
 - reason: 一句话结论
+- target_low / target_high: 量价维度的目标价区间（基于 Wyckoff 因果定律）
+  - 看多/偏多: 突破后的目标涨幅区间，以"整理区间宽度 × 1.5-3"为基础（蓄势越久倍数越大）
+  - 看空/偏空: 跌破后的目标跌幅区间
+  - 中性: 可省略 target_low/target_high
+  - 数值是绝对价格（元），不是百分比
 - signals: 数组，每个信号一个对象：
   - name: 信号名称（如"射击十字星"、"放量突破"）
   - date: 信号出现日期
@@ -1095,6 +1243,8 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
             reason=llm_result.get("reason", ""),
             report=llm_result.get("report", ""),
             signals_json=json.dumps(llm_result.get("signals", []), ensure_ascii=False),
+            target_low=llm_result.get("target_low"),
+            target_high=llm_result.get("target_high"),
         )
 
         # Auto-create pending signals from VERDICT
@@ -1126,6 +1276,8 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
         "llm_phase": llm_result.get("phase", ""),
         "llm_confirmed": llm_result.get("confirmed", False),
         "llm_reason": llm_result.get("reason", ""),
+        "llm_target_low": llm_result.get("target_low"),
+        "llm_target_high": llm_result.get("target_high"),
         "text": text,
     }
 
@@ -1166,6 +1318,17 @@ def _extract_verdict(report: str) -> dict:
         data.setdefault("reason", "")
         data.setdefault("signals", [])
 
+        # P0.2 Target zone — optional. Coerce to float or None.
+        for k in ("target_low", "target_high"):
+            v = data.get(k)
+            if v is None or v == "":
+                data[k] = None
+            else:
+                try:
+                    data[k] = float(v)
+                except (ValueError, TypeError):
+                    data[k] = None
+
         # Derive confirmed from signals: true only if ALL signals confirmed
         signals = data.get("signals", [])
         if signals:
@@ -1176,7 +1339,8 @@ def _extract_verdict(report: str) -> dict:
         return data
 
     return {"direction": "中性", "confidence": 0.0, "phase": "", "confirmed": False,
-            "signals": [], "reason": "verdict_parse_failed"}
+            "signals": [], "reason": "verdict_parse_failed",
+            "target_low": None, "target_high": None}
 
 
 def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict:
@@ -1246,6 +1410,8 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
             "confirmed": verdict_data.get("confirmed", False),
             "signals": verdict_data.get("signals", []),
             "reason": verdict_data.get("reason", ""),
+            "target_low": verdict_data.get("target_low"),
+            "target_high": verdict_data.get("target_high"),
         }
     except Exception as e:
         logger.debug("LLM VPA failed for %s: %s", code, e)

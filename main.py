@@ -261,12 +261,20 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
         scheduler.stop()
         scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
         logging.info("Scheduler stopped.")
 
     try:
         asyncio.run(_run())
     except (KeyboardInterrupt, SystemExit):
-        pass
+        logging.info("Shutdown by user.")
+    finally:
+        # Force kill any lingering LLM calls
+        import sys
+        sys.exit(0)
 
 
 def cmd_review(args: argparse.Namespace) -> None:

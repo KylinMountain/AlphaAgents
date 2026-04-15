@@ -238,13 +238,3 @@ def get_event_graph(limit: int = 50) -> dict:
         "events": [dict(e) for e in events],
         "links": [dict(lnk) for lnk in links],
     }
-
-
-def find_related_events(event_title: str, limit: int = 10) -> list[dict]:
-    """Find events with similar titles (for linking)."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM events WHERE title LIKE ? ORDER BY timestamp DESC LIMIT ?",
-        (f"%{event_title[:20]}%", limit),
-    ).fetchall()
-    return [dict(r) for r in rows]

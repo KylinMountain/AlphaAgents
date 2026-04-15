@@ -34,6 +34,14 @@ AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("SILICONFLOW_API_
 AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen-plus")
 
+# ---------------------------------------------------------------------------
+# DeepSeek LLM (backup for VPA analysis — prompt caching saves cost)
+# Primary VPA model is AGENT (LongCat). DeepSeek is fallback.
+# ---------------------------------------------------------------------------
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
 # News monitor settings
 MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))
 NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))

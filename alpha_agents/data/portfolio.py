@@ -646,7 +646,7 @@ def get_today_changes_summary(today: str) -> str:
     if new_pending:
         lines.append(f"今日新挂单 {len(new_pending)} 笔:")
         for r in new_pending:
-            lines.append(f"  {r['code']} {r['name']} 介入区间{r.get('entry_low','?')}-{r.get('entry_high','?')} ({r['source']})")
+            lines.append(f"  {r['code']} {r['name']} 介入区间{r['entry_low'] or '?'}-{r['entry_high'] or '?'} ({r['source']})")
     if filled:
         lines.append(f"今日成交 {len(filled)} 笔:")
         for r in filled:
@@ -658,7 +658,7 @@ def get_today_changes_summary(today: str) -> str:
             ret = r['return_pct'] or 0
             amt = r['return_amount'] or 0
             lines.append(
-                f"  {r['code']} {r['name']} {r.get('shares',0)}股 @ {r['close_price']:.2f} "
+                f"  {r['code']} {r['name']} {r['shares'] or 0}股 @ {r['close_price']:.2f} "
                 f"({'盈' if ret >= 0 else '亏'}{abs(ret):.1f}%, {amt:+,.0f}元) — {r['close_reason']}"
             )
     return "\n".join(lines) if lines else "今日无持仓变动"

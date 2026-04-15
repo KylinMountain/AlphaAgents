@@ -18,7 +18,6 @@ from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, update_theme_strength, maybe_discover_theme
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
-from alpha_agents.agents.intraday import run_intraday_analysis
 from alpha_agents.notify import notify_all
 from alpha_agents.data.portfolio import (
     create_pending_order, check_pending_orders, check_positions,
@@ -96,30 +95,115 @@ def _refresh_theme_strengths() -> None:
         logger.debug("Theme strength refresh failed: %s", e)
 
 
+def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str]:
+    """Run LLM VPA (Anna Coulling) on an actionable candidate.
+
+    Returns (verdict, note) where verdict maps Chinese to English:
+      看多/偏多 → bullish, 看空/偏空 → bearish, 中性 → neutral
+
+    Uses LLM full analysis with history context. Saves to DB automatically.
+    """
+    if not code or not code.strip().isdigit() or len(code.strip()) != 6:
+        return ("unknown", "")
+    try:
+        from alpha_agents.tools.vpa import compute_vpa_with_llm
+        r = compute_vpa_with_llm(code.strip(), name=name)
+        if not r.get("ok"):
+            return ("unknown", "")
+        raw_v = r.get("llm_verdict", "中性")
+        verdict_map = {"看多": "bullish", "偏多": "bullish",
+                       "看空": "bearish", "偏空": "bearish", "中性": "neutral"}
+        verdict = verdict_map.get(raw_v, "neutral")
+        phase = r.get("llm_phase", "")
+        reason = r.get("llm_reason", "")
+        note = f"{phase}: {reason}" if phase else reason
+        return (verdict, note)
+    except Exception as e:
+        logger.debug("VPA gate for %s failed: %s", code, e)
+        return ("unknown", "")
+
+
+
 def _detect_anomalies() -> tuple[bool, str]:
-    """Pre-fetch market data and check for anomalies before calling LLM.
+    """Detect anomalies with FUND FLOW FIRST, price second.
+
+    V2 design principle #2: "资金行为优先于新闻叙事。看'谁在买卖'比看'发生了什么'更可靠。"
+    Anna Coulling: "成交量是唯一不能被掩盖的真相。"
+
+    Detection hierarchy:
+      1. Fund flow anomalies (资金异动) — highest priority
+      2. Volume-price divergence (量价背离) — Anna Coulling core
+      3. Limit-up concentration (涨停板集中) — market structure signal
+      4. Market breadth extremes (情绪极端) — context signal
 
     Returns (has_anomaly, context_text).
     """
     signals = []
 
-    # 1. Sector ranking — which sectors are surging/plunging?
+    # ── 1. FUND FLOW: who is buying/selling and how much ──
     try:
+        # Industry sectors
         ranking = json.loads(get_sector_ranking_fn(top_n=5))
         top_gainers = ranking.get("gainers", [])
         top_losers = ranking.get("losers", [])
-        if top_gainers:
-            best = top_gainers[0]
-            if best.get("change_pct", 0) > 1.5:
-                signals.append(f"板块异动: {best['sector']} 涨{best['change_pct']:.1f}%, 资金净流入{best['net_flow_yi']:.1f}亿, 领涨股{best.get('leader', '')}")
-        if top_losers:
-            worst = top_losers[0]
-            if worst.get("change_pct", 0) < -1.5:
-                signals.append(f"板块下杀: {worst['sector']} 跌{abs(worst['change_pct']):.1f}%")
+
+        for sector in top_gainers[:3]:
+            chg = sector.get("change_pct", 0)
+            flow = sector.get("net_flow_yi", 0)
+
+            # Case A: 涨 + 大资金流入 = 真异动（量价确认）
+            if chg > 1.0 and flow > 5:
+                signals.append(
+                    f"🔴资金异动(量价确认): {sector['sector']} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
+                    f"领涨{sector.get('leader', '')}"
+                )
+            # Case B: 涨 + 资金流出 = 量价背离（可能出货）
+            elif chg > 2.0 and flow < -2:
+                signals.append(
+                    f"⚠️量价背离: {sector['sector']} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
+                    f"— 可能主力借涨出货"
+                )
+            # Case C: 不怎么涨但资金大幅流入 = 暗中吸筹
+            elif chg < 1.0 and flow > 8:
+                signals.append(
+                    f"🔵暗流涌动: {sector['sector']} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
+                    f"— 资金暗中布局"
+                )
+
+        for sector in top_losers[:2]:
+            chg = sector.get("change_pct", 0)
+            flow = sector.get("net_flow_yi", 0)
+
+            # Case D: 跌 + 大资金流出 = 真下杀
+            if chg < -1.5 and flow < -5:
+                signals.append(
+                    f"🔴资金出逃: {sector['sector']} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿"
+                )
+            # Case E: 跌 + 资金流入 = 逆势吸筹
+            elif chg < -2.0 and flow > 3:
+                signals.append(
+                    f"🔵逆势吸筹: {sector['sector']} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
+                    f"— 有人在接盘"
+                )
+
+        # Concept sectors — check for large fund flows
+        try:
+            concept_ranking = json.loads(get_concept_ranking_fn(top_n=5))
+            for concept in concept_ranking.get("gainers", [])[:3]:
+                flow = concept.get("net_flow_yi", 0)
+                chg = concept.get("change_pct", 0)
+                if flow > 10:
+                    signals.append(
+                        f"🔴概念资金涌入: {concept['concept']} 净流入{flow:.1f}亿 "
+                        f"涨{chg:.1f}% 领涨{concept.get('leader', '')}"
+                    )
+        except Exception:
+            pass
+
     except Exception as e:
         logger.debug("Sector ranking fetch failed: %s", e)
 
-    # 2. Anomaly stocks — limit up concentration
+    # ── 2. LIMIT-UP concentration (market structure) ──
     try:
         anomalies = json.loads(get_anomaly_stocks_fn())
         summary = anomalies.get("summary", {})
@@ -135,7 +219,7 @@ def _detect_anomalies() -> tuple[bool, str]:
     except Exception as e:
         logger.debug("Anomaly detection failed: %s", e)
 
-    # 3. Market breadth
+    # ── 3. MARKET BREADTH (context) ──
     try:
         breadth = json.loads(get_market_breadth_fn())
         ad_ratio = breadth.get("advance_decline_ratio", 1)
@@ -315,18 +399,37 @@ async def run_intraday_monitor() -> str | None:
     sector_picks_ctx = ""
     try:
         from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
-        # Extract sector names from anomaly context and active themes
+        # ── Build candidate sectors from 3 sources (not just themes) ──
         candidate_sectors = []
-        for t in themes:
-            if t.get("strength", 0) >= 6:
-                candidate_sectors.append(t["name"])
-        # Also try to extract sector from anomaly text (e.g. "板块异动: 电池 涨3.5%")
+        seen = set()
+
+        # Source 1: Today's anomaly sectors (real-time, changes every cycle)
         import re as _re2
         sector_match = _re2.search(r"板块异动:\s*(\S+)\s*涨", anomaly_context)
         if sector_match:
-            anomaly_sector = sector_match.group(1)
-            if anomaly_sector not in candidate_sectors:
-                candidate_sectors.insert(0, anomaly_sector)
+            s = sector_match.group(1)
+            if s not in seen:
+                candidate_sectors.append(s)
+                seen.add(s)
+
+        # Source 2: Today's top concept ranking gainers (real-time)
+        try:
+            ranking = json.loads(get_concept_ranking_fn(top_n=5))
+            for gainer in ranking.get("gainers", [])[:3]:
+                s = gainer.get("concept", "")
+                if s and s not in seen and gainer.get("change_pct", 0) > 1.5:
+                    candidate_sectors.append(s)
+                    seen.add(s)
+        except Exception:
+            pass
+
+        # Source 3: Active themes with strength >= 6 (stable but may not change daily)
+        for t in themes:
+            if t.get("strength", 0) >= 6:
+                s = t["name"]
+                if s not in seen:
+                    candidate_sectors.append(s)
+                    seen.add(s)
 
         pick_lines = []
         for sector in candidate_sectors[:3]:  # Max 3 sectors to avoid slowness
@@ -356,16 +459,33 @@ async def run_intraday_monitor() -> str | None:
     now_str = datetime.now().strftime("%H:%M")
 
     # ── Step 1: Code selects signal stocks (涨停确认) ──
-    # Reuse anomaly data from _detect_anomalies if possible, fallback to fresh call
+    # Show all 连板 (consecutive >= 2) + top first-board stocks for theme confirmation
     signals = []
+    total_limit_up = 0
+    consecutive_count = 0
     try:
         anomaly_data = json.loads(get_anomaly_stocks_fn())
-        for stock in anomaly_data.get("limit_up", [])[:10]:
+        all_limit_up = anomaly_data.get("limit_up", [])
+        total_limit_up = len(all_limit_up)
+
+        # Split by board count
+        consecutive_stocks = [s for s in all_limit_up if s.get("consecutive_limits", 1) >= 2]
+        first_board_stocks = [s for s in all_limit_up if s.get("consecutive_limits", 1) < 2]
+        consecutive_count = len(consecutive_stocks)
+
+        # Sort 连板 by board count desc (5连板 > 3连板 > 2连板)
+        consecutive_stocks.sort(key=lambda x: x.get("consecutive_limits", 1), reverse=True)
+
+        # Take all 连板 + top 15 first-board (already sorted by seal strength from akshare)
+        selected = consecutive_stocks + first_board_stocks[:15]
+
+        for stock in selected:
             signals.append({
                 "code": stock.get("code", ""),
                 "name": stock.get("name", ""),
                 "change_pct": stock.get("change_pct", 0),
                 "consecutive": stock.get("consecutive_limits", 1),
+                "sector": stock.get("sector", ""),
             })
     except Exception as e:
         logger.warning("Signal detection failed: %s", e)
@@ -384,8 +504,18 @@ async def run_intraday_monitor() -> str | None:
 
             for s in result.get("top", []):
                 if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
+                    # VPA gate: run in thread to avoid blocking event loop
+                    try:
+                        vpa_verdict, vpa_note = await asyncio.to_thread(
+                            _vpa_gate_for_candidate, s["code"], s["name"]
+                        )
+                    except Exception:
+                        vpa_verdict, vpa_note = "unknown", ""
+                    if vpa_verdict == "bearish":
+                        logger.info("Actionable filtered out by VPA: %s %s — %s",
+                                    s["code"], s["name"], vpa_note)
+                        continue
                     # Use beta tool's score + institutional signals (already in result)
-                    # No per-stock get_institutional_position call (too slow)
                     price = s.get("price", 0)
                     # Compute simple entry zone from price: 3% below current
                     entry_high = round(price, 2) if price else None
@@ -403,6 +533,8 @@ async def run_intraday_monitor() -> str | None:
                         "note": s.get("note", ""),
                         "theme": sector,
                         "institutional": s.get("institutional", ""),
+                        "vpa_verdict": vpa_verdict,
+                        "vpa_note": vpa_note,
                         "entry_low": entry_low,
                         "entry_high": entry_high,
                         "stop_loss": stop_loss_val,
@@ -440,16 +572,21 @@ async def run_intraday_monitor() -> str | None:
 
     # Signal stocks (code-generated)
     if signals:
-        report_lines.append("【信号确认】（已涨停，不可买入，仅作主线强度参考）")
-        for s in signals[:5]:
+        header = "【信号确认】（已涨停，不可买入，仅作主线强度参考）"
+        if total_limit_up > 0:
+            first_board = total_limit_up - consecutive_count
+            header += f" — 今日涨停 {total_limit_up} 家（{consecutive_count} 连板，{first_board} 首板）"
+        report_lines.append(header)
+        for s in signals:
             board = f"({s['consecutive']}连板)" if s['consecutive'] >= 2 else ""
-            report_lines.append(f"• {s['code']} {s['name']} 涨停封板{board}")
+            sector = f" [{s['sector']}]" if s.get("sector") else ""
+            report_lines.append(f"• {s['code']} {s['name']} 涨停封板{board}{sector}")
         report_lines.append("")
 
     # Actionable stocks (code-generated, zero hallucination)
     report_lines.append("【可操作标的】")
-    report_lines.append("| 代码 | 名称 | 现价 | 涨幅 | 评分 | 操作建议 |")
-    report_lines.append("|------|------|------|------|------|---------|")
+    report_lines.append("| 代码 | 名称 | 现价 | 涨幅 | 评分 | VPA | 操作建议 |")
+    report_lines.append("|------|------|------|------|------|-----|---------|")
     if actionable:
         for a in actionable:
             el = a.get("entry_low")
@@ -466,9 +603,14 @@ async def run_intraday_monitor() -> str | None:
             sl_str = f" 止损{sl:.2f}" if sl else ""
             inst = a.get("institutional", "")
             inst_str = f" [{inst}]" if inst and inst != "无" else ""
+            vpa_verdict = a.get("vpa_verdict", "unknown")
+            vpa_note = a.get("vpa_note", "")
+            vpa_cell = f"{vpa_verdict}"
+            if vpa_note:
+                vpa_cell = f"{vpa_verdict}({vpa_note})"
             report_lines.append(
                 f"| {a['code']} | {a['name']} | {a['price']:.2f}元 | "
-                f"{a['change_pct']:+.2f}% | {a['score']:.0f} | "
+                f"{a['change_pct']:+.2f}% | {a['score']:.0f} | {vpa_cell} | "
                 f"{action}{sl_str}{inst_str} |"
             )
     else:
@@ -486,13 +628,44 @@ async def run_intraday_monitor() -> str | None:
         report_lines.append(sentiment_ctx)
         report_lines.append("")
 
+    # ── LLM VPA deep analysis for top actionable stocks ──
+    # Code VPA does fast filtering; LLM VPA adds Anna Coulling narrative for user.
+    if actionable:
+        try:
+            from alpha_agents.tools.vpa import compute_vpa_with_llm
+            report_lines.append("【量价深度分析】（Anna Coulling VPA, 仅对可操作标的前 3 只）")
+            for a in actionable[:3]:
+                try:
+                    vpa_r = await asyncio.to_thread(
+                        compute_vpa_with_llm, a["code"], a["name"]
+                    )
+                    if vpa_r.get("ok") and vpa_r.get("llm_report"):
+                        verdict = vpa_r.get("llm_verdict", "?")
+                        conf = vpa_r.get("llm_confidence", 0)
+                        phase = vpa_r.get("llm_phase", "?")
+                        confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
+                        report_lines.append(
+                            f"\n▶ {a['code']} {a['name']} [{verdict} 信心{conf} {phase} {confirmed}]"
+                        )
+                        # Truncate report to key sections (skip full table to save space)
+                        llm_text = vpa_r["llm_report"]
+                        if len(llm_text) > 1500:
+                            llm_text = llm_text[:1500] + "\n...(完整报告请用 chat: vpa " + a["code"] + ")"
+                        report_lines.append(llm_text)
+                except Exception as e:
+                    logger.debug("LLM VPA for %s failed: %s", a["code"], e)
+            report_lines.append("")
+        except Exception as e:
+            logger.debug("LLM VPA section failed: %s", e)
+
     # Build RECOMMENDATIONS JSON (code-generated)
     recs_json = []
-    for s in signals[:5]:
+    for s in signals:
+        board_note = f"({s['consecutive']}连板)" if s['consecutive'] >= 2 else ""
         recs_json.append({
             "code": s["code"], "name": s["name"],
-            "theme": "", "type": "signal",
-            "reason": f"涨停封板",
+            "theme": s.get("sector", ""), "type": "signal",
+            "reason": f"涨停封板{board_note}",
         })
     for a in actionable:
         recs_json.append({
@@ -617,35 +790,73 @@ def _fix_prices_in_report(report: str) -> str:
 
 
 async def _get_cause_analysis(context: str) -> str:
-    """LLM's ONLY job: explain WHY the anomaly happened in 2-3 sentences."""
+    """V2 anomaly tracing: observe → trace cause → judge persistence.
+
+    Restored from V2 spec design. LLM has tools to search for catalysts
+    and check fund flow sources. Code handles stock selection and pricing.
+
+    Tools given:
+      - web_search: find news catalysts (policy, earnings, events)
+      - get_lhb_detail: check institutional vs hot money seats
+      - get_stock_fund_flow: check main force vs retail flow direction
+      - get_sector_data: check related sector linkage
+    """
     import asyncio
     from agents import Agent, Runner
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
     from openai import AsyncOpenAI
     from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+    from alpha_agents.tools.registry import (
+        web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data,
+    )
 
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
     model = OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
     agent = Agent(
         name="cause_analyst",
         instructions=(
-            "你是盘中异动追因分析师。你只需要做一件事：用2-3句话解释异动的原因。"
-            "不要推荐股票，不要给操作建议，不要生成表格。只写原因分析。"
-            "格式：【异动】{板块名} {描述}\n• 催化: {原因}\n• 判断: {一日游/持续行情}\n• 失效条件: {什么情况下判断不成立}"
+            "你是盘中异动追因分析师。检测到市场异动后，你需要追溯原因并判断持续性。\n\n"
+            "## 思维链路（严格按步骤执行）\n\n"
+            "1. **观察**：阅读传入的异动数据，识别核心异动（哪个板块、什么类型的资金异动）\n"
+            "2. **追因**：\n"
+            "   - 调用 web_search 搜索相关板块/个股的最新新闻，寻找催化事件（政策、业绩、行业事件）\n"
+            "   - 调用 get_lhb_detail 查看龙虎榜，判断资金来源是机构还是游资\n"
+            "   - 如果有明确的龙头股，调用 get_stock_fund_flow 查看主力资金方向\n"
+            "   - 调用 get_sector_data 查看关联板块是否联动\n"
+            "3. **判断**：基于追因结果判断——\n"
+            "   - 机构资金 + 明确政策/产业催化 + 多板块联动 → **持续行情**\n"
+            "   - 游资席位 + 无明确催化 + 单一个股 → **一日游，不追**\n"
+            "   - 资金异动但无新闻催化 → **主力提前布局，密切关注**\n\n"
+            "## 输出格式\n\n"
+            "对每个异动板块/方向输出：\n"
+            "【异动】{板块名} {异动类型}\n"
+            "• 催化: {找到的新闻原因，没找到就写'未发现明确催化，可能是资金先行'}\n"
+            "• 资金来源: {机构/游资/主力/不明}\n"
+            "• 关联板块: {是否有联动}\n"
+            "• 判断: {一日游/持续行情/主力提前布局}\n"
+            "• 失效条件: {什么情况下判断不成立}\n\n"
+            "## 重要原则\n"
+            "- 不要推荐股票，不要给操作建议，不要生成表格\n"
+            "- 资金行为优先于新闻叙事——如果资金在流入但没有新闻，不要说'没有异动'\n"
+            "- 没找到新闻催化不代表没有原因，可能是主力提前知道了什么\n"
+            "- 每个工具最多调用一次，不要重复调用"
         ),
         model=model,
-        tools=[],  # No tools — just analyze the context we give it
+        tools=[web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data],
     )
 
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, f"请分析以下异动的原因:\n\n{context}"),
-            timeout=30,
+            Runner.run(agent, f"以下是刚检测到的市场异动，请按思维链路追因分析：\n\n{context}"),
+            timeout=60,  # More time — agent needs to call tools
         )
         return result.final_output
+    except asyncio.TimeoutError:
+        logger.warning("Cause analysis timed out (60s)")
+        return context
     except Exception as e:
         logger.warning("Cause analysis failed: %s", e)
-        return context  # Fallback to raw anomaly data
+        return context
 
 
 def _auto_fill_actionable(report: str, sectors: list[str]) -> str:

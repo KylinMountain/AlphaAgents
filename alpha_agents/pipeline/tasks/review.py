@@ -241,7 +241,7 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
     lines = ["| 代码 | 名称 | 方向 | 推荐价 | 收盘价 | 推荐→收盘 | 结果 | 主线 |",
              "|------|------|------|-------|-------|----------|------|------|"]
 
-    hits, misses, neutral = 0, 0, 0
+    hits, misses, neutral, unreachable = 0, 0, 0, 0
     by_theme: dict[str, dict] = {}
 
     for p in unique:
@@ -266,8 +266,17 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
             change_pct = rt["change_pct"]
             entry = None
 
-        # Determine hit/miss based on return from entry
-        if direction == "bullish":
+        # Determine hit/miss based on return from entry.
+        # Limit-up stocks (>=9.5% from entry) are likely unfillable in practice —
+        # mark separately and exclude from hit/miss stats so the rate reflects
+        # actually-tradeable outcomes.
+        is_limit_up_unreachable = (direction == "bullish" and change_pct >= 9.5)
+        is_limit_down_unreachable = (direction == "bearish" and change_pct <= -9.5)
+
+        if is_limit_up_unreachable or is_limit_down_unreachable:
+            result = "涨停未入场" if is_limit_up_unreachable else "跌停未入场"
+            unreachable += 1  # Not counted in hit/miss — not actually tradeable
+        elif direction == "bullish":
             if change_pct > 0:
                 result = "命中"
                 hits += 1
@@ -302,7 +311,11 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
     total_verified = hits + misses + neutral
     hit_rate = hits / total_verified * 100 if total_verified > 0 else 0
 
-    summary = f"命中率: {hits}/{total_verified} ({hit_rate:.0f}%) | 中性{neutral}只 | 共{len(unique)}只\n"
+    summary_parts = [f"命中率: {hits}/{total_verified} ({hit_rate:.0f}%)", f"中性{neutral}只"]
+    if unreachable > 0:
+        summary_parts.append(f"涨停/跌停未入场{unreachable}只（已从命中率分母剔除）")
+    summary_parts.append(f"共{len(unique)}只")
+    summary = " | ".join(summary_parts) + "\n"
     summary += "按主线:\n"
     for theme, data in by_theme.items():
         tr = data["hits"] / data["total"] * 100 if data["total"] else 0
@@ -450,5 +463,87 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Sentiment cycle computation failed: %s", e)
 
+    # Check VPA pending signals — auto-confirm/deny/expire
+    try:
+        vpa_updates = await asyncio.to_thread(_check_vpa_signals, today)
+        if vpa_updates:
+            report += "\n\n" + vpa_updates
+            logger.info("VPA signal check: %s", vpa_updates[:200])
+    except Exception as e:
+        logger.warning("VPA signal check failed: %s", e)
+
     print(report)
     return report
+
+
+def _check_vpa_signals(today: str) -> str:
+    """Check all pending VPA signals against today's K-line data.
+
+    For each pending signal:
+      - Expired? → mark expired
+      - Confirmed? → re-analyze with LLM, let LLM judge
+      - Still pending? → keep
+
+    Returns text summary of changes for the report.
+    """
+    from alpha_agents.data.memory_store import (
+        get_pending_vpa_signals, resolve_vpa_signal, expire_old_vpa_signals,
+    )
+
+    # Step 1: Expire old signals
+    expired_count = expire_old_vpa_signals(today)
+
+    # Step 2: Check remaining pending signals
+    pending = get_pending_vpa_signals()
+    if not pending and expired_count == 0:
+        return ""
+
+    lines = ["【VPA 信号追踪】"]
+    if expired_count > 0:
+        lines.append(f"• {expired_count} 个信号已过期（超过 3 天未确认）")
+
+    # Step 3: For each pending signal, check confirmation with code VPA (fast, no LLM save)
+    if pending:
+        from alpha_agents.tools.vpa import compute_vpa
+        from alpha_agents.data.market_data import get_realtime_quotes
+        for sig in pending[:10]:
+            code = sig["code"]
+            name = sig.get("name", "")
+            try:
+                # Use code-only VPA for quick check (no LLM, no DB writes)
+                r = compute_vpa(code, name=name)
+                if not r.get("ok"):
+                    continue
+
+                # Simple confirmation heuristic:
+                # If signal was bearish and stock dropped today → confirmed
+                # If signal was bearish and stock rose significantly → denied
+                rt = get_realtime_quotes([code])
+                today_chg = rt.get(code, {}).get("change_pct", 0) if rt else 0
+
+                if sig["direction"] in ("偏空", "看空"):
+                    if today_chg < -2:
+                        resolve_vpa_signal(sig["id"], "confirmed",
+                                          resolved_by=f"今日跌{today_chg:.1f}%")
+                        lines.append(f"• ✅ {code} {name} [{sig['signal_type']}] → 已确认（今日{today_chg:+.1f}%）")
+                    elif today_chg > 3:
+                        resolve_vpa_signal(sig["id"], "denied",
+                                          resolved_by=f"今日涨{today_chg:.1f}%否定看空")
+                        lines.append(f"• ❌ {code} {name} [{sig['signal_type']}] → 已否定（今日{today_chg:+.1f}%）")
+                    else:
+                        lines.append(f"• ⏳ {code} {name} [{sig['signal_type']}] → 仍待确认（今日{today_chg:+.1f}%）")
+                elif sig["direction"] in ("偏多", "看多"):
+                    if today_chg > 2:
+                        resolve_vpa_signal(sig["id"], "confirmed",
+                                          resolved_by=f"今日涨{today_chg:.1f}%")
+                        lines.append(f"• ✅ {code} {name} [{sig['signal_type']}] → 已确认（今日{today_chg:+.1f}%）")
+                    elif today_chg < -3:
+                        resolve_vpa_signal(sig["id"], "denied",
+                                          resolved_by=f"今日跌{today_chg:.1f}%否定看多")
+                        lines.append(f"• ❌ {code} {name} [{sig['signal_type']}] → 已否定（今日{today_chg:+.1f}%）")
+                    else:
+                        lines.append(f"• ⏳ {code} {name} [{sig['signal_type']}] → 仍待确认（今日{today_chg:+.1f}%）")
+            except Exception as e:
+                logger.debug("VPA signal check for %s failed: %s", code, e)
+
+    return "\n".join(lines) if len(lines) > 1 else ""

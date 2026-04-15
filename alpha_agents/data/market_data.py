@@ -341,6 +341,63 @@ def get_financial_indicator(code: str) -> Optional[pd.DataFrame]:
     return _ak_call(ak.stock_financial_analysis_indicator, symbol=code, start_year=year)
 
 
+# ── Intraday minute-level OHLCV (for multi-timeframe VPA) ───
+# 60-min bars let VPA see intraday structure hidden inside daily bars —
+# crucial for A-share where ±10% caps compress daily information.
+# Sina API works; EastMoney's often fails with proxy errors.
+
+_MINUTE_CACHE: dict[str, tuple[str, list[dict]]] = {}  # "code:period" → (date, rows)
+
+
+def get_stock_minute_history(code: str, period: str = "60", bars: int = 80) -> list[dict]:
+    """Get intraday N-minute OHLCV for a stock, newest-last.
+
+    Args:
+        code: 6-digit stock code (e.g. "300606")
+        period: "5", "15", "30", "60" (minutes)
+        bars: How many trailing bars to return. For 60-min, 80 bars ≈ 20
+              trading days (A-share has 4 hourly bars per day).
+
+    Returns list of {date, open, high, low, close, volume} dicts, oldest-first.
+    Cached per (symbol, period) per-day in-process.
+    """
+    # Sina needs sh/sz prefix based on first digit
+    prefix = "sh" if code.startswith("6") else "sz"
+    symbol = f"{prefix}{code}"
+    cache_key = f"{symbol}:{period}"
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cached = _MINUTE_CACHE.get(cache_key)
+    if cached and cached[0] == today and len(cached[1]) >= bars:
+        return cached[1][-bars:]
+
+    import akshare as ak
+    try:
+        df = _ak_call(ak.stock_zh_a_minute, symbol=symbol, period=period, adjust="qfq")
+    except Exception:
+        return []
+    if df is None or df.empty:
+        return []
+
+    # Normalize column names and types
+    df = df.tail(bars * 2).copy()  # buffer for dropna
+    for col in ("open", "high", "low", "close", "volume"):
+        if col not in df.columns:
+            return []
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+
+    rows = [
+        {"date": str(r["day"]),
+         "open": float(r["open"]), "high": float(r["high"]),
+         "low": float(r["low"]), "close": float(r["close"]),
+         "volume": int(r["volume"])}
+        for _, r in df.iterrows()
+    ]
+    _MINUTE_CACHE[cache_key] = (today, rows)
+    return rows[-bars:]
+
+
 # ── Market index history (for VPA relative strength) ────────
 # In-process cache: index history changes once per day, no need to hit
 # akshare on every VPA call. Reset by restarting the process.

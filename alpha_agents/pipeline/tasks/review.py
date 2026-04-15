@@ -499,19 +499,33 @@ def _check_vpa_signals(today: str) -> str:
     """
     from alpha_agents.data.memory_store import (
         get_pending_vpa_signals, resolve_vpa_signal, expire_old_vpa_signals,
+        get_pending_vpa_scenarios, expire_old_vpa_scenarios,
     )
 
-    # Step 1: Expire old signals
+    # Step 1: Expire old signals + scenarios (scenarios expire at 10 days,
+    # signals at 3 — both use the same per-row expire_date set at create)
     expired_count = expire_old_vpa_signals(today)
+    expired_scenarios = expire_old_vpa_scenarios(today)
 
     # Step 2: Check remaining pending signals
     pending = get_pending_vpa_signals()
-    if not pending and expired_count == 0:
+    pending_scenarios = get_pending_vpa_scenarios()
+    if not pending and not pending_scenarios and expired_count == 0 and expired_scenarios == 0:
         return ""
 
     lines = ["【VPA 信号追踪】"]
     if expired_count > 0:
         lines.append(f"• {expired_count} 个信号已过期（超过 3 天未确认）")
+    if expired_scenarios > 0:
+        lines.append(f"• {expired_scenarios} 个 scenario 已过期（超过 10 天未确认）")
+    if pending_scenarios:
+        lines.append(f"• {len(pending_scenarios)} 个 scenario 仍在追踪:")
+        for sc in pending_scenarios[:5]:  # cap display
+            sigs = "+".join(sc.get("signal_names") or [])
+            lines.append(
+                f"  - {sc['code']} {sc.get('name', '')}: {sc['scenario_name']} "
+                f"({sc.get('phase', '')}) — 等 {sc.get('confirmation_criteria', '')[:30]}"
+            )
 
     # Step 3: For each pending signal, check confirmation with code VPA (fast, no LLM save)
     if pending:

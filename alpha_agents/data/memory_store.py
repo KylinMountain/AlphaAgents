@@ -703,3 +703,67 @@ def save_cached_financials(code: str, data: dict) -> None:
         conn.commit()
 
 
+# ── Theme strength snapshots (for velocity detection) ───────
+# Snapshot daily at end of morning_scan so we can detect rapid theme decay
+# (e.g., strength dropping from 9 → 5 in 2 days) which is a sell signal
+# even if the current strength hasn't yet crossed the exit threshold.
+
+def save_theme_snapshot(date: str, themes: list[dict]) -> None:
+    """Snapshot current theme strengths for the given date.
+
+    Args:
+        date: "YYYY-MM-DD"
+        themes: [{"name": "...", "strength": 8, "status": "..."}, ...]
+    """
+    with _write_lock:
+        conn = _get_conn()
+        payload = json.dumps(
+            [{"name": t.get("name"), "strength": t.get("strength"), "status": t.get("status")}
+             for t in themes],
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_snapshots (date, data_type, data) "
+            "VALUES (?, 'theme_strengths', ?)",
+            (date, payload),
+        )
+        conn.commit()
+
+
+def get_theme_strength_history(theme_name: str, days: int = 5) -> list[dict]:
+    """Get strength history for a theme over the last N days.
+
+    Returns list sorted newest-first: [{"date": "...", "strength": N}, ...].
+    Missing days are skipped (not padded).
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT date, data FROM daily_snapshots "
+        "WHERE data_type = 'theme_strengths' "
+        "ORDER BY date DESC LIMIT ?",
+        (days,),
+    ).fetchall()
+    history = []
+    for r in rows:
+        try:
+            themes = json.loads(r["data"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for t in themes:
+            if t.get("name") == theme_name and t.get("strength") is not None:
+                history.append({"date": r["date"], "strength": t["strength"]})
+                break
+    return history
+
+
+def get_recent_sentiment_phases(n: int = 2) -> list[dict]:
+    """Get the N most recent sentiment phases, newest first.
+
+    Returns: [{"date": "...", "phase": "..."}, ...]
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT date, phase FROM sentiment_phase ORDER BY date DESC LIMIT ?",
+        (n,),
+    ).fetchall()
+    return [dict(r) for r in rows]

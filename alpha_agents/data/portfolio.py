@@ -361,6 +361,116 @@ def _status_from_reason(reason: str) -> str:
     return "expired"
 
 
+def _is_phase_bearish() -> tuple[bool, str]:
+    """Check if current sentiment phase demands aggressive stop-tightening.
+
+    V2 design: 分歧/退潮 phases have tighter trailing_stop_pct and higher
+    theme_exit_threshold. In these phases, we also tighten stops on all
+    positions — even unprofitable ones — to cut losses faster.
+
+    Returns (is_bearish, phase_name).
+    """
+    try:
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        phase = get_sentiment_cycle().get("phase", "")
+        return phase in ("分歧", "退潮"), phase
+    except Exception:
+        return False, ""
+
+
+def _check_bearish_signals(
+    pos: dict, price: float, phase_bearish: bool, phase_name: str
+) -> tuple[float, list[str]]:
+    """Detect bearish signals on a position and compute a tightened stop.
+
+    Implements V2 principle #2 (资金行为优先) on the sell side. Four signals:
+      1. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
+      2. P1 VPA：派发phase或看空verdict → 97% of current price
+      3. P2 情绪周期：分歧/退潮 phase → 97% of current price
+      4. P3 主线速率：2日内强度下降≥3 → 98% of current price
+
+    Returns (tightest_stop, reasons). tightest_stop is 0 if no signal.
+    The caller integrates this with trailing stop logic (take the max).
+
+    "Tighten stop" beats "partial close" for MVP: less new infrastructure,
+    same effective outcome — if price keeps falling, existing stop-loss
+    machinery triggers the close; if price recovers, we never forced a sale.
+    """
+    import json as _json
+    code = pos.get("code", "")
+    name = pos.get("name", "")
+    reasons: list[str] = []
+    tightest_stop = 0.0
+
+    def _apply(factor: float, label: str) -> None:
+        """Raise tightest_stop to price*factor if it beats prior candidates."""
+        nonlocal tightest_stop
+        candidate = round(price * factor, 2)
+        if candidate > tightest_stop:
+            tightest_stop = candidate
+        reasons.append(label)
+
+    # ── Signal 1: 资金流 ──
+    try:
+        from alpha_agents.tools.fund_flow import get_stock_fund_flow_fn
+        ff = _json.loads(get_stock_fund_flow_fn(code))
+        out_days = ff.get("consecutive_outflow_days", 0) or 0
+        if out_days >= 5:
+            _apply(0.98, f"主力{out_days}日净流出")
+        elif out_days >= 3:
+            _apply(0.97, f"主力{out_days}日净流出")
+    except Exception as e:
+        logger.debug("Fund flow check failed for %s: %s", code, e)
+
+    # ── Signal 2: VPA 派发/看空 ──
+    # Uses cached analysis (from morning/intraday scans), not on-the-fly LLM.
+    # If no recent analysis, this signal is silent — not a default-pass.
+    try:
+        from alpha_agents.data.memory_store import get_latest_vpa_analysis
+        vpa = get_latest_vpa_analysis(code)
+        if vpa:
+            verdict = vpa.get("verdict", "") or ""
+            phase = vpa.get("phase", "") or ""
+            # Only recent analyses matter (within 3 days)
+            analysis_date = vpa.get("analysis_date", "")
+            analysis_fresh = False
+            try:
+                a_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
+                now_dt = datetime.now()
+                analysis_fresh = (now_dt - a_dt).days <= 3
+            except (ValueError, TypeError):
+                pass
+            if analysis_fresh:
+                if verdict in ("看空", "偏空"):
+                    _apply(0.97, f"VPA{verdict}")
+                elif "派发" in phase and "尾声" not in phase:
+                    # 派发尾声往往是抛售高峰→反转，不算纯看空信号
+                    _apply(0.97, f"VPA派发({phase})")
+    except Exception as e:
+        logger.debug("VPA check failed for %s: %s", code, e)
+
+    # ── Signal 3: 情绪周期 分歧/退潮 ──
+    if phase_bearish:
+        _apply(0.97, f"情绪{phase_name}")
+
+    # ── Signal 4: 主线强度速率 ──
+    try:
+        from alpha_agents.data.memory_store import get_theme_strength_history
+        theme = pos.get("theme", "")
+        if theme:
+            history = get_theme_strength_history(theme, days=3)
+            if len(history) >= 2:
+                newest = history[0]["strength"]
+                oldest = history[-1]["strength"]
+                drop = oldest - newest
+                if drop >= 3:
+                    _apply(0.98, f"主线{drop}日跌{drop}点")
+    except Exception as e:
+        logger.debug("Theme velocity check failed for %s: %s", code, e)
+
+    return tightest_stop, reasons
+
+
 def check_positions(
     realtime_prices: dict[str, float],
     today: str,
@@ -368,12 +478,27 @@ def check_positions(
     """Check open positions for stop-loss/take-profit/expiry.
 
     Respects T+1: skips positions where open_date == today.
+
+    Sell triggers (priority order):
+      1. Hard stop / trailing stop triggered → close
+      2. Target price hit → close
+      3. Theme declining/weakening → close
+      4. Bearish signals (fund flow / VPA / phase / theme velocity) → tighten
+         stop (may trigger #1 on next tick)
+
+    The bearish-signal mechanism implements V2 principle #2 (资金行为优先) on
+    the sell side: we no longer wait for the price to touch the original
+    stop — we proactively raise it whenever the fund-flow / VPA / phase /
+    theme signals say the position is at risk.
     """
     conn = _get_conn()
     positions = conn.execute(
         "SELECT * FROM virtual_portfolio WHERE status = 'open' AND open_date < ?",
         (today,),
     ).fetchall()
+
+    # ── Compute shared sentiment context (once per cycle, not per-position) ──
+    phase_bearish, phase_name = _is_phase_bearish()
 
     alerts = []
     for pos in positions:
@@ -429,6 +554,22 @@ def check_positions(
                             code, pos.get("name", ""), stop_loss, new_stop, peak_price, price)
                 stop_loss = new_stop
 
+        # ── Bearish-signal tightening (V2 原则#2 资金行为优先的卖出侧落地) ──
+        # Unlike trailing stop (only profits-based), this applies regardless of
+        # P/L. Take the MAX of trailing-stop and bearish-signal-stop — we never
+        # loosen a stop that was previously tightened.
+        stop_before_bearish = stop_loss
+        bearish_stop, bearish_reasons = _check_bearish_signals(
+            pos, price, phase_bearish, phase_name,
+        )
+        if bearish_stop > stop_loss:
+            logger.info(
+                "Bearish stop: %s %s 止损 %.2f → %.2f [%s]",
+                code, pos.get("name", ""), stop_loss, bearish_stop,
+                "+".join(bearish_reasons),
+            )
+            stop_loss = bearish_stop
+
         with _write_lock:
             conn.execute(
                 "UPDATE virtual_portfolio SET peak_return_pct = ?, "
@@ -436,6 +577,23 @@ def check_positions(
                 (peak, drawdown, holding_days, stop_loss, pos["id"]),
             )
             conn.commit()
+
+        # Emit a non-closing alert when bearish signals materially tightened
+        # the stop. The alert surfaces WHY the stop moved, so the user sees
+        # the signals — not just the eventual close. Threshold 0.5% above
+        # the pre-bearish stop filters out no-op / sub-cent adjustments.
+        if (bearish_reasons and stop_loss > stop_before_bearish * 1.005
+                and stop_loss > price * 0.5):  # sanity guard vs zero/garbage prices
+            alerts.append({
+                "type": "stop_tightened",
+                "code": code,
+                "name": pos.get("name", ""),
+                "price": price,
+                "old_stop": stop_before_bearish,
+                "new_stop": stop_loss,
+                "reason": "预警-" + "+".join(bearish_reasons),
+                "current_return": current_return,
+            })
 
         # Check triggers (priority order)
         alert = None

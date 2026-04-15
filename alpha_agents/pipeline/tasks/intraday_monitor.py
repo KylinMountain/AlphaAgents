@@ -875,7 +875,7 @@ async def _get_cause_analysis(context: str) -> str:
     try:
         result = await asyncio.wait_for(
             Runner.run(agent, f"以下是刚检测到的市场异动，请按思维链路追因分析：\n\n{context}",
-                       max_turns=10),  # Limit tool call rounds to avoid runaway
+                       max_turns=30),
             timeout=90,
         )
         return result.final_output

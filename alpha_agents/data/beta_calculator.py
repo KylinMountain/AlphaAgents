@@ -144,10 +144,11 @@ def calculate_concept_betas(concept_name: str) -> list[dict]:
 
         stock_returns = _returns_from_history(history)
 
-        # Calculate beta for each period
-        beta_120d = compute_beta(stock_returns, sector_120) if len(stock_returns) >= 20 else None
-        beta_60d = compute_beta(stock_returns[-59:], sector_60) if len(stock_returns) >= 20 else None
-        beta_20d = compute_beta(stock_returns[-19:], sector_20) if len(stock_returns) >= 10 else None
+        # Calculate beta for each period — thresholds must match slice lengths
+        # so the computed beta actually reflects the intended time window.
+        beta_120d = compute_beta(stock_returns, sector_120) if len(stock_returns) >= 100 else None
+        beta_60d = compute_beta(stock_returns[-59:], sector_60) if len(stock_returns) >= 59 else None
+        beta_20d = compute_beta(stock_returns[-19:], sector_20) if len(stock_returns) >= 19 else None
 
         bw = weighted_beta(beta_20d, beta_60d, beta_120d)
 

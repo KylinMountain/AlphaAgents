@@ -37,12 +37,12 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
             "error": None,
         }
 
-        # 1. Limit-up pool (涨停)
+        # 1. Limit-up pool (涨停) — return up to 100 to cover active days
         try:
             df_zt = get_limit_up_pool(date=date)
             if df_zt is None:
                 raise ValueError("no data")
-            for _, row in df_zt.head(20).iterrows():
+            for _, row in df_zt.head(100).iterrows():
                 result["limit_up"].append({
                     "code": str(row.get("代码", "")),
                     "name": str(row.get("名称", "")),

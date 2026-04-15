@@ -59,6 +59,7 @@ def _do_institutional_position(code: str, market: str) -> str:
         "institutional_cost": None,
         "relative_strength": None,
         "turnover_regime": None,
+        "vpa": None,
         "signal_summary": None,
         "action": None,
     }
@@ -79,12 +80,35 @@ def _do_institutional_position(code: str, market: str) -> str:
     turnover = _analyze_turnover(code)
     result["turnover_regime"] = turnover
 
-    # ── 5. Synthesize signals → action ──
+    # ── 5. Volume Price Analysis (VPA, Wyckoff/Anna Coulling 体系) ──
+    vpa = _compute_vpa_compact(code)
+    result["vpa"] = vpa
+
+    # ── 6. Synthesize signals → action ──
     result["signal_summary"], result["action"] = _synthesize(
-        code, fund_flow, inst_cost, price_info, turnover
+        code, fund_flow, inst_cost, price_info, turnover, vpa
     )
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def _compute_vpa_compact(code: str) -> dict:
+    """Compact VPA result for integration (no recent_bars/text to save bandwidth)."""
+    try:
+        from alpha_agents.tools.vpa import compute_vpa
+        r = compute_vpa(code)
+        if not r.get("ok"):
+            return {"error": r.get("error", "VPA 计算失败")}
+        return {
+            "verdict": r.get("verdict"),
+            "net_score": r.get("net_score"),
+            "obv_trend": r.get("obv_trend"),
+            "volume_regime": r.get("volume_regime"),
+            "patterns": r.get("patterns", []),  # list of {pattern, label, bullish, strength, detail}
+        }
+    except Exception as e:
+        logger.debug("VPA compact failed for %s: %s", code, e)
+        return {"error": str(e)}
 
 
 def _analyze_fund_flow(code: str, market: str, realtime_price: float | None = None) -> dict:
@@ -472,12 +496,14 @@ def _synthesize(
     inst_cost: dict,
     price_info: dict,
     turnover: dict,
+    vpa: dict | None = None,
 ) -> tuple[dict, dict]:
     """Synthesize all signals into a summary and actionable recommendation."""
 
     bullish_signals = []
     bearish_signals = []
     confidence_penalty = 0
+    vpa = vpa or {}
 
     # Check if sub-analyzers returned errors
     if fund_flow.get("error"):
@@ -523,9 +549,23 @@ def _synthesize(
     elif regime == "缩量上涨(量价背离，需警惕)":
         bearish_signals.append("缩量上涨，量价背离")
 
+    # VPA signals (5th dimension)
+    vpa_patterns = vpa.get("patterns", []) if isinstance(vpa, dict) else []
+    vpa_net = vpa.get("net_score", 0) if isinstance(vpa, dict) else 0
+    for p in vpa_patterns:
+        label = p.get("label", "?")
+        strength = p.get("strength", 0)
+        tag = f"VPA-{label}({strength:+d})"
+        if strength > 0:
+            bullish_signals.append(tag)
+        elif strength < 0:
+            bearish_signals.append(tag)
+
     # Overall score: -10 to +10
     score = len(bullish_signals) * 2 - len(bearish_signals) * 2
     score += ff_momentum
+    # VPA net score directly contributes (already -3..+3 range typically)
+    score += vpa_net
     score -= confidence_penalty
     score = min(10, max(-10, score))
 

@@ -33,6 +33,11 @@ def get_lhb_detail_fn(date: str = "") -> str:
     try:
         if not date:
             date = datetime.now().strftime("%Y%m%d")
+        else:
+            # Normalize to YYYYMMDD — accept 2026-04-13, 2026/04/13, 20260413
+            date = date.replace("-", "").replace("/", "").strip()
+            if len(date) != 8 or not date.isdigit():
+                return json.dumps({"date": date, "data": [], "error": f"无效日期格式: {date}，需要 YYYYMMDD 或 YYYY-MM-DD"}, ensure_ascii=False)
 
         df = get_lhb(date)
 
@@ -139,61 +144,64 @@ def get_block_trade_fn(date: str = "") -> str:
 
 
 def get_north_flow_fn(indicator: str = "today") -> str:
-    """Get northbound capital (北向资金) stock holdings — foreign money direction.
+    """Get northbound capital (北向资金) aggregate flow — today's net inflow summary.
 
-    Foreign investors via Stock Connect tend to be longer-term and more informed.
-    Their buying/selling direction is a strong signal for A-share investors.
+    NOTE: Per-stock northbound holdings data is NO LONGER AVAILABLE since
+    HK Exchange stopped publishing real-time per-stock holdings on 2024-08-19.
+    This tool now returns aggregate (market-wide) data only.
 
     Args:
-        indicator: "today" for today's top holdings, or a stock code like "000858"
-                   to check if northbound holds that specific stock.
+        indicator: Only "today" is supported. Per-stock queries return unavailable.
     """
+    import akshare as ak
+
+    # Per-stock queries are no longer supported — data source is dead.
+    if indicator != "today":
+        return json.dumps({
+            "code": indicator.strip(),
+            "available": False,
+            "note": "港交所自2024-08-19起不再公布个股级北向持仓，数据源已失效",
+            "data": [],
+        }, ensure_ascii=False)
+
     try:
-        df = get_north_holdings()
+        # stock_hsgt_fund_flow_summary_em returns today's aggregate summary
+        # with 4 rows: 沪股通(北向)/深股通(北向)/港股通(南向 via 沪)/港股通(南向 via 深)
+        df = ak.stock_hsgt_fund_flow_summary_em()
 
         if df is None or df.empty:
             return json.dumps({"data": [], "error": "no data"}, ensure_ascii=False)
 
-        if indicator != "today":
-            # Filter for specific stock
-            code = indicator.strip()
-            match = df[df["代码"] == code]
-            if match.empty:
-                return json.dumps({
-                    "code": code,
-                    "held_by_north": False,
-                    "note": "北向资金未持有该股票",
-                }, ensure_ascii=False)
-            row = match.iloc[0]
-            return json.dumps({
-                "code": code,
-                "name": str(row.get("名称", "")),
-                "held_by_north": True,
-                "hold_shares_wan": float(row.get("今日持股-股数", 0) or 0),
-                "hold_value_wan": float(row.get("今日持股-市值", 0) or 0),
-                "pct_of_float": float(row.get("今日持股-占流通股比", 0) or 0),
-                "change_shares_wan": float(row.get("今日增持估计-股数", 0) or 0),
-                "change_value_wan": float(row.get("今日增持估计-市值", 0) or 0),
-                "change_pct": float(row.get("今日增持估计-市值增幅", 0) or 0),
-            }, ensure_ascii=False)
+        # Filter to northbound rows (资金方向 = 北向)
+        north = df[df["资金方向"] == "北向"]
 
-        # Return top movers (biggest increases/decreases)
-        results = []
-        for _, row in df.head(30).iterrows():
-            results.append({
-                "code": str(row.get("代码", "")),
-                "name": str(row.get("名称", "")),
-                "hold_value_wan": float(row.get("今日持股-市值", 0) or 0),
-                "pct_of_float": float(row.get("今日持股-占流通股比", 0) or 0),
-                "change_shares_wan": float(row.get("今日增持估计-股数", 0) or 0),
-                "change_value_wan": float(row.get("今日增持估计-市值", 0) or 0),
-                "change_pct": float(row.get("今日增持估计-市值增幅", 0) or 0),
-                "sector": str(row.get("所属板块", "")),
+        segments = []
+        total_net_buy_yi = 0.0
+        for _, row in north.iterrows():
+            net_buy = float(row.get("成交净买额", 0) or 0)  # akshare: 亿元
+            inflow = float(row.get("资金净流入", 0) or 0)
+            segments.append({
+                "segment": str(row.get("板块", "")),  # 沪股通/深股通
+                "net_buy_yi": round(net_buy, 2),
+                "net_inflow_yi": round(inflow, 2),
+                "advance_count": int(row.get("上涨数", 0) or 0),
+                "decline_count": int(row.get("下跌数", 0) or 0),
+                "flat_count": int(row.get("持平数", 0) or 0),
+                "index_name": str(row.get("相关指数", "")),
+                "index_change_pct": float(row.get("指数涨跌幅", 0) or 0),
             })
+            total_net_buy_yi += net_buy
+
+        trading_date = ""
+        if not north.empty:
+            trading_date = str(north.iloc[0].get("交易日", ""))
 
         return json.dumps({
-            "count": len(results),
-            "data": results,
+            "date": trading_date,
+            "total_net_buy_yi": round(total_net_buy_yi, 2),
+            "direction": "净买入" if total_net_buy_yi > 0 else "净卖出" if total_net_buy_yi < 0 else "平",
+            "segments": segments,
+            "note": "仅汇总数据，个股级北向持仓自2024-08-19起不可用",
         }, ensure_ascii=False)
 
     except Exception as e:

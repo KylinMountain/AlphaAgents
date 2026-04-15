@@ -284,6 +284,37 @@ async def run_morning_scan() -> str | None:
             recs = await _cross_validate_recommendations(recs)
             _save_recommendations_list(recs)
 
+            # 7. LLM VPA analysis for each recommended stock (Anna Coulling deep analysis)
+            try:
+                from alpha_agents.tools.vpa import compute_vpa_with_llm
+                vpa_lines = ["\n\n【量价深度分析】（Anna Coulling VPA）"]
+                for r in recs[:5]:  # Top 5 recommendations
+                    code = r.get("code", "")
+                    name = r.get("name", "")
+                    if not code:
+                        continue
+                    try:
+                        vpa_r = await asyncio.to_thread(compute_vpa_with_llm, code, name)
+                        if vpa_r.get("ok") and vpa_r.get("llm_report"):
+                            verdict = vpa_r.get("llm_verdict", "?")
+                            conf = vpa_r.get("llm_confidence", 0)
+                            phase = vpa_r.get("llm_phase", "?")
+                            confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
+                            vpa_lines.append(
+                                f"\n▶ {code} {name} [{verdict} 信心{conf} {phase} {confirmed}]"
+                            )
+                            llm_text = vpa_r["llm_report"]
+                            if len(llm_text) > 1500:
+                                llm_text = llm_text[:1500] + f"\n...(完整报告: vpa {code})"
+                            vpa_lines.append(llm_text)
+                    except Exception as e:
+                        logger.debug("Morning VPA for %s failed: %s", code, e)
+                if len(vpa_lines) > 1:
+                    report += "\n".join(vpa_lines)
+                    logger.info("Added VPA analysis for %d stocks to morning report", len(vpa_lines) - 1)
+            except Exception as e:
+                logger.debug("Morning VPA section failed: %s", e)
+
     print(report)
     return report
 

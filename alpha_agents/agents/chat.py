@@ -649,6 +649,7 @@ async def run_chat():
                 "  sectors / 板块       — 板块资金排名 Top10\n"
                 "  查 002384            — 快速查个股实时行情\n"
                 "  选股 电池 / best 电池 — 板块内多因子选股\n"
+                "  vpa 002364 / 量价 002364 — 量价分析（Wyckoff/Anna Coulling）\n"
                 "  lhb / 龙虎榜         — 今日龙虎榜机构动向\n"
                 "  north / 北向         — 北向资金流向\n"
                 "  limitup / 涨停       — 涨停板分布\n"
@@ -798,6 +799,33 @@ async def run_chat():
             from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
             result = get_sector_best_stocks_fn(best_match.group(1).strip())
             console.print(Panel(result, title="板块选股", border_style="cyan"))
+            continue
+        # VPA analysis: "vpa 002364" or "量价 002364" — full Anna Coulling LLM report
+        vpa_match = _re.match(r"^(?:vpa|量价)\s+(\d{6})(?:\s+(.+))?$", user_input.strip(), _re.IGNORECASE)
+        if vpa_match:
+            code = vpa_match.group(1)
+            name = (vpa_match.group(2) or "").strip()
+            console.print(f"[dim]正在进行 Anna Coulling 量价分析 {code} {name}...[/dim]")
+            try:
+                from alpha_agents.tools.vpa import compute_vpa_with_llm
+                r = compute_vpa_with_llm(code, name=name)
+                if not r.get("ok"):
+                    console.print(f"[red]VPA 分析失败: {r.get('error', '未知错误')}[/red]")
+                else:
+                    verdict = r.get("llm_verdict", "中性")
+                    conf = r.get("llm_confidence", 0)
+                    phase = r.get("llm_phase", "?")
+                    confirmed = r.get("llm_confirmed", False)
+                    reason = r.get("llm_reason", "")
+                    report = r.get("llm_report", "")
+
+                    color_map = {"看多": "green", "偏多": "green", "看空": "red", "偏空": "red", "中性": "yellow"}
+                    border = color_map.get(verdict, "cyan")
+                    confirm_str = "已确认" if confirmed else "待确认"
+                    title = f"VPA 量价分析 — {code} {name} [{verdict} 信心{conf} {phase} {confirm_str}]"
+                    console.print(Panel(report or reason, title=title, border_style=border))
+            except Exception as e:
+                console.print(f"[red]VPA 调用失败: {e}[/red]")
             continue
         if user_input.lower() in ("risk", "风险"):
             # Quick risk: show portfolio with unrealized P&L

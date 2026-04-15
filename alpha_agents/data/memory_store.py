@@ -154,6 +154,42 @@ CREATE TABLE IF NOT EXISTS chat_memory (
     summary TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS vpa_analysis_history (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    analysis_date TEXT NOT NULL,
+    verdict TEXT,
+    confidence REAL,
+    phase TEXT,
+    confirmed INTEGER DEFAULT 0,
+    reason TEXT,
+    report TEXT,
+    signals_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vpa_history_code_date ON vpa_analysis_history(code, analysis_date);
+
+CREATE TABLE IF NOT EXISTS vpa_pending_signals (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    signal_type TEXT NOT NULL,
+    signal_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    expected_confirmation TEXT,
+    expected_denial TEXT,
+    status TEXT DEFAULT 'pending',
+    expire_date TEXT,
+    source_analysis_id INTEGER,
+    resolved_date TEXT,
+    resolved_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (source_analysis_id) REFERENCES vpa_analysis_history(id)
+);
+CREATE INDEX IF NOT EXISTS idx_vpa_signals_status ON vpa_pending_signals(status);
+CREATE INDEX IF NOT EXISTS idx_vpa_signals_code ON vpa_pending_signals(code);
 """
 
 _local = threading.local()
@@ -501,3 +537,114 @@ def get_all_cognition_latest() -> list[dict]:
         "ORDER BY m1.sector"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── VPA Analysis History ──────────────────────────────────────
+
+def save_vpa_analysis(code: str, name: str, analysis_date: str,
+                      verdict: str, confidence: float, phase: str,
+                      confirmed: bool, reason: str, report: str,
+                      signals_json: str = "") -> int:
+    """Save a VPA analysis report to history. Returns row id."""
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO vpa_analysis_history "
+            "(code, name, analysis_date, verdict, confidence, phase, confirmed, reason, report, signals_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, name, analysis_date, verdict, confidence, phase,
+             1 if confirmed else 0, reason, report, signals_json),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_latest_vpa_analysis(code: str) -> dict | None:
+    """Get the most recent VPA analysis for a stock."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM vpa_analysis_history WHERE code = ? ORDER BY analysis_date DESC, id DESC LIMIT 1",
+        (code,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_vpa_history(code: str, limit: int = 5) -> list[dict]:
+    """Get recent VPA analyses for a stock."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM vpa_analysis_history WHERE code = ? ORDER BY analysis_date DESC LIMIT ?",
+        (code, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── VPA Pending Signals ──────────────────────────────────────
+
+def save_vpa_signal(code: str, name: str, signal_type: str, signal_date: str,
+                    direction: str, expected_confirmation: str = "",
+                    expected_denial: str = "", expire_days: int = 3,
+                    source_analysis_id: int | None = None) -> int:
+    """Create a pending VPA signal to track. Returns row id. Deduplicates by (code, signal_type, signal_date)."""
+    from datetime import datetime, timedelta
+    # LLM may return "04-14" or "2026-04-14" — normalize
+    if len(signal_date) <= 5:
+        signal_date = f"{datetime.now().year}-{signal_date}"
+    try:
+        expire = (datetime.strptime(signal_date, "%Y-%m-%d") + timedelta(days=expire_days)).strftime("%Y-%m-%d")
+    except ValueError:
+        expire = (datetime.now() + timedelta(days=expire_days)).strftime("%Y-%m-%d")
+
+    # Dedup: skip if same signal already pending for this stock
+    conn = _get_conn()
+    existing = conn.execute(
+        "SELECT id FROM vpa_pending_signals WHERE code = ? AND signal_type = ? AND signal_date = ? AND status = 'pending'",
+        (code, signal_type, signal_date),
+    ).fetchone()
+    if existing:
+        return existing["id"]
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO vpa_pending_signals "
+            "(code, name, signal_type, signal_date, direction, expected_confirmation, "
+            " expected_denial, status, expire_date, source_analysis_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (code, name, signal_type, signal_date, direction,
+             expected_confirmation, expected_denial, expire, source_analysis_id),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_pending_vpa_signals() -> list[dict]:
+    """Get all pending (unresolved) VPA signals."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM vpa_pending_signals WHERE status = 'pending' ORDER BY signal_date",
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolve_vpa_signal(signal_id: int, status: str, resolved_by: str = "") -> None:
+    """Mark a VPA signal as confirmed/denied/expired."""
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE vpa_pending_signals SET status = ?, resolved_date = date('now'), resolved_by = ? WHERE id = ?",
+            (status, resolved_by, signal_id),
+        )
+        conn.commit()
+
+
+def expire_old_vpa_signals(today: str) -> int:
+    """Expire signals past their expire_date. Returns count expired."""
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE vpa_pending_signals SET status = 'expired', resolved_date = ? "
+            "WHERE status = 'pending' AND expire_date < ?",
+            (today, today),
+        )
+        conn.commit()
+        return cur.rowcount

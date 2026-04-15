@@ -154,22 +154,15 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
     codes = [b["code"] for b in betas]
     rt = get_realtime_quotes(codes) or {}
 
-    # 3. Get institutional data (from daily archive or live)
-    north_data = {}
+    # 3. Get institutional data — per-stock northbound is no longer published
+    # by HK Exchange since 2024-08-19, so north_data stays empty. LHB still works.
+    north_data: dict = {}
     lhb_data = {}
     try:
-        from alpha_agents.tools.fund_flow import get_north_flow_fn, get_lhb_detail_fn
+        from alpha_agents.tools.fund_flow import get_lhb_detail_fn
         import json as _j
 
-        # North flow
-        north_raw = _j.loads(get_north_flow_fn("today"))
-        for item in north_raw.get("data", []):
-            north_data[item["code"]] = {
-                "pct": item.get("pct_of_float", 0),
-                "change": "增持" if item.get("change_value_wan", 0) > 0 else "减持",
-            }
-
-        # LHB
+        # LHB (still working)
         lhb_raw = _j.loads(get_lhb_detail_fn())
         for item in lhb_raw.get("data", []):
             lhb_data[item["code"]] = {
@@ -177,7 +170,7 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
                 "net_buy": item.get("net_buy", 0),
             }
     except Exception as e:
-        logger.debug("Institutional data fetch failed: %s", e)
+        logger.debug("LHB data fetch failed: %s", e)
 
     # 4. Normalize beta scores
     beta_scores = _normalize_beta_scores(betas)

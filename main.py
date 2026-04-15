@@ -181,11 +181,11 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         scheduler = TradingDayScheduler()
     set_scheduler(scheduler)
 
-    # Morning scan: 06:30, every day (non-trading days still useful for global news)
-    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(6, 30), trading_day_only=False))
+    # Morning scan: 09:00, every day (non-trading days still useful for global news)
+    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0), trading_day_only=False))
 
-    # Opening reminder: 09:15, trading days only
-    scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 15)))
+    # Opening reminder: 09:25, trading days only (集合竞价末端,价格已稳定)
+    scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 25)))
 
     # Intraday monitor: 09:30-15:00 every 5 min, boost to 2 min on anomaly
     scheduler.add_task(Task(

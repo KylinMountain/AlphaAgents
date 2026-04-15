@@ -490,12 +490,11 @@ async def run_intraday_monitor() -> str | None:
     except Exception as e:
         logger.warning("Signal detection failed: %s", e)
 
-    # ── Step 2: Code selects actionable stocks from pre-fetched sector picks ──
-    # Reuses sector_picks_cache from pre-fetch (no duplicate API calls)
-    actionable = []
+    # ── Step 2: Code selects actionable stocks, then parallel VPA filter ──
+    # Phase A: Collect all non-limit-up candidates (fast, no LLM)
+    raw_candidates = []
     for sector in candidate_sectors[:3]:
         try:
-            # Use cached result from pre-fetch, only call API if not cached
             if sector in sector_picks_cache:
                 result = sector_picks_cache[sector]
             else:
@@ -504,43 +503,55 @@ async def run_intraday_monitor() -> str | None:
 
             for s in result.get("top", []):
                 if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
-                    # VPA gate: run in thread to avoid blocking event loop
-                    try:
-                        vpa_verdict, vpa_note = await asyncio.to_thread(
-                            _vpa_gate_for_candidate, s["code"], s["name"]
-                        )
-                    except Exception:
-                        vpa_verdict, vpa_note = "unknown", ""
-                    if vpa_verdict == "bearish":
-                        logger.info("Actionable filtered out by VPA: %s %s — %s",
-                                    s["code"], s["name"], vpa_note)
-                        continue
-                    # Use beta tool's score + institutional signals (already in result)
-                    price = s.get("price", 0)
-                    # Compute simple entry zone from price: 3% below current
-                    entry_high = round(price, 2) if price else None
-                    entry_low = round(price * 0.97, 2) if price else None
-                    # Stop loss: 7% below current
-                    stop_loss_val = round(price * 0.93, 2) if price else None
-
-                    actionable.append({
-                        "code": s["code"],
-                        "name": s["name"],
-                        "price": price,
-                        "change_pct": s.get("today_change_pct", 0),
-                        "score": s.get("score", 0),
-                        "beta": s.get("beta_weighted", 0),
-                        "note": s.get("note", ""),
-                        "theme": sector,
-                        "institutional": s.get("institutional", ""),
-                        "vpa_verdict": vpa_verdict,
-                        "vpa_note": vpa_note,
-                        "entry_low": entry_low,
-                        "entry_high": entry_high,
-                        "stop_loss": stop_loss_val,
-                    })
+                    raw_candidates.append((sector, s))
         except Exception as e:
             logger.debug("Sector best stocks failed for %s: %s", sector, e)
+
+    # Phase B: Parallel VPA gate on all candidates (LLM calls run concurrently)
+    actionable = []
+    if raw_candidates:
+        async def _vpa_check(sector, s):
+            try:
+                vpa_verdict, vpa_note = await asyncio.to_thread(
+                    _vpa_gate_for_candidate, s["code"], s["name"]
+                )
+            except Exception:
+                vpa_verdict, vpa_note = "unknown", ""
+            return sector, s, vpa_verdict, vpa_note
+
+        vpa_tasks = [_vpa_check(sector, s) for sector, s in raw_candidates]
+        vpa_results = await asyncio.gather(*vpa_tasks, return_exceptions=True)
+
+        for item in vpa_results:
+            if isinstance(item, Exception):
+                continue
+            sector, s, vpa_verdict, vpa_note = item
+            if vpa_verdict == "bearish":
+                logger.info("Actionable filtered out by VPA: %s %s — %s",
+                            s["code"], s["name"], vpa_note)
+                continue
+
+            price = s.get("price", 0)
+            entry_high = round(price, 2) if price else None
+            entry_low = round(price * 0.97, 2) if price else None
+            stop_loss_val = round(price * 0.93, 2) if price else None
+
+            actionable.append({
+                "code": s["code"],
+                "name": s["name"],
+                "price": price,
+                "change_pct": s.get("today_change_pct", 0),
+                "score": s.get("score", 0),
+                "beta": s.get("beta_weighted", 0),
+                "note": s.get("note", ""),
+                "theme": sector,
+                "institutional": s.get("institutional", ""),
+                "vpa_verdict": vpa_verdict,
+                "vpa_note": vpa_note,
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "stop_loss": stop_loss_val,
+            })
 
     # Sort by score, take top 5
     actionable.sort(key=lambda x: x["score"], reverse=True)

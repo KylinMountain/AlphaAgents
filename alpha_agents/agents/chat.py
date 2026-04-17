@@ -580,10 +580,17 @@ def _build_context() -> str:
     except Exception:
         memories_text = "无法加载历史记忆"
 
-    return CHAT_SYSTEM_PROMPT.format(
+    from alpha_agents.evolution import build_chat_context
+    base_ctx = build_chat_context(
         portfolio_summary=portfolio,
         themes_summary=themes_text,
         stats_summary=stats_text,
+    )
+
+    return CHAT_SYSTEM_PROMPT.format(
+        portfolio_summary=base_ctx,
+        themes_summary="",
+        stats_summary="",
         chat_memories=memories_text,
     )
 

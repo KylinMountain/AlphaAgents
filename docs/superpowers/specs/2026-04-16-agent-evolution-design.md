@@ -446,4 +446,32 @@ L1 Feedback + `features_json` schema extension landed on branch `feat/evolution-
 
 **Unblocks Phase 2/3:** `features_json` populated on every new intraday prediction provides the feature clusters that Phase 3 playbook auto-creation requires. Wait ≥2 weeks before starting Phase 3 to accumulate enough data for meaningful clustering.
 
-Commits on `feat/evolution-phase1`: `1c5e87c` `8376221` `fc343fc` `6ba87c9` `de7a973` `5c0b4ff` `b3e2c3a` `5c4ffa1` `e8bb46b` `a244209` `2daee01` `38dbe8b` `186bbca` `3cad523` `f236c55`.
+Commits on `feat/evolution-phase1`: `1c5e87c` `8376221` `fc343fc` `6ba87c9` `de7a973` `5c0b4ff` `b3e2c3a` `5c4ffa1` `e8bb46b` `a244209` `2daee01` `38dbe8b` `186bbca` `3cad523` `f236c55` `a41ec83`.
+
+---
+
+## Phase 2 Shipped — 2026-04-17 (same branch)
+
+L2 Lessons + Trading Principles landed. Continued on `feat/evolution-phase1`.
+
+**New tables:** `daily_lessons`, `trading_principles` with full CRUD (`insert_daily_lesson`, `get_recent_daily_lessons`, `get_historical_lessons_by_themes`, `create_trading_principle`, `reinforce_trading_principle`, `set_principle_status`, `get_active_principles`, `get_all_principles_including_weakened`).
+
+**New module** `alpha_agents/evolution/lessons.py`:
+- `extract_daily_lessons(report, today)` — parses `<!-- LESSONS: [{type,theme,content,tags}] -->` tag from review output, persists rows via `insert_daily_lesson` (idempotent on UNIQUE(date, content))
+- `consolidate_principles(today)` — LLM reads today's lessons + existing principles → create/reinforce/weaken operations. Graceful degrade on LLM failure (401, timeout, etc.) → all-zero counts, logged, no exception
+- `post_review(today, report)` — async entrypoint, returns short summary for review report
+
+**Prompt change:** `alpha_agents/prompts/review.md` appends "结构化输出" section requiring `<!-- LESSONS: [...] -->` tag with concrete examples and anti-patterns.
+
+**Wired:** `review.py :: run_review()` calls `await post_review(today, report)` after the VPA signal check block, appends evolution report to the final output.
+
+**Context upgrade:**
+- `build_morning_context` now composes: sentiment + cognition + **principles** + **recent_lessons (7d)** + stats
+- `build_chat_context` now composes: portfolio + themes + stats + sentiment + **principles** + **recent_lessons (3d)**
+- `build_vpa_context` unchanged (Phase 3 will add playbook matching here)
+
+**Tests:** 40/40 passing (10 schema + 15 feedback + 7 context_builder + 8 lessons). All Phase 1 tests still green after extending existing mocks with the new injectors.
+
+**Unblocks Phase 3:** `features_json` from Phase 1 now has enough schema; principles form the qualitative side of evolution; Phase 3 Playbooks will add the quantitative weight-adjustment layer once ≥2 weeks of real predictions accumulate.
+
+Phase 2 commits: `454141f` `44f811a` `2dd0aec` `75201ba` `0d1e749` `8c09360` `c3e6f2a`.

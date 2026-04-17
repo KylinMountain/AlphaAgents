@@ -483,6 +483,15 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("VPA signal check failed: %s", e)
 
+    # Phase 2: extract lessons + consolidate principles
+    try:
+        from alpha_agents.evolution import post_review
+        evolution_report = await post_review(today, report)
+        if evolution_report:
+            report += "\n\n" + evolution_report
+    except Exception as e:
+        logger.warning("Evolution post_review failed: %s", e)
+
     return report
 
 

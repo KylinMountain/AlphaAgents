@@ -119,3 +119,76 @@ def test_trading_principles_table_exists(tmp_path, monkeypatch):
                 "action_guidance", "evidence", "evidence_count", "win_rate",
                 "first_learned", "last_reinforced", "status"}
     assert expected <= cols
+
+
+def test_insert_daily_lesson_and_query(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    ms.insert_daily_lesson("2026-04-17", "failure", "数据中心",
+                            "东方国信破5日线才预警", tags="5日线,止损时机")
+    rows = ms.get_recent_daily_lessons(days=7)
+    assert len(rows) == 1
+    assert rows[0]["lesson_type"] == "failure"
+    assert rows[0]["theme"] == "数据中心"
+    assert "东方国信" in rows[0]["content"]
+
+
+def test_insert_daily_lesson_deduplicates(tmp_path, monkeypatch):
+    """UNIQUE(date, content) — second insert same day same content is ignored."""
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    ms.insert_daily_lesson("2026-04-17", "insight", None, "相同内容")
+    ms.insert_daily_lesson("2026-04-17", "insight", None, "相同内容")
+    rows = ms.get_recent_daily_lessons(days=1)
+    assert len(rows) == 1
+
+
+def test_upsert_trading_principle_create_and_reinforce(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    pid = ms.create_trading_principle(
+        principle="巨量长下影 = 买入高峰",
+        pattern_description="跌幅>5%下影>30%",
+        category="vpa_signal",
+        action_guidance="等缩量不破低再介入",
+        evidence=[{"code": "300274", "date": "04-01", "outcome": "+8.2% in 10d"}],
+        today="2026-04-17",
+    )
+    assert pid > 0
+
+    ms.reinforce_trading_principle(pid, today="2026-04-18",
+                                    new_case={"code": "000001", "date": "04-18",
+                                              "outcome": "+5% in 5d"})
+    rows = ms.get_active_principles()
+    assert len(rows) == 1
+    assert rows[0]["evidence_count"] == 2
+    assert rows[0]["last_reinforced"] == "2026-04-18"
+
+
+def test_weaken_and_retire_principle(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    pid = ms.create_trading_principle(
+        principle="P", pattern_description="d", category="x",
+        action_guidance="a", evidence=[], today="2026-04-17",
+    )
+    ms.set_principle_status(pid, "weakened")
+    assert ms.get_active_principles() == []
+    all_rows = ms.get_all_principles_including_weakened()
+    assert len(all_rows) == 1
+    assert all_rows[0]["status"] == "weakened"

@@ -962,3 +962,127 @@ def get_recent_sentiment_phases(n: int = 2) -> list[dict]:
         (n,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Phase 2: daily lessons ────────────────────────────────────
+def insert_daily_lesson(date: str, lesson_type: str, theme: str | None,
+                        content: str, tags: str = "", source: str = "review") -> None:
+    """Insert a lesson; silently skips if (date, content) already exists."""
+    with _write_lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO daily_lessons (date, lesson_type, theme, content, source, relevance_tags) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (date, lesson_type, theme, content, source, tags),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass  # duplicate (date, content)
+
+
+def get_recent_daily_lessons(days: int = 7, themes: list[str] | None = None) -> list[dict]:
+    """Return lessons from last N days. If themes given, ONLY matching ones."""
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    q = "SELECT * FROM daily_lessons WHERE date >= ?"
+    params: list = [cutoff]
+    if themes:
+        placeholders = ",".join("?" * len(themes))
+        q += f" AND theme IN ({placeholders})"
+        params.extend(themes)
+    q += " ORDER BY date DESC, id DESC"
+    return [dict(r) for r in _get_conn().execute(q, params).fetchall()]
+
+
+def get_historical_lessons_by_themes(themes: list[str], older_than_days: int = 7,
+                                      limit: int = 10) -> list[dict]:
+    """For filtering old lessons by currently active themes (budget-aware injection)."""
+    if not themes:
+        return []
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=older_than_days)).strftime("%Y-%m-%d")
+    placeholders = ",".join("?" * len(themes))
+    q = (f"SELECT * FROM daily_lessons WHERE date < ? AND theme IN ({placeholders}) "
+         f"ORDER BY date DESC LIMIT ?")
+    return [dict(r) for r in _get_conn().execute(q, [cutoff, *themes, limit]).fetchall()]
+
+
+# ── Phase 2: trading principles ───────────────────────────────
+def create_trading_principle(*, principle: str, pattern_description: str,
+                              category: str, action_guidance: str,
+                              evidence: list[dict], today: str,
+                              win_rate: float | None = None) -> int:
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO trading_principles "
+            "(principle, pattern_description, category, action_guidance, "
+            " evidence, evidence_count, win_rate, first_learned, last_reinforced, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+            (principle, pattern_description, category, action_guidance,
+             json.dumps(evidence, ensure_ascii=False), len(evidence),
+             win_rate, today, today),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def reinforce_trading_principle(principle_id: int, *, today: str,
+                                 new_case: dict | None = None,
+                                 win_rate: float | None = None) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT evidence, evidence_count FROM trading_principles WHERE id = ?",
+            (principle_id,),
+        ).fetchone()
+        if not row:
+            return
+        evidence = json.loads(row["evidence"] or "[]")
+        if new_case:
+            evidence.append(new_case)
+        updates = [
+            "evidence = ?",
+            "evidence_count = ?",
+            "last_reinforced = ?",
+            "status = 'active'",
+        ]
+        params: list = [json.dumps(evidence, ensure_ascii=False),
+                        len(evidence), today]
+        if win_rate is not None:
+            updates.append("win_rate = ?")
+            params.append(win_rate)
+        params.append(principle_id)
+        conn.execute(
+            f"UPDATE trading_principles SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+
+
+def set_principle_status(principle_id: int, status: str) -> None:
+    """status ∈ {'active', 'weakened', 'retired'}"""
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE trading_principles SET status = ? WHERE id = ?",
+            (status, principle_id),
+        )
+        conn.commit()
+
+
+def get_active_principles() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT * FROM trading_principles WHERE status = 'active' "
+        "ORDER BY evidence_count DESC, last_reinforced DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_principles_including_weakened() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT * FROM trading_principles WHERE status IN ('active', 'weakened') "
+        "ORDER BY status, evidence_count DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]

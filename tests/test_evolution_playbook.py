@@ -147,3 +147,56 @@ def test_update_playbook_stats_boosts_high_performer():
     assert any("boost" in o.lower() or "1.5" in o for o in ops)
     assert m_upd.call_args.kwargs["weight"] == 1.5
     assert m_upd.call_args.kwargs["status"] == "active"
+
+
+def test_scan_and_auto_create_ignores_signal_rows():
+    """Only report_type='intraday' counts — intraday_signal (limit-up obs) excluded."""
+    from alpha_agents.evolution.playbook import scan_and_auto_create
+    with patch("alpha_agents.evolution.playbook._query_hit_clusters") as m:
+        m.return_value = []
+        result = scan_and_auto_create("2026-04-17")
+    assert result == []
+    m.assert_called_once()
+
+
+def test_scan_and_auto_create_creates_new_playbook():
+    cluster = {"vpa_verdict": "bullish", "theme": "CPO",
+               "institutional_present": 1,
+               "hits": 4, "total": 5, "avg_return": 4.2}
+    with patch("alpha_agents.evolution.playbook._query_hit_clusters",
+               return_value=[cluster]), \
+         patch("alpha_agents.evolution.playbook.get_all_playbooks",
+               return_value=[]), \
+         patch("alpha_agents.evolution.playbook.create_playbook",
+               return_value=42) as m_create:
+        from alpha_agents.evolution.playbook import scan_and_auto_create
+        created = scan_and_auto_create("2026-04-17")
+    assert created == [42]
+    m_create.assert_called_once()
+    args = m_create.call_args.kwargs
+    pattern = args["pattern_json"]
+    # Conditions must reference theme + vpa_verdict + institutional (contains 机构)
+    fields = {c["field"] for c in pattern["conditions"]}
+    assert fields == {"theme", "vpa_verdict", "institutional"}
+    # Name includes identifying bits
+    assert "CPO" in args["name"]
+    assert "bullish" in args["name"]
+
+
+def test_scan_and_auto_create_skips_existing_pattern():
+    cluster = {"vpa_verdict": "bullish", "theme": "CPO",
+               "institutional_present": 0,
+               "hits": 3, "total": 4, "avg_return": 2.0}
+    # Existing playbook matches the same signature (theme + vpa_verdict, no institutional)
+    existing = [{"id": 1, "name": "Auto: CPO-bullish",
+                 "pattern_json": '{"conditions":[{"field":"theme","op":"==","value":"CPO"},{"field":"vpa_verdict","op":"==","value":"bullish"}]}',
+                 "status": "active"}]
+    with patch("alpha_agents.evolution.playbook._query_hit_clusters",
+               return_value=[cluster]), \
+         patch("alpha_agents.evolution.playbook.get_all_playbooks",
+               return_value=existing), \
+         patch("alpha_agents.evolution.playbook.create_playbook") as m_create:
+        from alpha_agents.evolution.playbook import scan_and_auto_create
+        created = scan_and_auto_create("2026-04-17")
+    assert created == []
+    m_create.assert_not_called()

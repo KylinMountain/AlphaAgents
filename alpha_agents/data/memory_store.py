@@ -251,6 +251,18 @@ def _get_conn() -> sqlite3.Connection:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        # Phase 1 migration: add features_json to predictions (idempotent).
+        # Used by Playbook clustering (Phase 3) to group predictions by decision features
+        # (vpa_verdict, theme_strength, institutional, score, etc.).
+        try:
+            conn.execute(
+                "ALTER TABLE predictions ADD COLUMN features_json TEXT DEFAULT '{}'"
+            )
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            # Column already exists — expected on every restart after first migration.
+            if "duplicate column name" not in str(e).lower():
+                raise
         _local.conn = conn
     return conn
 

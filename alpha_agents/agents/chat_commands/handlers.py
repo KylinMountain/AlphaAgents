@@ -334,6 +334,29 @@ async def handle_weekly(arg: str, ctx: ChatContext) -> None:
     )
 
 
+# ── Evolution/Playbook handlers ───────────────────────────────────────
+
+async def handle_playbook(arg: str, ctx: ChatContext) -> None:
+    """List all playbooks with status / weight / hit rate."""
+    from alpha_agents.data.memory_store import get_all_playbooks
+    rows = get_all_playbooks()
+    if not rows:
+        ctx.console.print("[yellow]尚无 Playbook。至少积累 2 周 intraday 数据后由复盘自动发现。[/yellow]")
+        return
+    lines = [f"共 {len(rows)} 条 Playbook:"]
+    for pb in rows:
+        hr = pb.get("hit_rate", 0) or 0
+        status = pb["status"]
+        color = {"active": "green", "degraded": "yellow", "deprecated": "dim"}.get(status, "white")
+        lines.append(
+            f"[{color}]• {pb['name']} ({status}, weight={pb.get('weight', 1.0):.1f}) "
+            f"— 胜率{hr*100:.0f}% ({pb.get('wins',0)}/{pb.get('total_trades',0)})[/]"
+        )
+        if pb.get("annotation"):
+            lines.append(f"    [dim]注：{pb['annotation']}[/dim]")
+    ctx.console.print(Panel("\n".join(lines), title="Playbook 列表", border_style="cyan"))
+
+
 # ── Automation handlers ───────────────────────────────────────────────
 
 async def handle_alerts(arg: str, ctx: ChatContext) -> None:
@@ -374,6 +397,7 @@ REGISTRY: tuple[Command, ...] = (
     # 数据
     Command("/news", "数据", "最新新闻", handle_news),
     Command("/themes", "数据", "活跃主线状态", handle_themes),
+    Command("/playbook", "数据", "查看 Playbook 列表及胜率", handle_playbook),
 
     # 任务
     Command("/morning", "任务", "手动运行晨扫", handle_morning),

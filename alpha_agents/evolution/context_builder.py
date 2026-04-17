@@ -8,6 +8,7 @@ from alpha_agents.evolution.feedback import (
     inject_vpa_signal_history,
     inject_principles,
     inject_recent_lessons,
+    inject_playbooks,
 )
 
 
@@ -26,7 +27,8 @@ def build_morning_context(themes: list[dict], stats: str) -> str:
     """
     sections = []
     for part in (inject_sentiment(), inject_cognition(),
-                 inject_principles(), inject_recent_lessons()):
+                 inject_principles(), inject_recent_lessons(),
+                 inject_playbooks()):
         if part:
             sections.append(part)
     if stats:

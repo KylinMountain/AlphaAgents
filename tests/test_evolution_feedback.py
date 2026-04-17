@@ -187,3 +187,28 @@ def test_inject_recent_lessons_empty():
                return_value=[]):
         from alpha_agents.evolution.feedback import inject_recent_lessons
         assert inject_recent_lessons() == ""
+
+
+def test_inject_playbooks_formats_active_and_degraded():
+    fake = [
+        {"name": "CPO突破+机构", "status": "active", "weight": 1.5,
+         "hit_rate": 0.8, "total_trades": 10, "wins": 8, "annotation": ""},
+        {"name": "数据中心追强", "status": "degraded", "weight": 0.5,
+         "hit_rate": 0.3, "total_trades": 6, "wins": 2,
+         "annotation": "主线资金退潮"},
+    ]
+    with patch("alpha_agents.evolution.feedback.get_active_or_degraded_playbooks",
+               return_value=fake):
+        from alpha_agents.evolution.feedback import inject_playbooks
+        result = inject_playbooks()
+    assert "Playbook" in result or "playbook" in result
+    assert "CPO突破+机构" in result and "80%" in result
+    assert "数据中心追强" in result and ("⚠️" in result or "degraded" in result.lower())
+    assert "主线资金退潮" in result
+
+
+def test_inject_playbooks_empty():
+    with patch("alpha_agents.evolution.feedback.get_active_or_degraded_playbooks",
+               return_value=[]):
+        from alpha_agents.evolution.feedback import inject_playbooks
+        assert inject_playbooks() == ""

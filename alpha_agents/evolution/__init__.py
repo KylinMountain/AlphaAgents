@@ -6,13 +6,15 @@ not read by any agent (cognition, sentiment, VPA signal confirmations).
 Phase 2 (this module): L2 Lessons/Principles — extract lessons from review
 reports, consolidate into reusable trading principles.
 
-Phase 3+ (not yet implemented): L3 Playbooks.
+Phase 3 (this module): L3 Playbooks — pattern-based trade playbooks with
+regime-aware matching and daily stat tracking.
 See docs/superpowers/specs/2026-04-16-agent-evolution-design.md.
 
 Public API:
     build_morning_context, build_chat_context, build_vpa_context  — compose
     inject_sentiment, inject_cognition, inject_vpa_signal_history  — atoms
     extract_daily_lessons, consolidate_principles, post_review  — L2 lessons
+    match_playbook, update_playbook_stats  — L3 playbooks
 """
 
 from alpha_agents.evolution.feedback import (
@@ -30,6 +32,7 @@ from alpha_agents.evolution.lessons import (
     consolidate_principles,
     post_review,
 )
+from alpha_agents.evolution.playbook import match_playbook, update_playbook_stats
 
 __all__ = [
     "build_chat_context",
@@ -41,4 +44,6 @@ __all__ = [
     "extract_daily_lessons",
     "consolidate_principles",
     "post_review",
+    "match_playbook",
+    "update_playbook_stats",
 ]

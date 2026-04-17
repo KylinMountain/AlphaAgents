@@ -171,7 +171,7 @@ def consolidate_principles(today: str) -> dict:
 
 
 async def post_review(today: str, review_report: str) -> str:
-    """Phase 2 entry point: extract lessons, consolidate into principles.
+    """Phase 2+3 entry point: extract lessons, consolidate into principles, update playbooks.
 
     Called from review.py after the review report is generated. Returns a
     short summary string to append to the report (or empty string if nothing
@@ -179,16 +179,32 @@ async def post_review(today: str, review_report: str) -> str:
     """
     import asyncio
 
-    # Step ①: extract structured lessons from the report's LESSONS tag
+    # Phase 2: lessons + principles
     lesson_count = await asyncio.to_thread(extract_daily_lessons, review_report, today)
-
-    # Step ②: LLM consolidation (only if we got new lessons today)
     if lesson_count > 0:
         counts = await asyncio.to_thread(consolidate_principles, today)
     else:
         counts = {"created": 0, "reinforced": 0, "weakened": 0}
 
-    if lesson_count == 0 and sum(counts.values()) == 0:
+    # Phase 3: playbook daily lifecycle
+    from alpha_agents.evolution.playbook import (
+        update_playbook_stats, scan_and_auto_create,
+    )
+    try:
+        playbook_ops = await asyncio.to_thread(update_playbook_stats, today)
+    except Exception as e:
+        logger.warning("Playbook stats update failed: %s", e)
+        playbook_ops = []
+    try:
+        created_ids = await asyncio.to_thread(scan_and_auto_create, today)
+    except Exception as e:
+        logger.warning("Playbook auto-create failed: %s", e)
+        created_ids = []
+
+    # Assemble report
+    nothing = (lesson_count == 0 and sum(counts.values()) == 0
+               and not playbook_ops and not created_ids)
+    if nothing:
         return ""
 
     lines = ["【经验沉淀】"]
@@ -200,4 +216,10 @@ async def post_review(today: str, review_report: str) -> str:
         lines.append(f"• 强化 {counts['reinforced']} 条 principles")
     if counts["weakened"]:
         lines.append(f"• 减弱 {counts['weakened']} 条 principles")
+    if playbook_ops:
+        lines.append("【Playbook 变化】")
+        for op in playbook_ops[:5]:
+            lines.append(f"• {op}")
+    if created_ids:
+        lines.append(f"• 自动发现 {len(created_ids)} 条新 Playbook（id={created_ids}）")
     return "\n".join(lines)

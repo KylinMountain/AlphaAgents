@@ -472,14 +472,23 @@ def save_prediction(
     theme_line: str,
     entry_price: float | None,
     reason: str,
+    features: dict | None = None,
 ) -> int:
-    """Record a stock recommendation."""
+    """Record a stock recommendation.
+
+    ``features`` (Phase 1): optional dict of decision-time features used by the
+    Playbook clustering in Phase 3. Serialized to ``features_json`` column.
+    Pass None for legacy callers (stored as empty '{}').
+    """
+    features_json = json.dumps(features or {}, ensure_ascii=False)
     with _write_lock:
         conn = _get_conn()
         cur = conn.execute(
-            "INSERT INTO predictions (date, report_type, code, name, direction, confidence, theme_line, entry_price, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (date, report_type, code, name, direction, confidence, theme_line, entry_price, reason),
+            "INSERT INTO predictions (date, report_type, code, name, direction, "
+            "confidence, theme_line, entry_price, reason, features_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (date, report_type, code, name, direction, confidence, theme_line,
+             entry_price, reason, features_json),
         )
         conn.commit()
         return cur.lastrowid

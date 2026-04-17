@@ -36,3 +36,53 @@ def test_alter_is_idempotent_on_existing_db(tmp_path):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
     conn.close()
     assert "features_json" in cols
+
+
+import json
+
+
+def test_save_prediction_writes_features_json(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    features = {"vpa_verdict": "bullish", "theme_strength": 9, "score": 62}
+    pred_id = ms.save_prediction(
+        date="2026-04-17",
+        report_type="intraday",
+        code="300857",
+        name="协创数据",
+        direction="bullish",
+        confidence="medium",
+        theme_line="CPO",
+        entry_price=303.96,
+        reason="测试",
+        features=features,
+    )
+    assert pred_id > 0
+    row = ms._get_conn().execute(
+        "SELECT features_json FROM predictions WHERE id = ?", (pred_id,)
+    ).fetchone()
+    assert json.loads(row["features_json"]) == features
+
+
+def test_save_prediction_defaults_features_to_empty(tmp_path, monkeypatch):
+    """Legacy callers that don't pass features must still work."""
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    pred_id = ms.save_prediction(
+        date="2026-04-17", report_type="morning", code="000001", name="平安银行",
+        direction="bullish", confidence="low", theme_line="", entry_price=None,
+        reason="legacy test",
+    )
+    row = ms._get_conn().execute(
+        "SELECT features_json FROM predictions WHERE id = ?", (pred_id,)
+    ).fetchone()
+    # Either "{}" or empty string is acceptable as "no features"
+    assert row["features_json"] in ("{}", "", None)

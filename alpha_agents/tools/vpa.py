@@ -1834,7 +1834,7 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
                 {"role": "system", "content": ANNA_COULLING_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=3000,
+            max_tokens=7000,
             timeout=90,
         )
         content = resp.choices[0].message.content

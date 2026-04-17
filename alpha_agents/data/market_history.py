@@ -197,35 +197,65 @@ def init_history(months: int = 6, batch_size: int = BATCH_SIZE) -> int:
     return total_inserted
 
 
-def _fetch_batch(codes: list[str], start_date: str, end_date: str) -> list[tuple]:
-    """Fetch history for a batch of stock codes from baostock."""
+def _fetch_batch(
+    codes: list[str],
+    start_date: str,
+    end_date: str,
+    *,
+    progress_every: int = 500,
+) -> list[tuple]:
+    """Fetch history for a batch of stock codes from baostock.
+
+    Logs a progress line every ``progress_every`` codes (INFO), tracking
+    got/empty/error counts so silent baostock failures (session eviction,
+    delayed post-close publishing) are visible. Set progress_every=0 to
+    silence progress (e.g. inside init_history's own batch loop).
+    """
     _bs_login()
     rows = []
+    n = len(codes)
+    got = empty = errors = 0
     try:
-        for code in codes:
+        for i, code in enumerate(codes, 1):
             bs_code = _to_bs_code(code)
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,turn,pctChg",
-                start_date=start_date, end_date=end_date,
-                frequency="d", adjustflag="2",
-            )
-            while rs.error_code == "0" and rs.next():
-                r = rs.get_row_data()
-                try:
-                    rows.append((
-                        code,           # code (6-digit)
-                        r[0],           # date
-                        float(r[1]) if r[1] else 0,  # open
-                        float(r[2]) if r[2] else 0,  # high
-                        float(r[3]) if r[3] else 0,  # low
-                        float(r[4]) if r[4] else 0,  # close
-                        int(r[5]) if r[5] else 0,     # volume
-                        float(r[6]) if r[6] else 0,  # turnover_rate
-                        float(r[7]) if r[7] else 0,  # change_pct
-                    ))
-                except (ValueError, IndexError):
-                    continue
+            code_rows_before = len(rows)
+            try:
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,open,high,low,close,volume,turn,pctChg",
+                    start_date=start_date, end_date=end_date,
+                    frequency="d", adjustflag="2",
+                )
+                if rs.error_code != "0":
+                    errors += 1
+                else:
+                    while rs.next():
+                        r = rs.get_row_data()
+                        try:
+                            rows.append((
+                                code,           # code (6-digit)
+                                r[0],           # date
+                                float(r[1]) if r[1] else 0,  # open
+                                float(r[2]) if r[2] else 0,  # high
+                                float(r[3]) if r[3] else 0,  # low
+                                float(r[4]) if r[4] else 0,  # close
+                                int(r[5]) if r[5] else 0,     # volume
+                                float(r[6]) if r[6] else 0,  # turnover_rate
+                                float(r[7]) if r[7] else 0,  # change_pct
+                            ))
+                        except (ValueError, IndexError):
+                            continue
+                    if len(rows) > code_rows_before:
+                        got += 1
+                    else:
+                        empty += 1
+            except Exception:
+                errors += 1
+            if progress_every > 0 and (i % progress_every == 0 or i == n):
+                logger.info(
+                    "Fetch progress %d/%d (got=%d empty=%d err=%d rows=%d)",
+                    i, n, got, empty, errors, len(rows),
+                )
     finally:
         _bs_logout()
     return rows
@@ -247,8 +277,26 @@ def _save_batch(rows: list[tuple]) -> int:
 
 # ── Daily Update ─────────────────────────────────────────────
 
+def _ensure_progress_visible() -> None:
+    """Attach a stderr handler to the root logger if nothing is consuming INFO.
+
+    Lets ``python -c "...; update_daily()"`` show progress lines without
+    boilerplate logging config. No-op inside the scheduler, which already
+    configures root logging at startup.
+    """
+    import sys
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    root.addHandler(h)
+    root.setLevel(logging.INFO)
+
+
 def update_daily() -> int:
     """Fetch today's data for all stocks. Called after market close."""
+    _ensure_progress_visible()
     today = datetime.now().strftime("%Y-%m-%d")
 
     # Check if already updated today

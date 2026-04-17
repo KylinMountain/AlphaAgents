@@ -254,6 +254,55 @@ def test_update_playbook_status_and_history(tmp_path, monkeypatch):
     assert history[0]["reason"] == "胜率跌破40%"
 
 
+def test_evolution_metrics_table_exists(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    ms._get_conn()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(evolution_metrics)")}
+    conn.close()
+    expected = {"date", "intraday_hit_rate_7d", "intraday_count_7d",
+                "matched_hit_rate_7d", "matched_count_7d",
+                "unmatched_hit_rate_7d", "unmatched_count_7d",
+                "active_principles", "weakened_principles",
+                "active_playbooks", "degraded_playbooks",
+                "lessons_count_7d"}
+    assert expected <= cols
+
+
+def test_upsert_evolution_metrics_and_trend(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    ms.upsert_evolution_metrics("2026-04-17", {
+        "intraday_hit_rate_7d": 0.62, "intraday_count_7d": 200,
+        "matched_hit_rate_7d": 0.75, "matched_count_7d": 40,
+        "unmatched_hit_rate_7d": 0.55, "unmatched_count_7d": 160,
+        "active_principles": 5, "weakened_principles": 1,
+        "active_playbooks": 3, "degraded_playbooks": 0,
+        "lessons_count_7d": 18,
+    })
+    # Upserts re-insert same date:
+    ms.upsert_evolution_metrics("2026-04-17", {
+        "intraday_hit_rate_7d": 0.65, "intraday_count_7d": 201,
+        "matched_hit_rate_7d": 0.75, "matched_count_7d": 40,
+        "unmatched_hit_rate_7d": 0.55, "unmatched_count_7d": 160,
+        "active_principles": 5, "weakened_principles": 1,
+        "active_playbooks": 3, "degraded_playbooks": 0,
+        "lessons_count_7d": 18,
+    })
+    trend = ms.get_evolution_metrics_trend(days=7)
+    assert len(trend) == 1  # same-date upsert replaces, not duplicates
+    assert abs(trend[0]["intraday_hit_rate_7d"] - 0.65) < 1e-9
+
+
 def test_record_playbook_trade_updates_stats(tmp_path, monkeypatch):
     import alpha_agents.data.memory_store as ms
     db = tmp_path / "memory.db"

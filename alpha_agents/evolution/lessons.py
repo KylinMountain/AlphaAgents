@@ -168,3 +168,36 @@ def consolidate_principles(today: str) -> dict:
         except Exception as e:
             logger.warning("Consolidation op %s failed: %s", op, e)
     return counts
+
+
+async def post_review(today: str, review_report: str) -> str:
+    """Phase 2 entry point: extract lessons, consolidate into principles.
+
+    Called from review.py after the review report is generated. Returns a
+    short summary string to append to the report (or empty string if nothing
+    happened).
+    """
+    import asyncio
+
+    # Step ①: extract structured lessons from the report's LESSONS tag
+    lesson_count = await asyncio.to_thread(extract_daily_lessons, review_report, today)
+
+    # Step ②: LLM consolidation (only if we got new lessons today)
+    if lesson_count > 0:
+        counts = await asyncio.to_thread(consolidate_principles, today)
+    else:
+        counts = {"created": 0, "reinforced": 0, "weakened": 0}
+
+    if lesson_count == 0 and sum(counts.values()) == 0:
+        return ""
+
+    lines = ["【经验沉淀】"]
+    if lesson_count > 0:
+        lines.append(f"• 今日提取 {lesson_count} 条 lessons")
+    if counts["created"]:
+        lines.append(f"• 新增 {counts['created']} 条 principles")
+    if counts["reinforced"]:
+        lines.append(f"• 强化 {counts['reinforced']} 条 principles")
+    if counts["weakened"]:
+        lines.append(f"• 减弱 {counts['weakened']} 条 principles")
+    return "\n".join(lines)

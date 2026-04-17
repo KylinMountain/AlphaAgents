@@ -504,6 +504,35 @@ L3 Playbooks landed. All code in place; auto-creation will activate once ≥2 we
 
 **Phase 3 commits:** `abd84b9` `c9ba424` `828954f` `ba20241` `87cc9fb` `f70d23d` `5f450ef`.
 
-## What remains: Phase 4 (Evolution Metrics + A/B)
+## Phase 4 Shipped — 2026-04-17 (same branch)
 
-Phase 4 is the self-measurement layer — weekly evolution_metrics snapshot + `build_morning_context(mode="baseline")` for A/B validation. Should be written as a short plan after Phase 3 has been running for ≥2 weeks (so metrics have something to measure).
+Evolution meta-metrics + A/B validation landed. The learning-loop is now **observable** — whether the evolution system actually helps is measurable in real time.
+
+**New table:** `evolution_metrics` (date-keyed upsert) with 12 signals:
+- 7-day intraday hit rate + count (global)
+- Matched vs unmatched hit rate + count (playbook contribution)
+- Active / weakened principle counts
+- Active / degraded playbook counts
+- Recent lessons count (7d)
+
+**New module** `alpha_agents/evolution/metrics.py`:
+- `compute_evolution_metrics(today)` — pure SQL + Python aggregation (no LLM). Re-runs `match_playbook` against each verified prediction's features to bucket as matched/unmatched.
+- `get_evolution_metrics_trend(days=30)` — fetch historical rows.
+- `format_metrics_trend(rows)` — tabular formatter with WoW delta.
+
+**Integration:**
+- `post_review()` computes a daily snapshot BEFORE the nothing-check (metrics always persist, even on silent days), surfaces a one-line 【进化自评】 summary when the review report has any other content.
+- `build_morning_context(mode="baseline")` strips Phase 2/3 sections, used for A/B comparisons.
+- `/evolution` chat command renders 30-day trend.
+- `weekly_report.py` appends 7-day trend block after LLM content.
+
+**Tests:** 67/67 passing (16 schema + 17 feedback + 10 context_builder + 8 lessons + 12 playbook + 4 metrics).
+
+**Today's baseline** (2026-04-17, single data point):
+- 7d intraday hit rate: 36% (832 verified predictions)
+- Matched: 0 / Unmatched: 832 (no playbooks yet — needs ≥2 weeks of features_json data)
+- 2 active principles, 3 recent lessons
+
+As data accumulates, the `matched_hit_rate vs unmatched_hit_rate` delta will answer: **does matching a playbook actually raise the win rate?** If not, the whole architecture is questionable and Phase 4 makes that signal visible.
+
+**Phase 4 commits:** `51f9ad8` `56d8ad6` `0480dae` `66d7e03` `0eb6035` `ed71a23`.

@@ -201,6 +201,14 @@ async def post_review(today: str, review_report: str) -> str:
         logger.warning("Playbook auto-create failed: %s", e)
         created_ids = []
 
+    # Phase 4: daily metrics snapshot — always computed (self-measurement)
+    try:
+        from alpha_agents.evolution.metrics import compute_evolution_metrics
+        metrics = await asyncio.to_thread(compute_evolution_metrics, today)
+    except Exception as e:
+        logger.warning("Evolution metrics computation failed: %s", e)
+        metrics = None
+
     # Assemble report
     nothing = (lesson_count == 0 and sum(counts.values()) == 0
                and not playbook_ops and not created_ids)
@@ -222,4 +230,11 @@ async def post_review(today: str, review_report: str) -> str:
             lines.append(f"• {op}")
     if created_ids:
         lines.append(f"• 自动发现 {len(created_ids)} 条新 Playbook（id={created_ids}）")
+    if metrics:
+        lines.append(
+            f"【进化自评】7d胜率{metrics['intraday_hit_rate_7d']*100:.0f}% | "
+            f"Playbook匹配{metrics['matched_count_7d']}笔胜率{metrics['matched_hit_rate_7d']*100:.0f}% | "
+            f"原则{metrics['active_principles']}活+{metrics['weakened_principles']}弱 | "
+            f"Playbook{metrics['active_playbooks']}活+{metrics['degraded_playbooks']}弱"
+        )
     return "\n".join(lines)

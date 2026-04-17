@@ -224,6 +224,35 @@ CREATE TABLE IF NOT EXISTS financial_cache (
     cached_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_financial_cached_at ON financial_cache(cached_at);
+
+CREATE TABLE IF NOT EXISTS daily_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    lesson_type TEXT NOT NULL,
+    theme TEXT,
+    content TEXT NOT NULL,
+    source TEXT DEFAULT 'review',
+    relevance_tags TEXT DEFAULT '',
+    consolidated_into INTEGER,
+    UNIQUE(date, content)
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_date ON daily_lessons(date);
+
+CREATE TABLE IF NOT EXISTS trading_principles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    principle TEXT NOT NULL UNIQUE,
+    pattern_description TEXT NOT NULL,
+    category TEXT NOT NULL,
+    action_guidance TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    evidence_count INTEGER DEFAULT 1,
+    win_rate REAL,
+    first_learned TEXT NOT NULL,
+    last_reinforced TEXT NOT NULL,
+    status TEXT DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_principles_status ON trading_principles(status);
+CREATE INDEX IF NOT EXISTS idx_principles_category ON trading_principles(category);
 """
 
 _local = threading.local()

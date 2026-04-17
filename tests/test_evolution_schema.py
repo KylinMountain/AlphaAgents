@@ -86,3 +86,36 @@ def test_save_prediction_defaults_features_to_empty(tmp_path, monkeypatch):
     ).fetchone()
     # Either "{}" or empty string is acceptable as "no features"
     assert row["features_json"] in ("{}", "", None)
+
+
+def test_daily_lessons_table_exists(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    ms._get_conn()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(daily_lessons)")}
+    conn.close()
+    expected = {"id", "date", "lesson_type", "theme", "content",
+                "source", "relevance_tags", "consolidated_into"}
+    assert expected <= cols
+
+
+def test_trading_principles_table_exists(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    ms._get_conn()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trading_principles)")}
+    conn.close()
+    expected = {"id", "principle", "pattern_description", "category",
+                "action_guidance", "evidence", "evidence_count", "win_rate",
+                "first_learned", "last_reinforced", "status"}
+    assert expected <= cols

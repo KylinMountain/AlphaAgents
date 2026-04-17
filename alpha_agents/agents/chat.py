@@ -19,8 +19,20 @@ from openai import AsyncOpenAI
 from alpha_agents.config import (
     PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
-from agents import function_tool
+from agents import function_tool as _agents_function_tool
 from alpha_agents.tools.registry import STOCK_TOOLS
+
+
+def function_tool(func):
+    """Wrap ``agents.function_tool`` but preserve the raw callable as ``._fn``.
+
+    Chat-mode slash handlers (``chat_commands.handlers``) invoke these helpers
+    directly without an LLM roundtrip — they need the plain Python callable,
+    not the FunctionTool wrapper (which is only callable via the agent runtime).
+    """
+    tool = _agents_function_tool(func)
+    tool._fn = func
+    return tool
 from alpha_agents.data.portfolio import (
     get_open_positions_summary, get_pending_orders, get_open_positions,
     get_portfolio_stats, format_portfolio_stats,
@@ -614,15 +626,18 @@ async def run_chat():
         "[bold]AlphaAgents 交互模式[/bold]\n"
         "问任何关于持仓、推荐、市场的问题\n"
         "支持: 分析个股 / 买卖操作 / 查看持仓 / 讨论主线 / 查看新闻 / 手动晨扫\n"
-        "输入 [dim]help[/dim] 查看所有命令",
+        "输入 [dim]/help[/dim] 查看所有命令（斜杠前缀走本地命令，无 LLM）",
         title="AlphaAgents", border_style="blue",
     ))
 
     from alpha_agents.agents.context_compressor import ContextCompressor
+    from alpha_agents.agents.chat_commands import ChatContext, dispatch
 
     agent = _create_chat_agent()
-    conversation_history = []  # Accumulated conversation for context
     compressor = ContextCompressor()
+    # ChatContext holds the live agent + conversation history so that /refresh
+    # can rebuild them in place.
+    ctx = ChatContext(console=console, agent=agent, conversation_history=[])
 
     # prompt_toolkit session with history (arrow up/down for previous inputs)
     session = PromptSession(history=InMemoryHistory())
@@ -639,302 +654,39 @@ async def run_chat():
 
         if not user_input:
             continue
-        if user_input.lower() in ("quit", "exit", "q"):
-            console.print("[dim]再见[/dim]")
-            break
-        if user_input.lower() in ("help", "帮助", "?"):
-            console.print(Panel(
-                "[bold]行情查看（秒出，不调LLM）:[/bold]\n"
-                "  market / 大盘        — 大盘指数+涨跌比+情绪\n"
-                "  sectors / 板块       — 板块资金排名 Top10\n"
-                "  查 002384            — 快速查个股实时行情\n"
-                "  选股 电池 / best 电池 — 板块内多因子选股\n"
-                "  vpa 002364 / 量价 002364 — 量价分析（Wyckoff/Anna Coulling）\n"
-                "  lhb / 龙虎榜         — 今日龙虎榜机构动向\n"
-                "  north / 北向         — 北向资金流向\n"
-                "  limitup / 涨停       — 涨停板分布\n"
-                "  sentiment / 情绪    — 当前情绪周期和策略建议\n"
-                "\n[bold]持仓管理:[/bold]\n"
-                "  portfolio / 持仓     — 持仓+挂单+资金\n"
-                "  trades / 历史        — 最近交易记录和盈亏\n"
-                "  risk / 风险          — 当前风险评估\n"
-                "  撤单 002384          — 取消某只挂单\n"
-                "\n[bold]数据源:[/bold]\n"
-                "  news / 新闻          — 最新新闻\n"
-                "  themes / 主线        — 活跃主线状态\n"
-                "\n[bold]手动运行任务:[/bold]\n"
-                "  morning / 晨扫 | opening / 开盘 | intraday / 盘中\n"
-                "  review / 复盘 | night / 夜扫 | weekly / 周报\n"
-                "\n[bold]自动化:[/bold]\n"
-                "  alerts / 提醒        — 查看价格提醒\n"
-                "  scheduled / 自定义   — 查看自定义定时任务\n"
-                "\n[bold]系统:[/bold]\n"
-                "  tasks / 任务         — 查看系统定时任务状态\n"
-                "  refresh | quit | help\n"
-                "\n[bold]自然语言（调AI分析）:[/bold]\n"
-                "  分析一下东山精密 / 帮我买002384止损124元\n"
-                "  通鼎互联要不要卖？ / 今天哪些板块资金流入最多？",
-                title="帮助", border_style="yellow",
-            ))
-            continue
-        if user_input.lower() in ("morning", "晨扫"):
-            console.print("[dim]正在运行晨扫...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
-                with _SuppressPrint():
-                    report = await run_morning_scan()
-                if report:
-                    console.print(Panel(report, title="晨报", border_style="green"))
-                else:
-                    console.print("[dim]晨扫未产生报告[/dim]")
-            except Exception as e:
-                console.print(f"[red]晨扫失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("news", "新闻"):
-            console.print("[dim]获取最新新闻...[/dim]")
-            try:
-                from alpha_agents.tools.registry import get_news
-                import json as _j
-                raw = get_news(limit=20)
-                news = _j.loads(raw)
-                lines = []
-                for item in news.get("news", [])[:15]:
-                    lines.append(f"  {item.get('time', '')} {item.get('title', '')}")
-                console.print(Panel("\n".join(lines) if lines else "无新闻", title="最新新闻", border_style="yellow"))
-            except Exception as e:
-                console.print(f"[red]获取新闻失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("themes", "主线"):
-            try:
-                themes = get_active_themes()
-                lines = []
-                for t in themes:
-                    stocks = json.loads(t["core_stocks"]) if t.get("core_stocks") else []
-                    leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
-                    lines.append(f"  {t['name']} (强度{t['strength']}/10, {t['status']}) 龙头: {leader}")
-                console.print(Panel("\n".join(lines) if lines else "无活跃主线", title="活跃主线", border_style="magenta"))
-            except Exception as e:
-                console.print(f"[red]获取主线失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("tasks", "任务", "定时"):
-            try:
-                from alpha_agents.config import DATA_DIR
-                import json as _j2
-                state_file = DATA_DIR / "scheduler_state.json"
-                state = {}
-                if state_file.exists():
-                    state = _j2.loads(state_file.read_text(encoding="utf-8"))
 
-                from datetime import datetime as _dt
-                now = _dt.now()
-                today = now.strftime("%Y-%m-%d")
-                tasks_info = [
-                    ("morning_scan", "06:30", "晨扫分析"),
-                    ("opening_reminder", "09:15", "开盘提醒"),
-                    ("intraday_monitor", "09:30-15:00", "盘中监控(每5分钟)"),
-                    ("review", "15:30", "收盘复盘"),
-                    ("night_scan", "20:00", "夜扫分析"),
-                    ("weekly_report", "周六 10:00", "周报"),
-                ]
-                lines = []
-                for name, schedule, desc in tasks_info:
-                    last_run = state.get(name, "")
-                    if last_run and last_run.startswith(today):
-                        status = f"[green]已完成[/green] ({last_run[11:16]})"
-                    elif last_run:
-                        status = f"[dim]上次: {last_run[:16]}[/dim]"
-                    else:
-                        status = "[yellow]未运行[/yellow]"
-                    lines.append(f"  {schedule:15s} {desc:18s} {status}")
-                console.print(Panel("\n".join(lines), title=f"定时任务 ({today})", border_style="blue"))
-            except Exception as e:
-                console.print(f"[red]获取任务状态失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("scheduled", "自定义任务", "自定义"):
-            console.print(Panel(list_scheduled_tasks(), title="自定义定时任务", border_style="blue"))
-            continue
-        if user_input.lower() in ("alerts", "提醒"):
-            console.print(Panel(show_price_alerts(), title="价格提醒", border_style="yellow"))
-            continue
-        if user_input.lower() in ("market", "大盘"):
-            console.print(Panel(show_market_overview(), title="大盘概览", border_style="blue"))
-            continue
-        if user_input.lower() in ("sectors", "板块"):
-            console.print(Panel(show_sector_ranking(top_n=10), title="板块排名", border_style="yellow"))
-            continue
-        if user_input.lower() in ("lhb", "龙虎榜"):
-            console.print(Panel(show_lhb(), title="龙虎榜", border_style="red"))
-            continue
-        if user_input.lower() in ("north", "北向"):
-            console.print(Panel(show_north_flow(), title="北向资金", border_style="green"))
-            continue
-        if user_input.lower() in ("limitup", "涨停"):
-            console.print(Panel(show_limit_up(), title="涨停板", border_style="red"))
-            continue
-        if user_input.lower() in ("sentiment", "情绪", "情绪周期"):
-            from alpha_agents.data.sentiment_cycle import get_sentiment_cycle, format_sentiment_cycle
-            try:
-                cycle = get_sentiment_cycle()
-                console.print(Panel(format_sentiment_cycle(cycle), title=f"情绪周期: {cycle['phase']}", border_style="magenta"))
-            except Exception as e:
-                console.print(f"[red]获取情绪周期失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("trades", "历史"):
-            console.print(Panel(show_trade_history(), title="交易记录", border_style="cyan"))
-            continue
-        # Quick stock quote: "查 002384" or "quote 002384"
-        import re as _re
-        quote_match = _re.match(r"^(?:查|quote)\s+(\d{6})$", user_input.strip())
-        if quote_match:
-            console.print(Panel(show_stock_quote(code=quote_match.group(1)), title="个股行情", border_style="green"))
-            continue
-        # Cancel order: "撤单 002384" or "cancel 002384"
-        cancel_match = _re.match(r"^(?:撤单|cancel)\s+(\d{6})$", user_input.strip())
-        if cancel_match:
-            console.print(Panel(cancel_pending_order(code=cancel_match.group(1)), title="撤单", border_style="yellow"))
-            continue
-        # Quick sector best stocks: "选股 电池" or "best 电池"
-        best_match = _re.match(r"^(?:选股|best)\s+(.+)$", user_input.strip())
-        if best_match:
-            from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
-            result = get_sector_best_stocks_fn(best_match.group(1).strip())
-            console.print(Panel(result, title="板块选股", border_style="cyan"))
-            continue
-        # VPA analysis: "vpa 002364" or "量价 002364" — full Anna Coulling LLM report
-        vpa_match = _re.match(r"^(?:vpa|量价)\s+(\d{6})(?:\s+(.+))?$", user_input.strip(), _re.IGNORECASE)
-        if vpa_match:
-            code = vpa_match.group(1)
-            name = (vpa_match.group(2) or "").strip()
-            console.print(f"[dim]正在进行 Anna Coulling 量价分析 {code} {name}...[/dim]")
-            try:
-                from alpha_agents.tools.vpa import compute_vpa_with_llm
-                r = compute_vpa_with_llm(code, name=name)
-                if not r.get("ok"):
-                    console.print(f"[red]VPA 分析失败: {r.get('error', '未知错误')}[/red]")
-                else:
-                    verdict = r.get("llm_verdict", "中性")
-                    conf = r.get("llm_confidence", 0)
-                    phase = r.get("llm_phase", "?")
-                    confirmed = r.get("llm_confirmed", False)
-                    reason = r.get("llm_reason", "")
-                    report = r.get("llm_report", "")
-
-                    color_map = {"看多": "green", "偏多": "green", "看空": "red", "偏空": "red", "中性": "yellow"}
-                    border = color_map.get(verdict, "cyan")
-                    confirm_str = "已确认" if confirmed else "待确认"
-                    title = f"VPA 量价分析 — {code} {name} [{verdict} 信心{conf} {phase} {confirm_str}]"
-                    console.print(Panel(report or reason, title=title, border_style=border))
-            except Exception as e:
-                console.print(f"[red]VPA 调用失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("risk", "风险"):
-            # Quick risk: show portfolio with unrealized P&L
-            console.print(Panel(show_portfolio(), title="持仓风险", border_style="red"))
-            continue
-        if user_input.lower() in ("opening", "开盘"):
-            console.print("[dim]正在运行开盘提醒...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
-                with _SuppressPrint():
-                    report = await run_opening_reminder()
-                if report:
-                    console.print(Panel(report, title="开盘提醒", border_style="green"))
-                else:
-                    console.print("[dim]无开盘提醒（可能无预测数据）[/dim]")
-            except Exception as e:
-                console.print(f"[red]开盘提醒失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("intraday", "盘中", "异动"):
-            console.print("[dim]正在检测盘中异动...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor
-                with _SuppressPrint():
-                    report = await run_intraday_monitor()
-                if report:
-                    console.print(Panel(report, title="盘中提醒", border_style="yellow"))
-                else:
-                    console.print("[dim]当前无异动[/dim]")
-            except Exception as e:
-                console.print(f"[red]盘中监控失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("review", "复盘"):
-            console.print("[dim]正在运行复盘分析...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.review import run_review
-                with _SuppressPrint():
-                    report = await run_review()
-                if report:
-                    console.print(Panel(report, title="复盘报告", border_style="cyan"))
-                else:
-                    console.print("[dim]复盘未产生报告[/dim]")
-            except Exception as e:
-                console.print(f"[red]复盘失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("night", "夜扫"):
-            console.print("[dim]正在运行夜扫...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.night_scan import run_night_scan
-                with _SuppressPrint():
-                    report = await run_night_scan()
-                if report:
-                    console.print(Panel(report, title="夜报", border_style="blue"))
-                else:
-                    console.print("[dim]夜扫未产生报告[/dim]")
-            except Exception as e:
-                console.print(f"[red]夜扫失败: {e}[/red]")
-            continue
-        if user_input.lower() in ("weekly", "周报"):
-            console.print("[dim]正在生成周报...[/dim]")
-            try:
-                from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
-                with _SuppressPrint():
-                    report = await run_weekly_report()
-                if report:
-                    console.print(Panel(report, title="周报", border_style="magenta"))
-                else:
-                    console.print("[dim]周报未产生报告[/dim]")
-            except Exception as e:
-                console.print(f"[red]周报失败: {e}[/red]")
-            continue
-        if user_input.lower() == "refresh":
-            agent = _create_chat_agent()
-            conversation_history = []
-            console.print("[dim]系统状态已刷新，对话历史已清空[/dim]")
-            continue
-        if user_input.lower() in ("portfolio", "持仓", "仓位"):
-            # Quick shortcut: show portfolio without LLM call
-            console.print(Panel(show_portfolio(), title="持仓概览", border_style="green"))
+        # Slash commands: deterministic local dispatch, no LLM.
+        if user_input.startswith("/"):
+            await dispatch(user_input, ctx)
+            if ctx.should_exit:
+                break
             continue
 
+        # Fall through → LLM chat analyst for natural-language input.
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"[{now}] {user_input}"
-
         console.print("[dim]分析中...[/dim]")
 
         try:
             from agents.stream_events import RawResponsesStreamEvent, RunItemStreamEvent
             from openai.types.responses import ResponseTextDeltaEvent
 
-            # Pass conversation history so agent remembers prior exchanges
             streamed = Runner.run_streamed(
-                agent,
-                input=conversation_history + [{"role": "user", "content": message}],
+                ctx.agent,
+                input=ctx.conversation_history + [{"role": "user", "content": message}],
                 hooks=hooks, max_turns=30,
             )
 
             full_output = ""
-            streaming_text = False  # Track if we've started printing text
+            streaming_text = False
 
             async for event in streamed.stream_events():
-                # Show tool calls in real-time
                 if isinstance(event, RunItemStreamEvent):
                     item = event.item
                     if getattr(item, "type", "") == "tool_call_item":
-                        # Extract tool name from raw_item
                         raw = getattr(item, "raw_item", None)
                         tool_name = ""
                         if raw:
-                            # Could be dict or object
                             if isinstance(raw, dict):
                                 tool_name = raw.get("name", "") or raw.get("function", {}).get("name", "")
                             else:
@@ -962,17 +714,15 @@ async def run_chat():
 
             print()  # newline after streaming
 
-            # Save conversation history and compress if needed
             try:
-                conversation_history = streamed.to_input_list()
-                if compressor.should_compress(conversation_history):
+                ctx.conversation_history = streamed.to_input_list()
+                if compressor.should_compress(ctx.conversation_history):
                     console.print("[dim]对话历史较长，正在压缩...[/dim]")
-                    conversation_history = compressor.compress(conversation_history)
+                    ctx.conversation_history = compressor.compress(ctx.conversation_history)
                     console.print("[dim]压缩完成[/dim]")
             except Exception as e:
                 logger.warning("Failed to update conversation history: %s", e)
 
-            # Fallback display if streaming didn't produce text
             if not full_output:
                 try:
                     full_output = streamed.final_output or ""
@@ -989,10 +739,10 @@ async def run_chat():
             console.print(f"[red]错误: {e}[/red]")
 
     # ── Session end: save memory for next time ──
-    if conversation_history and len(conversation_history) > 3:
+    if ctx.conversation_history and len(ctx.conversation_history) > 3:
         console.print("[dim]保存对话记忆...[/dim]")
         try:
-            summary = compressor._generate_summary(conversation_history)
+            summary = compressor._generate_summary(ctx.conversation_history)
             if summary:
                 save_chat_memory(summary)
                 console.print("[dim]记忆已保存，下次对话可回忆[/dim]")

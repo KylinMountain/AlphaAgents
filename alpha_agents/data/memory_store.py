@@ -253,6 +253,24 @@ CREATE TABLE IF NOT EXISTS trading_principles (
 );
 CREATE INDEX IF NOT EXISTS idx_principles_status ON trading_principles(status);
 CREATE INDEX IF NOT EXISTS idx_principles_category ON trading_principles(category);
+
+CREATE TABLE IF NOT EXISTS playbooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    pattern_json TEXT NOT NULL,
+    created_date TEXT NOT NULL,
+    last_updated TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    weight REAL DEFAULT 1.0,
+    total_trades INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    hit_rate REAL DEFAULT 0.0,
+    avg_return REAL DEFAULT 0.0,
+    annotation TEXT DEFAULT '',
+    annotation_date TEXT DEFAULT '',
+    version_history TEXT DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_playbooks_status ON playbooks(status);
 """
 
 _local = threading.local()
@@ -1084,5 +1102,108 @@ def get_all_principles_including_weakened() -> list[dict]:
     rows = _get_conn().execute(
         "SELECT * FROM trading_principles WHERE status IN ('active', 'weakened') "
         "ORDER BY status, evidence_count DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Phase 3: playbooks ────────────────────────────────────────
+def create_playbook(*, name: str, pattern_json: dict, today: str,
+                    status: str = "active", weight: float = 1.0) -> int:
+    with _write_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO playbooks (name, pattern_json, created_date, last_updated, "
+            " status, weight, version_history) "
+            "VALUES (?, ?, ?, ?, ?, ?, '[]')",
+            (name, json.dumps(pattern_json, ensure_ascii=False),
+             today, today, status, weight),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_playbook_status(playbook_id: int, *, status: str, weight: float,
+                            reason: str, hit_rate_at_change: float,
+                            today: str) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT status, version_history FROM playbooks WHERE id = ?",
+            (playbook_id,),
+        ).fetchone()
+        if not row:
+            return
+        old_status = row["status"]
+        history = json.loads(row["version_history"] or "[]")
+        history.append({
+            "date": today,
+            "old_status": old_status,
+            "new_status": status,
+            "reason": reason,
+            "hit_rate_at_change": hit_rate_at_change,
+        })
+        conn.execute(
+            "UPDATE playbooks SET status = ?, weight = ?, last_updated = ?, "
+            "version_history = ? WHERE id = ?",
+            (status, weight, today,
+             json.dumps(history, ensure_ascii=False), playbook_id),
+        )
+        conn.commit()
+
+
+def record_playbook_trade(playbook_id: int, *, hit: bool,
+                           return_pct: float) -> None:
+    """Called when a prediction matched to a playbook is verified."""
+    with _write_lock:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT total_trades, wins, avg_return FROM playbooks WHERE id = ?",
+            (playbook_id,),
+        ).fetchone()
+        if not row:
+            return
+        total = row["total_trades"] + 1
+        wins = row["wins"] + (1 if hit else 0)
+        prev_avg = row["avg_return"] or 0.0
+        new_avg = (prev_avg * (total - 1) + return_pct) / total
+        conn.execute(
+            "UPDATE playbooks SET total_trades = ?, wins = ?, hit_rate = ?, "
+            "avg_return = ? WHERE id = ?",
+            (total, wins, wins / total, new_avg, playbook_id),
+        )
+        conn.commit()
+
+
+def set_playbook_annotation(playbook_id: int, *, annotation: str,
+                             today: str) -> None:
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE playbooks SET annotation = ?, annotation_date = ? "
+            "WHERE id = ?",
+            (annotation, today, playbook_id),
+        )
+        conn.commit()
+
+
+def get_active_playbooks() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT * FROM playbooks WHERE status = 'active' "
+        "ORDER BY weight DESC, hit_rate DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_playbooks() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT * FROM playbooks ORDER BY status, weight DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_active_or_degraded_playbooks() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT * FROM playbooks WHERE status IN ('active', 'degraded') "
+        "ORDER BY status, weight DESC"
     ).fetchall()
     return [dict(r) for r in rows]

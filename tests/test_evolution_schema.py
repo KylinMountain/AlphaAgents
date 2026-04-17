@@ -192,3 +192,80 @@ def test_weaken_and_retire_principle(tmp_path, monkeypatch):
     all_rows = ms.get_all_principles_including_weakened()
     assert len(all_rows) == 1
     assert all_rows[0]["status"] == "weakened"
+
+
+def test_playbooks_table_exists(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    ms._get_conn()
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(playbooks)")}
+    conn.close()
+    expected = {"id", "name", "pattern_json", "created_date", "last_updated",
+                "status", "weight", "total_trades", "wins", "hit_rate",
+                "avg_return", "annotation", "annotation_date", "version_history"}
+    assert expected <= cols
+
+
+def test_create_and_get_active_playbooks(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    pid = ms.create_playbook(
+        name="CPO突破+机构买入",
+        pattern_json={"conditions": [
+            {"field": "vpa_verdict", "op": "==", "value": "bullish"},
+            {"field": "theme", "op": "==", "value": "CPO"},
+        ]},
+        today="2026-04-17",
+    )
+    assert pid > 0
+    rows = ms.get_active_playbooks()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "CPO突破+机构买入"
+    assert rows[0]["status"] == "active"
+    assert rows[0]["weight"] == 1.0
+
+
+def test_update_playbook_status_and_history(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    pid = ms.create_playbook(name="X", pattern_json={"conditions": []}, today="2026-04-17")
+    ms.update_playbook_status(pid, status="degraded", weight=0.5,
+                               reason="胜率跌破40%", hit_rate_at_change=0.35,
+                               today="2026-04-18")
+    row = ms.get_all_playbooks()[0]
+    assert row["status"] == "degraded"
+    assert row["weight"] == 0.5
+    import json
+    history = json.loads(row["version_history"])
+    assert len(history) == 1
+    assert history[0]["new_status"] == "degraded"
+    assert history[0]["reason"] == "胜率跌破40%"
+
+
+def test_record_playbook_trade_updates_stats(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+    pid = ms.create_playbook(name="X", pattern_json={"conditions": []}, today="2026-04-17")
+    ms.record_playbook_trade(pid, hit=True, return_pct=2.5)
+    ms.record_playbook_trade(pid, hit=True, return_pct=1.0)
+    ms.record_playbook_trade(pid, hit=False, return_pct=-1.5)
+    row = ms.get_all_playbooks()[0]
+    assert row["total_trades"] == 3
+    assert row["wins"] == 2
+    assert abs(row["hit_rate"] - 2/3) < 0.01
+    assert abs(row["avg_return"] - (2.5 + 1.0 - 1.5) / 3) < 0.01

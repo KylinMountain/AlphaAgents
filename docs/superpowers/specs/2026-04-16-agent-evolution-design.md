@@ -475,3 +475,35 @@ L2 Lessons + Trading Principles landed. Continued on `feat/evolution-phase1`.
 **Unblocks Phase 3:** `features_json` from Phase 1 now has enough schema; principles form the qualitative side of evolution; Phase 3 Playbooks will add the quantitative weight-adjustment layer once ≥2 weeks of real predictions accumulate.
 
 Phase 2 commits: `454141f` `44f811a` `2dd0aec` `75201ba` `0d1e749` `8c09360` `c3e6f2a`.
+
+---
+
+## Phase 3 Shipped — 2026-04-17 (same branch)
+
+L3 Playbooks landed. All code in place; auto-creation will activate once ≥2 weeks of `features_json`-populated predictions accumulate (≥3 hit clusters per pattern).
+
+**New table:** `playbooks` with rule-driven lifecycle (active / degraded / deprecated), per-playbook version_history JSON, and all stats (weight, total_trades, wins, hit_rate, avg_return, annotation).
+
+**New module** `alpha_agents/evolution/playbook.py`:
+- `match_playbook(candidate)` — condition-based matcher with regime-change fallback (<2 active → None)
+- `_check_condition` supports ==, in, contains, >=, <=, >, < operators
+- `update_playbook_stats(today)` — daily rule engine: degrades if hit_rate<40% w/≥5 trades (+LLM annotation), restores if recent hit≥60%, deprecates after 14 days degraded, boosts if hit≥70% w/≥10 trades
+- `scan_and_auto_create(today)` — clusters intraday (NOT intraday_signal) predictions by `(vpa_verdict, theme, institutional_present)` via `json_extract` SQL; creates playbooks for novel feature clusters with ≥3 hits
+- `annotate_degraded(playbook)` — short LLM call explaining why a playbook went bad (graceful degrade on LLM failure)
+
+**New context atom** `inject_playbooks()` in `alpha_agents/evolution/feedback.py` — renders active + degraded playbooks with win rate + weight + annotation, budgeted at 400 chars. Wired into `build_morning_context` (morning agent only; chat/VPA contexts stay compact).
+
+**New chat command** `/playbook` — lists all playbooks with colored status (green=active, yellow=degraded, dim=deprecated), shows stats + LLM annotation if present.
+
+**Integration:**
+- `post_review()` in `alpha_agents/evolution/lessons.py` now calls `update_playbook_stats` + `scan_and_auto_create` after the Phase 2 lesson+principle pipeline. Graceful failure isolation per call.
+- `intraday_monitor.py` applies `match_playbook` between VPA gate and score sort, multiplies candidate's score by `pb["weight"]` (1.5 boost / 0.5 degraded / 0.0 deprecated)
+- `_verify_predictions()` in `review.py` — when a prediction's features match an active playbook, records the hit/return outcome via `record_playbook_trade`. This closes the loop: features captured → intraday matching → verified → stats updated → next day's rule engine acts on them.
+
+**Tests:** 59/59 passing (14 schema + 17 feedback + 8 context_builder + 8 lessons + 12 playbook).
+
+**Phase 3 commits:** `abd84b9` `c9ba424` `828954f` `ba20241` `87cc9fb` `f70d23d` `5f450ef`.
+
+## What remains: Phase 4 (Evolution Metrics + A/B)
+
+Phase 4 is the self-measurement layer — weekly evolution_metrics snapshot + `build_morning_context(mode="baseline")` for A/B validation. Should be written as a short plan after Phase 3 has been running for ≥2 weeks (so metrics have something to measure).

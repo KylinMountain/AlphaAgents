@@ -102,6 +102,15 @@ async def run_weekly_report() -> str | None:
             except Exception as e:
                 logger.debug("Weekly report notification failed: %s", e)
 
+        # Phase 4: append evolution metrics trend (deterministic, no LLM)
+        try:
+            from alpha_agents.evolution import get_evolution_metrics_trend, format_metrics_trend
+            rows = get_evolution_metrics_trend(days=7)
+            if rows:
+                report = (report or "") + "\n\n" + format_metrics_trend(rows)
+        except Exception as e:
+            logger.warning("Weekly evolution metrics block failed: %s", e)
+
         # Calculate sector betas for all active themes (weekly refresh)
         try:
             from alpha_agents.data.beta_calculator import run_weekly_beta_calculation

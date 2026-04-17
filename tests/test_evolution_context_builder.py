@@ -40,3 +40,27 @@ def test_build_morning_context_handles_empty_sections():
         result = build_morning_context(themes=[], stats="")
     assert "【情绪周期】" not in result
     assert "【市场认知】" not in result
+
+
+def test_build_chat_context_adds_sentiment_to_existing_sections():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment",
+               return_value="【情绪周期】升温"):
+        from alpha_agents.evolution.context_builder import build_chat_context
+        result = build_chat_context(
+            portfolio_summary="总资金 100,000元",
+            themes_summary="CPO强度10/10",
+            stats_summary="命中率62%",
+        )
+    assert "总资金" in result
+    assert "CPO强度" in result
+    assert "命中率62%" in result
+    assert "【情绪周期】" in result
+
+
+def test_build_chat_context_empty_sentiment_skipped():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment",
+               return_value=""):
+        from alpha_agents.evolution.context_builder import build_chat_context
+        result = build_chat_context("持仓A", "主线B", "统计C")
+    assert "【情绪周期】" not in result
+    assert "持仓A" in result

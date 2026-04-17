@@ -34,9 +34,24 @@ def build_morning_context(themes: list[dict], stats: str) -> str:
     return "\n\n".join(sections)
 
 
-def build_chat_context(portfolio_summary: str, themes_summary: str, stats_summary: str) -> str:
-    """Stub — filled in Task 16."""
-    return ""
+def build_chat_context(portfolio_summary: str, themes_summary: str,
+                       stats_summary: str) -> str:
+    """Build the chat agent's system-prompt context string.
+
+    Phase 1: adds sentiment on top of the existing portfolio / themes / stats.
+    Phase 2 hook: will also inject principles + recent lessons.
+    """
+    sections = []
+    if portfolio_summary:
+        sections.append(portfolio_summary)
+    if themes_summary:
+        sections.append(themes_summary)
+    if stats_summary:
+        sections.append(stats_summary)
+    sentiment = inject_sentiment()
+    if sentiment:
+        sections.append(sentiment)
+    return "\n\n".join(sections)
 
 
 def build_vpa_context(code: str) -> str:

@@ -158,6 +158,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     _chat_console = None
     if getattr(args, 'chat', False):
         from rich.console import Console
+        from rich.markdown import Markdown
         from rich.panel import Panel
         _chat_console = Console()
 
@@ -173,7 +174,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         def _on_task_output(task_name: str, output: str):
             title, color = _TASK_TITLES.get(task_name, (task_name, "white"))
             _chat_console.print()
-            _chat_console.print(Panel(output[:2000], title=f"[后台] {title}", border_style=color))
+            _chat_console.print(Panel(Markdown(output[:4000]), title=f"[后台] {title}", border_style=color))
             _chat_console.print()
 
         scheduler = TradingDayScheduler(on_task_output=_on_task_output)

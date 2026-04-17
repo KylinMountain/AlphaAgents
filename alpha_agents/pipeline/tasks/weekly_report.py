@@ -89,7 +89,6 @@ async def run_weekly_report() -> str | None:
         )
         report = result.final_output
         logger.info("Weekly report finished, length=%d", len(report))
-        print(report)
 
         # Push notification
         if report:

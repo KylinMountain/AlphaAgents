@@ -719,6 +719,12 @@ async def run_intraday_monitor() -> str | None:
             "entry_low": a.get("entry_low"),
             "entry_high": a.get("entry_high"),
             "stop_loss": a.get("stop_loss"),
+            # Phase 1: decision features flow through to save_prediction
+            "vpa_verdict": a.get("vpa_verdict", "unknown"),
+            "vpa_phase": (a.get("vpa_result") or {}).get("llm_phase", ""),
+            "score": a.get("score", 0),
+            "change_pct": a.get("change_pct", 0),
+            "institutional": a.get("institutional", ""),
         })
 
     report_lines.append(f"<!--RECOMMENDATIONS\n{json.dumps(recs_json, ensure_ascii=False)}\nRECOMMENDATIONS-->")

@@ -112,3 +112,40 @@ def test_build_morning_context_includes_playbooks():
         result = build_morning_context(themes=[], stats="")
     assert "Playbook" in result
     assert "CPO+机构" in result
+
+
+def test_build_morning_context_baseline_mode_strips_evolution_sections():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment",
+               return_value="【情绪周期】升温"), \
+         patch("alpha_agents.evolution.context_builder.inject_cognition",
+               return_value="【市场认知】\n• CPO: 高位"), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value="【交易经验手册】\n• 这条不应该出现"), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value="【近期教训】\n• 这条不应该出现"), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
+               return_value="【活跃 Playbook】\n• 这条不应该出现"):
+        from alpha_agents.evolution.context_builder import build_morning_context
+        baseline = build_morning_context(themes=[], stats="命中率62%", mode="baseline")
+        full = build_morning_context(themes=[], stats="命中率62%", mode="full")
+    assert "【情绪周期】" in baseline
+    assert "【市场认知】" in baseline
+    assert "命中率62%" in baseline
+    assert "【交易经验手册】" not in baseline
+    assert "【近期教训】" not in baseline
+    assert "【活跃 Playbook】" not in baseline
+    assert "【交易经验手册】" in full
+    assert "【近期教训】" in full
+    assert "【活跃 Playbook】" in full
+
+
+def test_build_morning_context_default_mode_is_full():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_cognition", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value="【交易经验手册】\n• 必须出现"), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks", return_value=""):
+        from alpha_agents.evolution.context_builder import build_morning_context
+        result = build_morning_context(themes=[], stats="")
+    assert "【交易经验手册】" in result

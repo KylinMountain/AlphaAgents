@@ -88,11 +88,7 @@ CHAT_SYSTEM_PROMPT = """你是 AlphaAgents 的交互式分析师，用户可以�
 3. 用户确认后，调 place_sell_order 平仓
 
 ## 当前状态
-{portfolio_summary}
-
-{themes_summary}
-
-{stats_summary}
+{agent_context}
 
 ## 工具
 你有完整的市场数据工具，包括：实时行情、板块排名、龙虎榜、北向资金、融资融券、个股资金流、机构持仓分析等。
@@ -588,9 +584,7 @@ def _build_context() -> str:
     )
 
     return CHAT_SYSTEM_PROMPT.format(
-        portfolio_summary=base_ctx,
-        themes_summary="",
-        stats_summary="",
+        agent_context=base_ctx,
         chat_memories=memories_text,
     )
 

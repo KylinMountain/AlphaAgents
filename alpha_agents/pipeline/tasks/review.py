@@ -85,6 +85,22 @@ def _verify_predictions() -> None:
             hit_val = 1 if return_pct < 0 else 0
 
         update_prediction_result(pred["id"], next_day_return=return_pct, hit=hit_val)
+
+        # Phase 3: if this prediction matched an active playbook, record the trade outcome
+        try:
+            import json as _json
+            from alpha_agents.evolution.playbook import match_playbook
+            from alpha_agents.data.memory_store import record_playbook_trade
+            features = _json.loads(pred.get("features_json") or "{}")
+            if features:
+                pb = match_playbook(features)
+                if pb:
+                    record_playbook_trade(pb["id"], hit=bool(hit_val),
+                                          return_pct=return_pct)
+        except Exception as e:
+            logger.debug("Playbook trade recording failed for pred #%d: %s",
+                         pred["id"], e)
+
         verified += 1
         logger.debug("Prediction #%d %s: return=%.2f%%, hit=%d",
                       pred["id"], code, return_pct, hit_val)

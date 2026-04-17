@@ -315,7 +315,6 @@ async def run_morning_scan() -> str | None:
             except Exception as e:
                 logger.debug("Morning VPA section failed: %s", e)
 
-    print(report)
     return report
 
 

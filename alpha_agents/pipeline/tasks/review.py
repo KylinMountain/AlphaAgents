@@ -483,7 +483,6 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("VPA signal check failed: %s", e)
 
-    print(report)
     return report
 
 

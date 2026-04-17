@@ -166,5 +166,4 @@ async def run_night_scan() -> str | None:
         else:
             logger.info("Night scan: no significant moves, skipping push notification")
 
-    print(report)
     return report

@@ -95,21 +95,23 @@ def _refresh_theme_strengths() -> None:
         logger.debug("Theme strength refresh failed: %s", e)
 
 
-def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str]:
+def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str, dict | None]:
     """Run LLM VPA (Anna Coulling) on an actionable candidate.
 
-    Returns (verdict, note) where verdict maps Chinese to English:
+    Returns (verdict, note, full_result) where verdict maps Chinese to English:
       看多/偏多 → bullish, 看空/偏空 → bearish, 中性 → neutral
+    full_result is the raw compute_vpa_with_llm dict (or None on failure) so
+    callers can reuse the llm_report without a second LLM call.
 
     Uses LLM full analysis with history context. Saves to DB automatically.
     """
     if not code or not code.strip().isdigit() or len(code.strip()) != 6:
-        return ("unknown", "")
+        return ("unknown", "", None)
     try:
         from alpha_agents.tools.vpa import compute_vpa_with_llm
         r = compute_vpa_with_llm(code.strip(), name=name)
         if not r.get("ok"):
-            return ("unknown", "")
+            return ("unknown", "", r)
         raw_v = r.get("llm_verdict", "中性")
         verdict_map = {"看多": "bullish", "偏多": "bullish",
                        "看空": "bearish", "偏空": "bearish", "中性": "neutral"}
@@ -117,10 +119,10 @@ def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str]:
         phase = r.get("llm_phase", "")
         reason = r.get("llm_reason", "")
         note = f"{phase}: {reason}" if phase else reason
-        return (verdict, note)
+        return (verdict, note, r)
     except Exception as e:
         logger.debug("VPA gate for %s failed: %s", code, e)
-        return ("unknown", "")
+        return ("unknown", "", None)
 
 
 
@@ -534,12 +536,12 @@ async def run_intraday_monitor() -> str | None:
     if raw_candidates:
         async def _vpa_check(sector, s):
             try:
-                vpa_verdict, vpa_note = await asyncio.to_thread(
+                vpa_verdict, vpa_note, vpa_result = await asyncio.to_thread(
                     _vpa_gate_for_candidate, s["code"], s["name"]
                 )
             except Exception:
-                vpa_verdict, vpa_note = "unknown", ""
-            return sector, s, vpa_verdict, vpa_note
+                vpa_verdict, vpa_note, vpa_result = "unknown", "", None
+            return sector, s, vpa_verdict, vpa_note, vpa_result
 
         vpa_tasks = [_vpa_check(sector, s) for sector, s in raw_candidates]
         vpa_results = await asyncio.gather(*vpa_tasks, return_exceptions=True)
@@ -547,7 +549,7 @@ async def run_intraday_monitor() -> str | None:
         for item in vpa_results:
             if isinstance(item, Exception):
                 continue
-            sector, s, vpa_verdict, vpa_note = item
+            sector, s, vpa_verdict, vpa_note, vpa_result = item
             if vpa_verdict == "bearish":
                 logger.info("Actionable filtered out by VPA: %s %s — %s",
                             s["code"], s["name"], vpa_note)
@@ -570,6 +572,7 @@ async def run_intraday_monitor() -> str | None:
                 "institutional": s.get("institutional", ""),
                 "vpa_verdict": vpa_verdict,
                 "vpa_note": vpa_note,
+                "vpa_result": vpa_result,
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop_loss": stop_loss_val,
@@ -672,24 +675,14 @@ async def run_intraday_monitor() -> str | None:
         report_lines.append(sentiment_ctx)
         report_lines.append("")
 
-    # ── LLM VPA deep analysis for top actionable stocks ──
-    # Code VPA does fast filtering; LLM VPA adds Anna Coulling narrative for user.
-    # Run all 3 deep analyses in PARALLEL.
+    # ── LLM VPA deep analysis for all actionable stocks ──
+    # Gate已在Phase B对每只候选跑过完整 compute_vpa_with_llm，结果缓存在
+    # a["vpa_result"] 里。这里直接复用 llm_report，不再触发第二次 LLM 调用。
     if actionable:
         try:
-            from alpha_agents.tools.vpa import compute_vpa_with_llm
-            report_lines.append("【量价深度分析】（Anna Coulling VPA, 仅对可操作标的前 3 只）")
-
-            async def _deep_vpa(a):
-                try:
-                    return a, await asyncio.to_thread(compute_vpa_with_llm, a["code"], a["name"])
-                except Exception as e:
-                    logger.debug("LLM VPA for %s failed: %s", a["code"], e)
-                    return a, None
-
-            deep_results = await asyncio.gather(*[_deep_vpa(a) for a in actionable[:3]])
-
-            for a, vpa_r in deep_results:
+            report_lines.append("【量价深度分析】（Anna Coulling VPA）")
+            for a in actionable:
+                vpa_r = a.get("vpa_result")
                 if not vpa_r or not vpa_r.get("ok") or not vpa_r.get("llm_report"):
                     continue
                 verdict = vpa_r.get("llm_verdict", "?")
@@ -732,8 +725,6 @@ async def run_intraday_monitor() -> str | None:
 
     output = "\n".join(report_lines)
     logger.info("Code-driven intraday report generated: %d signals, %d actionable", len(signals), len(actionable))
-
-    print(output)
 
     # Save recommendations
     _save_intraday_recommendations(output)

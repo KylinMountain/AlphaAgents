@@ -121,5 +121,4 @@ async def run_opening_reminder() -> str | None:
     except Exception as e:
         logger.debug("Opening notification failed: %s", e)
 
-    print(report)
     return report

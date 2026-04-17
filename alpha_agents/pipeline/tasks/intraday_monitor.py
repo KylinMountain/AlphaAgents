@@ -1084,6 +1084,17 @@ def _save_intraday_recommendations(report: str) -> None:
         report_type = "intraday_signal" if rec_type == "signal" else "intraday"
         confidence = r.get("confidence", "medium") if rec_type != "signal" else "signal"
         try:
+            # Phase 1: capture decision-time features for Playbook clustering (Phase 3).
+            # Fields match the available_fields list in the evolution spec.
+            features = {
+                "vpa_verdict": r.get("vpa_verdict", "unknown"),
+                "vpa_phase": (r.get("vpa_result") or {}).get("llm_phase", ""),
+                "theme": r.get("theme", ""),
+                "score": r.get("score", 0),
+                "change_pct": r.get("change_pct", 0),
+                "institutional": r.get("institutional", ""),
+                "rec_type": rec_type,  # 'signal' vs 'actionable'
+            }
             save_prediction(
                 date=today,
                 report_type=report_type,
@@ -1094,6 +1105,7 @@ def _save_intraday_recommendations(report: str) -> None:
                 theme_line=r.get("theme", ""),
                 entry_price=entry_price,
                 reason=r.get("reason", "")[:100],
+                features=features,
             )
             saved += 1
             tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")

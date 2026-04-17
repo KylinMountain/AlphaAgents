@@ -19,7 +19,7 @@ def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
         df = _fetch_news()
 
         if keyword:
-            mask = df["标题"].str.contains(keyword, na=False) | df["内容"].str.contains(keyword, na=False)
+            mask = df["新闻标题"].str.contains(keyword, na=False) | df["新闻内容"].str.contains(keyword, na=False)
             df = df[mask]
 
         df = df.head(limit)
@@ -27,8 +27,8 @@ def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
         news = []
         for _, row in df.iterrows():
             news.append({
-                "title": str(row.get("标题", "")),
-                "summary": str(row.get("内容", ""))[:200],
+                "title": str(row.get("新闻标题", "")),
+                "summary": str(row.get("新闻内容", ""))[:200],
                 "time": str(row.get("发布时间", "")),
                 "source": str(row.get("文章来源", "")),
             })

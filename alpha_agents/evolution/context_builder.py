@@ -12,13 +12,13 @@ from alpha_agents.evolution.feedback import (
 )
 
 
-def build_morning_context(themes: list[dict], stats: str) -> str:
+def build_morning_context(themes: list[dict], stats: str,
+                          mode: str = "full") -> str:
     """Build the enriched context injected into the morning agent.
 
-    Phase 1: sentiment + cognition (both currently lost by morning_scan) +
-    the existing stats string.
-    Phase 2: also includes principles + recent daily_lessons.
-    Phase 3 hook: will also include active playbooks.
+    mode: "full" (default) includes all Phase 1/2/3 sections.
+          "baseline" includes only Phase 1 (sentiment + cognition + stats) —
+          used by Phase 4 A/B validation to compare against pre-evolution prompts.
 
     The ``themes`` list is currently not used here (morning_scan passes it
     in a separate ``themes_ctx`` argument to run_morning_analysis). Kept in
@@ -26,11 +26,14 @@ def build_morning_context(themes: list[dict], stats: str) -> str:
     can leverage it (e.g., filtering lessons by active theme).
     """
     sections = []
-    for part in (inject_sentiment(), inject_cognition(),
-                 inject_principles(), inject_recent_lessons(),
-                 inject_playbooks()):
+    for part in (inject_sentiment(), inject_cognition()):
         if part:
             sections.append(part)
+    if mode != "baseline":
+        for part in (inject_principles(), inject_recent_lessons(),
+                     inject_playbooks()):
+            if part:
+                sections.append(part)
     if stats:
         sections.append(stats)
     return "\n\n".join(sections)

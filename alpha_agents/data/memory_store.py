@@ -271,6 +271,21 @@ CREATE TABLE IF NOT EXISTS playbooks (
     version_history TEXT DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_playbooks_status ON playbooks(status);
+
+CREATE TABLE IF NOT EXISTS evolution_metrics (
+    date TEXT PRIMARY KEY,
+    intraday_hit_rate_7d REAL,
+    intraday_count_7d INTEGER,
+    matched_hit_rate_7d REAL,
+    matched_count_7d INTEGER,
+    unmatched_hit_rate_7d REAL,
+    unmatched_count_7d INTEGER,
+    active_principles INTEGER DEFAULT 0,
+    weakened_principles INTEGER DEFAULT 0,
+    active_playbooks INTEGER DEFAULT 0,
+    degraded_playbooks INTEGER DEFAULT 0,
+    lessons_count_7d INTEGER DEFAULT 0
+);
 """
 
 _local = threading.local()
@@ -1205,5 +1220,37 @@ def get_active_or_degraded_playbooks() -> list[dict]:
     rows = _get_conn().execute(
         "SELECT * FROM playbooks WHERE status IN ('active', 'degraded') "
         "ORDER BY status, weight DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Phase 4: evolution metrics ────────────────────────────────
+def upsert_evolution_metrics(date: str, fields: dict) -> None:
+    """Insert or replace a daily metrics row. `fields` maps column names to values."""
+    cols = [
+        "intraday_hit_rate_7d", "intraday_count_7d",
+        "matched_hit_rate_7d", "matched_count_7d",
+        "unmatched_hit_rate_7d", "unmatched_count_7d",
+        "active_principles", "weakened_principles",
+        "active_playbooks", "degraded_playbooks",
+        "lessons_count_7d",
+    ]
+    values = [fields.get(c) for c in cols]
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO evolution_metrics "
+            f"(date, {', '.join(cols)}) VALUES (?, {', '.join('?' * len(cols))})",
+            (date, *values),
+        )
+        conn.commit()
+
+
+def get_evolution_metrics_trend(days: int = 30) -> list[dict]:
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = _get_conn().execute(
+        "SELECT * FROM evolution_metrics WHERE date >= ? ORDER BY date",
+        (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]

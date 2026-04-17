@@ -33,6 +33,11 @@ from alpha_agents.evolution.lessons import (
     post_review,
 )
 from alpha_agents.evolution.playbook import match_playbook, update_playbook_stats
+from alpha_agents.evolution.metrics import (
+    compute_evolution_metrics,
+    get_evolution_metrics_trend,
+    format_metrics_trend,
+)
 
 __all__ = [
     "build_chat_context",
@@ -46,4 +51,7 @@ __all__ = [
     "post_review",
     "match_playbook",
     "update_playbook_stats",
+    "compute_evolution_metrics",
+    "get_evolution_metrics_trend",
+    "format_metrics_trend",
 ]

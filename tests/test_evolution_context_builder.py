@@ -23,7 +23,11 @@ def test_build_morning_context_includes_sentiment_and_cognition():
     with patch("alpha_agents.evolution.context_builder.inject_sentiment",
                return_value="【情绪周期】升温 — 可追强势"), \
          patch("alpha_agents.evolution.context_builder.inject_cognition",
-               return_value="【市场认知】\n• CPO: 高位 + 资金流入 — \"强势延续\""):
+               return_value="【市场认知】\n• CPO: 高位 + 资金流入 — \"强势延续\""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value=""):
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="命中率62%")
     assert "【情绪周期】" in result
@@ -35,6 +39,10 @@ def test_build_morning_context_handles_empty_sections():
     with patch("alpha_agents.evolution.context_builder.inject_sentiment",
                return_value=""), \
          patch("alpha_agents.evolution.context_builder.inject_cognition",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
                return_value=""):
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="")
@@ -44,7 +52,11 @@ def test_build_morning_context_handles_empty_sections():
 
 def test_build_chat_context_adds_sentiment_to_existing_sections():
     with patch("alpha_agents.evolution.context_builder.inject_sentiment",
-               return_value="【情绪周期】升温"):
+               return_value="【情绪周期】升温"), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value=""):
         from alpha_agents.evolution.context_builder import build_chat_context
         result = build_chat_context(
             portfolio_summary="总资金 100,000元",
@@ -59,8 +71,25 @@ def test_build_chat_context_adds_sentiment_to_existing_sections():
 
 def test_build_chat_context_empty_sentiment_skipped():
     with patch("alpha_agents.evolution.context_builder.inject_sentiment",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
                return_value=""):
         from alpha_agents.evolution.context_builder import build_chat_context
         result = build_chat_context("持仓A", "主线B", "统计C")
     assert "【情绪周期】" not in result
     assert "持仓A" in result
+
+
+def test_build_morning_context_includes_principles_and_lessons():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_cognition", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               return_value="【交易经验手册】\n• 巨量长下影 = 买入高峰"), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value="【近期教训】\n• [04-17] success: CPO命中"):
+        from alpha_agents.evolution.context_builder import build_morning_context
+        result = build_morning_context(themes=[], stats="")
+    assert "【交易经验手册】" in result
+    assert "【近期教训】" in result

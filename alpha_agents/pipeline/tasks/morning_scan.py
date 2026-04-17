@@ -262,6 +262,11 @@ async def run_morning_scan() -> str | None:
     if sentiment_ctx:
         events_ctx = sentiment_ctx + "\n\n" + events_ctx
 
+    # Phase 1: enrich stats_ctx with sentiment + cognition via evolution module.
+    # Previously `cognition` was fetched above but silently dropped.
+    from alpha_agents.evolution import build_morning_context
+    stats_ctx = build_morning_context(themes=themes, stats=stats_ctx)
+
     report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
 
     # 5. Push notification

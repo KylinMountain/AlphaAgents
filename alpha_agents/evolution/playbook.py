@@ -11,6 +11,7 @@ from alpha_agents.data.memory_store import (
     get_all_playbooks,
     update_playbook_status,
     set_playbook_annotation,
+    create_playbook,
 )
 
 logger = logging.getLogger(__name__)
@@ -207,3 +208,111 @@ def update_playbook_stats(today: str) -> list[str]:
                                    hit_rate_at_change=hr, today=today)
             ops.append(f"{name}: weight 1.0→1.5 (boost, {hr:.1%})")
     return ops
+
+
+_AUTO_CREATE_MIN_WINS = 3
+_AUTO_CREATE_MIN_TOTAL = 3
+_AUTO_CREATE_LOOKBACK_DAYS = 14
+
+
+def _query_hit_clusters(days: int = _AUTO_CREATE_LOOKBACK_DAYS) -> list[dict]:
+    """Group recent verified intraday predictions by decision-feature cluster.
+    Returns rows where wins >= _AUTO_CREATE_MIN_WINS. CRITICAL: only uses
+    report_type='intraday' (excludes 'intraday_signal' limit-up observations
+    which would dominate clustering with useless patterns)."""
+    from alpha_agents.data.memory_store import _get_conn
+
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    q = """
+    SELECT
+        json_extract(features_json, '$.vpa_verdict') as vpa_verdict,
+        json_extract(features_json, '$.theme') as theme,
+        CASE WHEN json_extract(features_json, '$.institutional') IS NOT NULL
+                  AND json_extract(features_json, '$.institutional') != ''
+             THEN 1 ELSE 0 END as institutional_present,
+        COUNT(*) FILTER (WHERE hit=1) as hits,
+        COUNT(*) as total,
+        AVG(CASE WHEN hit=1 THEN next_day_return ELSE 0 END) as avg_return
+    FROM predictions
+    WHERE report_type = 'intraday'
+      AND hit IS NOT NULL
+      AND features_json IS NOT NULL
+      AND features_json != '{}'
+      AND date >= ?
+    GROUP BY vpa_verdict, theme, institutional_present
+    HAVING hits >= ?
+    ORDER BY hits DESC
+    """
+    rows = _get_conn().execute(q, (cutoff, _AUTO_CREATE_MIN_WINS)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _pattern_from_cluster(cluster: dict) -> dict:
+    """Build the pattern_json for a feature cluster."""
+    conditions = []
+    if cluster.get("theme"):
+        conditions.append({"field": "theme", "op": "==", "value": cluster["theme"]})
+    if cluster.get("vpa_verdict"):
+        conditions.append({"field": "vpa_verdict", "op": "==",
+                           "value": cluster["vpa_verdict"]})
+    if cluster.get("institutional_present"):
+        conditions.append({"field": "institutional", "op": "contains",
+                           "value": "机构"})
+    desc_parts = []
+    if cluster.get("theme"):
+        desc_parts.append(cluster["theme"])
+    if cluster.get("vpa_verdict"):
+        desc_parts.append(f"VPA{cluster['vpa_verdict']}")
+    if cluster.get("institutional_present"):
+        desc_parts.append("机构买入")
+    return {"description": "+".join(desc_parts), "conditions": conditions}
+
+
+def _pattern_signature(pattern_json_str: str) -> frozenset:
+    """Return a comparable signature (field+op+value) of a pattern's conditions."""
+    try:
+        pattern = json.loads(pattern_json_str)
+    except json.JSONDecodeError:
+        return frozenset()
+    return frozenset(
+        (c.get("field"), c.get("op"), str(c.get("value")))
+        for c in pattern.get("conditions", [])
+    )
+
+
+def scan_and_auto_create(today: str) -> list[int]:
+    """Scan hit clusters and create a new playbook for each novel pattern.
+    Returns list of newly-created playbook IDs."""
+    clusters = _query_hit_clusters()
+    if not clusters:
+        return []
+
+    existing = get_all_playbooks()
+    existing_sigs = {_pattern_signature(pb.get("pattern_json", "{}"))
+                     for pb in existing}
+
+    created = []
+    for c in clusters:
+        if c["total"] < _AUTO_CREATE_MIN_TOTAL:
+            continue
+        pattern = _pattern_from_cluster(c)
+        sig = frozenset(
+            (cond["field"], cond["op"], str(cond["value"]))
+            for cond in pattern["conditions"]
+        )
+        if sig in existing_sigs:
+            continue
+        name_parts = []
+        if c.get("theme"):
+            name_parts.append(str(c["theme"]))
+        if c.get("vpa_verdict"):
+            name_parts.append(str(c["vpa_verdict"]))
+        if c.get("institutional_present"):
+            name_parts.append("机构")
+        name = f"Auto: {'-'.join(name_parts)}"
+        pid = create_playbook(name=name, pattern_json=pattern, today=today)
+        existing_sigs.add(sig)
+        created.append(pid)
+        logger.info("Auto-created playbook #%d: %s (hits=%d/%d)",
+                    pid, name, c["hits"], c["total"])
+    return created

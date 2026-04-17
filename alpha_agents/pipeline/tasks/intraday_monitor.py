@@ -578,6 +578,18 @@ async def run_intraday_monitor() -> str | None:
                 "stop_loss": stop_loss_val,
             })
 
+    # Phase 3: apply playbook weights (regime-aware — returns None if <2 active)
+    try:
+        from alpha_agents.evolution import match_playbook
+        for a in actionable:
+            pb = match_playbook(a)
+            if pb:
+                a["playbook"] = pb["name"]
+                a["playbook_weight"] = pb.get("weight", 1.0)
+                a["score"] = a.get("score", 0) * pb.get("weight", 1.0)
+    except Exception as e:
+        logger.debug("Playbook matching failed (non-fatal): %s", e)
+
     # Sort by score, take top 5
     actionable.sort(key=lambda x: x["score"], reverse=True)
     actionable = actionable[:5]
@@ -650,6 +662,8 @@ async def run_intraday_monitor() -> str | None:
             sl_str = f" 止损{sl:.2f}" if sl else ""
             inst = a.get("institutional", "")
             inst_str = f" [{inst}]" if inst and inst != "无" else ""
+            pb_name = a.get("playbook", "")
+            pb_bit = f" [{pb_name}×{a.get('playbook_weight', 1.0):.1f}]" if pb_name else ""
             vpa_verdict = a.get("vpa_verdict", "unknown")
             vpa_note = a.get("vpa_note", "")
             vpa_cell = f"{vpa_verdict}"
@@ -658,7 +672,7 @@ async def run_intraday_monitor() -> str | None:
             report_lines.append(
                 f"| {a['code']} | {a['name']} | {a['price']:.2f}元 | "
                 f"{a['change_pct']:+.2f}% | {a['score']:.0f} | {vpa_cell} | "
-                f"{action}{sl_str}{inst_str} |"
+                f"{action}{sl_str}{inst_str}{pb_bit} |"
             )
     else:
         report_lines.append("| — | 暂无符合条件的候选 | — | — | — | — |")

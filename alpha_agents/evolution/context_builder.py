@@ -6,6 +6,8 @@ from alpha_agents.evolution.feedback import (
     inject_cognition,
     inject_sentiment,
     inject_vpa_signal_history,
+    inject_principles,
+    inject_recent_lessons,
 )
 
 
@@ -14,7 +16,7 @@ def build_morning_context(themes: list[dict], stats: str) -> str:
 
     Phase 1: sentiment + cognition (both currently lost by morning_scan) +
     the existing stats string.
-    Phase 2 hook: will also include principles + recent daily_lessons.
+    Phase 2: also includes principles + recent daily_lessons.
     Phase 3 hook: will also include active playbooks.
 
     The ``themes`` list is currently not used here (morning_scan passes it
@@ -23,12 +25,10 @@ def build_morning_context(themes: list[dict], stats: str) -> str:
     can leverage it (e.g., filtering lessons by active theme).
     """
     sections = []
-    sentiment = inject_sentiment()
-    if sentiment:
-        sections.append(sentiment)
-    cognition = inject_cognition()
-    if cognition:
-        sections.append(cognition)
+    for part in (inject_sentiment(), inject_cognition(),
+                 inject_principles(), inject_recent_lessons()):
+        if part:
+            sections.append(part)
     if stats:
         sections.append(stats)
     return "\n\n".join(sections)
@@ -39,18 +39,14 @@ def build_chat_context(portfolio_summary: str, themes_summary: str,
     """Build the chat agent's system-prompt context string.
 
     Phase 1: adds sentiment on top of the existing portfolio / themes / stats.
-    Phase 2 hook: will also inject principles + recent lessons.
+    Phase 2: also injects principles + recent lessons (3-day window).
     """
     sections = []
-    if portfolio_summary:
-        sections.append(portfolio_summary)
-    if themes_summary:
-        sections.append(themes_summary)
-    if stats_summary:
-        sections.append(stats_summary)
-    sentiment = inject_sentiment()
-    if sentiment:
-        sections.append(sentiment)
+    for part in (portfolio_summary, themes_summary, stats_summary,
+                 inject_sentiment(), inject_principles(),
+                 inject_recent_lessons(days=3)):
+        if part:
+            sections.append(part)
     return "\n\n".join(sections)
 
 

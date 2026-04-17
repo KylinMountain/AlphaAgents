@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-from alpha_agents.data.memory_store import get_all_cognition_latest
+from alpha_agents.data.memory_store import (
+    get_all_cognition_latest,
+    get_all_principles_including_weakened,
+    get_recent_daily_lessons,
+)
 
 
 def inject_sentiment() -> str:
@@ -108,6 +112,64 @@ def inject_vpa_signal_history(code: str) -> str:
         tail = f"（{resolved}）" if resolved else ""
         line = f"• {date} {stype}({direction}) → {icon}{tail}"
         if sum(len(x) for x in lines) + len(line) > _VPA_SIGNAL_BUDGET:
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+_PRINCIPLES_BUDGET = 800
+_LESSONS_BUDGET = 600
+
+_CATEGORY_HEADERS = {
+    "vpa_signal": "VPA信号",
+    "theme_timing": "主线择时",
+    "entry": "入场",
+    "exit": "出场",
+    "risk": "风控",
+}
+
+
+def inject_principles() -> str:
+    """Render active (and weakened) trading principles as an Anna-Coulling-style
+    manual, grouped by category. Budget: 800 chars."""
+    rows = get_all_principles_including_weakened()
+    if not rows:
+        return ""
+    by_cat: dict[str, list[dict]] = {}
+    for r in rows:
+        by_cat.setdefault(r.get("category", "insight"), []).append(r)
+
+    lines = [f"【交易经验手册】（{len(rows)}条）"]
+    for cat, items in by_cat.items():
+        header = _CATEGORY_HEADERS.get(cat, cat)
+        lines.append(f"■ {header}")
+        for r in items:
+            wr = r.get("win_rate")
+            ec = r.get("evidence_count", 0)
+            tag = "⚠️" if r.get("status") == "weakened" else ""
+            wr_str = f"胜率{wr*100:.0f}%" if wr is not None else ""
+            meta = f"（{wr_str}, {ec}例）" if wr_str else f"（{ec}例）"
+            line = f"• {tag}{r['principle']}{meta} → {r.get('action_guidance', '')}"
+            if sum(len(x) for x in lines) + len(line) > _PRINCIPLES_BUDGET:
+                return "\n".join(lines)
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def inject_recent_lessons(days: int = 7) -> str:
+    """Render last N days of daily_lessons. Budget: 600 chars."""
+    rows = get_recent_daily_lessons(days=days)
+    if not rows:
+        return ""
+    lines = ["【近期教训】"]
+    for r in rows:
+        date = r.get("date", "")[5:]  # "04-17"
+        ltype = r.get("lesson_type", "")
+        theme = r.get("theme", "") or ""
+        content = r.get("content", "")
+        theme_bit = f"[{theme}] " if theme else ""
+        line = f"• [{date}] {ltype}: {theme_bit}{content}"
+        if sum(len(x) for x in lines) + len(line) > _LESSONS_BUDGET:
             break
         lines.append(line)
     return "\n".join(lines)

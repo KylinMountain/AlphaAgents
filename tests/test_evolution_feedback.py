@@ -125,3 +125,65 @@ def test_inject_vpa_signal_history_no_signals_returns_empty():
                return_value=[]):
         from alpha_agents.evolution.feedback import inject_vpa_signal_history
         assert inject_vpa_signal_history("300274") == ""
+
+
+def test_inject_principles_formats_by_category():
+    fake = [
+        {"id": 1, "principle": "高位缩量新高长上影 = 派发",
+         "pattern_description": "...", "category": "vpa_signal",
+         "action_guidance": "减仓", "win_rate": 0.8, "evidence_count": 5,
+         "status": "active"},
+        {"id": 2, "principle": "板块分化 = 主线虚胖",
+         "pattern_description": "...", "category": "theme_timing",
+         "action_guidance": "降级", "win_rate": 0.3, "evidence_count": 3,
+         "status": "active"},
+    ]
+    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+               return_value=fake):
+        from alpha_agents.evolution.feedback import inject_principles
+        result = inject_principles()
+    assert "【交易经验手册】" in result
+    assert "高位缩量新高" in result
+    assert "板块分化" in result
+
+
+def test_inject_principles_empty_returns_empty():
+    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+               return_value=[]):
+        from alpha_agents.evolution.feedback import inject_principles
+        assert inject_principles() == ""
+
+
+def test_inject_principles_marks_weakened():
+    fake = [{"id": 1, "principle": "失效法则", "pattern_description": "x",
+             "category": "insight", "action_guidance": "谨慎",
+             "win_rate": 0.25, "evidence_count": 4, "status": "weakened"}]
+    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+               return_value=fake):
+        from alpha_agents.evolution.feedback import inject_principles
+        result = inject_principles()
+    assert "⚠️" in result
+
+
+def test_inject_recent_lessons_formats():
+    fake = [
+        {"date": "2026-04-17", "lesson_type": "failure", "theme": "数据中心",
+         "content": "东方国信破5日线"},
+        {"date": "2026-04-16", "lesson_type": "success", "theme": "CPO",
+         "content": "协创数据+9.4%"},
+    ]
+    with patch("alpha_agents.evolution.feedback.get_recent_daily_lessons",
+               return_value=fake):
+        from alpha_agents.evolution.feedback import inject_recent_lessons
+        result = inject_recent_lessons()
+    assert "【近期教训】" in result or "【近期经验】" in result
+    assert "04-17" in result or "2026-04-17" in result
+    assert "东方国信" in result
+    assert "协创数据" in result
+
+
+def test_inject_recent_lessons_empty():
+    with patch("alpha_agents.evolution.feedback.get_recent_daily_lessons",
+               return_value=[]):
+        from alpha_agents.evolution.feedback import inject_recent_lessons
+        assert inject_recent_lessons() == ""

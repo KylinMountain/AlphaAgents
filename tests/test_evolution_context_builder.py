@@ -27,6 +27,8 @@ def test_build_morning_context_includes_sentiment_and_cognition():
          patch("alpha_agents.evolution.context_builder.inject_principles",
                return_value=""), \
          patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
                return_value=""):
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="命中率62%")
@@ -43,6 +45,8 @@ def test_build_morning_context_handles_empty_sections():
          patch("alpha_agents.evolution.context_builder.inject_principles",
                return_value=""), \
          patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
+               return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
                return_value=""):
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="")
@@ -88,8 +92,23 @@ def test_build_morning_context_includes_principles_and_lessons():
          patch("alpha_agents.evolution.context_builder.inject_principles",
                return_value="【交易经验手册】\n• 巨量长下影 = 买入高峰"), \
          patch("alpha_agents.evolution.context_builder.inject_recent_lessons",
-               return_value="【近期教训】\n• [04-17] success: CPO命中"):
+               return_value="【近期教训】\n• [04-17] success: CPO命中"), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
+               return_value=""):
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="")
     assert "【交易经验手册】" in result
     assert "【近期教训】" in result
+
+
+def test_build_morning_context_includes_playbooks():
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_cognition", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_recent_lessons", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
+               return_value="【活跃 Playbook】\n• CPO+机构 — 胜率80%"):
+        from alpha_agents.evolution.context_builder import build_morning_context
+        result = build_morning_context(themes=[], stats="")
+    assert "Playbook" in result
+    assert "CPO+机构" in result

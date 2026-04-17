@@ -7,6 +7,7 @@ from alpha_agents.data.memory_store import (
     get_all_cognition_latest,
     get_all_principles_including_weakened,
     get_recent_daily_lessons,
+    get_active_or_degraded_playbooks,
 )
 
 
@@ -170,6 +171,30 @@ def inject_recent_lessons(days: int = 7) -> str:
         theme_bit = f"[{theme}] " if theme else ""
         line = f"• [{date}] {ltype}: {theme_bit}{content}"
         if sum(len(x) for x in lines) + len(line) > _LESSONS_BUDGET:
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+_PLAYBOOKS_BUDGET = 400
+
+
+def inject_playbooks() -> str:
+    rows = get_active_or_degraded_playbooks()
+    if not rows:
+        return ""
+    lines = [f"【活跃 Playbook】（{len(rows)}条）"]
+    for pb in rows:
+        hr = pb.get("hit_rate", 0) or 0
+        ttl = pb.get("total_trades", 0)
+        wins = pb.get("wins", 0)
+        w = pb.get("weight", 1.0)
+        tag = "⚠️" if pb["status"] == "degraded" else ("⭐" if w >= 1.5 else "")
+        ann = pb.get("annotation", "")
+        ann_bit = f" — {ann}" if ann else ""
+        line = (f"• {tag}{pb['name']} — 胜率{hr*100:.0f}%"
+                f"（{wins}/{ttl}）weight={w:.1f}{ann_bit}")
+        if sum(len(x) for x in lines) + len(line) > _PLAYBOOKS_BUDGET:
             break
         lines.append(line)
     return "\n".join(lines)

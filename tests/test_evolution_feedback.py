@@ -33,6 +33,30 @@ def test_inject_sentiment_fits_budget():
     assert len(result) <= 80  # 50 char budget + small header overhead
 
 
+def test_inject_sentiment_handles_dict_strategy():
+    """Real sentiment_cycle schema stores strategy as dict (buy_style / sell_style),
+    not a plain string. Must extract buy_style rather than stringify the dict."""
+    fake_cycle = {
+        "phase": "升温",
+        "confidence": 0.8,
+        "strategy": {
+            "en": "warming",
+            "max_exposure_pct": 60,
+            "buy_style": "可追强势，高beta优先",
+            "sell_style": "放宽移动止损",
+        },
+    }
+    with patch("alpha_agents.evolution.feedback.get_sentiment_cycle",
+               return_value=fake_cycle):
+        from alpha_agents.evolution.feedback import inject_sentiment
+        result = inject_sentiment()
+    assert "升温" in result
+    assert "可追强势" in result
+    # Must not leak raw dict literals into the rendered prompt
+    assert "max_exposure_pct" not in result
+    assert "{'en'" not in result
+
+
 def test_inject_cognition_formats_sectors():
     fake_rows = [
         {"sector": "CPO", "position": "high", "fund_trend": "inflow",

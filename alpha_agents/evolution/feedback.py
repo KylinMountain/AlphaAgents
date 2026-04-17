@@ -15,9 +15,15 @@ def inject_sentiment() -> str:
     if not cycle:
         return ""
     phase = cycle.get("phase", "")
-    strategy = cycle.get("strategy", "")
     if not phase:
         return ""
+    # ``strategy`` may be a string (legacy) or a dict with buy_style/sell_style
+    # (current schema from sentiment_cycle.py). Normalize to a string.
+    raw_strategy = cycle.get("strategy", "")
+    if isinstance(raw_strategy, dict):
+        strategy = raw_strategy.get("buy_style", "") or raw_strategy.get("sell_style", "")
+    else:
+        strategy = raw_strategy or ""
     # Truncate strategy to stay within ~50 char budget
     if len(strategy) > 40:
         strategy = strategy[:40].rstrip() + "…"

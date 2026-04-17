@@ -423,3 +423,27 @@ The initial draft of this spec was reviewed via `/autoresearch` (3 iterations) w
 8. ~~no playbook version snapshot~~ → `version_history` JSON column
 9. ~~no meta-metric for evolution effectiveness~~ → `evolution_metrics` weekly
 10. ~~no A/B validation of evolution benefit~~ → `build_morning_context(mode="baseline")`
+
+---
+
+## Phase 1 Shipped — 2026-04-17
+
+L1 Feedback + `features_json` schema extension landed on branch `feat/evolution-phase1`:
+
+**New module** `alpha_agents/evolution/`:
+- `__init__.py` — public API (`build_*_context`, `inject_*`)
+- `feedback.py` — `inject_sentiment`, `inject_cognition`, `inject_vpa_signal_history`
+- `context_builder.py` — `build_morning_context`, `build_chat_context`, `build_vpa_context`
+
+**Schema:** idempotent ALTER TABLE added `features_json TEXT DEFAULT '{}'` to `predictions`; `save_prediction()` signature extended with optional `features: dict | None = None`; `intraday_monitor.py` now writes vpa_verdict / vpa_phase / score / change_pct / institutional / theme / rec_type at save time (carried through `recs_json` so `_save_intraday_recommendations` → `save_prediction` has the real features).
+
+**Wired:**
+- `morning_scan.py` — `stats_ctx` now passes through `build_morning_context(themes, stats_ctx)` so the morning agent sees sentiment + cognition (previously fetched but dropped)
+- `vpa.py` — `_call_llm_vpa` prepends `build_vpa_context(code)` (VPA signal history) to user_content so the LLM sees its own track record
+- `chat.py` — `CHAT_SYSTEM_PROMPT` now has a single `{agent_context}` placeholder filled by `build_chat_context()`
+
+**Tests:** 19 unit tests across `test_evolution_schema.py`, `test_evolution_feedback.py`, `test_evolution_context_builder.py` — all passing.
+
+**Unblocks Phase 2/3:** `features_json` populated on every new intraday prediction provides the feature clusters that Phase 3 playbook auto-creation requires. Wait ≥2 weeks before starting Phase 3 to accumulate enough data for meaningful clustering.
+
+Commits on `feat/evolution-phase1`: `1c5e87c` `8376221` `fc343fc` `6ba87c9` `de7a973` `5c0b4ff` `b3e2c3a` `5c4ffa1` `e8bb46b` `a244209` `2daee01` `38dbe8b` `186bbca` `3cad523` `f236c55`.

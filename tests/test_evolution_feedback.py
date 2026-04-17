@@ -70,3 +70,34 @@ def test_inject_cognition_respects_budget():
         from alpha_agents.evolution.feedback import inject_cognition
         result = inject_cognition()
     assert len(result) <= 400  # 300 budget + header overhead
+
+
+def test_inject_vpa_signal_history_formats_confirmed_and_pending():
+    fake_signals = [
+        {"signal_type": "射击十字星", "signal_date": "2026-04-14",
+         "direction": "偏空", "status": "confirmed",
+         "resolved_by": "今日跌3.6%", "resolved_date": "2026-04-15"},
+        {"signal_type": "缩量止跌", "signal_date": "2026-04-16",
+         "direction": "偏多", "status": "pending",
+         "resolved_by": "", "resolved_date": ""},
+    ]
+    with patch("alpha_agents.evolution.feedback._query_vpa_signals_for_code",
+               return_value=fake_signals):
+        from alpha_agents.evolution.feedback import inject_vpa_signal_history
+        result = inject_vpa_signal_history("300274")
+    assert "VPA信号历史" in result
+    assert "射击十字星" in result and "✅" in result
+    assert "缩量止跌" in result and "⏳" in result
+
+
+def test_inject_vpa_signal_history_empty_code():
+    from alpha_agents.evolution.feedback import inject_vpa_signal_history
+    assert inject_vpa_signal_history("") == ""
+    assert inject_vpa_signal_history("abc") == ""  # not 6 digits
+
+
+def test_inject_vpa_signal_history_no_signals_returns_empty():
+    with patch("alpha_agents.evolution.feedback._query_vpa_signals_for_code",
+               return_value=[]):
+        from alpha_agents.evolution.feedback import inject_vpa_signal_history
+        assert inject_vpa_signal_history("300274") == ""

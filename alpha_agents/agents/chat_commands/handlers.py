@@ -336,6 +336,14 @@ async def handle_weekly(arg: str, ctx: ChatContext) -> None:
 
 # ── Evolution/Playbook handlers ───────────────────────────────────────
 
+async def handle_evolution(arg: str, ctx: ChatContext) -> None:
+    """Show evolution system health — 30-day metric trend."""
+    from alpha_agents.evolution import get_evolution_metrics_trend, format_metrics_trend
+    rows = get_evolution_metrics_trend(days=30)
+    text = format_metrics_trend(rows)
+    ctx.console.print(Panel(text, title="进化系统自评（30天）", border_style="cyan"))
+
+
 async def handle_playbook(arg: str, ctx: ChatContext) -> None:
     """List all playbooks with status / weight / hit rate."""
     from alpha_agents.data.memory_store import get_all_playbooks
@@ -398,6 +406,7 @@ REGISTRY: tuple[Command, ...] = (
     Command("/news", "数据", "最新新闻", handle_news),
     Command("/themes", "数据", "活跃主线状态", handle_themes),
     Command("/playbook", "数据", "查看 Playbook 列表及胜率", handle_playbook),
+    Command("/evolution", "数据", "查看进化系统自评指标", handle_evolution),
 
     # 任务
     Command("/morning", "任务", "手动运行晨扫", handle_morning),

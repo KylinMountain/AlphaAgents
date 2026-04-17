@@ -1828,6 +1828,16 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
                 f"【最新数据】{user_content}"
             )
 
+        # Phase 1 L1: inject this stock's VPA signal history (confirmed/denied/pending)
+        # so the LLM can see its own track record and re-evaluate recent calls.
+        try:
+            from alpha_agents.evolution import build_vpa_context
+            signal_ctx = build_vpa_context(code)
+            if signal_ctx:
+                user_content = signal_ctx + "\n\n" + user_content
+        except Exception as e:
+            logger.debug("VPA context injection failed (non-fatal): %s", e)
+
         resp = client.chat.completions.create(
             model=model,
             messages=[

@@ -41,12 +41,12 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def get_sec_news_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch SEC press releases from the RSS feed.
+    """Fetch SEC press releases from the RSS feed. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["SEC"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
-    """
     all_news: list[dict] = []
 
     try:
@@ -55,6 +55,11 @@ def get_sec_news_fn(limit: int = 20, keyword: str | None = None) -> str:
         logger.debug("Fetched %d items from SEC RSS", len(all_news))
     except Exception as e:
         logger.warning("Failed to fetch SEC RSS: %s", e)
+
+    try:
+        save_news("SEC", all_news)
+    except Exception as e:
+        logger.debug("sec capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

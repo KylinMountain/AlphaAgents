@@ -45,10 +45,13 @@ def _parse_items(data: dict) -> list[dict]:
 def get_wallstreetcn_fn(limit: int = 30, keyword: str | None = None) -> str:
     """Fetch financial news from 华尔街见闻 (Wall Street CN).
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
+    Replay-aware: in replay mode reads from news_items snapshot instead of live.
     """
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["华尔街见闻"], limit, keyword)
+    if replay is not None:
+        return replay
+
     all_news: list[dict] = []
 
     try:
@@ -59,6 +62,12 @@ def get_wallstreetcn_fn(limit: int = 30, keyword: str | None = None) -> str:
         logger.debug("Fetched %d items from 华尔街见闻", len(items))
     except Exception as e:
         logger.warning("Failed to fetch 华尔街见闻: %s", e)
+
+    # Capture full corpus BEFORE filter
+    try:
+        save_news("华尔街见闻", all_news)
+    except Exception as e:
+        logger.debug("wallstreetcn capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

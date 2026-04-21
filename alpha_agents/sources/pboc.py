@@ -133,12 +133,12 @@ def _parse_pboc_html(html_text: str) -> list[dict]:
 
 
 def get_pboc_news_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch monetary policy news from the People's Bank of China.
+    """Fetch monetary policy news from the People's Bank of China. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["中国人民银行"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
-    """
     all_news: list[dict] = []
 
     try:
@@ -152,6 +152,11 @@ def get_pboc_news_fn(limit: int = 20, keyword: str | None = None) -> str:
         logger.debug("Fetched %d items from PBOC", len(all_news))
     except Exception as e:
         logger.warning("Failed to fetch PBOC news: %s", e)
+
+    try:
+        save_news("中国人民银行", all_news)
+    except Exception as e:
+        logger.debug("pboc capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

@@ -149,15 +149,31 @@ def _fetch_feed(url: str, source: str, is_google: bool = False) -> list[dict]:
 
 
 def get_social_media_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch Trump/Musk social media content and US political news.
+    """Fetch Trump/Musk social media content and US political news. Replay-aware.
 
-    Uses Google News RSS search to capture Truth Social posts reported by media,
-    plus US political feeds for policy announcements.
-
-    Args:
-        limit: Maximum number of posts to return.
-        keyword: Optional keyword to filter results (case-insensitive).
+    Source labels mix fixed names (Google News feeds, political RSS) and
+    dynamic ones (X/@handle for tweets). Replay reads matching entries via
+    both exact names and the X/@ prefix.
     """
+    from alpha_agents.data.snapshot_store import (
+        replay_news_response, read_news, save_news,
+    )
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        fixed_sources = [name for name, _ in GOOGLE_NEWS_FEEDS] + \
+                        [name for name, _ in POLITICAL_FEEDS]
+        items_fixed = read_news(fixed_sources, as_of, keyword, limit)
+        items_x = read_news(None, as_of, keyword, limit, source_prefix="X/@")
+        merged = items_fixed + items_x
+        merged.sort(key=lambda x: x.get("time", ""), reverse=True)
+        merged = merged[:limit]
+        import json as _j
+        return _j.dumps({"news": merged, "count": len(merged)}, ensure_ascii=False)
+
     all_posts: list[dict] = []
 
     # 1. Twitter Syndication — direct tweets (highest priority)
@@ -174,6 +190,16 @@ def get_social_media_fn(limit: int = 20, keyword: str | None = None) -> str:
     for name, url in POLITICAL_FEEDS:
         items = _fetch_feed(url, name)
         all_posts.extend(items)
+
+    # Capture per-source tag (each item carries its own "source")
+    by_source: dict[str, list[dict]] = {}
+    for p in all_posts:
+        by_source.setdefault(p.get("source", "social_media"), []).append(p)
+    for src, items in by_source.items():
+        try:
+            save_news(src, items)
+        except Exception as e:
+            logger.debug("truthsocial capture failed for %s: %s", src, e)
 
     if keyword:
         kw = keyword.lower()

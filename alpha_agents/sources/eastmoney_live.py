@@ -61,15 +61,12 @@ def _parse_response(text: str) -> list[dict]:
 
 
 def get_eastmoney_live_fn(*, keyword: str = "", limit: int = 50) -> str:
-    """Fetch East Money 7x24 live flash news.
+    """Fetch East Money 7x24 live flash news. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["东方财富7x24"], limit, keyword or None)
+    if replay is not None:
+        return replay
 
-    Args:
-        keyword: Optional keyword filter.
-        limit: Max items to return.
-
-    Returns:
-        JSON string with {"news": [...]} format.
-    """
     try:
         url = LIVE_API_TEMPLATE.format(size=min(limit * 2, 100), page=1)
         resp = http_client.fetch(
@@ -80,6 +77,11 @@ def get_eastmoney_live_fn(*, keyword: str = "", limit: int = 50) -> str:
     except Exception as e:
         logger.warning("Failed to fetch eastmoney live: %s", e)
         items = []
+
+    try:
+        save_news("东方财富7x24", items)
+    except Exception as e:
+        logger.debug("eastmoney_live capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

@@ -69,7 +69,7 @@ SYSTEM_PROMPT = """\
 {
   "event": "事件标题",
   "category": "政策/地缘/宏观/行业/市场",
-  "industry": "所属行业（如：半导体、医药、新能源、军工、消费等，宏观/地缘类填'宏观'或'地缘'）",
+  "concept": "所属概念/主线题材（如：CPO、算力、固态电池、华为概念、国产芯片、低空经济、新能源车、数字货币等，宏观/地缘类填'宏观'或'地缘'；务必使用同花顺/开盘啦风格的概念热词，不要用'半导体/医药/新能源'这种静态行业名）",
   "target_market": "stock/futures/both",
   "summary": "综合多源信息的事件摘要",
   "importance": 4,
@@ -231,10 +231,30 @@ async def digest_news(news_items: list[dict]) -> list[dict]:
     context window, processes each batch with a separate LLM call,
     then merges and deduplicates results.
 
+    Side effect: captures every raw news item into ``news_items`` snapshot
+    table before digesting, so future replay can look up what news was
+    available at any point in time.
+
     Returns list of event dicts sorted by importance.
     """
     if not news_items:
         return []
+
+    # Capture raw news to snapshot DB (fire and forget; dedup by md5)
+    try:
+        from alpha_agents.data.snapshot_store import save_news
+        by_source: dict[str, list[dict]] = {}
+        for item in news_items:
+            src = item.get("source", "unknown")
+            by_source.setdefault(src, []).append(item)
+        total_new = 0
+        for src, items in by_source.items():
+            total_new += save_news(src, items)
+        if total_new:
+            logger.info("Captured %d new news items across %d sources",
+                        total_new, len(by_source))
+    except Exception as e:
+        logger.debug("news capture failed: %s", e)
 
     if not DIGEST_API_KEY:
         logger.error(

@@ -72,12 +72,12 @@ def _parse_fallback_html(html_text: str) -> list[dict]:
 
 
 def get_xinhua_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch financial news from Xinhua News Agency RSS feeds.
+    """Fetch financial news from Xinhua News Agency RSS feeds. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["新华社"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
-    """
     all_news: list[dict] = []
 
     # Try each RSS URL in order (list may be empty if all feeds are dead)
@@ -104,6 +104,11 @@ def get_xinhua_fn(limit: int = 20, keyword: str | None = None) -> str:
                 logger.debug("Xinhua fallback page returned no items")
         except Exception as e:
             logger.warning("Failed to fetch Xinhua fallback page: %s", e)
+
+    try:
+        save_news("新华社", all_news)
+    except Exception as e:
+        logger.debug("xinhua capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

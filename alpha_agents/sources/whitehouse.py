@@ -45,12 +45,12 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def get_whitehouse_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch official White House statements from the RSS feed.
+    """Fetch official White House statements from the RSS feed. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["White House"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
-    """
     all_news: list[dict] = []
 
     for rss_url in RSS_URLS:
@@ -66,6 +66,11 @@ def get_whitehouse_fn(limit: int = 20, keyword: str | None = None) -> str:
 
     if not all_news:
         logger.warning("All White House RSS URLs failed")
+
+    try:
+        save_news("White House", all_news)
+    except Exception as e:
+        logger.debug("whitehouse capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

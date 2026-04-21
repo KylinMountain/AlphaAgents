@@ -97,12 +97,17 @@ def _parse_rss(xml_text: str, source: str) -> list[dict]:
 
 
 def get_world_news_fn(limit: int = 30, keyword: str | None = None) -> str:
-    """Fetch international news from multiple RSS feeds.
+    """Fetch international news from multiple RSS feeds. Replay-aware.
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
+    Each RSS feed has its own source name (BBC World, Bloomberg, etc.).
+    Replay reads all 15 known feed names from the snapshot.
     """
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    feed_names = [name for name, _ in RSS_FEEDS]
+    replay = replay_news_response(feed_names, limit, keyword)
+    if replay is not None:
+        return replay
+
     all_news: list[dict] = []
 
     with client_session() as client:
@@ -115,6 +120,15 @@ def get_world_news_fn(limit: int = 30, keyword: str | None = None) -> str:
                 logger.debug("Fetched %d items from %s", len(items), source_name)
             except Exception as e:
                 logger.warning("Failed to fetch %s: %s", source_name, e)
+
+    # Capture per-source to preserve source attribution in news_items
+    for source_name in feed_names:
+        src_items = [n for n in all_news if n.get("source") == source_name]
+        if src_items:
+            try:
+                save_news(source_name, src_items)
+            except Exception as e:
+                logger.debug("world_news capture failed for %s: %s", source_name, e)
 
     if keyword:
         kw = keyword.lower()

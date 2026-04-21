@@ -43,12 +43,35 @@ def _fetch_telegraph() -> list[dict]:
 def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
     """Fetch CLS Telegraph news flashes.
 
+    Proxy-aware: live fetch captures to ``news_items``; replay reads from
+    the snapshot table filtered by ``published_at <= as_of`` + keyword.
+
     Args:
         limit: Maximum number of news items to return.
         keyword: Optional keyword to filter results on title and content.
     """
+    # Replay short-circuit — read from snapshot, NEVER touch live API
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_news
+        news = read_news(sources=["财联社电报"], as_of=as_of,
+                         keyword=keyword, limit=limit)
+        return json.dumps({"news": news, "count": len(news)}, ensure_ascii=False)
+
     try:
         news = _fetch_telegraph()
+
+        # Capture to snapshot BEFORE filtering (so replay can keyword-search
+        # the full corpus, not just what this particular call retrieved).
+        try:
+            from alpha_agents.data.snapshot_store import save_news
+            save_news("财联社电报", news)
+        except Exception as e:
+            logger.debug("cls news capture failed: %s", e)
 
         if keyword:
             kw = keyword.lower()

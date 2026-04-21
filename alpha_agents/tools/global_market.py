@@ -93,7 +93,23 @@ def get_bond_yields_fn() -> str:
 
 
 def get_global_overview_fn() -> str:
-    """Combined global market overview — US indices + bond yields + key signals."""
+    """Combined global market overview — US indices + bond yields + key signals.
+
+    Proxy-aware: live calls capture to ``global_market_snapshots`` (flattened);
+    replay reads the latest snapshot <= ``as_of``.
+    """
+    # Replay short-circuit
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_global_market
+        cached = read_global_market(as_of)
+        if cached is not None:
+            return json.dumps(cached, ensure_ascii=False)
+
     us = json.loads(get_us_market_fn())
     bonds = json.loads(get_bond_yields_fn())
     all_signals = bonds.get("signals", [])
@@ -101,10 +117,16 @@ def get_global_overview_fn() -> str:
         change = idx.get("change_pct", 0)
         if abs(change) > 1.5:
             all_signals.append(f"{idx['name']}{'大涨' if change > 0 else '大跌'}{abs(change):.1f}%")
-    return json.dumps({
+    payload = {
         "us_indices": us.get("indices", []),
         "bond_yields": {"us_10y": bonds.get("us", {}).get("10y"), "cn_10y": bonds.get("cn", {}).get("10y"),
                         "us_10y_2y_spread": bonds.get("us", {}).get("10y_2y_spread"),
                         "cn_us_spread": bonds.get("cn_us_10y_spread")},
         "signals": all_signals, "signal_count": len(all_signals),
-    }, ensure_ascii=False)
+    }
+    try:
+        from alpha_agents.data.snapshot_store import save_global_market
+        save_global_market(payload)
+    except Exception as e:
+        logger.debug("global_market capture failed: %s", e)
+    return json.dumps(payload, ensure_ascii=False)

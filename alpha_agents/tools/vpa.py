@@ -143,15 +143,25 @@ def get_pattern_scores(regime: str = "") -> dict:
     return PATTERN_SCORES
 
 
-def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True) -> Optional[pd.DataFrame]:
+def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
+                as_of: str | None = None) -> Optional[pd.DataFrame]:
     """Fetch OHLCV data from local market_history.db, fallback to baostock.
 
     If include_realtime=True and market is open, appends today's partial bar
     from Sina realtime API so VPA can see intraday action.
+
+    ``as_of`` (YYYY-MM-DD): if set, returns K-lines up to and including that
+    date only. Also forces include_realtime=False (no realtime bar since
+    we're viewing from a past date). Used by backtest/replay.
     """
-    history = get_local_history(code, days=days)
+    if as_of:
+        include_realtime = False  # can't have "realtime" for a past date
+
+    history = get_local_history(code, days=days, as_of=as_of)
     if not history or len(history) < 25:
-        history = get_stock_history(code, days=days)
+        # Fallback to baostock only when not in historical replay mode
+        if not as_of:
+            history = get_stock_history(code, days=days)
     if not history or len(history) < 25:
         return None
 
@@ -1575,17 +1585,23 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 """
 
 
-def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int = 20) -> dict:
+def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
+                          window: int = 20, as_of: str | None = None) -> dict:
     """VPA with LLM interpretation using Anna Coulling rules.
 
     Steps:
       1. Code pre-computes all VPA indicators (same as compute_vpa)
       2. LLM reads pre-computed text + Anna Coulling prompt → verdict
 
+    Args:
+        as_of: YYYY-MM-DD. If set, analyzes the stock as viewed FROM that
+            date (ignores future K-lines, skips realtime bar and 60-min
+            data). Used by backtest/replay.
+
     Returns dict with both code signals and LLM verdict.
     """
     # Step 1: code pre-computation (same as before)
-    df = _load_ohlcv(code, days=days)
+    df = _load_ohlcv(code, days=days, as_of=as_of)
     if df is None or len(df) < window + 5:
         return {"code": code, "name": name, "ok": False, "error": "数据不足"}
 
@@ -1595,26 +1611,26 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
     vr = _volume_regime(df)
     text = _format_text(code, name, df, patterns, window=window)
 
-    # Step 1b: 60-min VPA (multi-timeframe, problem 5). Best-effort —
-    # network issues to sina should not block the daily analysis.
-    try:
-        df_60min = _load_ohlcv_60min(code, bars=80)
-        if df_60min is not None and len(df_60min) >= 20:
-            # Use a smaller window (12 bars ≈ 3 trading days at 60-min) for the
-            # baseline — matches the human intuition of "recent" at this tf.
-            df_60min = _compute_derived(df_60min, window=12)
-            patterns_60min = _detect_patterns(df_60min)
-            section_60 = _format_60min_section(df_60min, patterns_60min)
-            if section_60:
-                text = text + section_60
-    except Exception as e:
-        logger.debug("60-min VPA for %s failed (non-fatal): %s", code, e)
+    # Step 1b: 60-min VPA (multi-timeframe). Skipped in backtest replay
+    # because Sina's 60-min API only returns current-day bars.
+    if not as_of:
+        try:
+            df_60min = _load_ohlcv_60min(code, bars=80)
+            if df_60min is not None and len(df_60min) >= 20:
+                df_60min = _compute_derived(df_60min, window=12)
+                patterns_60min = _detect_patterns(df_60min)
+                section_60 = _format_60min_section(df_60min, patterns_60min)
+                if section_60:
+                    text = text + section_60
+        except Exception as e:
+            logger.debug("60-min VPA for %s failed (non-fatal): %s", code, e)
 
     # Step 2: Fetch previous analysis for context continuity
+    # In replay mode, only see analyses BEFORE as_of (prevent future leakage)
     previous_report = ""
     try:
         from alpha_agents.data.memory_store import get_latest_vpa_analysis
-        prev = get_latest_vpa_analysis(code)
+        prev = get_latest_vpa_analysis(code, as_of=as_of)
         if prev and prev.get("report"):
             previous_report = prev["report"]
             logger.debug("Found previous VPA analysis for %s from %s", code, prev.get("analysis_date"))
@@ -1626,13 +1642,15 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
 
     # Step 4: Save analysis to history
     import time as _time
+    # In replay mode, analysis_date = as_of (not real today)
+    analysis_date = as_of or _time.strftime("%Y-%m-%d")
     try:
         from alpha_agents.data.memory_store import (
             save_vpa_analysis, save_vpa_signal, save_vpa_scenario,
         )
         analysis_id = save_vpa_analysis(
             code=code, name=name,
-            analysis_date=_time.strftime("%Y-%m-%d"),
+            analysis_date=analysis_date,
             verdict=llm_result.get("verdict", "中性"),
             confidence=llm_result.get("confidence", 0.5),
             phase=llm_result.get("phase", ""),
@@ -1651,7 +1669,7 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
                 save_vpa_signal(
                     code=code, name=name,
                     signal_type=sig.get("name", "unknown"),
-                    signal_date=sig.get("date", _time.strftime("%Y-%m-%d")),
+                    signal_date=sig.get("date", analysis_date),
                     direction=llm_result.get("verdict", "中性"),
                     expected_confirmation=sig.get("need", ""),
                     expected_denial=sig.get("deny", ""),
@@ -1659,8 +1677,6 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
                 )
 
         # Problem 7: Auto-create pending scenarios from VERDICT
-        # Scenarios take LONGER to play out than signals (10 day default expiry
-        # vs 3 for signals) — they describe a complete Wyckoff story.
         scenarios = llm_result.get("scenarios", [])
         for sc in scenarios:
             status = sc.get("status", "pending")
@@ -1673,7 +1689,7 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60, window: int 
                 signal_names=sc.get("signal_names", []),
                 confirmation=sc.get("confirmation", ""),
                 denial=sc.get("denial", ""),
-                scenario_date=_time.strftime("%Y-%m-%d"),
+                scenario_date=analysis_date,
                 source_analysis_id=analysis_id,
             )
     except Exception as e:

@@ -46,6 +46,35 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 MONITOR_INTERVAL_SECONDS = int(os.environ.get("MONITOR_INTERVAL_SECONDS", "300"))
 NEWS_FETCH_LIMIT = int(os.environ.get("NEWS_FETCH_LIMIT", "50"))
 
+# ---------------------------------------------------------------------------
+# Tradable universe — only recommend stocks from markets the user can actually
+# trade. Defaults to main board + ChiNext; override via TRADABLE_PREFIXES env.
+#   - 60xxxx: 沪市主板 (600/601/603/605)
+#   - 000xxx / 001xxx / 002xxx / 003xxx: 深市主板
+#   - 300xxx / 301xxx: 创业板
+# Excluded by default:
+#   - 688/689xxx: 科创板 (需要 50万+ 开通权限)
+#   - 4xxxxx / 8xxxxx / 92xxxx: 北交所
+#   - 900xxx / 200xxx / 201xxx: B股
+# ---------------------------------------------------------------------------
+TRADABLE_PREFIXES = tuple(
+    os.environ.get(
+        "TRADABLE_PREFIXES",
+        "60,000,001,002,003,300,301",
+    ).split(",")
+)
+
+
+def is_tradable(code: str) -> bool:
+    """True if ``code`` is in a market tier the user can trade.
+
+    Keep cheap — pure string prefix check, no DB lookup. Used at every
+    candidate-selection chokepoint (stock_filter / sector_beta / anomaly).
+    """
+    if not code or not code.strip().isdigit() or len(code.strip()) != 6:
+        return False
+    return code.startswith(TRADABLE_PREFIXES)
+
 
 @contextmanager
 def no_proxy():

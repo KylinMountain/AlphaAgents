@@ -56,13 +56,25 @@ def _get_conn() -> sqlite3.Connection:
 
 # ── Query ────────────────────────────────────────────────────
 
-def get_local_history(code: str, days: int = 5) -> list[dict] | None:
-    """Get recent K-lines from local DB. Returns None if not enough data."""
+def get_local_history(code: str, days: int = 5,
+                      as_of: str | None = None) -> list[dict] | None:
+    """Get recent K-lines from local DB. Returns None if not enough data.
+
+    ``as_of`` (YYYY-MM-DD): if set, only return bars with ``date <= as_of``
+    — used by backtest/replay to get "historical view" of the stock.
+    """
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM daily_kline WHERE code = ? ORDER BY date DESC LIMIT ?",
-        (code, days),
-    ).fetchall()
+    if as_of:
+        rows = conn.execute(
+            "SELECT * FROM daily_kline WHERE code = ? AND date <= ? "
+            "ORDER BY date DESC LIMIT ?",
+            (code, as_of, days),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM daily_kline WHERE code = ? ORDER BY date DESC LIMIT ?",
+            (code, days),
+        ).fetchall()
     if not rows or len(rows) < days:
         return None
     result = [dict(r) for r in reversed(rows)]  # Oldest first

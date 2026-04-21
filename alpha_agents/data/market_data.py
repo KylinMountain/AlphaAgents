@@ -92,6 +92,45 @@ def _ak_call(fn, *args, **kwargs):
 # ═══════════════════════════════════════════════════════════════
 
 
+def _historical_quotes(codes: list[str], as_of: str) -> Optional[dict]:
+    """Replay-mode fallback: return historical daily close as fake 'realtime'.
+
+    Reads the most recent bar with date <= as_of from market_history.db.
+    Constructs a dict mimicking Sina realtime format (price/open/high/low/
+    volume/change_pct/prev_close).
+    """
+    from alpha_agents.data.market_history import _get_conn as _hist_conn
+    conn = _hist_conn()
+    result: dict = {}
+    for code in codes:
+        rows = conn.execute(
+            "SELECT date, open, high, low, close, volume "
+            "FROM daily_kline WHERE code = ? AND date <= ? "
+            "ORDER BY date DESC LIMIT 2",
+            (code, as_of),
+        ).fetchall()
+        if not rows:
+            continue
+        today = rows[0]
+        prev_close = rows[1]["close"] if len(rows) > 1 else today["close"]
+        price = float(today["close"])
+        change_pct = ((price - prev_close) / prev_close * 100) if prev_close else 0.0
+        result[code] = {
+            "name": "",
+            "price": price,
+            "open": float(today["open"]),
+            "high": float(today["high"]),
+            "low": float(today["low"]),
+            "volume": int(today["volume"]),
+            "amount": float(today["volume"]) * price,
+            "prev_close": float(prev_close),
+            "change_pct": round(change_pct, 2),
+            "turnover_rate": 0.0,  # not available in history DB
+            "date": today["date"],
+        }
+    return result if result else None
+
+
 # ── Stock Quotes (baostock TCP) ──────────────────────────────
 
 def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
@@ -99,11 +138,46 @@ def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
 
     Returns dict mapping code -> {price, change_pct, volume, turnover_rate, ...}
     Works during trading hours. Sina API is lightweight and reliable.
+
+    Replay mode: when ``evolution.replay_mode.set_replay_as_of(date)`` is
+    active, returns historical daily close from market_history.db instead of
+    live Sina data. This lets walk-forward backtest run without live network.
     """
     import urllib.request
 
     if not codes:
         return None
+
+    # Replay-mode short-circuit with 3-tier fallback:
+    #   1. realtime_quote_snapshots   — per-stock, populated by prior live calls
+    #   2. all_quote_snapshots        — whole-market every 5min (any code covered)
+    #   3. daily K-line historical    — EOD fallback when neither has data
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import (
+            read_realtime_quotes, read_all_quotes,
+        )
+        # Strict-complete reads: if a tier can't cover every requested code,
+        # return None so we fall through, rather than returning partial data
+        # that the caller might not notice is incomplete.
+        snap = read_realtime_quotes(codes, as_of, require_complete=True)
+        if snap is not None:
+            return snap
+        all_snap = read_all_quotes(codes, as_of, require_complete=True)
+        if all_snap is not None:
+            return all_snap
+        # Best-effort merge when neither tier is complete on its own
+        snap_partial = read_realtime_quotes(codes, as_of) or {}
+        all_partial = read_all_quotes(codes, as_of) or {}
+        merged = {**all_partial, **snap_partial}
+        if len(merged) == len(codes):
+            return merged
+        # Final fallback: daily K-line close
+        return _historical_quotes(codes, as_of)
 
     # Build Sina symbol list: sz300475, sh600519
     symbols = []
@@ -178,6 +252,12 @@ def get_realtime_quotes(codes: list[str]) -> Optional[dict]:
         except (ValueError, IndexError):
             continue
 
+    if result:
+        try:
+            from alpha_agents.data.snapshot_store import save_realtime_quotes
+            save_realtime_quotes(result)
+        except Exception as e:
+            logger.debug("realtime_quotes capture failed: %s", e)
     return result if result else None
 
 
@@ -243,16 +323,108 @@ def get_stock_latest_price(code: str) -> Optional[dict]:
 
 # ── Sector/Concept Fund Flow (akshare THS) ──────────────────
 
+def _replay_sector_flow(scope: str, as_of: str) -> Optional[pd.DataFrame]:
+    """Read sector flow for replay: new time-indexed table first, EOD backfill
+    second. Returns None if both miss (caller handles)."""
+    from alpha_agents.data.snapshot_store import read_sector_flow
+    df = read_sector_flow(scope, as_of)
+    if df is not None and not df.empty:
+        return df
+    # Fallback to legacy daily_snapshots backfill
+    legacy_key = "industry_fund_flow_hist" if scope == "industry" else "concept_fund_flow_hist"
+    return _historical_sector_flow(legacy_key, as_of[:10])
+
+
 def get_industry_fund_flow() -> Optional[pd.DataFrame]:
-    """Get industry-level fund flow ranking (90 sectors)."""
+    """Get industry-level fund flow ranking (90 sectors).
+
+    Live mode: fetches from akshare (THS) and captures a snapshot to
+    ``sector_flow_snapshots`` for future replay.
+    Replay mode: reads the latest snapshot <= replay_as_of; falls back to the
+    legacy EOD backfill in ``daily_snapshots`` if no intraday snapshot exists.
+    """
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        return _replay_sector_flow("industry", as_of)
+
     import akshare as ak
-    return _ak_call(ak.stock_fund_flow_industry)
+    df = _ak_call(ak.stock_fund_flow_industry)
+    if df is not None and not df.empty:
+        try:
+            from alpha_agents.data.snapshot_store import save_sector_flow
+            save_sector_flow(df, scope="industry")
+        except Exception as e:
+            logger.debug("sector_flow capture failed: %s", e)
+    return df
 
 
 def get_concept_fund_flow() -> Optional[pd.DataFrame]:
-    """Get concept-level fund flow ranking (387 concepts)."""
+    """Get concept-level fund flow ranking (387 concepts).
+
+    Live mode: fetches from akshare (THS) and captures a snapshot.
+    Replay mode: reads the latest snapshot <= replay_as_of; falls back to the
+    legacy EOD backfill if no intraday snapshot exists.
+    """
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        return _replay_sector_flow("concept", as_of)
+
     import akshare as ak
-    return _ak_call(ak.stock_fund_flow_concept)
+    df = _ak_call(ak.stock_fund_flow_concept)
+    if df is not None and not df.empty:
+        try:
+            from alpha_agents.data.snapshot_store import save_sector_flow
+            save_sector_flow(df, scope="concept")
+        except Exception as e:
+            logger.debug("concept_flow capture failed: %s", e)
+    return df
+
+
+def _historical_sector_flow(snapshot_key: str, as_of: str) -> Optional[pd.DataFrame]:
+    """Build a DataFrame shaped like the live fund flow output from historical
+    daily_snapshots data. Returns the latest snapshot on or before as_of."""
+    from alpha_agents.data.daily_archive import get_snapshot
+    from alpha_agents.data.memory_store import _get_conn
+    import pandas as pd
+
+    # Find the latest snapshot on or before as_of
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT date, data FROM daily_snapshots "
+        "WHERE data_type = ? AND date <= ? ORDER BY date DESC LIMIT 1",
+        (snapshot_key, as_of),
+    ).fetchone()
+    if not row:
+        return None
+    import json as _json
+    data = _json.loads(row["data"])
+    sectors = data.get("sectors", [])
+    if not sectors:
+        return None
+    # Shape to match what akshare returns (同花顺/东财行业资金流列名):
+    # 行业, 行业-涨跌幅, 净额, 领涨股, 领涨股-涨跌幅, 公司家数
+    # Our snapshot stores: name, main_net (yuan), close_pct_change
+    # We don't have 领涨股 or 公司家数 — set placeholders
+    rows = []
+    for sec in sectors:
+        rows.append({
+            "行业": sec["name"],
+            "名称": sec["name"],  # concept_fund_flow uses this alt name
+            "行业-涨跌幅": sec.get("close_pct_change", 0),
+            "净额": sec.get("main_net", 0) / 1e8,  # convert 元 to 亿
+            "领涨股": "",
+            "领涨股-涨跌幅": 0,
+            "公司家数": 0,
+        })
+    return pd.DataFrame(rows)
 
 
 # ── LHB / Block Trade / Margin (akshare eastmoney) ──────────
@@ -300,36 +472,92 @@ def get_individual_fund_flow(code: str, market: str = "") -> Optional[pd.DataFra
 
 # ── Anomaly Detection (akshare eastmoney) ────────────────────
 
+def _limit_pool_live(pool_type: str, ak_fn, date: str) -> Optional[pd.DataFrame]:
+    """Helper: fetch live and capture to snapshot. pool_type: 'up'/'down'/'broken'."""
+    df = _ak_call(ak_fn, date=date)
+    if df is not None and not df.empty:
+        try:
+            from alpha_agents.data.snapshot_store import save_limit_pool
+            save_limit_pool(df, pool_type=pool_type)
+        except Exception as e:
+            logger.debug("limit_pool(%s) capture failed: %s", pool_type, e)
+    return df
+
+
 def get_limit_up_pool(date: str = "") -> Optional[pd.DataFrame]:
-    """Get limit-up stock pool."""
+    """Get limit-up stock pool. Proxy-aware (replay reads snapshot)."""
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_limit_pool
+        return read_limit_pool("up", as_of)
     import akshare as ak
     if not date:
         date = datetime.now().strftime("%Y%m%d")
-    return _ak_call(ak.stock_zt_pool_em, date=date)
+    return _limit_pool_live("up", ak.stock_zt_pool_em, date)
 
 
 def get_broken_limit_pool(date: str = "") -> Optional[pd.DataFrame]:
-    """Get broken limit-up stock pool."""
+    """Get broken limit-up stock pool. Proxy-aware."""
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_limit_pool
+        return read_limit_pool("broken", as_of)
     import akshare as ak
     if not date:
         date = datetime.now().strftime("%Y%m%d")
-    return _ak_call(ak.stock_zt_pool_zbgc_em, date=date)
+    return _limit_pool_live("broken", ak.stock_zt_pool_zbgc_em, date)
 
 
 def get_limit_down_pool(date: str = "") -> Optional[pd.DataFrame]:
-    """Get limit-down stock pool."""
+    """Get limit-down stock pool. Proxy-aware."""
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_limit_pool
+        return read_limit_pool("down", as_of)
     import akshare as ak
     if not date:
         date = datetime.now().strftime("%Y%m%d")
-    return _ak_call(ak.stock_zt_pool_dtgc_em, date=date)
+    return _limit_pool_live("down", ak.stock_zt_pool_dtgc_em, date)
 
 
 # ── Market Breadth (akshare legu) ────────────────────────────
 
 def get_market_activity() -> Optional[pd.DataFrame]:
-    """Get A-share market activity (advance/decline/limit up-down)."""
+    """Get A-share market activity (advance/decline/limit up-down).
+
+    Proxy-aware: live calls capture to ``market_breadth_snapshots``; replay
+    reads the latest row <= ``as_of``.
+    """
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_market_breadth
+        return read_market_breadth(as_of)
+
     import akshare as ak
-    return _ak_call(ak.stock_market_activity_legu)
+    df = _ak_call(ak.stock_market_activity_legu)
+    if df is not None and not df.empty:
+        try:
+            from alpha_agents.data.snapshot_store import save_market_breadth
+            save_market_breadth(df)
+        except Exception as e:
+            logger.debug("breadth capture failed: %s", e)
+    return df
 
 
 # ── Financial Data (akshare THS) ────────────────────────────

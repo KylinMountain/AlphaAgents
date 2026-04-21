@@ -21,6 +21,7 @@ dependencies = [
     "json-repair>=0.58.7",
     "prompt-toolkit>=3.0.52",
     "rich>=14.3.3",
+    "tushare>=1.4.29",
 ]
 
 [project.optional-dependencies]

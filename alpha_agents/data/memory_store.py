@@ -697,13 +697,25 @@ def save_vpa_analysis(code: str, name: str, analysis_date: str,
         return cur.lastrowid
 
 
-def get_latest_vpa_analysis(code: str) -> dict | None:
-    """Get the most recent VPA analysis for a stock."""
+def get_latest_vpa_analysis(code: str, as_of: str | None = None) -> dict | None:
+    """Get the most recent VPA analysis for a stock.
+
+    ``as_of`` (YYYY-MM-DD): only return analyses dated strictly BEFORE as_of
+    — used by backtest replay to prevent future-data leakage.
+    """
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM vpa_analysis_history WHERE code = ? ORDER BY analysis_date DESC, id DESC LIMIT 1",
-        (code,),
-    ).fetchone()
+    if as_of:
+        row = conn.execute(
+            "SELECT * FROM vpa_analysis_history WHERE code = ? AND analysis_date < ? "
+            "ORDER BY analysis_date DESC, id DESC LIMIT 1",
+            (code, as_of),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM vpa_analysis_history WHERE code = ? "
+            "ORDER BY analysis_date DESC, id DESC LIMIT 1",
+            (code,),
+        ).fetchone()
     return dict(row) if row else None
 
 

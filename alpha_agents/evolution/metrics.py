@@ -20,8 +20,17 @@ from alpha_agents.data.memory_store import (
 logger = logging.getLogger(__name__)
 
 
-def _query_intraday_buckets(days: int = 7) -> dict:
+def _query_intraday_buckets(days: int = 7, as_of: str | None = None) -> dict:
     """SQL: verified intraday predictions bucketed by whether they matched a playbook.
+
+    Deduplicates by (date, code) — the intraday monitor runs every 5 min and
+    re-emits the same recommendation many times, which would otherwise inflate
+    counts by 30x. We take the earliest record per (date, code) as the
+    representative judgement for that stock on that day.
+
+    ``as_of`` (YYYY-MM-DD) anchors the 7-day window end. Defaults to today.
+    During replay, callers must pass the replay target_date so the metric
+    reflects that historical day's perspective, not today's.
 
     A prediction is 'matched' if its features_json matches any currently active
     playbook. Since matching is a runtime decision not persisted, we re-run
@@ -30,11 +39,19 @@ def _query_intraday_buckets(days: int = 7) -> dict:
     from alpha_agents.data.memory_store import _get_conn
     from alpha_agents.evolution.playbook import match_playbook
 
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = (datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now())
+    cutoff = (end - timedelta(days=days)).strftime("%Y-%m-%d")
+    end_str = end.strftime("%Y-%m-%d")
+    # One representative row per (date, code): earliest id wins.
     rows = _get_conn().execute(
         "SELECT features_json, hit FROM predictions "
-        "WHERE report_type = 'intraday' AND hit IS NOT NULL AND date >= ?",
-        (cutoff,),
+        "WHERE id IN ("
+        "    SELECT MIN(id) FROM predictions "
+        "    WHERE report_type = 'intraday' AND hit IS NOT NULL "
+        "      AND date >= ? AND date <= ? "
+        "    GROUP BY date, code"
+        ")",
+        (cutoff, end_str),
     ).fetchall()
 
     total = hits = m_total = m_hits = u_total = u_hits = 0
@@ -68,7 +85,7 @@ def _query_intraday_buckets(days: int = 7) -> dict:
 def compute_evolution_metrics(today: str) -> dict:
     """Aggregate a daily snapshot of evolution-system health and persist it.
     Returns the computed dict."""
-    buckets = _query_intraday_buckets(days=7)
+    buckets = _query_intraday_buckets(days=7, as_of=today)
 
     active_pr = len(get_active_principles())
     all_pr = get_all_principles_including_weakened()

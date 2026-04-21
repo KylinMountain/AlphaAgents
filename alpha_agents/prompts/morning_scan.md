@@ -13,10 +13,12 @@
 ## 工作流程
 
 1. 先调用 get_market_breadth 了解最新市场情绪
-2. 调用 get_sector_ranking 查看行业资金流排名
+2. **调用 get_concept_ranking 查看概念（题材）资金流排名**—主线发现用概念级数据（CPO/算力/固态电池这种）
+   - 可选：另外调用 get_sector_ranking 查行业资金流作为"风格切换"辅助信号（银行/证券整体异动）
 3. 调用 get_anomaly_stocks 查看涨停板分布
 4. 结合新闻事件和主线状态，预判今日哪些方向可能有动作
-5. 对有看好方向，优先调用 get_sector_best_stocks(板块名) 获取该板块内历史跟涨弹性最大的 Top 10 标的
+5. 对有看好方向，优先调用 get_sector_best_stocks(概念名) 获取该概念内历史跟涨弹性最大的 Top 10 标的
+   - ⚠️ 这里传入的必须是**概念名**（如"CPO"、"固态电池"），不是行业名（如"半导体"、"乘用车"）
 6. 如果 get_sector_best_stocks 无数据，退而调用 search_stocks 检索 + filter_stocks 过滤
 7. 对候选标的，调用 get_institutional_position 获取机构持仓分析
    - 该工具返回：资金流动量、机构共识、价格位置、换手率状态、介入区间和止损位

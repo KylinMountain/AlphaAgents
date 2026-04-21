@@ -126,84 +126,119 @@ def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str, dict | None
 
 
 
+def _detect_style_rotation() -> list[str]:
+    """Industry-level fund flow → style rotation signals (aux context).
+
+    Industry aggregates ~500 stocks each, so industry signals lag concept
+    signals but carry different information: STYLE CHANGE. Example — 银行
+    + 证券 today see >20亿 inflow each = defensive rotation starting.
+
+    This is context for LLM, NOT a trade trigger.
+    """
+    out = []
+    try:
+        ranking = json.loads(get_sector_ranking_fn(top_n=5))
+        # Flag industry-level inflows/outflows above a coarse threshold.
+        for ind in ranking.get("gainers", [])[:3]:
+            chg = ind.get("change_pct", 0)
+            flow = ind.get("net_flow_yi", 0)
+            if chg > 1.5 and flow > 15:
+                out.append(
+                    f"🧭风格切换: {ind['sector']} 行业级流入 {flow:.1f}亿 涨{chg:.1f}% "
+                    f"— 可能启动宏观风格轮动"
+                )
+        for ind in ranking.get("losers", [])[:2]:
+            chg = ind.get("change_pct", 0)
+            flow = ind.get("net_flow_yi", 0)
+            if chg < -1.5 and flow < -15:
+                out.append(
+                    f"🧭风格退潮: {ind['sector']} 行业级流出 {abs(flow):.1f}亿 "
+                    f"跌{abs(chg):.1f}% — 资金离场"
+                )
+    except Exception as e:
+        logger.debug("Style rotation detect failed: %s", e)
+    return out
+
+
 def _detect_anomalies() -> tuple[bool, str]:
     """Detect anomalies with FUND FLOW FIRST, price second.
 
     V2 design principle #2: "资金行为优先于新闻叙事。看'谁在买卖'比看'发生了什么'更可靠。"
     Anna Coulling: "成交量是唯一不能被掩盖的真相。"
 
+    Detection is CONCEPT-driven (fine granularity), NOT industry-driven:
+      - Concept boards (~30-50 members each) react fast and sharp to
+        smart-money moves. Industry boards (~500 members each) average
+        out and lag, so they're only useful for style rotation signals.
+      - Case A-E (inflow confirmation, divergence, hidden accumulation,
+        outflow, counter-trend) all run on concept ranking.
+      - Industry ranking is used separately in _detect_style_rotation()
+        for macro style-change context.
+
     Detection hierarchy:
-      1. Fund flow anomalies (资金异动) — highest priority
-      2. Volume-price divergence (量价背离) — Anna Coulling core
-      3. Limit-up concentration (涨停板集中) — market structure signal
-      4. Market breadth extremes (情绪极端) — context signal
+      1. Concept fund flow anomalies (Case A-E) — PRIMARY trade triggers
+      2. Industry-level style rotation — macro context (aux)
+      3. Limit-up concentration — market structure
+      4. Market breadth extremes — sentiment context
 
     Returns (has_anomaly, context_text).
     """
     signals = []
 
-    # ── 1. FUND FLOW: who is buying/selling and how much ──
+    # ── 1. CONCEPT FUND FLOW (primary anomaly detection) ──
+    # Thresholds calibrated for concept scale (concept ~30-50 members per
+    # board, so inflow figures are roughly 1/3 of industry for same signal).
     try:
-        # Industry sectors
-        ranking = json.loads(get_sector_ranking_fn(top_n=5))
+        ranking = json.loads(get_concept_ranking_fn(top_n=10))
         top_gainers = ranking.get("gainers", [])
         top_losers = ranking.get("losers", [])
 
-        for sector in top_gainers[:3]:
-            chg = sector.get("change_pct", 0)
-            flow = sector.get("net_flow_yi", 0)
+        for concept in top_gainers[:5]:
+            name = concept.get("concept", "")
+            chg = concept.get("change_pct", 0)
+            flow = concept.get("net_flow_yi", 0)
+            leader = concept.get("leader", "")
 
             # Case A: 涨 + 大资金流入 = 真异动（量价确认）
-            if chg > 1.0 and flow > 5:
+            if chg > 1.0 and flow > 3:
                 signals.append(
-                    f"🔴资金异动(量价确认): {sector['sector']} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
-                    f"领涨{sector.get('leader', '')}"
+                    f"🔴资金异动(量价确认): {name} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
+                    f"领涨{leader}"
                 )
             # Case B: 涨 + 资金流出 = 量价背离（可能出货）
-            elif chg > 2.0 and flow < -2:
+            elif chg > 2.0 and flow < -1:
                 signals.append(
-                    f"⚠️量价背离: {sector['sector']} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
+                    f"⚠️量价背离: {name} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
                     f"— 可能主力借涨出货"
                 )
             # Case C: 不怎么涨但资金大幅流入 = 暗中吸筹
-            elif chg < 1.0 and flow > 8:
+            elif chg < 1.0 and flow > 5:
                 signals.append(
-                    f"🔵暗流涌动: {sector['sector']} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
+                    f"🔵暗流涌动: {name} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
                     f"— 资金暗中布局"
                 )
 
-        for sector in top_losers[:2]:
-            chg = sector.get("change_pct", 0)
-            flow = sector.get("net_flow_yi", 0)
+        for concept in top_losers[:3]:
+            name = concept.get("concept", "")
+            chg = concept.get("change_pct", 0)
+            flow = concept.get("net_flow_yi", 0)
 
             # Case D: 跌 + 大资金流出 = 真下杀
-            if chg < -1.5 and flow < -5:
+            if chg < -1.5 and flow < -3:
                 signals.append(
-                    f"🔴资金出逃: {sector['sector']} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿"
+                    f"🔴资金出逃: {name} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿"
                 )
             # Case E: 跌 + 资金流入 = 逆势吸筹
-            elif chg < -2.0 and flow > 3:
+            elif chg < -2.0 and flow > 2:
                 signals.append(
-                    f"🔵逆势吸筹: {sector['sector']} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
+                    f"🔵逆势吸筹: {name} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
                     f"— 有人在接盘"
                 )
-
-        # Concept sectors — check for large fund flows
-        try:
-            concept_ranking = json.loads(get_concept_ranking_fn(top_n=5))
-            for concept in concept_ranking.get("gainers", [])[:3]:
-                flow = concept.get("net_flow_yi", 0)
-                chg = concept.get("change_pct", 0)
-                if flow > 10:
-                    signals.append(
-                        f"🔴概念资金涌入: {concept['concept']} 净流入{flow:.1f}亿 "
-                        f"涨{chg:.1f}% 领涨{concept.get('leader', '')}"
-                    )
-        except Exception:
-            pass
-
     except Exception as e:
-        logger.debug("Sector ranking fetch failed: %s", e)
+        logger.debug("Concept ranking fetch failed: %s", e)
+
+    # ── 1b. INDUSTRY STYLE ROTATION (aux context) ──
+    signals.extend(_detect_style_rotation())
 
     # ── 2. LIMIT-UP concentration (market structure) ──
     try:
@@ -256,6 +291,19 @@ async def run_intraday_monitor() -> str | None:
     if 1130 <= hm < 1300:
         logger.info("Intraday monitor: lunch break, skipping")
         return None
+
+    # Capture whole-market spot to all_quote_snapshots — enables per-minute
+    # replay fidelity across ALL A-shares regardless of later strategy changes.
+    # Runs in a worker thread (~10s Tencent batch) to keep the main loop async;
+    # any failure is swallowed and logged at debug, so the rest of the monitor
+    # never blocks on this.
+    try:
+        from alpha_agents.data.snapshot_store import capture_market_snapshot
+        n_captured = await asyncio.to_thread(capture_market_snapshot)
+        if n_captured:
+            logger.info("Captured %d whole-market quotes to snapshot DB", n_captured)
+    except Exception as e:
+        logger.debug("market snapshot capture failed: %s", e)
 
     # ── Portfolio monitoring: check pending orders + open positions ──
     today_str = now.strftime("%Y-%m-%d")
@@ -412,12 +460,24 @@ async def run_intraday_monitor() -> str | None:
         candidate_sectors = []
         seen = set()
 
-        # Source 1: Today's anomaly sectors (real-time, changes every cycle)
+        # Source 1: Today's anomaly concepts (real-time, changes every cycle).
+        # Parse concept names out of the concept-driven signals emitted by
+        # _detect_anomalies. Matches patterns like:
+        #   "🔴资金异动(量价确认): <name> 涨..."
+        #   "⚠️量价背离: <name> 涨..."
+        #   "🔵暗流涌动: <name> 仅涨..."
+        #   "🔴资金出逃: <name> 跌..."
+        #   "🔵逆势吸筹: <name> 跌..."
+        # Style-rotation signals (🧭) are intentionally skipped — those are
+        # industry-level, members aren't in concept_stocks mapping.
         import re as _re2
-        sector_match = _re2.search(r"板块异动:\s*(\S+)\s*涨", anomaly_context)
-        if sector_match:
-            s = sector_match.group(1)
-            if s not in seen:
+        for m in _re2.finditer(
+            r"(?:🔴资金异动.*?|⚠️量价背离|🔵暗流涌动|🔴资金出逃|🔵逆势吸筹)[:：]\s*"
+            r"([^\s涨跌仅]+)\s+(?:涨|跌|仅涨)",
+            anomaly_context,
+        ):
+            s = m.group(1).strip()
+            if s and s not in seen:
                 candidate_sectors.append(s)
                 seen.add(s)
 
@@ -494,7 +554,12 @@ async def run_intraday_monitor() -> str | None:
                 "name": stock.get("name", ""),
                 "change_pct": stock.get("change_pct", 0),
                 "consecutive": stock.get("consecutive_limits", 1),
-                "sector": stock.get("sector", ""),
+                # 涨停原因（Kaipanla lu_desc）— 真实主题标签（"算力"/"锂电池"）
+                # 若 Tushare 数据缺失回退到 industry 结构标签
+                "lu_desc": stock.get("lu_desc", "") or stock.get("industry", ""),
+                "industry": stock.get("industry", ""),
+                "theme": stock.get("theme", ""),
+                "board_status": stock.get("board_status", ""),
             })
     except Exception as e:
         logger.warning("Signal detection failed: %s", e)
@@ -638,8 +703,16 @@ async def run_intraday_monitor() -> str | None:
         report_lines.append(header)
         for s in signals:
             board = f"({s['consecutive']}连板)" if s['consecutive'] >= 2 else ""
-            sector = f" [{s['sector']}]" if s.get("sector") else ""
-            report_lines.append(f"• {s['code']} {s['name']} 涨停封板{board}{sector}")
+            # Prefer Kaipanla concept reason (lu_desc) over static industry
+            label_parts = []
+            if s.get("lu_desc"):
+                label_parts.append(f"涨停原因:{s['lu_desc']}")
+            elif s.get("industry"):
+                label_parts.append(f"行业:{s['industry']}")
+            if s.get("theme") and s["theme"] != s.get("lu_desc", ""):
+                label_parts.append(f"题材:{s['theme']}")
+            label = f" [{' | '.join(label_parts)}]" if label_parts else ""
+            report_lines.append(f"• {s['code']} {s['name']} 涨停封板{board}{label}")
         report_lines.append("")
 
     # Actionable stocks (code-generated, zero hallucination)
@@ -718,9 +791,11 @@ async def run_intraday_monitor() -> str | None:
     recs_json = []
     for s in signals:
         board_note = f"({s['consecutive']}连板)" if s['consecutive'] >= 2 else ""
+        # Theme preference: Kaipanla concept reason > industry fallback
+        theme = s.get("lu_desc") or s.get("industry", "")
         recs_json.append({
             "code": s["code"], "name": s["name"],
-            "theme": s.get("sector", ""), "type": "signal",
+            "theme": theme, "type": "signal",
             "reason": f"涨停封板{board_note}",
         })
     for a in actionable:

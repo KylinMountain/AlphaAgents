@@ -641,15 +641,15 @@ async def run_chat():
     ctx = ChatContext(console=console, agent=agent, conversation_history=[])
 
     # prompt_toolkit session with history (arrow up/down for previous inputs)
+    # Use prompt_async(): integrates with the event loop so Ctrl+C/TERM
+    # cancellation propagates cleanly instead of wedging a worker thread
+    # that asyncio.run's shutdown would then block on.
     session = PromptSession(history=InMemoryHistory())
-    loop = asyncio.get_event_loop()
 
     while True:
         try:
-            user_input = (await loop.run_in_executor(
-                None, lambda: session.prompt("你: ")
-            )).strip()
-        except (EOFError, KeyboardInterrupt):
+            user_input = (await session.prompt_async("你: ")).strip()
+        except (EOFError, KeyboardInterrupt, asyncio.CancelledError):
             console.print("\n[dim]再见[/dim]")
             break
 

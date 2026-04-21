@@ -275,6 +275,14 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             )
             for t in pending:
                 t.cancel()
+            # If chat was pending, give prompt_async() a beat to unwind its
+            # terminal state (disable raw mode) before we exit. Otherwise
+            # leave the terminal broken for the next command.
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True),
+                                        timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
         else:
             await stop.wait()
 

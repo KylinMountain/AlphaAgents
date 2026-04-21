@@ -95,11 +95,13 @@ def _ak_call(fn, *args, **kwargs):
 def _historical_quotes(codes: list[str], as_of: str) -> Optional[dict]:
     """Replay-mode fallback: return historical daily close as fake 'realtime'.
 
-    Reads the most recent bar with date <= as_of from market_history.db.
-    Constructs a dict mimicking Sina realtime format (price/open/high/low/
-    volume/change_pct/prev_close).
+    Reads the most recent bar with date <= cut_date from market_history.db.
+    Daily K-line is EOD data, so pre-close replay times (e.g. 06:30 morning)
+    must roll back to the previous trading day via ``effective_eod_cut_date``.
     """
     from alpha_agents.data.market_history import _get_conn as _hist_conn
+    from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+    cut = effective_eod_cut_date(as_of) or as_of[:10]
     conn = _hist_conn()
     result: dict = {}
     for code in codes:
@@ -107,7 +109,7 @@ def _historical_quotes(codes: list[str], as_of: str) -> Optional[dict]:
             "SELECT date, open, high, low, close, volume "
             "FROM daily_kline WHERE code = ? AND date <= ? "
             "ORDER BY date DESC LIMIT 2",
-            (code, as_of),
+            (code, cut),
         ).fetchall()
         if not rows:
             continue
@@ -325,14 +327,23 @@ def get_stock_latest_price(code: str) -> Optional[dict]:
 
 def _replay_sector_flow(scope: str, as_of: str) -> Optional[pd.DataFrame]:
     """Read sector flow for replay: new time-indexed table first, EOD backfill
-    second. Returns None if both miss (caller handles)."""
+    second. Returns None if both miss (caller handles).
+
+    Time-indexed ``sector_flow_snapshots`` uses ``captured_at <= as_of`` so it
+    handles point-in-time correctly. The legacy ``daily_snapshots`` backfill
+    is EOD-only (one row per date captured at 15:30+), so we pass it the
+    cut-date — pre-close replay times roll back to the previous trading day
+    to prevent future-data leak.
+    """
     from alpha_agents.data.snapshot_store import read_sector_flow
+    from alpha_agents.evolution.replay_mode import effective_eod_cut_date
     df = read_sector_flow(scope, as_of)
     if df is not None and not df.empty:
         return df
-    # Fallback to legacy daily_snapshots backfill
+    # Fallback to legacy daily_snapshots backfill — EOD-only, needs cut
     legacy_key = "industry_fund_flow_hist" if scope == "industry" else "concept_fund_flow_hist"
-    return _historical_sector_flow(legacy_key, as_of[:10])
+    cut = effective_eod_cut_date(as_of) or as_of[:10]
+    return _historical_sector_flow(legacy_key, cut)
 
 
 def get_industry_fund_flow() -> Optional[pd.DataFrame]:

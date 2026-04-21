@@ -21,11 +21,19 @@ logger = logging.getLogger(__name__)
 
 
 def _historical_lhb(as_of: str) -> str:
-    """Replay-mode helper: prefer Tushare EOD tables, fallback to daily_snapshots."""
+    """Replay-mode helper: prefer Tushare EOD tables, fallback to daily_snapshots.
+
+    LHB is an EOD data source — published after market close. In point-in-time
+    replay (e.g. morning 06:30), ``effective_eod_cut_date`` rolls back to the
+    previous trading day so we don't leak today's not-yet-published LHB.
+    """
+    from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+    cut = effective_eod_cut_date(as_of) or as_of
+
     # Tier 1: Tushare (top_list + top_inst + hm_detail in one query)
     try:
         from alpha_agents.data.tushare_store import read_lhb_for_date
-        ts = read_lhb_for_date(as_of)
+        ts = read_lhb_for_date(cut)
         if ts and ts.get("data"):
             return json.dumps(ts, ensure_ascii=False)
     except Exception:
@@ -36,7 +44,7 @@ def _historical_lhb(as_of: str) -> str:
     row = _get_conn().execute(
         "SELECT date, data FROM daily_snapshots WHERE data_type='lhb' "
         "AND date <= ? ORDER BY date DESC LIMIT 1",
-        (as_of,),
+        (cut,),
     ).fetchone()
     if not row:
         return json.dumps({"date": as_of, "data": [], "count": 0,
@@ -67,10 +75,14 @@ def _historical_lhb(as_of: str) -> str:
 
 
 def _historical_north_flow(as_of: str) -> str:
+    """Replay-mode helper: EOD-only source, rolls back when pre-close."""
+    from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+    cut = effective_eod_cut_date(as_of) or as_of
+
     # Tier 1: Tushare moneyflow_hsgt table
     try:
         from alpha_agents.data.tushare_store import read_north_flow_for_date
-        ts = read_north_flow_for_date(as_of)
+        ts = read_north_flow_for_date(cut)
         if ts:
             # Shape matches get_north_flow_fn's today branch enough for consumers
             direction = ("净流入" if ts["north_money_yi"] > 0
@@ -92,7 +104,7 @@ def _historical_north_flow(as_of: str) -> str:
     row = _get_conn().execute(
         "SELECT date, data FROM daily_snapshots WHERE data_type='north_flow' "
         "AND date <= ? ORDER BY date DESC LIMIT 1",
-        (as_of,),
+        (cut,),
     ).fetchone()
     if not row:
         return json.dumps({"date": as_of, "total_net_buy_yi": 0.0,
@@ -327,10 +339,12 @@ def get_margin_data_fn(code: str = "") -> str:
         as_of = None
     if as_of:
         from alpha_agents.data.tushare_store import read_margin_for_date
-        ts = read_margin_for_date(as_of)
+        from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+        cut = effective_eod_cut_date(as_of) or as_of
+        ts = read_margin_for_date(cut)
         if ts:
             return json.dumps({
-                "date": as_of[:10],
+                "date": cut[:10],
                 "summary": {
                     "total_rzye_yi": ts["total_rzye_yi"],
                     "total_rzmre_yi": ts["total_rzmre_yi"],
@@ -412,9 +426,13 @@ def get_stock_fund_flow_fn(code: str, market: str = "") -> str:
     if as_of:
         from alpha_agents.data.tushare_store import read_stock_fund_flow_history
         from alpha_agents.data.snapshot_store import read_stock_fund_flow
-        ts_cached = read_stock_fund_flow_history(code, as_of)
+        from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+        # EOD table needs cut-to-previous-trading-day when as_of is pre-close
+        cut = effective_eod_cut_date(as_of) or as_of
+        ts_cached = read_stock_fund_flow_history(code, cut)
         if ts_cached is not None and ts_cached.get("data"):
             return json.dumps(ts_cached, ensure_ascii=False)
+        # Per-stock snapshots are time-indexed (captured_at), so raw as_of is fine
         cached = read_stock_fund_flow(code, as_of)
         if cached is not None:
             return json.dumps(cached, ensure_ascii=False)

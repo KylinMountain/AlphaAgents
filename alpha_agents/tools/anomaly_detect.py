@@ -47,18 +47,20 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
     Args:
         date: Date in YYYYMMDD format. Empty for today.
     """
-    # Replay mode: read from daily_snapshots "limit_up_pool"
+    # Replay mode: limit-up pool is EOD data (published after close); in
+    # point-in-time replay before 15:00 we must roll back to T-1.
     try:
-        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        from alpha_agents.evolution.replay_mode import get_replay_as_of, effective_eod_cut_date
         as_of = get_replay_as_of()
     except Exception:
         as_of = None
     if as_of:
         from alpha_agents.data.memory_store import _get_conn
+        cut = effective_eod_cut_date(as_of) or as_of
         row = _get_conn().execute(
             "SELECT date, data FROM daily_snapshots WHERE data_type='limit_up_pool' "
             "AND date <= ? ORDER BY date DESC LIMIT 1",
-            (as_of,),
+            (cut,),
         ).fetchone()
         if row:
             data = json.loads(row["data"])
@@ -69,8 +71,8 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
                 "broken_limit": data.get("broken_board", []),
                 "error": None,
             }, ensure_ascii=False)
-        # Fallback: reconstruct from daily_kline
-        return _reconstruct_limit_pools_from_kline(as_of)
+        # Fallback: reconstruct from daily_kline (also needs cut-date semantics)
+        return _reconstruct_limit_pools_from_kline(cut)
 
     try:
         if not date:

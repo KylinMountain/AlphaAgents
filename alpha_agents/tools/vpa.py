@@ -150,14 +150,20 @@ def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
     If include_realtime=True and market is open, appends today's partial bar
     from Sina realtime API so VPA can see intraday action.
 
-    ``as_of`` (YYYY-MM-DD): if set, returns K-lines up to and including that
-    date only. Also forces include_realtime=False (no realtime bar since
-    we're viewing from a past date). Used by backtest/replay.
+    ``as_of`` accepts either ``"YYYY-MM-DD"`` (EOD — include that date's close)
+    or ``"YYYY-MM-DD HH:MM"`` (point-in-time — if HH:MM is pre-close, only
+    bars < as_of_date are returned; this is what morning / intraday replay
+    wants since today's close hasn't happened yet).
     """
     if as_of:
         include_realtime = False  # can't have "realtime" for a past date
+        # Respect point-in-time cut — pre-close replay excludes same-day EOD bar
+        from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+        cut = effective_eod_cut_date(as_of) or as_of[:10]
+    else:
+        cut = None
 
-    history = get_local_history(code, days=days, as_of=as_of)
+    history = get_local_history(code, days=days, as_of=cut)
     if not history or len(history) < 25:
         # Fallback to baostock only when not in historical replay mode
         if not as_of:

@@ -151,5 +151,51 @@ class TestEvolutionMetricsDedup(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestReplayEodCutDate(unittest.TestCase):
+    """effective_eod_cut_date rolls back pre-close replay times to T-1 to
+    prevent future-data leak in daily EOD data sources."""
+
+    def test_bare_date_stays_same(self):
+        from alpha_agents.evolution.replay_mode import (
+            effective_eod_cut_date, replay_as_of,
+        )
+        with replay_as_of("2026-03-20"):
+            self.assertEqual(effective_eod_cut_date(), "2026-03-20")
+
+    def test_post_close_stays_same(self):
+        from alpha_agents.evolution.replay_mode import (
+            effective_eod_cut_date, replay_as_of,
+        )
+        with replay_as_of("2026-03-20 15:30"):
+            self.assertEqual(effective_eod_cut_date(), "2026-03-20")
+        # 15:00 exact is still "after bell"
+        with replay_as_of("2026-03-20 15:00"):
+            self.assertEqual(effective_eod_cut_date(), "2026-03-20")
+
+    def test_pre_close_rolls_back_one_day(self):
+        from alpha_agents.evolution.replay_mode import (
+            effective_eod_cut_date, replay_as_of,
+        )
+        with replay_as_of("2026-03-20 06:30"):  # morning
+            self.assertEqual(effective_eod_cut_date(), "2026-03-19")
+        with replay_as_of("2026-03-20 10:30"):  # intraday
+            self.assertEqual(effective_eod_cut_date(), "2026-03-19")
+        with replay_as_of("2026-03-20 14:59"):  # last second pre-close
+            self.assertEqual(effective_eod_cut_date(), "2026-03-19")
+
+    def test_monday_morning_rolls_to_sunday(self):
+        """SQL WHERE trade_date <= '2026-03-22' (Sun, no row) resolves to
+        the last Friday's row — this helper doesn't need to skip weekends."""
+        from alpha_agents.evolution.replay_mode import (
+            effective_eod_cut_date, replay_as_of,
+        )
+        with replay_as_of("2026-03-23 06:30"):
+            self.assertEqual(effective_eod_cut_date(), "2026-03-22")
+
+    def test_none_when_no_replay_active(self):
+        from alpha_agents.evolution.replay_mode import effective_eod_cut_date
+        self.assertIsNone(effective_eod_cut_date())
+
+
 if __name__ == "__main__":
     unittest.main()

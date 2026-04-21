@@ -59,27 +59,32 @@ def get_market_breadth_fn() -> str:
     Replay mode: reads the latest daily_snapshots market_breadth entry at/before as_of.
     If none available, reconstructs a minimal breadth from daily_kline advances/declines.
     """
-    # Replay mode
+    # Replay mode: get_market_activity() below already hits the new
+    # time-indexed snapshot_store via proxy (honors point-in-time). Only
+    # fall back to legacy daily_snapshots + K-line reconstruction when
+    # the proxy returns nothing — both of those paths are EOD-only, so
+    # use cut_date to avoid leaking today's close in pre-close replay.
     try:
-        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        from alpha_agents.evolution.replay_mode import get_replay_as_of, effective_eod_cut_date
         as_of = get_replay_as_of()
     except Exception:
         as_of = None
-    if as_of:
-        from alpha_agents.data.memory_store import _get_conn
-        row = _get_conn().execute(
-            "SELECT date, data FROM daily_snapshots WHERE data_type='market_breadth' "
-            "AND date <= ? ORDER BY date DESC LIMIT 1",
-            (as_of,),
-        ).fetchone()
-        if row:
-            return row["data"]  # already JSON string
-        # Fallback: reconstruct from market_history daily_kline
-        return _reconstruct_breadth_from_kline(as_of)
 
     try:
         df = get_market_activity()
-        if df is None:
+        if df is None or (hasattr(df, "empty") and df.empty):
+            # Replay fallback chain when snapshot_store is empty for this point
+            if as_of:
+                from alpha_agents.data.memory_store import _get_conn as _mem_conn
+                cut = effective_eod_cut_date(as_of) or as_of[:10]
+                row = _mem_conn().execute(
+                    "SELECT date, data FROM daily_snapshots WHERE data_type='market_breadth' "
+                    "AND date <= ? ORDER BY date DESC LIMIT 1",
+                    (cut,),
+                ).fetchone()
+                if row:
+                    return row["data"]
+                return _reconstruct_breadth_from_kline(cut)
             return json.dumps({"error": "no market data"}, ensure_ascii=False)
 
         data = {}

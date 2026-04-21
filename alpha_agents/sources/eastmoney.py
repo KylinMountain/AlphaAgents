@@ -15,8 +15,36 @@ def _fetch_news(**kwargs) -> pd.DataFrame:
 
 
 def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
+    """Fetch Eastmoney news. Proxy-aware: replay reads ``news_items`` snapshot."""
+    # Replay short-circuit
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.snapshot_store import read_news
+        news = read_news(sources=["东方财富7x24", "东方财富"], as_of=as_of,
+                         keyword=keyword, limit=limit)
+        return json.dumps({"news": news, "count": len(news)}, ensure_ascii=False)
+
     try:
         df = _fetch_news()
+
+        # Capture full corpus BEFORE filtering
+        full_items = []
+        for _, row in df.iterrows():
+            full_items.append({
+                "title": str(row.get("新闻标题", "")),
+                "summary": str(row.get("新闻内容", ""))[:500],
+                "time": str(row.get("发布时间", "")),
+                "source": str(row.get("文章来源", "")),
+            })
+        try:
+            from alpha_agents.data.snapshot_store import save_news
+            save_news("东方财富", full_items)
+        except Exception as e:
+            logger.debug("eastmoney news capture failed: %s", e)
 
         if keyword:
             mask = df["新闻标题"].str.contains(keyword, na=False) | df["新闻内容"].str.contains(keyword, na=False)

@@ -58,15 +58,20 @@ def _parse_item(item: dict) -> dict:
 
 
 def get_jin10_fn(limit: int = 30, keyword: str | None = None) -> str:
-    """Fetch Jin10 real-time flash news.
+    """Fetch Jin10 real-time flash news. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["金十数据"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results on title and content.
-    """
     try:
         raw_items = _fetch_flash_list(limit)
         news = [_parse_item(item) for item in raw_items]
+
+        try:
+            save_news("金十数据", news)
+        except Exception as e:
+            logger.debug("jin10 capture failed: %s", e)
 
         if keyword:
             kw = keyword.lower()

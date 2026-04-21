@@ -41,12 +41,12 @@ def _parse_rss(xml_text: str) -> list[dict]:
 
 
 def get_fed_news_fn(limit: int = 20, keyword: str | None = None) -> str:
-    """Fetch press releases from the Federal Reserve RSS feed.
+    """Fetch press releases from the Federal Reserve RSS feed. Replay-aware."""
+    from alpha_agents.data.snapshot_store import replay_news_response, save_news
+    replay = replay_news_response(["Federal Reserve"], limit, keyword)
+    if replay is not None:
+        return replay
 
-    Args:
-        limit: Maximum number of news items to return.
-        keyword: Optional keyword to filter results (case-insensitive).
-    """
     all_news: list[dict] = []
 
     try:
@@ -55,6 +55,11 @@ def get_fed_news_fn(limit: int = 20, keyword: str | None = None) -> str:
         logger.debug("Fetched %d items from Federal Reserve RSS", len(all_news))
     except Exception as e:
         logger.warning("Failed to fetch Federal Reserve RSS: %s", e)
+
+    try:
+        save_news("Federal Reserve", all_news)
+    except Exception as e:
+        logger.debug("fed capture failed: %s", e)
 
     if keyword:
         kw = keyword.lower()

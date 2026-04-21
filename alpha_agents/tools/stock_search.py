@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_stocks_for_concept(conn, concept_id: int) -> list[dict]:
-    """Fetch stocks linked to a concept, ordered by market cap."""
+    """Fetch stocks linked to a concept, ordered by market cap.
+
+    Filters out markets the user can't trade (科创板 / 北交所 / B股) via the
+    ``is_tradable`` prefix check in config.
+    """
+    from alpha_agents.config import is_tradable
     stocks = conn.execute(
         """
         SELECT s.code, s.name, s.market_cap, s.industry
@@ -28,6 +33,7 @@ def _fetch_stocks_for_concept(conn, concept_id: int) -> list[dict]:
             "industry": s["industry"],
         }
         for s in stocks
+        if is_tradable(s["code"])
     ]
 
 

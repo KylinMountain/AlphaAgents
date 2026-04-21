@@ -185,10 +185,15 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
     beta_scores = _normalize_beta_scores(betas)
 
     # 5. Multi-factor scoring
+    from alpha_agents.config import is_tradable
     scored = []
     for b in betas:
         code = b["code"]
         name = b.get("name", "")
+
+        # Skip markets the user can't trade (科创板 / 北交所 / B股)
+        if not is_tradable(code):
+            continue
 
         # Get realtime data
         real = rt.get(code, {})

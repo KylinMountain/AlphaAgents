@@ -102,8 +102,14 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
             kpl_rows = read_kpl_limit_list_for_date(trade_date_iso)
             kpl_by_code = {r["code"]: r for r in kpl_rows}
 
-            for _, row in df_zt.head(100).iterrows():
+            # Filter to user's tradable universe: 科创板 (688/689) and
+            # 北交所 stocks show up in limit-up pool but we can't buy them,
+            # so there's no point surfacing them as signals.
+            from alpha_agents.config import is_tradable
+            for _, row in df_zt.head(200).iterrows():
                 code = str(row.get("代码", ""))
+                if not is_tradable(code):
+                    continue
                 kpl = kpl_by_code.get(code, {})
                 result["limit_up"].append({
                     "code": code,
@@ -119,6 +125,8 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
                     "theme": kpl.get("theme") or "",            # related themes, comma-sep
                     "board_status": kpl.get("status") or "",    # 首板 / 2连板 / ...
                 })
+                if len(result["limit_up"]) >= 100:
+                    break
         except Exception as e:
             logger.debug("Limit-up pool failed: %s", e)
 
@@ -127,8 +135,12 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
             df_zb = get_broken_limit_pool(date=date)
             if df_zb is None:
                 raise ValueError("no data")
-            for _, row in df_zb.head(10).iterrows():
+            for _, row in df_zb.head(30).iterrows():
                 code = str(row.get("代码", ""))
+                if not is_tradable(code):
+                    continue
+                if len(result["broken_limit"]) >= 10:
+                    break
                 kpl = kpl_by_code.get(code, {})
                 result["broken_limit"].append({
                     "code": code,
@@ -147,8 +159,12 @@ def get_anomaly_stocks_fn(date: str = "") -> str:
             df_dt = get_limit_down_pool(date=date)
             if df_dt is None:
                 raise ValueError("no data")
-            for _, row in df_dt.head(10).iterrows():
+            for _, row in df_dt.head(30).iterrows():
                 code = str(row.get("代码", ""))
+                if not is_tradable(code):
+                    continue
+                if len(result["limit_down"]) >= 10:
+                    break
                 # KPL has a 'tag' column for 涨停/跌停; filtering happens in the
                 # backfill query (tag='涨停') so kpl_by_code here only covers
                 # limit-up stocks. Limit-down just gets industry + empty lu_desc.

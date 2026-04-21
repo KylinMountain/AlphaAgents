@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from alpha_agents.config import DB_PATH
+from alpha_agents.config import DB_PATH, is_tradable
 from alpha_agents.data.db import get_connection
 
 DEFAULT_MIN_MARKET_CAP = 1_000_000_000  # 10亿
@@ -25,6 +25,10 @@ def filter_stocks_fn(
         removed = []
         for r in rows:
             reasons = []
+            if not is_tradable(r["code"]):
+                # Outside the user's tradable universe (科创板/北交所/B股);
+                # reject up front, skip further checks to keep reason clean.
+                reasons.append("非可交易板块")
             if r["is_st"]:
                 reasons.append("ST")
             if r["is_suspended"]:

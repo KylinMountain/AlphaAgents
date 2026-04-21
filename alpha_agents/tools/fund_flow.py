@@ -20,6 +20,87 @@ from alpha_agents.data.market_data import (
 logger = logging.getLogger(__name__)
 
 
+def _historical_lhb(as_of: str) -> str:
+    """Replay-mode helper: prefer Tushare EOD tables, fallback to daily_snapshots."""
+    # Tier 1: Tushare (top_list + top_inst + hm_detail in one query)
+    try:
+        from alpha_agents.data.tushare_store import read_lhb_for_date
+        ts = read_lhb_for_date(as_of)
+        if ts and ts.get("data"):
+            return json.dumps(ts, ensure_ascii=False)
+    except Exception:
+        pass
+
+    # Tier 2: legacy daily_snapshots JSON blob
+    from alpha_agents.data.memory_store import _get_conn
+    row = _get_conn().execute(
+        "SELECT date, data FROM daily_snapshots WHERE data_type='lhb' "
+        "AND date <= ? ORDER BY date DESC LIMIT 1",
+        (as_of,),
+    ).fetchone()
+    if not row:
+        return json.dumps({"date": as_of, "data": [], "count": 0,
+                           "error": "no historical LHB data"}, ensure_ascii=False)
+    data = json.loads(row["data"])
+    records = data.get("records", []) or []
+    # Transform to match live format
+    results = []
+    for r in records[:50]:
+        net_buy = float(r.get("龙虎榜净买额", 0) or 0)
+        results.append({
+            "code": str(r.get("代码", "")),
+            "name": str(r.get("名称", "")),
+            "date": str(r.get("上榜日", row["date"])),
+            "change_pct": float(r.get("涨跌幅", 0) or 0),
+            "net_buy": net_buy,
+            "net_buy_yi": round(net_buy / 1e8, 2),
+            "reason": str(r.get("上榜原因", "")),
+            "interpretation": str(r.get("解读", "")),
+            "is_institutional": "机构" in str(r.get("解读", "")),
+        })
+    inst_count = sum(1 for r in results if r.get("is_institutional"))
+    return json.dumps({
+        "date": row["date"], "count": len(results),
+        "institutional_buys": inst_count, "data": results,
+        "error": None,
+    }, ensure_ascii=False)
+
+
+def _historical_north_flow(as_of: str) -> str:
+    # Tier 1: Tushare moneyflow_hsgt table
+    try:
+        from alpha_agents.data.tushare_store import read_north_flow_for_date
+        ts = read_north_flow_for_date(as_of)
+        if ts:
+            # Shape matches get_north_flow_fn's today branch enough for consumers
+            direction = ("净流入" if ts["north_money_yi"] > 0
+                         else "净流出" if ts["north_money_yi"] < 0 else "平衡")
+            return json.dumps({
+                "date": ts["date"],
+                "total_net_buy_yi": ts["north_money_yi"],
+                "direction": direction,
+                "sources": [
+                    {"name": "沪股通", "net_buy_yi": ts["hgt_yi"]},
+                    {"name": "深股通", "net_buy_yi": ts["sgt_yi"]},
+                ],
+            }, ensure_ascii=False)
+    except Exception:
+        pass
+
+    # Tier 2: legacy daily_snapshots
+    from alpha_agents.data.memory_store import _get_conn
+    row = _get_conn().execute(
+        "SELECT date, data FROM daily_snapshots WHERE data_type='north_flow' "
+        "AND date <= ? ORDER BY date DESC LIMIT 1",
+        (as_of,),
+    ).fetchone()
+    if not row:
+        return json.dumps({"date": as_of, "total_net_buy_yi": 0.0,
+                           "direction": "unknown",
+                           "error": "no historical north flow data"}, ensure_ascii=False)
+    return row["data"]  # already JSON string
+
+
 def get_lhb_detail_fn(date: str = "") -> str:
     """Get Dragon-Tiger Board (龙虎榜) data — institutional/hot money seat details.
 
@@ -30,6 +111,15 @@ def get_lhb_detail_fn(date: str = "") -> str:
     Args:
         date: Date in YYYYMMDD format. Empty for latest trading day.
     """
+    # Replay mode: read from daily_snapshots "lhb"
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        return _historical_lhb(as_of)
+
     try:
         if not date:
             date = datetime.now().strftime("%Y%m%d")
@@ -146,6 +236,8 @@ def get_block_trade_fn(date: str = "") -> str:
 def get_north_flow_fn(indicator: str = "today") -> str:
     """Get northbound capital (北向资金) aggregate flow — today's net inflow summary.
 
+    Replay mode: returns latest snapshot on or before as_of.
+
     NOTE: Per-stock northbound holdings data is NO LONGER AVAILABLE since
     HK Exchange stopped publishing real-time per-stock holdings on 2024-08-19.
     This tool now returns aggregate (market-wide) data only.
@@ -154,6 +246,15 @@ def get_north_flow_fn(indicator: str = "today") -> str:
         indicator: Only "today" is supported. Per-stock queries return unavailable.
     """
     import akshare as ak
+
+    # Replay mode: read from daily_snapshots
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        return _historical_north_flow(as_of)
 
     # Per-stock queries are no longer supported — data source is dead.
     if indicator != "today":
@@ -215,9 +316,32 @@ def get_margin_data_fn(code: str = "") -> str:
     Rising margin balance = bullish leverage building.
     Falling margin balance = deleveraging / bearish.
 
-    Args:
-        code: Stock code to check (e.g. "000858"). Empty for market summary.
+    Replay-aware: reads from Tushare-sourced ``margin_daily`` table when
+    a replay_as_of is active.
     """
+    # Replay short-circuit
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.tushare_store import read_margin_for_date
+        ts = read_margin_for_date(as_of)
+        if ts:
+            return json.dumps({
+                "date": as_of[:10],
+                "summary": {
+                    "total_rzye_yi": ts["total_rzye_yi"],
+                    "total_rzmre_yi": ts["total_rzmre_yi"],
+                    "total_rzrqye_yi": ts["total_rzrqye_yi"],
+                    "by_exchange": ts["by_exchange"],
+                },
+                "direction": "融资增加" if ts["total_rzmre_yi"] > 0 else "融资减少",
+            }, ensure_ascii=False)
+        return json.dumps({"data": [], "error": "no historical margin data"},
+                          ensure_ascii=False)
+
     try:
         df_sse = get_margin_detail()
 
@@ -274,13 +398,29 @@ def get_margin_data_fn(code: str = "") -> str:
 def get_stock_fund_flow_fn(code: str, market: str = "") -> str:
     """Get individual stock fund flow — main force vs retail money flow.
 
-    Shows whether big money (主力/超大单/大单) is flowing in or out,
-    versus small retail money (中单/小单). Main force inflow = strong signal.
-
-    Args:
-        code: Stock code, e.g. "000858"
-        market: "sh" for Shanghai, "sz" for Shenzhen. Auto-detected if empty.
+    Proxy-aware: live calls capture to ``stock_fund_flow_snapshots``; replay
+    reads the latest snapshot <= ``as_of``.
     """
+    # Replay short-circuit with 2-tier fallback:
+    #   1. Tushare EOD stock_fund_flow_daily (broad coverage, all 5900+ codes)
+    #   2. Per-stock snapshot captured from prior live calls
+    try:
+        from alpha_agents.evolution.replay_mode import get_replay_as_of
+        as_of = get_replay_as_of()
+    except Exception:
+        as_of = None
+    if as_of:
+        from alpha_agents.data.tushare_store import read_stock_fund_flow_history
+        from alpha_agents.data.snapshot_store import read_stock_fund_flow
+        ts_cached = read_stock_fund_flow_history(code, as_of)
+        if ts_cached is not None and ts_cached.get("data"):
+            return json.dumps(ts_cached, ensure_ascii=False)
+        cached = read_stock_fund_flow(code, as_of)
+        if cached is not None:
+            return json.dumps(cached, ensure_ascii=False)
+        return json.dumps({"code": code, "data": [], "error": "no snapshot"},
+                          ensure_ascii=False)
+
     try:
         if not market:
             market = "sh" if code.startswith("6") else "sz"
@@ -326,13 +466,19 @@ def get_stock_fund_flow_fn(code: str, market: str = "") -> str:
             trend = "无数据"
             consecutive_inflow = consecutive_outflow = 0
 
-        return json.dumps({
+        payload = {
             "code": code,
             "trend": trend,
             "consecutive_inflow_days": consecutive_inflow,
             "consecutive_outflow_days": consecutive_outflow,
             "data": records,
-        }, ensure_ascii=False)
+        }
+        try:
+            from alpha_agents.data.snapshot_store import save_stock_fund_flow
+            save_stock_fund_flow(code, payload)
+        except Exception as e:
+            logger.debug("stock_fund_flow capture failed for %s: %s", code, e)
+        return json.dumps(payload, ensure_ascii=False)
 
     except Exception as e:
         logger.error("get_stock_fund_flow failed for %s: %s", code, e)

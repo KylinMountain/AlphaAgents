@@ -272,6 +272,15 @@ def _select_stock_pool(
 
 
 def _parse_explicit_codes(args: argparse.Namespace) -> list[str] | None:
+    """Extract 6-digit stock codes from --codes (comma list) or --codes-file
+    (CSV / one-per-line).
+
+    Robust to varied CSV layouts: scans every comma-separated cell on each
+    line and keeps the first one that is a 6-digit string. Skips lines where
+    no cell qualifies (CSV headers, narrative text, etc.). The original
+    "first column only" parser silently dropped formats like the Sina ETF PCF
+    where column 0 is a date and the code is in column 1.
+    """
     codes: list[str] = []
     if args.codes:
         codes.extend(c.strip() for c in args.codes.split(",") if c.strip())
@@ -281,7 +290,11 @@ def _parse_explicit_codes(args: argparse.Namespace) -> list[str] | None:
                 raw = line.strip()
                 if not raw or raw.startswith("#"):
                     continue
-                codes.append(raw.split(",")[0].strip())
+                for cell in raw.split(","):
+                    cell = cell.strip()
+                    if cell.isdigit() and len(cell) == 6:
+                        codes.append(cell)
+                        break
     cleaned = []
     seen = set()
     for code in codes:

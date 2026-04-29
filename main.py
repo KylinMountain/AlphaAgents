@@ -174,7 +174,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         def _on_task_output(task_name: str, output: str):
             title, color = _TASK_TITLES.get(task_name, (task_name, "white"))
             _chat_console.print()
-            _chat_console.print(Panel(Markdown(output[:4000]), title=f"[后台] {title}", border_style=color))
+            _chat_console.print(Panel(Markdown(output), title=f"[后台] {title}", border_style=color))
             _chat_console.print()
 
         scheduler = TradingDayScheduler(on_task_output=_on_task_output)
@@ -183,30 +183,41 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     set_scheduler(scheduler)
 
     # Morning scan: 09:00, every day (non-trading days still useful for global news)
-    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0), trading_day_only=False))
+    scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0),
+                            trading_day_only=False, timeout_seconds=600,
+                            catch_up_grace_minutes=25))
 
     # Opening reminder: 09:25, trading days only (集合竞价末端,价格已稳定)
-    scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 25)))
+    scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 25),
+                            timeout_seconds=300, catch_up_grace_minutes=5))
 
-    # Intraday monitor: 09:30-15:00 every 5 min, boost to 2 min on anomaly
+    # Intraday monitor: 09:30-15:00 every 5 min, boost to 2 min on anomaly.
+    # Healthy anomaly path takes 2-3 min (multiple LLM calls + VPA filter);
+    # 4 min sits between the boost and normal intervals so a wedged run
+    # gets killed long before the next normal tick at 5 min.
     scheduler.add_task(Task(
         "intraday_monitor", run_intraday_monitor,
         dtime(9, 30), end_at=dtime(15, 0), interval_minutes=5,
+        timeout_seconds=240,
     ))
 
-    # Post-market review: 15:30, trading days only
-    scheduler.add_task(Task("review", run_review, dtime(15, 30)))
+    # Post-market review: 15:30, trading days only.
+    # Heaviest task (review_agent + 5 archives + market_history daily fetch).
+    scheduler.add_task(Task("review", run_review, dtime(15, 30),
+                            timeout_seconds=1200, catch_up_grace_minutes=90))
 
     # Night scan: 20:00, every day (monitors foreign markets)
     scheduler.add_task(Task(
         "night_scan", run_night_scan,
-        dtime(20, 0), trading_day_only=False,
+        dtime(20, 0), trading_day_only=False, timeout_seconds=900,
+        catch_up_grace_minutes=60,
     ))
 
     # Weekly report: Saturday 10:00
     scheduler.add_task(Task(
         "weekly_report", run_weekly_report,
         dtime(10, 0), trading_day_only=False, weekday=5,
+        timeout_seconds=1200, catch_up_grace_minutes=180,
     ))
 
     # --task: run a single task and exit

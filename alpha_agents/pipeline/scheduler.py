@@ -50,6 +50,8 @@ class Task:
         interval_minutes: int | None = None,
         trading_day_only: bool = True,
         weekday: int | None = None,
+        timeout_seconds: int = 600,
+        catch_up_grace_minutes: int | None = 15,
     ):
         self.name = name
         self.run_fn = run_fn
@@ -60,6 +62,12 @@ class Task:
         self._last_run: datetime | None = None
         # Weekday constraint: 0=Monday … 6=Sunday. None means any day.
         self.weekday = weekday
+        # Hard ceiling on a single run. Prevents one wedged external call
+        # (DNS, baostock fetch, hung LLM tool) from freezing the scheduler.
+        self.timeout_seconds = timeout_seconds
+        # One-shot tasks may be caught up after restart only inside this
+        # window. Stale catch-up would run "morning" logic with afternoon data.
+        self.catch_up_grace_minutes = catch_up_grace_minutes
         # Dynamic interval boost — used to shorten polling on anomaly detection
         self._boost_until: datetime | None = None
         self._boost_interval: int = 2  # minutes to use while boosted
@@ -193,14 +201,20 @@ class TradingDayScheduler:
 
             for task in self._tasks:
                 if task.should_run(now, is_trading):
-                    logger.info("Running task: %s", task.name)
+                    logger.info("Running task: %s (timeout=%ds)", task.name, task.timeout_seconds)
                     try:
-                        result = await task.run_fn()
+                        result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
                         task._last_run = datetime.now()
                         logger.info("Task %s completed", task.name)
                         # Notify chat terminal if callback is set
                         if self._on_task_output and result and isinstance(result, str):
                             self._on_task_output(task.name, result)
+                    except asyncio.TimeoutError:
+                        logger.error("Task %s exceeded %ds timeout — cancelled "
+                                     "(any to_thread workers will keep running until "
+                                     "their blocking call returns)",
+                                     task.name, task.timeout_seconds)
+                        task._last_run = datetime.now()
                     except Exception:
                         logger.exception("Task %s failed", task.name)
                         task._last_run = datetime.now()
@@ -294,15 +308,35 @@ class TradingDayScheduler:
                 continue
             # If the task's scheduled time has passed today and it hasn't run yet
             scheduled = now.replace(hour=task.run_at.hour, minute=task.run_at.minute, second=0)
-            if now > scheduled and task._last_run is None:
+            elapsed_seconds = (now - scheduled).total_seconds()
+            if elapsed_seconds <= 0 or task._last_run is not None:
+                continue
+
+            grace = task.catch_up_grace_minutes
+            if grace is not None and elapsed_seconds > grace * 60:
+                logger.info(
+                    "Catch-up: skipping stale task '%s' (scheduled at %s, %.0f min late)",
+                    task.name, task.run_at, elapsed_seconds / 60,
+                )
+                # Mark as handled for today so the main loop does not run it
+                # immediately after this catch-up pass.
+                task._last_run = now
+                self._save_state()
+                continue
+
+            if elapsed_seconds > 0:
                 logger.info("Catch-up: running missed task '%s' (was scheduled at %s)",
                             task.name, task.run_at)
                 try:
-                    result = await task.run_fn()
+                    result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
                     task._last_run = datetime.now()
                     logger.info("Catch-up: task %s completed", task.name)
                     if self._on_task_output and result and isinstance(result, str):
                         self._on_task_output(task.name, result)
+                except asyncio.TimeoutError:
+                    logger.error("Catch-up: task %s exceeded %ds timeout — cancelled",
+                                 task.name, task.timeout_seconds)
+                    task._last_run = datetime.now()
                 except Exception:
                     logger.exception("Catch-up: task %s failed", task.name)
                     task._last_run = datetime.now()

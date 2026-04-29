@@ -1,11 +1,20 @@
 """Web search tool using DuckDuckGo (free, no API key needed)."""
 
+import concurrent.futures as _cf
 import json
 import logging
 
 from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
+
+# DDGS().__init__ can hang indefinitely on DNS/TLS failures (no internal timeout).
+# We isolate it in a single-shot executor so the caller is bounded.
+_SEARCH_TIMEOUT_SECONDS = 12
+
+
+def _ddgs_search(query: str, max_results: int):
+    return DDGS().text(query, max_results=max_results)
 
 
 def web_search_fn(query: str, max_results: int = 10) -> str:
@@ -33,8 +42,22 @@ def web_search_fn(query: str, max_results: int = 10) -> str:
             "note": "no captured web_search result for this query before as_of",
         }, ensure_ascii=False)
 
+    ex = _cf.ThreadPoolExecutor(max_workers=1)
     try:
-        results = DDGS().text(query, max_results=max_results)
+        fut = ex.submit(_ddgs_search, query, max_results)
+        try:
+            results = fut.result(timeout=_SEARCH_TIMEOUT_SECONDS)
+        except _cf.TimeoutError:
+            # DDGS is wedged in DNS/TLS — abandon the worker (wait=False so
+            # we return immediately; the thread exits when its socket finally
+            # errors out) and report timeout to the caller.
+            logger.warning("Web search timed out after %ds: %s",
+                           _SEARCH_TIMEOUT_SECONDS, query[:80])
+            return json.dumps({"query": query, "results": [], "count": 0,
+                               "error": "search_timeout"}, ensure_ascii=False)
+    finally:
+        ex.shutdown(wait=False)
+    try:
         items = [
             {
                 "title": r.get("title", ""),

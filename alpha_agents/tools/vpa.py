@@ -20,6 +20,7 @@ without parsing text.
 
 import json
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -1592,7 +1593,9 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 
 
 def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
-                          window: int = 20, as_of: str | None = None) -> dict:
+                          window: int = 20, as_of: str | None = None,
+                          skip_save: bool = False,
+                          previous_analysis_override: str | None = None) -> dict:
     """VPA with LLM interpretation using Anna Coulling rules.
 
     Steps:
@@ -1603,6 +1606,12 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
         as_of: YYYY-MM-DD. If set, analyzes the stock as viewed FROM that
             date (ignores future K-lines, skips realtime bar and 60-min
             data). Used by backtest/replay.
+        skip_save: If True, do not persist the analysis to memory_store.
+            Backtest uses this to avoid polluting production history.
+        previous_analysis_override: If set, use this as the previous analysis
+            context instead of reading from memory_store. Backtest passes an
+            in-memory dict entry here to preserve continuity without writing
+            to the shared store.
 
     Returns dict with both code signals and LLM verdict.
     """
@@ -1633,23 +1642,45 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
 
     # Step 2: Fetch previous analysis for context continuity
     # In replay mode, only see analyses BEFORE as_of (prevent future leakage)
-    previous_report = ""
-    try:
-        from alpha_agents.data.memory_store import get_latest_vpa_analysis
-        prev = get_latest_vpa_analysis(code, as_of=as_of)
-        if prev and prev.get("report"):
-            previous_report = prev["report"]
-            logger.debug("Found previous VPA analysis for %s from %s", code, prev.get("analysis_date"))
-    except Exception:
-        pass
+    if previous_analysis_override is not None:
+        previous_report = previous_analysis_override
+    else:
+        previous_report = ""
+        try:
+            from alpha_agents.data.memory_store import get_latest_vpa_analysis
+            prev = get_latest_vpa_analysis(code, as_of=as_of)
+            if prev and prev.get("report"):
+                previous_report = prev["report"]
+                logger.debug("Found previous VPA analysis for %s from %s", code, prev.get("analysis_date"))
+        except Exception:
+            pass
 
     # Step 3: LLM interpretation with history context
     llm_result = _call_llm_vpa(code, text, previous_analysis=previous_report)
 
-    # Step 4: Save analysis to history
+    # Step 4: Save analysis to history (skipped in backtest)
     import time as _time
     # In replay mode, analysis_date = as_of (not real today)
     analysis_date = as_of or _time.strftime("%Y-%m-%d")
+    if skip_save:
+        return {
+            "code": code,
+            "name": name,
+            "ok": True,
+            "code_patterns": patterns,
+            "obv_trend": obv,
+            "volume_regime": vr,
+            "llm_report": llm_result.get("report", ""),
+            "llm_verdict": llm_result.get("verdict", "中性"),
+            "llm_confidence": llm_result.get("confidence", 0.5),
+            "llm_phase": llm_result.get("phase", ""),
+            "llm_confirmed": llm_result.get("confirmed", False),
+            "llm_reason": llm_result.get("reason", ""),
+            "llm_target_low": llm_result.get("target_low"),
+            "llm_target_high": llm_result.get("target_high"),
+            "llm_scenarios": llm_result.get("scenarios", []),
+            "text": text,
+        }
     try:
         from alpha_agents.data.memory_store import (
             save_vpa_analysis, save_vpa_signal, save_vpa_scenario,
@@ -1721,25 +1752,77 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
     }
 
 
-def _extract_verdict(report: str) -> dict:
-    """Extract structured verdict from <!-- VERDICT: {...} --> tag in LLM report.
+def _extract_json_object_with_key(text: str, needle: str) -> str | None:
+    """Find a JSON object containing ``needle`` and return its full text.
 
-    New schema includes per-signal confirmation:
-    {"direction": "偏空", "confidence": 0.7, "phase": "派发", "reason": "...",
-     "signals": [{"name": "射击十字星", "date": "04-09", "confirmed": true, ...}]}
+    Bracket-balancing scan that respects string literals — handles nested
+    arrays/objects which a regex cannot. Returns ``None`` if no balanced
+    object containing the needle is found.
+    """
+    pos = 0
+    while True:
+        idx = text.find(needle, pos)
+        if idx == -1:
+            return None
+        open_idx = text.rfind('{', 0, idx)
+        if open_idx == -1:
+            return None
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(open_idx, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[open_idx:i + 1]
+        # Unbalanced from this position — search past this needle occurrence
+        pos = idx + len(needle)
+
+
+def _extract_verdict(report: str) -> dict:
+    """Extract structured verdict from LLM report.
+
+    Three lookup paths, in order of preference:
+      1. ``<!-- VERDICT: {...} -->`` HTML-comment block (the prompt's
+         requested format).
+      2. Bracket-balanced JSON object containing ``"direction"`` — handles
+         pretty-printed JSON inside ```json fences``` etc.
+      3. Last-ditch single-line regex (kept for backward compatibility).
+
+    Pre-fix, path 2 was a too-strict regex that only matched ``{"direction":``
+    with no whitespace between ``{`` and the key — so any pretty-printed JSON
+    fell through to ``verdict_parse_failed`` despite being valid. That cost
+    36% of cached observations in the cybetf top20 backtest.
     """
     import re
 
-    # Try to find VERDICT tag — use greedy match to capture the full JSON including nested arrays
+    raw = None
     match = re.search(r'<!--\s*VERDICT:\s*(\{.*\})\s*-->', report, re.DOTALL)
-    if not match:
-        # Fallback: find any JSON with "direction" key
-        match = re.search(r'\{"direction":\s*"[^"]+?".*\}', report, re.DOTALL)
-
     if match:
+        raw = match.group(1)
+    else:
+        raw = _extract_json_object_with_key(report, '"direction"')
+    if not raw:
+        # Last fallback for any single-line tightly-packed JSON.
+        m2 = re.search(r'\{"direction":\s*"[^"]+?".*\}', report, re.DOTALL)
+        if m2:
+            raw = m2.group(0)
+
+    if raw:
         try:
-            raw = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
-            # Clean up common LLM JSON issues
             raw = raw.strip()
             from json_repair import repair_json
             data = repair_json(raw, return_objects=True)
@@ -1837,7 +1920,14 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
         else:
             return {"verdict": "中性", "confidence": 0.0, "reason": "no_api_key"}
 
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        if os.environ.get("VPA_LLM_NO_PROXY") == "1":
+            import httpx
+            client = OpenAI(
+                api_key=api_key, base_url=base_url,
+                http_client=httpx.Client(trust_env=False, timeout=60.0),
+            )
+        else:
+            client = OpenAI(api_key=api_key, base_url=base_url)
 
         # Build user message with optional previous analysis context
         user_content = f"以下是 {code} 的量价预计算数据，请按 Anna Coulling 理论做完整分析：\n\n{vpa_text}"

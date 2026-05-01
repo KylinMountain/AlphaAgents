@@ -147,14 +147,31 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
             concept_name = matched_name  # Use matched name for rest of function
 
     if not betas:
-        logger.info("No cached betas for '%s', computing on-the-fly...", concept_name)
+        logger.info("No cached betas for '%s', computing on-the-fly (timeout 90s)...", concept_name)
+        # calculate_concept_betas iterates up to 50 stocks × 3 time windows of
+        # baostock calls under a global _bs_lock. A single hung baostock socket
+        # locks the whole call indefinitely (the chat-process hang on 化肥 was
+        # caused by exactly this path). Bound it with a hard timeout.
+        import concurrent.futures as _cf
+        ex = _cf.ThreadPoolExecutor(max_workers=1)
         try:
-            computed = calculate_concept_betas(concept_name)
+            fut = ex.submit(calculate_concept_betas, concept_name)
+            try:
+                computed = fut.result(timeout=90)
+            except _cf.TimeoutError:
+                logger.warning("On-the-fly beta calc for '%s' timed out after 90s "
+                               "(baostock likely wedged); skipping", concept_name)
+                computed = None
+            except Exception as e:
+                logger.warning("On-the-fly beta calculation failed: %s", e)
+                computed = None
             if computed:
                 save_concept_betas(concept_name, computed)
                 betas = get_cached_betas(concept_name)
-        except Exception as e:
-            logger.warning("On-the-fly beta calculation failed: %s", e)
+        finally:
+            # Don't wait for the leaked worker — its baostock socket op will
+            # eventually error out at OS level.
+            ex.shutdown(wait=False)
 
     if not betas:
         return json.dumps({"concept": concept_name, "error": "无该板块的beta数据", "top": []}, ensure_ascii=False)

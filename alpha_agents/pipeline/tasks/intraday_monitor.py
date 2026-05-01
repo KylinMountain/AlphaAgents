@@ -650,6 +650,8 @@ async def run_intraday_monitor() -> str | None:
             pb = match_playbook(a)
             if pb:
                 a["playbook"] = pb["name"]
+                a["playbook_id"] = pb.get("id")
+                a["playbook_name"] = pb.get("name", "")
                 a["playbook_weight"] = pb.get("weight", 1.0)
                 a["score"] = a.get("score", 0) * pb.get("weight", 1.0)
     except Exception as e:
@@ -773,11 +775,10 @@ async def run_intraday_monitor() -> str | None:
                 if not vpa_r or not vpa_r.get("ok") or not vpa_r.get("llm_report"):
                     continue
                 verdict = vpa_r.get("llm_verdict", "?")
-                conf = vpa_r.get("llm_confidence", 0)
                 phase = vpa_r.get("llm_phase", "?")
                 confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
                 report_lines.append(
-                    f"\n▶ {a['code']} {a['name']} [{verdict} 信心{conf} {phase} {confirmed}]"
+                    f"\n▶ {a['code']} {a['name']} [{verdict} {phase} {confirmed}]"
                 )
                 llm_text = vpa_r["llm_report"]
                 if len(llm_text) > 1500:
@@ -814,6 +815,9 @@ async def run_intraday_monitor() -> str | None:
             "score": a.get("score", 0),
             "change_pct": a.get("change_pct", 0),
             "institutional": a.get("institutional", ""),
+            "playbook_id": a.get("playbook_id"),
+            "playbook_name": a.get("playbook_name", ""),
+            "playbook_matched": bool(a.get("playbook_id")),
         })
 
     report_lines.append(f"<!--RECOMMENDATIONS\n{json.dumps(recs_json, ensure_ascii=False)}\nRECOMMENDATIONS-->")
@@ -1188,6 +1192,9 @@ def _save_intraday_recommendations(report: str) -> None:
                 "score": r.get("score", 0),
                 "change_pct": r.get("change_pct", 0),
                 "institutional": r.get("institutional", ""),
+                "playbook_id": r.get("playbook_id"),
+                "playbook_name": r.get("playbook_name", ""),
+                "playbook_matched": bool(r.get("playbook_id")),
                 "rec_type": rec_type,  # 'signal' vs 'actionable'
             }
             save_prediction(

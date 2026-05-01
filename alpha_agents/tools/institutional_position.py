@@ -93,18 +93,25 @@ def _do_institutional_position(code: str, market: str) -> str:
 
 
 def _compute_vpa_compact(code: str) -> dict:
-    """Compact VPA result for integration (no recent_bars/text to save bandwidth)."""
+    """Compact LLM-VPA result for integration.
+
+    All VPA paths now go through the LLM pipeline. Returns the LLM's verdict
+    (中文: 看多/偏多/中性/偏空/看空) plus phase / confidence / confirmed for
+    downstream signal synthesis.
+    """
     try:
-        from alpha_agents.tools.vpa import compute_vpa
-        r = compute_vpa(code)
+        from alpha_agents.tools.vpa import compute_vpa_with_llm
+        # skip_save=True so this analytical call does not pollute production VPA
+        # history; we only need the LLM's verdict here.
+        r = compute_vpa_with_llm(code, skip_save=True)
         if not r.get("ok"):
             return {"error": r.get("error", "VPA 计算失败")}
         return {
-            "verdict": r.get("verdict"),
-            "net_score": r.get("net_score"),
-            "obv_trend": r.get("obv_trend"),
-            "volume_regime": r.get("volume_regime"),
-            "patterns": r.get("patterns", []),  # list of {pattern, label, bullish, strength, detail}
+            "verdict": r.get("llm_verdict"),       # 看多 / 偏多 / 中性 / 偏空 / 看空
+            "phase": r.get("llm_phase"),
+            "confidence": r.get("llm_confidence"),
+            "confirmed": r.get("llm_confirmed"),
+            "reason": r.get("llm_reason"),
         }
     except Exception as e:
         logger.debug("VPA compact failed for %s: %s", code, e)
@@ -549,23 +556,32 @@ def _synthesize(
     elif regime == "缩量上涨(量价背离，需警惕)":
         bearish_signals.append("缩量上涨，量价背离")
 
-    # VPA signals (5th dimension)
-    vpa_patterns = vpa.get("patterns", []) if isinstance(vpa, dict) else []
-    vpa_net = vpa.get("net_score", 0) if isinstance(vpa, dict) else 0
-    for p in vpa_patterns:
-        label = p.get("label", "?")
-        strength = p.get("strength", 0)
-        tag = f"VPA-{label}({strength:+d})"
-        if strength > 0:
+    # VPA signals (5th dimension) — now derived from LLM verdict.
+    # 看多/偏多 → bullish；偏空/看空 → bearish；中性 → none.
+    # Score contribution scales with verdict strength × LLM confidence so a
+    # tentative call (conf 0.55) doesn't dominate a confident one (0.85).
+    vpa_score = 0
+    if isinstance(vpa, dict) and vpa.get("verdict"):
+        vd = vpa["verdict"]
+        conf = float(vpa.get("confidence") or 0.5)
+        confirmed = bool(vpa.get("confirmed"))
+        verdict_to_score = {"看多": 3, "偏多": 1, "中性": 0, "偏空": -1, "看空": -3}
+        base = verdict_to_score.get(vd, 0)
+        # Confidence weighting (0.5..1.0 → 0.5..1.0). Confirmed signals get +0.2 boost.
+        weight = max(0.5, min(1.0, conf)) + (0.2 if confirmed else 0.0)
+        vpa_score = int(round(base * weight))
+        phase = vpa.get("phase") or ""
+        tag = f"VPA-{vd}({phase}, conf {conf:.2f}{', cfm=T' if confirmed else ''})"
+        if vpa_score > 0:
             bullish_signals.append(tag)
-        elif strength < 0:
+        elif vpa_score < 0:
             bearish_signals.append(tag)
 
     # Overall score: -10 to +10
     score = len(bullish_signals) * 2 - len(bearish_signals) * 2
     score += ff_momentum
-    # VPA net score directly contributes (already -3..+3 range typically)
-    score += vpa_net
+    # VPA verdict-derived score directly contributes (typically -3..+3)
+    score += vpa_score
     score -= confidence_penalty
     score = min(10, max(-10, score))
 

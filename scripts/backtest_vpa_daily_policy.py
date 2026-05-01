@@ -131,10 +131,7 @@ def _is_entry_signal(
 ) -> bool:
     verdict = _norm_verdict(vpa.get("llm_verdict", "中性"))
     phase = vpa.get("llm_phase", "") or ""
-    conf = float(vpa.get("llm_confidence") or 0)
     if verdict != "bullish":
-        return False
-    if conf < args.buy_confidence:
         return False
     if _is_bearish_phase(phase):
         return False
@@ -159,10 +156,9 @@ def _exit_reason(
 ) -> str | None:
     verdict = _norm_verdict(vpa.get("llm_verdict", "中性"))
     phase = vpa.get("llm_phase", "") or ""
-    conf = float(vpa.get("llm_confidence") or 0)
     if _is_bearish_phase(phase):
         return f"vpa_phase:{phase}"
-    if verdict == "bearish" and conf >= args.sell_confidence:
+    if verdict == "bearish":
         return f"vpa_verdict:{vpa.get('llm_verdict', '')}"
     # Early exit: bullish entry has slipped to non-bullish for ≥ 2 consecutive
     # days (without yet hitting full 派发). Catches deterioration before the
@@ -348,7 +344,31 @@ def _call_vpa_for_code(payload: tuple[str, str, str]) -> tuple[str, dict[str, An
         "llm_verdict": result.get("llm_verdict", "中性"),
         "llm_confidence": result.get("llm_confidence", 0.5),
         "llm_phase": result.get("llm_phase", ""),
+        "llm_raw_phase": result.get("llm_raw_phase", result.get("llm_phase", "")),
+        "llm_warning_phase": result.get("llm_warning_phase", ""),
+        "llm_phase_guard_reason": result.get("llm_phase_guard_reason", ""),
         "llm_confirmed": bool(result.get("llm_confirmed", False)),
+        "llm_action_confirmed": bool(
+            result.get("llm_action_confirmed", result.get("llm_confirmed", False))
+        ),
+        "llm_partial_confirmed": bool(result.get("llm_partial_confirmed", False)),
+        "llm_confirmed_any_signal": bool(result.get("llm_confirmed_any_signal", False)),
+        "llm_confirmed_all_signals": bool(result.get("llm_confirmed_all_signals", False)),
+        "llm_action_signal_count": int(result.get("llm_action_signal_count", 0) or 0),
+        "llm_action_confirmed_signal_count": int(
+            result.get("llm_action_confirmed_signal_count", 0) or 0
+        ),
+        "llm_decisive_confirmed_signal_count": int(
+            result.get("llm_decisive_confirmed_signal_count", 0) or 0
+        ),
+        "llm_structural_phase_change_confirmed": bool(
+            result.get("llm_structural_phase_change_confirmed", False)
+        ),
+        "llm_phase_confidence": float(
+            result.get("llm_phase_confidence", result.get("llm_confidence", 0.5)) or 0.5
+        ),
+        "llm_confirmation_level": int(result.get("llm_confirmation_level", 0) or 0),
+        "llm_confirmation_tier": str(result.get("llm_confirmation_tier", "none") or "none"),
         "llm_reason": result.get("llm_reason", ""),
         "llm_report": result.get("llm_report", ""),
         "error": result.get("error", ""),
@@ -381,7 +401,10 @@ def _run_vpa_for_day(
     call_codes = stock_pool if args.refresh_cache else missing
 
     executor_cls = ProcessPoolExecutor if args.executor == "process" else ThreadPoolExecutor
-    payloads = [(date, code, prev_report_by_code.get(code, "")) for code in call_codes]
+    if args.no_prev_analysis:
+        payloads = [(date, code, "") for code in call_codes]
+    else:
+        payloads = [(date, code, prev_report_by_code.get(code, "")) for code in call_codes]
     with executor_cls(max_workers=args.workers) as pool:
         futures = [pool.submit(_call_vpa_for_code, payload) for payload in payloads]
         for fut in as_completed(futures):
@@ -533,8 +556,12 @@ def main() -> None:
     parser.add_argument("--initial-capital", type=float, default=100_000)
     parser.add_argument("--position-pct", type=float, default=0.10)
     parser.add_argument("--max-positions", type=int, default=10)
-    parser.add_argument("--buy-confidence", type=float, default=0.60)
-    parser.add_argument("--sell-confidence", type=float, default=0.60)
+    parser.add_argument("--buy-confidence", type=float, default=0.0,
+                        help="Deprecated/ignored: LLM confidence is not used for decisions")
+    parser.add_argument("--sell-confidence", type=float, default=0.0,
+                        help="Deprecated/ignored: LLM confidence is not used for decisions")
+    parser.add_argument("--no-prev-analysis", action="store_true",
+                        help="Disable previous-day report context (avoid narrative lock-in)")
     parser.add_argument("--require-bullish-phase", action="store_true",
                         help="Only buy when phase contains 吸筹/拉升/买入高峰")
     parser.add_argument("--size-by-phase", action="store_true",
@@ -717,6 +744,9 @@ def main() -> None:
                 "llm_raw_verdict": vpa.get("llm_verdict", ""),
                 "llm_confidence": vpa.get("llm_confidence", ""),
                 "llm_phase": phase,
+                "llm_raw_phase": vpa.get("llm_raw_phase", phase),
+                "llm_warning_phase": vpa.get("llm_warning_phase", ""),
+                "llm_phase_guard_reason": vpa.get("llm_phase_guard_reason", ""),
                 "llm_confirmed": vpa.get("llm_confirmed", False),
                 "llm_reason": vpa.get("llm_reason", ""),
                 "position_state": "open" if code in positions else "flat",

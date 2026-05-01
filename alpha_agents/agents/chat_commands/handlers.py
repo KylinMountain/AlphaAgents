@@ -171,7 +171,6 @@ async def handle_vpa(arg: str, ctx: ChatContext) -> None:
         ctx.console.print(f"[red]VPA 分析失败: {r.get('error', '未知错误')}[/red]")
         return
     verdict = r.get("llm_verdict", "中性")
-    conf = r.get("llm_confidence", 0)
     phase = r.get("llm_phase", "?")
     confirmed = r.get("llm_confirmed", False)
     reason = r.get("llm_reason", "")
@@ -180,7 +179,7 @@ async def handle_vpa(arg: str, ctx: ChatContext) -> None:
     color_map = {"看多": "green", "偏多": "green", "看空": "red", "偏空": "red", "中性": "yellow"}
     border = color_map.get(verdict, "cyan")
     confirm_str = "已确认" if confirmed else "待确认"
-    title = f"VPA 量价分析 — {code} {name} [{verdict} 信心{conf} {phase} {confirm_str}]"
+    title = f"VPA 量价分析 — {code} {name} [{verdict} {phase} {confirm_str}]"
     ctx.console.print(Panel(Markdown(report or reason), title=title, border_style=border))
 
 

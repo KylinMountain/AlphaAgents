@@ -4,13 +4,13 @@ Verifies today's predictions, updates theme line strengths,
 updates market cognition, and generates review report.
 """
 
-import json
 import logging
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 
 from alpha_agents.data.memory_store import (
     get_active_themes, get_pending_predictions, update_prediction_result,
-    get_prediction_stats, upsert_cognition,
+    get_prediction_stats, upsert_cognition, get_pending_prediction_dates,
 )
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
@@ -31,30 +31,12 @@ from alpha_agents.data.portfolio import (
 logger = logging.getLogger(__name__)
 
 
-def _verify_predictions() -> None:
-    """Verify yesterday's predictions against today's actual prices.
-
-    Fetches yesterday's unverified predictions, gets today's close prices,
-    calculates returns, and writes back hit/next_day_return to the DB.
-    """
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    predictions = get_pending_predictions(yesterday)
+def _verify_prediction_date(pred_date: str, rt: dict) -> int:
+    """Verify one prior prediction date against today's actual prices."""
+    predictions = get_pending_predictions(pred_date)
     if not predictions:
-        logger.info("No pending predictions from %s to verify", yesterday)
-        return
-
-    # Collect unique stock codes
-    codes = list({p["code"] for p in predictions if p.get("code")})
-    if not codes:
-        return
-
-    # Batch fetch via Sina (fast, no baostock login/logout per stock)
-    from alpha_agents.data.market_data import get_realtime_quotes
-    try:
-        rt = get_realtime_quotes(codes) or {}
-    except Exception as e:
-        logger.warning("Failed to fetch quotes for prediction verification: %s", e)
-        return
+        logger.info("No pending predictions from %s to verify", pred_date)
+        return 0
 
     verified = 0
     for pred in predictions:
@@ -89,14 +71,12 @@ def _verify_predictions() -> None:
         # Phase 3: if this prediction matched an active playbook, record the trade outcome
         try:
             import json as _json
-            from alpha_agents.evolution.playbook import match_playbook
             from alpha_agents.data.memory_store import record_playbook_trade
             features = _json.loads(pred.get("features_json") or "{}")
-            if features:
-                pb = match_playbook(features)
-                if pb:
-                    record_playbook_trade(pb["id"], hit=bool(hit_val),
-                                          return_pct=return_pct)
+            playbook_id = features.get("playbook_id")
+            if playbook_id:
+                record_playbook_trade(int(playbook_id), hit=bool(hit_val),
+                                      return_pct=return_pct)
         except Exception as e:
             logger.debug("Playbook trade recording failed for pred #%d: %s",
                          pred["id"], e)
@@ -105,7 +85,41 @@ def _verify_predictions() -> None:
         logger.debug("Prediction #%d %s: return=%.2f%%, hit=%d",
                       pred["id"], code, return_pct, hit_val)
 
-    logger.info("Verified %d/%d predictions from %s", verified, len(predictions), yesterday)
+    logger.info("Verified %d/%d predictions from %s", verified, len(predictions), pred_date)
+    return verified
+
+
+def _verify_predictions() -> None:
+    """Verify recent unreviewed prediction dates against today's prices.
+
+    Uses prediction dates, not calendar yesterday, so Monday/holiday reviews
+    still close out the prior trading day's recommendations.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    dates = get_pending_prediction_dates(today)
+    if not dates:
+        logger.info("No pending predictions before %s to verify", today)
+        return
+
+    codes = set()
+    for pred_date in dates:
+        for pred in get_pending_predictions(pred_date):
+            if pred.get("code"):
+                codes.add(pred["code"])
+    if not codes:
+        return
+
+    from alpha_agents.data.market_data import get_realtime_quotes
+    try:
+        rt = get_realtime_quotes(list(codes)) or {}
+    except Exception as e:
+        logger.warning("Failed to fetch quotes for prediction verification: %s", e)
+        return
+
+    total = 0
+    for pred_date in dates:
+        total += _verify_prediction_date(pred_date, rt)
+    logger.info("Verified %d predictions across %d prior dates", total, len(dates))
 
 
 def _update_market_cognition(themes: list[dict], today: str) -> None:
@@ -551,16 +565,18 @@ def _check_vpa_signals(today: str) -> str:
                 f"({sc.get('phase', '')}) — 等 {sc.get('confirmation_criteria', '')[:30]}"
             )
 
-    # Step 3: For each pending signal, check confirmation with code VPA (fast, no LLM save)
+    # Step 3: For each pending signal, check confirmation with LLM VPA + realtime quote.
+    # All VPA paths now go through the LLM pipeline (compute_vpa_with_llm).
     if pending:
-        from alpha_agents.tools.vpa import compute_vpa
+        from alpha_agents.tools.vpa import compute_vpa_with_llm
         from alpha_agents.data.market_data import get_realtime_quotes
         for sig in pending[:10]:
             code = sig["code"]
             name = sig.get("name", "")
             try:
-                # Use code-only VPA for quick check (no LLM, no DB writes)
-                r = compute_vpa(code, name=name)
+                # skip_save=True so review-time confirmation does not pollute
+                # the production VPA history; we only need ok/llm_verdict here.
+                r = compute_vpa_with_llm(code, name=name, skip_save=True)
                 if not r.get("ok"):
                     continue
 

@@ -8,8 +8,8 @@ Core patterns detected:
 - 量价一致/背离 (price-volume agreement or divergence)
 - 顶部背离 (top divergence: price up, volume down)
 - 底部放量 (bottom volume spike: price down, volume up)
-- Selling Climax (急跌巨量收回过半)
-- Buying Climax (急涨巨量冲高回落)
+- Selling Climax / 恐慌抛售高潮（底部急跌巨量收回过半）
+- Buying Climax / 买入高潮顶部（顶部急涨巨量冲高回落）
 - 放量滞涨 (big volume but tiny body — distribution)
 - OBV trend
 
@@ -77,7 +77,7 @@ PATTERN_SCORES = {
     "fake_breakout": -2,         # 假突破：穿越+低量=陷阱
     "demand_test_fail": -2,      # 需求测试失败：缩量反弹=买盘耗尽
     "stopping_volume": 2,        # 放量止跌：长下影+极高量+收上半
-    "topping_volume": -3,        # 放量止涨：实体缩小弧线+量放大=抛售高峰
+    "topping_volume": -3,        # 放量止涨：实体缩小弧线+量放大=买入高潮顶部
 }
 
 # FALLING regime: Anna Coulling bullish signals work (超跌反弹有效)
@@ -131,7 +131,7 @@ PATTERN_SCORES_RISING = {
     "fake_breakout": -3,         # 假突破在升温期=散户被骗
     "demand_test_fail": -3,      # 需求测试失败=派筹完成
     "stopping_volume": 0,
-    "topping_volume": -3,        # 放量止涨在升温期=最强抛售高峰
+    "topping_volume": -3,        # 放量止涨在升温期=最强买入高潮顶部
 }
 
 
@@ -530,7 +530,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if is_hammer_shape and price_down:
             # 下跌趋势中的锤头线 = bullish (局内人买入)
             if vr > 1.5:
-                detail = f"{date_str} 下跌中锤头线+高量({vr:.1f})=局内人大量买入，买入高峰信号"
+                detail = f"{date_str} 下跌中锤头线+高量({vr:.1f})=局内人大量买入，底部吸收候选"
             else:
                 detail = f"{date_str} 下跌中锤头线+平均量({vr:.1f})=日内反弹机会"
             patterns.append({"pattern": "hammer", "label": "锤头线(下跌底部)",
@@ -618,7 +618,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                 and last_vr > 1.5 and last_cp > 0.5):
             patterns.append({"pattern": "stopping_volume", "label": "放量止跌",
                              "bullish": True, "strength": scores.get("stopping_volume", 2),
-                             "detail": f"{last_date} 触及支撑{support:.2f}+长下影+高量({last_vr:.1f})+收上半=买入高峰临近"})
+                             "detail": f"{last_date} 触及支撑{support:.2f}+长下影+高量({last_vr:.1f})+收上半=恐慌抛售高潮/底部吸收候选"})
 
         # 需求测试失败: 近期有派发信号 + 缩量反弹
         # 简化: 近5日有 distribution/buying_climax + 最新一根是缩量阳线
@@ -640,7 +640,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             last_date = str(df.iloc[-1].get("date", ""))[-5:]
             patterns.append({"pattern": "topping_volume", "label": "放量止涨(弧形顶)",
                              "bullish": False, "strength": scores.get("topping_volume", -3),
-                             "detail": f"{last_date} 实体逐渐缩小+量逐渐放大=派筹尾声，抛售高峰临近"})
+                             "detail": f"{last_date} 实体逐渐缩小+量逐渐放大=派筹尾声，买入高潮顶部候选"})
 
     return patterns
 
@@ -1263,109 +1263,11 @@ def _format_60min_section(df_60min: pd.DataFrame, patterns_60min: list[dict]) ->
     return "\n".join(lines)
 
 
-def compute_vpa(code: str, name: str = "", days: int = 60, window: int = 20, regime: str = "") -> dict:
-    """Compute VPA analysis for a single stock. Returns both structured signals and text.
-
-    Structure:
-        {
-            "code": "600050",
-            "name": "中国联通",
-            "ok": True,
-            "window": 20,
-            "obv_trend": "上升",
-            "volume_regime": {"regime": "放量", "ratio_5d_vs_20d": 1.35},
-            "patterns": [{pattern, label, bullish, strength, detail}, ...],
-            "net_score": <sum of pattern strengths>,
-            "verdict": "bullish" | "bearish" | "neutral",
-            "text": "...full markdown text...",
-            "recent_bars": [...last 15 bars as dicts...],
-        }
-
-    verdict mapping:
-        net_score >= +2 → bullish
-        net_score <= -2 → bearish
-        else → neutral
-    """
-    df = _load_ohlcv(code, days=days)
-    if df is None or len(df) < window + 5:
-        return {
-            "code": code,
-            "name": name,
-            "ok": False,
-            "error": "数据不足（需至少 25 日 K 线）",
-        }
-
-    df = _compute_derived(df, window=window)
-    patterns = _detect_patterns(df, regime=regime)
-    obv = _obv_trend(df)
-    vr = _volume_regime(df)
-
-    net_score = sum(p["strength"] for p in patterns)
-    # OBV adjustment
-    if obv == "上升":
-        net_score += 1
-    elif obv == "下降":
-        net_score -= 1
-
-    # Regime-adaptive thresholds:
-    # - Falling regime: bullish signals are strong (65% T+1 hit), use lower threshold
-    # - Rising regime: bearish signals dominant, tighten bullish threshold
-    # - Default: asymmetric (bearish strict, bullish moderate)
-    if regime == "falling":
-        bullish_threshold = 2
-        bearish_threshold = -3
-    elif regime == "rising":
-        bullish_threshold = 4   # very hard to trigger bullish in rising (追高)
-        bearish_threshold = -3
-    else:
-        bullish_threshold = 2
-        bearish_threshold = -4
-
-    if net_score >= bullish_threshold:
-        verdict = "bullish"
-    elif net_score <= bearish_threshold:
-        verdict = "bearish"
-    else:
-        verdict = "neutral"
-
-    # Recent bars as list-of-dict for programmatic consumers
-    keep_cols = ["date", "open", "high", "low", "close", "volume",
-                 "pct_change", "volume_ratio", "close_position", "bar_type",
-                 "upper_shadow", "lower_shadow", "bar_spread", "vp_harmony"]
-    recent_out = []
-    for _, row in df.tail(15).iterrows():
-        bar = {}
-        for c in keep_cols:
-            if c not in df.columns:
-                continue
-            val = row.get(c)
-            if pd.isna(val):
-                bar[c] = None
-            elif isinstance(val, (np.floating, np.integer)):
-                bar[c] = float(val) if "." in str(val) else int(val)
-            else:
-                bar[c] = val
-        recent_out.append(bar)
-
-    text = _format_text(code, name, df, patterns, window=window)
-
-    return {
-        "code": code,
-        "name": name,
-        "ok": True,
-        "window": window,
-        "obv_trend": obv,
-        "volume_regime": vr,
-        "patterns": patterns,
-        "net_score": net_score,
-        "verdict": verdict,
-        "text": text,
-        "recent_bars": recent_out,
-    }
-
-
 # ── Anna Coulling VPA system prompt (from TradingAgents) ──────────
 # LLM reads pre-computed data and applies Wyckoff theory to judge.
+# (The legacy rule-based compute_vpa() that aggregated pattern strength scores
+#  into a verdict was removed — every VPA judgment now goes through the LLM
+#  pipeline below: compute_vpa_with_llm().)
 
 ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严格基于 Anna Coulling《量价分析》的完整理论体系，通过成交量与价格的配合关系揭示市场供需真实力度和主力（局内人）意图。
 
@@ -1390,6 +1292,17 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 **第二步（宏观）：** 对比相邻数根K线，寻找小趋势的确认或潜在反转。
 **第三步（全局）：** 分析整张图表，判断当前价格处于大趋势的顶部、底部还是中间。
 
+## 术语使用规则（降低模型误读）
+
+本文中 Wyckoff 缩写只作为别名，推理和结论必须以中文全称为主：
+- `Selling Climax, SC` = **恐慌抛售高潮**，通常是底部吸收/潜在吸筹信号，不是顶部卖出信号。
+- `Buying Climax, BC` = **买入高潮顶部**，通常是顶部派发/潜在转弱信号，不是底部买入信号。
+- `Automatic Rally, AR` = 吸筹后的自动反弹；`Automatic Reaction, AR` = 派发后的自动回落。二者都叫 AR，但方向相反，必须结合所处阶段。
+- `Secondary Test, ST` = 二次测试；吸筹 ST 是回测底部，派发 ST 是回测顶部，不能混用。
+- `SOS` = 强势确认；`SOW` = 弱势确认。
+
+如果你不确定缩写含义，以中文全称和量价条件为准；最终 `phase` 不允许只输出缩写。
+
 ## 量价确认与异常判断规则
 
 ### ✅ 确认（正常）信号
@@ -1408,107 +1321,257 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 | 上涨中连续多根K线 | 成交量逐步萎缩 | 趋势减弱，做好离场准备 |
 | 下跌中连续多根K线 | 成交量逐步萎缩 | 卖压枯竭，可能反转 |
 
-## 市场循环五大阶段
+## 阶段判定的 Anna Coulling 三层判据
 
-### 1. 吸筹阶段（局内人买入）
-- 利空消息引发恐慌抛售，局内人趁机以批发价建仓
-- 价格在震荡区间反复，"摇树"震出弱势持有者
-- 图表特征：价格窄幅震荡，成交量高低交替
-- 识别：识别吸筹区间，耐心等待突破信号
+判 phase 之前**按以下三层顺序**问，每层用 Anna 书里的真实判据。**重要原则：不依赖单根 K 线，依赖量价配合 + 结构推进 + climactic event**。
 
-### 2. 供给测试（吸筹完成后的验证）
-- 局内人使价格短暂回落，测试剩余卖压
-- **低成交量测试 = 好消息**：卖盘已被吸尽，准备拉升
-- **高成交量测试 = 坏消息**：卖盘未尽，需继续吸筹
+### 第一层：量价配合（Anna 反复强调的核心 — volume = truth）
 
-### 3. 派筹阶段（局内人卖出）
-- 市场缓慢上涨，局内人逐步在零售价格卖出库存
-- 利好消息不断，吸引散户买入
-- 图表特征：上涨中出现弱势K线（低实体+高成交量）
-- 识别：发现弱势信号，准备离场或做空
+| 量价关系 | 含义 |
+|---|---|
+| **涨日放量 + 跌日缩量** | bullish 配合，倾向 markup 或 accumulation 后段 |
+| **涨日缩量 + 跌日放量** | bearish 背离，倾向 distribution 或 markdown |
+| 上涨中量能逐步萎缩 | markup 减弱（"volume drying up on advance"）|
+| 下跌中量能逐步萎缩 | markdown 减弱（"selling exhausted"）|
 
-### 4. 需求测试（派筹完成后的验证）
-- 局内人短暂拉价，测试剩余买盘
-- **低成交量 = 需求已满足**：可以推动市场下跌
-- **高成交量 = 买盘仍强**：需继续派筹
+**判 phase 必须先看量价配合方向**——与方向矛盾的 phase 必须在 reason 中说明，不允许用 confidence 数值代替证据。
 
-### 5. 抛售高峰 & 买入高峰
+### 第二层：结构推进（看价格序列）
 
-**抛售高峰（Selling Climax，派筹尾声）：**
-- 上涨趋势顶部出现 2~3 根带长上影线、低实体、**极高成交量**的K线
-- K线颜色不重要，重要是**长上影线 + 极高成交量**
-- 信号：局内人正在最后清仓，市场即将快速反转下跌
+- **持续创近 5 日新高** + 量价配合 → 仍在 markup
+- 连续 3-5 日**无法创近期新高** → markup 已停滞，警惕 PSY（初步供应）
+- 出现 **更低低点（LL）+ 量能放大** → 进入 markdown
+- 出现 **更高低点（HL）+ 量能配合** → 走出 accumulation
 
-**买入高峰（Buying Climax，吸筹尾声）：**
-- 下跌趋势底部出现 2~3 根带长下影线、**极高成交量**的K线
-- 信号：局内人大量吸筹，市场即将反转上涨
+### 第三层：Climactic event 识别（阶段切换的钥匙）
 
-## 关键K线信号
+阶段切换由 climactic event 标志，**不是简单价位比较**：
 
-### 射击十字星（弱势信号）
-- 特征：先涨后跌，收于开盘价附近，带长上影线
-- 永远代表弱势，成交量决定弱势程度：
-  - 低成交量：短期小幅回调
-  - 平均成交量：中等回调
-  - **高/极高成交量：局内人正在大量卖出，重大反转信号！**
-- 连续出现 2~3 根且成交量逐步放大：**极强的顶部信号**
+- **买入高潮顶部 BC 候选**：巨量 + 长上影 + 收下半区 + 已延伸数周涨势 → markup 结束，进入 distribution Phase A
+- **恐慌抛售高潮 SC 候选**：巨量 + 长下影 + 收上半区 + 已延伸数周跌势 → markdown 结束，进入 accumulation Phase A
+- 单根放量 K 不够，必须满足全部 4 条形态特征 + 后续验证
 
-### 锤头线（强势信号）
-- 特征：先跌后涨，收于开盘价附近，带长下影线
-- 成交量决定强势程度：
-  - 低成交量：轻微反弹
-  - 平均成交量：日内交易机会
-  - **高/极高成交量：局内人大量买入，买入高峰信号！**
-- 连续 2~3 根且成交量放大：**确认买入高峰，准备做多**
+**关键澄清（推翻常见误解）**：
 
-### 长腿十字线（不确定信号）
-- 特征：上下影线都很长，收盘接近开盘，方向未定
-- **低成交量 + 长腿十字线 = 异常！** 局内人在震仓制造波动，不是真实信号
-- **平均/高成交量**：可能是真实反转信号
+> **BC 当日本身就是新高，这与"distribution 已开始"不矛盾——BC 标志的就是"最后一个新高 + 反转"。**
+> **不要因为"今天创新高"就否决 distribution 判定**；要看 climactic 形态本身。
+> 派发中期的 UTAD（派发后上冲）也会再次假突破创新高，同样不矛盾。
 
-### 高实体K线
-- 正常：高实体 + **高成交量** = 趋势有效，可跟随
-- 异常：高实体 + **低成交量** = 警示！可能是陷阱，局内人未参与
+### 通用约束
 
-### 低实体K线
-- 正常：低实体 + 低成交量 = 忽略，不重要
-- 异常1：**低实体阳线 + 高成交量** = 牛市力竭！市场弱势
-- 异常2：**低实体阴线 + 高成交量** = 局内人嗅到牛市，熊转牛信号
+- **当日 K 线形态是否单独足以支持判定？** 否（依赖 narrative 串联）→ `confirmed=false`，并写清还需要哪根后续 K 线确认。
+- **子阶段标"中期/尾声/完成"必须有结构积累**（典型 ≥ 8 个交易日的反复触及）；否则最多标"初期"，不要用 confidence 数值弥补证据不足。
 
-### 吊人线（上涨趋势中的弱势信号）
-- 与锤头线形态相同，但出现在**上涨趋势顶部**
-- 伴随高于平均成交量 = 卖压出现的第一信号
-- 若随后跟随**射击十字星**则强烈确认反转
+## 市场循环七大阶段（Wyckoff Schematic）
 
-### 放量止跌信号
-- 暴跌中出现：带长下影线的K线 + **极高成交量**，价格收在上半部
-- 信号：局内人入场阻止下跌，买入高峰临近
+### A. 吸筹（Accumulation）— 必须依次出现的子阶段
 
-### 放量止涨信号
-- 上涨中出现：K线实体逐渐缩小形成"弧线" + 成交量大幅放大，最后以射击十字星结尾
-- 信号：派筹阶段接近尾声，抛售高峰即将来临
+**前提**：必须经历过一段下跌（无固定百分比，但应明显跌破近期 swing high，回撤幅度可观）。
+
+**允许 re-accumulation（吸筹中继）**：上涨趋势中的横盘整理后再启动属于 Wyckoff 教科书概念，可以在 markup 中段标记 "再吸筹/吸筹中继"，但需具备：
+- 整理期间量能逐步萎缩（"absorption" 特征）
+- 整理结束时放量突破整理高点（再次 SOS）
+- 不要把"主升浪中段消化几日 + 缩量"就标成 re-accumulation——必须有完整的 PS/AR/ST/SOS 序列。
+
+子阶段（必须按序识别，缺一不可成立；中文全称优先，英文缩写仅作别名）：
+
+| 子阶段 | 英文别名 | 量价签名 |
+|---|---|---|
+| 1. 初步支撑 | Preliminary Support, PS | 下跌中首次出现明显放量止跌（影线长 + 量比 ≥ 1.5） |
+| 2. 恐慌抛售高潮（底部信号） | Selling Climax, SC | 必须同时满足：① 已有明确延伸跌势 ② 当日量显著高于近期均量（典型 1.5-3×，非固定阈值）③ 当日 range 明显宽于近 5 日（典型 1.5-2×）④ 长下影 + 收盘在 K 线上半区 |
+| 3. 自动反弹 | Automatic Rally, AR | 恐慌抛售高潮后自然反弹，量能放大但不创前一段下跌起点高位 |
+| 4. 二次测试（吸筹） | Secondary Test, ST | 回测恐慌抛售高潮低点，量能 < 恐慌抛售高潮当日（卖盘耗尽证据） |
+| 5. 春天/震仓假破位 | Spring/Shakeout | 假跌破二次测试低点 + 后续放量收回（震洗弱手） |
+| 6. 最后支撑点 | Last Point of Support, LPS | 春天/震仓后回踩支撑成功 |
+| 7. 强势确认 | Sign of Strength, SOS | 放量阳线突破自动反弹高点 → 进入拉升 |
+
+**判定 phase 输出规则**：
+- 仅初步支撑出现：`phase=吸筹初期`，`confirmed=false`
+- 初步支撑 + 恐慌抛售高潮 + 自动反弹 + 二次测试出现：`phase=吸筹`，在 signals 中标明哪些事件已 confirmed
+- 出现春天/震仓假破位或最后支撑点：`phase=吸筹尾声`，并写清确认 K 线
+- 出现强势确认（SOS）：`phase=拉升初期`，SOS 信号 `confirmed=true`
+
+**禁止**：单根锤头线 + 高量就标"吸筹完成"。锤头线只是初步支撑或二次测试的候选。
+
+### B. 拉升（Markup）
+
+**前提**：必须先看到强势确认（SOS，放量突破吸筹区间高点）。
+
+特征：
+- 价格序列呈明显更高高点/更高低点（HH/HL，每段反弹创新高，每次回调不破前低）
+- 反弹放量、回调缩量（"no supply" pullback）
+- 持续时间通常数周至数月
+- **会出现中段消化整理**（窄幅震荡 4-7 日）—— **这是 markup 的一部分，不是派发**
+
+**markup 中段消化 vs 派发判别**（依 Anna 三层判据）：
+
+| 观察 | markup 中段消化 | 派发开始 |
+|---|---|---|
+| 量价配合 | 涨日仍放量、跌日缩量 | 涨日开始缩量、跌日开始放量 |
+| climactic event | 无 BC、无大量长上影 | 出现 BC 候选 或 多个 PSY |
+| 整理后表现 | 放量突破整理高点继续 markup | 假突破回落 / 跌破整理低点 |
+
+**关键**：仅看价格是否创新高**不能**区分两者——markup 中段消化往往最终也会创新高，而 BC 那天本身就在创新高。要看**量价配合方向 + climactic 形态**。
+
+### C. 派发（Distribution）— 必须依次出现的子阶段
+
+**前提（依 Anna 真实理论，结构判据 > 价位比较）**：
+
+1. **已经历明显的延伸涨势**（至少数周持续上涨）—— Anna："distribution requires a prior markup phase to distribute from"
+2. **已出现 BC 候选 或 PSY 候选**：
+   - PSY（初步供应）：上涨末端首次出现"放量上影 + 缩量回踩"组合
+   - BC（买入高潮顶部）：巨量 + 长上影 + 收下半区 + 后续 1-3 根 K 线已反向走出
+3. trading range **正在形成**（顶部 + 底部各至少 1 次触及，但 range 本身是 PSY → BC → AR → ST → UTAD 序列**逐步形成**的，不是先决条件）
+
+**不需要**"价格已停止创 20 日新高 ≥ 8 日"——这违反 Anna 实际理论：
+- BC 当天本身就是新高（"BC marks the END of markup, often AT a new high"）
+- UTAD（派发后上冲）会再次假突破创新高
+- 结构判据（climactic event + 后续反应）> 简单价位比较
+
+子阶段（必须按序识别，中文全称优先，英文缩写仅作别名）：
+
+| 子阶段 | 英文别名 | 量价签名 |
+|---|---|---|
+| 1. 初步供应/卖压出现 | Preliminary Supply, PSY | 上涨末端首次放量上影 |
+| 2. 买入高潮顶部（顶部信号） | Buying Climax, BC | 必须同时满足：① 已有明确延伸涨势 ② 当日量显著高于近期均量（典型 1.5-3×，非固定阈值）③ 当日 range 明显宽于近 5 日（典型 1.5-2×）④ 长上影 + 收盘在 K 线下半区 |
+| 3. 自动回落 | Automatic Reaction, AR | 买入高潮顶部后自然回调，量能放大 |
+| 4. 二次测试（派发） | Secondary Test, ST | 回测买入高潮顶部高点，**放量上影但收阴**或量能不足 |
+| 5. 派发后上冲 | Upthrust After Distribution, UTAD | 假突破买入高潮顶部高点 + **后续放量阴线收回区间** |
+| 6. 弱势确认 | Sign of Weakness, SOW | 放量阴线**跌破自动回落低点** → 进入下跌 |
+
+**判定 phase 输出规则**：
+- 仅初步供应/卖压出现 + 区间未确立：仍标 `phase=拉升`，加注"顶部预警信号"
+- 初步供应 + 买入高潮顶部候选 + 后续自动回落确认，或多个初步供应信号 + bearish 量价配合：`phase=派发初期`，写清 BC/PSY 是否 confirmed
+- 买入高潮顶部 + 自动回落 + 二次测试出现，且 trading range 已反复触及：`phase=派发中期`，写清区间证据
+- 派发后上冲出现：`phase=派发尾声`，UTAD 信号必须独立标注 confirmed/pending
+- 弱势确认（SOW）出现：`phase=下跌初期`，SOW 信号 `confirmed=true`
+
+**严格禁止**：
+- 单根放量上影线 / 单根高量阴线就标"派发中期/尾声/买入高潮顶部"
+- **量价配合仍是 bullish（涨日放量、跌日缩量）时标派发**——这违反第一层判据
+- 不满足 BC 五条硬性条件 + 后续反向走出的 K 线不可标为 `买入高潮顶部`
+- "已延伸涨势"和"climactic 形态"任一不满足，最多到 `派发初期 + confirmed=false`，不可升级
+
+### D. 下跌（Markdown）
+
+**前提**：必须先看到弱势确认（SOW，放量跌破派发区间下沿）。
+
+特征：
+- 更低高点/更低低点（LH/LL）
+- 反弹缩量、破位放量
+- 通常持续数周。不要在 markdown 第一段就标"下跌末期"
+
+### E. 震荡（Ranging Consolidation）
+
+**当无法明确归入吸筹/派发任一结构时**的"未明"状态。
+
+适用场景：
+- 既无前期下跌 + accumulation 子阶段证据 → 不是吸筹
+- 也无前期上涨 + distribution 子阶段证据 → 不是派发
+- 价格在水平区间内随机波动 ≤ 10 日
+
+输出：`phase=震荡` `verdict=中性`，**不要细分**。
+
+---
+
+## 双向 Climax 的 5 条形态条件（依 Anna 书 qualitative 判据）
+
+任何 K 线被判定为 **买入高潮顶部（Buying Climax, BC）** 或 **恐慌抛售高潮（Selling Climax, SC）** 时，5 条全部满足才允许 confirmed=true。Anna 强调 **qualitative 比较，不是固定阈值**：
+
+1. **延伸趋势前提**：已存在明确的多周单向趋势（涨势 → BC / 跌势 → SC）。"多周"不是固定数，但应**显著超出近期波动**——单日反弹/回调里不可能有 climax。
+2. **明显高量**：当日量**显著高于近 5 日均量**（典型 1.5-3×；Anna："extreme volume relative to recent norms"）
+3. **明显宽幅**：当日 range **明显宽于近 5 日**（典型 1.5-2×；Anna："noticeably wider than recent bars"）
+4. **反转收盘**：
+   - **BC**：长上影 ≥ 实体长度 + 收盘在 K 线下半区
+   - **SC**：长下影 ≥ 实体长度 + 收盘在 K 线上半区
+5. **后续反应（Automatic Reaction）确认**：信号日后 1-3 根 K 线已经**反向走出明显距离**（典型 ≥ 2-3%，但取决于该股 ATR）。仅满足前 4 条而尚无后续反向走出 → confirmed=false（仍是候选 BC/SC，等 AR 确认）。
+
+凡 5 条不齐 → 不可使用"买入高潮顶部/恐慌抛售高潮"标签，回退到"派发初期" 或 "吸筹初期" + confirmed=false。
+
+---
+
+## 关键 K 线信号（**单 K 线只是 setup，不是 action**）
+
+### 重要原则
+**任何单根 K 线形态都只是"候选信号"，必须由后续 1-3 根 K 线的价格结构验证（破/守支撑、更高高点/更高低点序列形成）才能升级为可执行信号。**
+
+### 射击十字星
+- 形态：长上影 + 低实体，**仅在已延伸的上涨末端 + 重要阻力位**才有意义
+- 出现在主升浪中段或非阻力位 = 噪声，忽略
+- 升级为可执行：后续放量阴线**跌破信号日低点**
+
+### 锤头线
+- 形态：长下影 + 低实体，**仅在已延伸的下跌末端 + 支撑位**才有意义
+- 出现在上涨中段 = 噪声
+- 升级为可执行：后续放量阳线**突破信号日高点**
+
+### 量价异常 vs 确认（保留旧规则的核心）
+- **大涨 + 低量** = 陷阱（可能虚假突破）
+- **大跌 + 低量** = 陷阱（可能虚假破位）
+- **窄幅 + 高量** = 多空拉锯，方向待变
+- **趋势方向 + 量能放大** = 趋势确认
+
+---
 
 ## 支撑与阻力守则
 
 ### 突破的确认规则
 - **真实突破**：价格清楚穿越天花板/地板 + **成交量大幅放大**
-- **虚假突破（陷阱）**：价格突破 + **低成交量** → 不追，等待回头
-- 突破后回踩：若成交量**缩量**，是正常测试，不必恐慌
+- **虚假突破**：价格突破 + **低成交量** → 不追，等待回头
+- 突破后回踩：若成交量**缩量**，是正常测试
 
-### 房屋法则（支撑阻力转换）
-- 天花板一旦被突破 → 变成地板（阻力转支撑）
-- 地板一旦被突破 → 变成天花板（支撑转阻力）
-- 整理区间越宽广、持续越久，突破后的趋势越强
+### 房屋法则
+- 天花板被突破 → 变成地板（阻力转支撑）
+- 地板被跌破 → 变成天花板（支撑转阻力）
+- 整理区间越宽广、持续越久，突破后趋势越强
+
+---
+
+## 因果定律的双向应用
+
+**Markup 方向**（已有定义见输出说明 target_high）
+
+**Markdown 方向**（必须对称使用）：
+
+| 派发持续时间 | 预期跌幅 |
+|---|---|
+| 8-15 日 + 区间宽度 W | 1× W |
+| 4-12 周 | 2-3× W |
+| > 12 周 | 3-5× W |
+
+**意义**：派发只持续 8 日就标"全面下跌即将启动"是违反因果定律的。派发时长不足时，只能写预警或早期阶段，不允许用 confidence 数值弥补因果不足。
+
+---
 
 ## 新闻与成交量守则
-- 新闻利好 + 价格上涨 + **高成交量** = 局内人确认，可跟随
-- 新闻利好 + 价格上涨 + **低成交量** = 局内人不参与，保持观望或反向警惕
-- 重大数据发布时长腿十字线 + 低成交量 = 局内人在震仓洗盘，不要追
+- 利好 + 涨 + **高量** = 局内人确认
+- 利好 + 涨 + **低量** = 局内人不参与，警惕陷阱
+- 重大数据 + 长腿十字 + 低量 = 震仓洗盘
 
-## 核心逻辑链
-整理区间积累 → 等待放量突破 → 动态确认趋势 → 持续量价分析（确认 or 异常）→ 发现放量止涨/抛售高峰/射击十字星 → 准备离场 → 发现买入高峰/放量止跌/锤头线 → 准备反向入场
+---
 
-**全书核心一句话：成交量是唯一不能被掩盖的真相。量价一致=确认趋势，量价背离=趋势将变。**
+## 核心逻辑链（重写）
+
+```
+判 phase 之前：先答 5 道否决题
+  ↓
+吸筹 ⇒ 必须按 初步支撑(PS)→恐慌抛售高潮(SC)→自动反弹(AR)→二次测试(ST)→春天/震仓→最后支撑点(LPS)→强势确认(SOS) 逐步累积证据
+  ↓
+强势确认(SOS) 出现 ⇒ 进入拉升（更高高点/更高低点序列）
+  ↓
+拉升中遇横盘 ⇒ 检查是否仍创 20 日新高
+   仍创 ⇒ 拉升中段消化（phase=拉升）
+   无买入高潮顶部/初步供应 ⇒ 拉升中段消化
+   出现买入高潮顶部或多个初步供应 + 后续自动回落 ⇒ 进入派发判定
+   横盘 ≥ 8 日且不再有效上攻 ⇒ 只是辅助证据，不是派发必要条件
+  ↓
+派发 ⇒ 必须按 初步供应(PSY)→买入高潮顶部(BC)→自动回落(AR)→二次测试(ST)→派发后上冲(UTAD)→弱势确认(SOW) 逐步累积证据
+       买入高潮顶部(BC)必须 5 条硬性条件全满足才 confirmed
+  ↓
+弱势确认(SOW) 出现 ⇒ 进入下跌（更低高点/更低低点序列）
+```
+
+**全书核心一句话**：成交量是唯一不能被掩盖的真相。**但单根 K 线永远不能独自定义阶段——阶段是 K 线序列在价格结构上的累积证据**。
 
 注意：以上规则是框架性指导。你需要结合具体数据灵活运用，不要机械套用单一规则，而是综合多个信号做出判断。耐心等待确认，不要见到单一信号就急于下结论。
 
@@ -1517,6 +1580,30 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 涨幅 ≈ +10% 且极度缩量可能是"一字涨停"（开盘即封死，全天无成交），不适用"大涨+低量=陷阱"规则，此时缩量代表供给枯竭。
 
 如果你收到了上次分析的参考，请对比新数据判断：上次识别的信号是否已被确认、否定或演变？你是在持续跟踪一个故事，不是做一次性快照。
+
+## 阶段连续性规则（收到上次结构化状态时强制执行）
+
+**phase 是稳定市场状态，不是单日标签。** 如果上次状态存在，必须先把本次量价行为解释为：
+- previous_phase 的延续；
+- previous_phase 内部的预警（写入 warning_phase，不要直接改 phase）；
+- 或者 previous_phase 被明确确认失效后的阶段切换。
+
+### 允许 phase 切换的最低证据
+- `吸筹 → 拉升`：必须出现强势确认（SOS）/ 放量突破吸筹区间上沿，且后续守住突破位。
+- `拉升 → 派发`：必须有已延伸涨势 + 买入高潮顶部（BC）并出现后续自动回落，或多个初步供应（PSY）+ bearish 量价配合；创新高本身不否定派发，单日放量上影只能是初步供应/卖压预警。
+- `派发 → 下跌`：必须出现弱势确认（SOW），即放量跌破派发区间下沿并延伸 ≥ 3%。
+- `下跌 → 吸筹`：必须出现恐慌抛售高潮、二次测试、春天/震仓或最后支撑点的序列证据，单日锤头线只能是候选。
+
+若证据不足：
+- 保留上次 `phase`；
+- 把新怀疑状态写入 `warning_phase`；
+- `phase_change.confirmed=false`；
+- 不要通过压低 confidence 来表达证据不足；应把证据不足写入 `warning_phase`、`phase_change.confirmed=false` 和 `signals.need`。
+
+若确实切换 phase：
+- `phase_change.confirmed=true`；
+- `phase_change.invalidated_by` 必须写清楚是哪条价量结构否定了上次 phase；
+- 不允许只用 narrative 或单日 K 线完成切换。
 
 ## 输出要求（严格按以下结构输出）
 
@@ -1537,9 +1624,25 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 列出检测到的所有信号，对每个信号说明：
 - 信号名称和类型（如"射击十字星 - 弱势信号"）
 - **是否已被后续K线确认**？
-  - 如果已确认：确认的K线是哪一根？确认逻辑是什么？（如"01-15阴线跌破信号日低点，放量确认"）
-  - 如果未确认：需要什么样的K线来确认？（如"等待一根放量阳线突破信号日高点"）
-  - 如果信号失效：为什么失效？（如"后续缩量横盘，信号过期"）
+
+**confirmed=true 的标准**（依 Anna 书"price structure + volume" 双重确认）：
+
+1. **价格结构已破位**（必要条件）：
+   - bearish 信号 confirmed → 后续 K 线**跌破信号日低点 / 跌破近 5 日 swing low / 跌破上升趋势线**
+   - bullish 信号 confirmed → 后续 K 线**突破信号日高点 / 突破近 5 日 swing high / 站上下降趋势线**
+2. **延伸距离明显**（依 Anna：noticeable continuation）：突破后已走出**该股近期波动量级**（典型 2-3%，但小盘股或低波动股可松到 1.5%；高波动股需更宽）
+3. **量能配合**：突破日量明显高于近 5 日均量（典型 ≥ 1.5×）
+4. **量价配合方向一致**：bearish confirmed 时**当前量价配合应为 bearish**（涨日缩量、跌日放量）；bullish confirmed 类似
+
+**严格禁止把以下情况标 confirmed=true**：
+- 仅"narrative 自洽"——后续一根阴线就说"派发被确认"
+- 单根 K 线 + 高量但价格未破任何关键水平
+- BC 满足前 4 条形态但尚无后续 Automatic Reaction（反向走出）
+
+如果未达到 confirmed=true 标准，必须 confirmed=false，并写明：
+- need: 需要什么样的 K 线 / 价格结构来确认（具体到价位）
+- deny: 什么条件出现会让信号失效
+
 - 信号可信度：高 / 中 / 低
 
 ### 五、方向结论与风险
@@ -1553,13 +1656,16 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 
 ### 七、机读摘要（格式固定，不可省略，不可改动键名）
 报告末尾追加（JSON 必须合法，用双引号）：
-<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}], "scenarios": [{"name": "初期吸筹", "phase": "吸筹", "signal_names": ["锤头线", "放量止跌"], "confirmation": "scenario级的确认条件（放量突破26.5）", "denial": "scenario级的否定条件（跌破23.0支撑）", "status": "pending"}]} -->
+<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "warning_phase": "", "phase_change": {"from": "", "to": "吸筹", "confirmed": false, "invalidated_by": "", "denial_level": "none"}, "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}], "scenarios": [{"name": "初期吸筹", "phase": "吸筹", "signal_names": ["锤头线", "放量止跌"], "confirmation": "scenario级的确认条件（放量突破26.5）", "denial": "scenario级的否定条件（跌破23.0支撑）", "status": "pending"}]} -->
 
 字段说明：
 - direction: 看多 / 偏多 / 中性 / 偏空 / 看空
-- confidence: 0.0-1.0（所有关键信号都已确认=高值，有未确认信号=低值）
+- confidence: 0.0-1.0（仅为兼容字段；不要用于决策，不要用它代替 confirmed/signals/phase_change）
 - phase: 吸筹 / 拉升 / 派发 / 下跌 / 震荡
-  - 派发可加细分: 派发初期 / 派发中期 / 派发尾声 / 抛售高峰 / 买入高峰
+  - 吸筹可加细分: 吸筹初期 / 吸筹尾声 / 恐慌抛售高潮
+  - 派发可加细分: 派发初期 / 派发中期 / 派发尾声 / 买入高潮顶部
+- warning_phase: 可选。证据不足以切换 phase 时，把怀疑中的阶段写这里，例如 `派发初期预警`
+- phase_change: 阶段切换证据对象。没有切换时 confirmed=false；发生切换时必须写 from/to/invalidated_by
 - reason: 一句话结论
 - target_low / target_high: 量价维度的目标价区间（基于 Wyckoff 因果定律）
   - 看多/偏多: 突破后的目标涨幅区间，乘数由「吸筹类型」决定（见结构性上下文）：
@@ -1656,7 +1762,13 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
             pass
 
     # Step 3: LLM interpretation with history context
-    llm_result = _call_llm_vpa(code, text, previous_analysis=previous_report)
+    llm_result = _call_llm_vpa(
+        code,
+        text,
+        previous_analysis=previous_report,
+        as_of=as_of,
+        phase_context=_phase_guard_context_from_df(df),
+    )
 
     # Step 4: Save analysis to history (skipped in backtest)
     import time as _time
@@ -1674,7 +1786,24 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
             "llm_verdict": llm_result.get("verdict", "中性"),
             "llm_confidence": llm_result.get("confidence", 0.5),
             "llm_phase": llm_result.get("phase", ""),
+            "llm_raw_phase": llm_result.get("raw_phase", llm_result.get("phase", "")),
+            "llm_warning_phase": llm_result.get("warning_phase", ""),
+            "llm_phase_change": llm_result.get("phase_change", {}),
+            "llm_phase_state_changed": llm_result.get("phase_state_changed", False),
+            "llm_phase_guard_reason": llm_result.get("phase_guard_reason", ""),
+            "llm_previous_phase": llm_result.get("previous_phase", ""),
             "llm_confirmed": llm_result.get("confirmed", False),
+            "llm_action_confirmed": llm_result.get("action_confirmed", llm_result.get("confirmed", False)),
+            "llm_confirmed_any_signal": llm_result.get("confirmed_any_signal", False),
+            "llm_confirmed_all_signals": llm_result.get("confirmed_all_signals", False),
+            "llm_action_signal_count": llm_result.get("action_signal_count", 0),
+            "llm_action_confirmed_signal_count": llm_result.get("action_confirmed_signal_count", 0),
+            "llm_decisive_confirmed_signal_count": llm_result.get("decisive_confirmed_signal_count", 0),
+            "llm_structural_phase_change_confirmed": llm_result.get("structural_phase_change_confirmed", False),
+            "llm_partial_confirmed": llm_result.get("partial_confirmed", False),
+            "llm_phase_confidence": llm_result.get("phase_confidence", llm_result.get("confidence", 0.5)),
+            "llm_confirmation_level": llm_result.get("confirmation_level", 0),
+            "llm_confirmation_tier": llm_result.get("confirmation_tier", "none"),
             "llm_reason": llm_result.get("reason", ""),
             "llm_target_low": llm_result.get("target_low"),
             "llm_target_high": llm_result.get("target_high"),
@@ -1743,7 +1872,24 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
         "llm_verdict": llm_result.get("verdict", "中性"),
         "llm_confidence": llm_result.get("confidence", 0.5),
         "llm_phase": llm_result.get("phase", ""),
+        "llm_raw_phase": llm_result.get("raw_phase", llm_result.get("phase", "")),
+        "llm_warning_phase": llm_result.get("warning_phase", ""),
+        "llm_phase_change": llm_result.get("phase_change", {}),
+        "llm_phase_state_changed": llm_result.get("phase_state_changed", False),
+        "llm_phase_guard_reason": llm_result.get("phase_guard_reason", ""),
+        "llm_previous_phase": llm_result.get("previous_phase", ""),
         "llm_confirmed": llm_result.get("confirmed", False),
+        "llm_action_confirmed": llm_result.get("action_confirmed", llm_result.get("confirmed", False)),
+        "llm_confirmed_any_signal": llm_result.get("confirmed_any_signal", False),
+        "llm_confirmed_all_signals": llm_result.get("confirmed_all_signals", False),
+        "llm_action_signal_count": llm_result.get("action_signal_count", 0),
+        "llm_action_confirmed_signal_count": llm_result.get("action_confirmed_signal_count", 0),
+        "llm_decisive_confirmed_signal_count": llm_result.get("decisive_confirmed_signal_count", 0),
+        "llm_structural_phase_change_confirmed": llm_result.get("structural_phase_change_confirmed", False),
+        "llm_partial_confirmed": llm_result.get("partial_confirmed", False),
+        "llm_phase_confidence": llm_result.get("phase_confidence", llm_result.get("confidence", 0.5)),
+        "llm_confirmation_level": llm_result.get("confirmation_level", 0),
+        "llm_confirmation_tier": llm_result.get("confirmation_tier", "none"),
         "llm_reason": llm_result.get("reason", ""),
         "llm_target_low": llm_result.get("target_low"),
         "llm_target_high": llm_result.get("target_high"),
@@ -1792,6 +1938,227 @@ def _extract_json_object_with_key(text: str, needle: str) -> str | None:
         pos = idx + len(needle)
 
 
+ACCUMULATION_KEYWORDS = (
+    "吸筹", "accumulation", "spring", "lps", "selling climax", "sc",
+    "恐慌抛售高潮", "卖出高潮", "底部吸收", "买入高峰",
+)
+MARKUP_KEYWORDS = ("拉升", "markup", "sos", "sign of strength", "主升", "上升")
+DISTRIBUTION_KEYWORDS = (
+    "派发", "distribution", "utad", "抛售高峰", "buying climax", "bc",
+    "买入高潮", "买入高潮顶部", "顶部派发", "派发顶部",
+)
+MARKDOWN_KEYWORDS = ("下跌", "markdown", "sow", "sign of weakness", "破位")
+NEUTRAL_KEYWORDS = ("震荡", "整理", "盘整", "中性", "未明", "ranging")
+
+BULLISH_PHASE_FAMILIES = {"accumulation", "markup"}
+BEARISH_PHASE_FAMILIES = {"distribution", "markdown"}
+
+# Anna 两层框架：phase/verdict 是描述层，事件信号才是动作层。
+# 这里定义需要“后续确认”的事件型 signals 关键词。
+ACTION_SIGNAL_KEYWORDS = (
+    "buying climax", "selling climax", "bc", "sc",
+    "买入高潮顶部", "恐慌抛售高潮",
+    "spring", "shakeout", "震仓", "假破位", "utad", "upthrust", "派发后上冲",
+    "sos", "sow", "sign of strength", "sign of weakness", "强势确认", "弱势确认",
+    "放量突破", "突破确认", "放量跌破", "破位", "跌破", "breakout", "breakdown",
+    "锤头", "射击十字", "吊人", "吞没", "长腿十字", "反转",
+    "需求测试", "供给测试", "demand test", "supply test",
+    "false breakout", "fake breakout",
+)
+
+DECISIVE_CONFIRMATION_KEYWORDS = (
+    "buying climax", "selling climax", "bc", "sc",
+    "买入高潮顶部", "恐慌抛售高潮",
+    "spring", "shakeout", "震仓", "假破位",
+    "lps", "最后支撑",
+    "utad", "upthrust", "派发后上冲",
+    "sos", "sow", "sign of strength", "sign of weakness",
+    "强势确认", "弱势确认", "放量突破", "放量跌破", "跌破区间", "跌破自动回落",
+)
+
+UNCONFIRMED_SIGNAL_MARKERS = (
+    "候选", "雏形", "预警", "待确认", "未确认", "candidate", "pending",
+)
+
+PHASE_TRANSITION_REQUIREMENTS = {
+    ("accumulation", "markup"):
+        "吸筹→拉升必须有强势确认(SOS)/放量突破区间上沿并守住突破位",
+    ("markup", "distribution"):
+        "拉升→派发必须有已延伸涨势+买入高潮顶部(BC)后续自动回落，或多个初步供应(PSY)+bearish量价配合；单日上影只能预警",
+    ("distribution", "markdown"):
+        "派发→下跌必须有弱势确认(SOW)：放量跌破派发区间下沿并延伸>=3%",
+    ("markdown", "accumulation"):
+        "下跌→吸筹必须有恐慌抛售高潮/二次测试/春天/最后支撑点序列证据，单日锤头线不够",
+}
+
+ENTRY_PHASE_BY_FAMILY = {
+    "accumulation": "吸筹初期",
+    "markup": "拉升初期",
+    "distribution": "派发初期",
+    "markdown": "下跌初期",
+}
+
+PHASE_STAGE_RANK_KEYWORDS = (
+    ("尾声", 3),
+    ("末期", 3),
+    ("完成", 3),
+    ("中期", 2),
+    ("初期", 1),
+)
+
+
+def _normalize_phase(phase: object) -> str:
+    """Normalize an LLM phase label for comparison without losing display text."""
+    return str(phase or "").strip()
+
+
+def _contains_phase_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    """Match phase keywords; short English abbreviations must be standalone."""
+    import re
+
+    for keyword in keywords:
+        k = keyword.lower()
+        if k.isascii() and len(k) <= 4:
+            if re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", text):
+                return True
+        elif k in text:
+            return True
+    return False
+
+
+def _phase_family(phase: object) -> str:
+    """Map flexible LLM phase text to a stable Wyckoff family."""
+    p = _normalize_phase(phase).lower()
+    if not p:
+        return ""
+    if _contains_phase_keyword(p, MARKDOWN_KEYWORDS):
+        return "markdown"
+    # Buying Climax/BC is a distribution-top concept. "买入高峰" is kept only
+    # as a legacy bottoming synonym from older cached reports.
+    if _contains_phase_keyword(p, DISTRIBUTION_KEYWORDS):
+        return "distribution"
+    if _contains_phase_keyword(p, MARKUP_KEYWORDS):
+        return "markup"
+    if _contains_phase_keyword(p, ACCUMULATION_KEYWORDS):
+        return "accumulation"
+    if _contains_phase_keyword(p, NEUTRAL_KEYWORDS):
+        return "neutral"
+    return "unknown"
+
+
+def _coerce_confidence(value: object, default: float = 0.5) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
+def _normalize_phase_change(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "from": value.get("from", "") or "",
+        "to": value.get("to", "") or "",
+        "confirmed": bool(value.get("confirmed", False)),
+        "invalidated_by": value.get("invalidated_by", "") or "",
+        "denial_level": value.get("denial_level", "") or "",
+    }
+
+
+def _normalize_signal(signal: object) -> dict | None:
+    if not isinstance(signal, dict):
+        return None
+    name = str(signal.get("name", "") or "").strip()
+    if not name:
+        return None
+    out = {
+        "name": name,
+        "date": str(signal.get("date", "") or ""),
+        "confirmed": bool(signal.get("confirmed", False)),
+    }
+    by = signal.get("by")
+    need = signal.get("need")
+    deny = signal.get("deny")
+    if isinstance(by, str) and by.strip():
+        out["by"] = by.strip()
+    if isinstance(need, str) and need.strip():
+        out["need"] = need.strip()
+    if isinstance(deny, str) and deny.strip():
+        out["deny"] = deny.strip()
+    return out
+
+
+def _signal_requires_action_confirmation(signal: dict) -> bool:
+    text = _signal_text(signal).lower()
+    if not text:
+        return False
+    return _contains_phase_keyword(text, ACTION_SIGNAL_KEYWORDS)
+
+
+def _is_confirmed_decisive_signal(signal: dict) -> bool:
+    if not bool(signal.get("confirmed", False)):
+        return False
+    text = _signal_text(signal).lower()
+    if not text:
+        return False
+    if _contains_phase_keyword(text, UNCONFIRMED_SIGNAL_MARKERS):
+        return False
+    if _contains_phase_keyword(text, ("sos", "sign of strength", "强势确认")):
+        return "放量" in text and ("突破" in text or "站稳" in text)
+    if _contains_phase_keyword(text, ("sow", "sign of weakness", "弱势确认")):
+        return "放量" in text and ("跌破" in text or "破位" in text)
+    if _contains_phase_keyword(text, ("spring", "春天", "震仓")):
+        return (
+            ("假破" in text or "跌破" in text)
+            and ("收复" in text or "收回" in text or "站回" in text)
+        )
+    if _contains_phase_keyword(text, ("lps", "最后支撑")):
+        return "缩量" in text and ("企稳" in text or "守住" in text or "回踩" in text)
+    if _contains_phase_keyword(text, ("utad", "upthrust", "派发后上冲")):
+        return "假突破" in text and ("跌回" in text or "收回" in text or "回落" in text)
+    if _contains_phase_keyword(text, ("buying climax", "bc", "买入高潮顶部")):
+        return "自动回落" in text or "ar" in text or "回落" in text or "跌破" in text
+    if _contains_phase_keyword(text, ("selling climax", "sc", "恐慌抛售高潮")):
+        return "自动反弹" in text or "ar" in text or "反弹" in text or "收复" in text
+    if "放量突破" in text or "放量跌破" in text:
+        return True
+    return False
+
+
+def _is_structural_phase_change(phase_change: dict) -> bool:
+    if not phase_change.get("confirmed"):
+        return False
+    from_family = _phase_family(phase_change.get("from"))
+    to_family = _phase_family(phase_change.get("to"))
+    if not from_family or not to_family or from_family == to_family:
+        return False
+    return (from_family, to_family) in PHASE_TRANSITION_REQUIREMENTS
+
+
+def _derive_confirmation_level(
+    *,
+    action_signal_count: int,
+    decisive_confirmed_signal_count: int,
+    structural_phase_change_confirmed: bool,
+) -> tuple[int, str]:
+    """Map confirmation evidence into a 0-3 tier.
+
+    Level definition (Anna two-layer compatible):
+      0: no action-type signal.
+      1: setup/background evidence only, or action signals are still pending.
+      2: at least one decisive VPA event is confirmed, but structure has not switched.
+      3: a decisive event confirms a valid Wyckoff phase transition.
+    """
+    if action_signal_count <= 0:
+        return 0, "none"
+    if decisive_confirmed_signal_count <= 0:
+        return 1, "pending"
+    if structural_phase_change_confirmed:
+        return 3, "strong"
+    return 2, "partial"
+
+
 def _extract_verdict(report: str) -> dict:
     """Extract structured verdict from LLM report.
 
@@ -1837,9 +2204,13 @@ def _extract_verdict(report: str) -> dict:
         data.setdefault("direction", "中性")
         data.setdefault("confidence", 0.5)
         data.setdefault("phase", "")
+        data.setdefault("warning_phase", "")
+        data.setdefault("phase_change", {})
         data.setdefault("reason", "")
         data.setdefault("signals", [])
         data.setdefault("scenarios", [])
+        data["confidence"] = _coerce_confidence(data.get("confidence"), default=0.5)
+        data["phase_change"] = _normalize_phase_change(data.get("phase_change"))
 
         # P0.2 Target zone — optional. Coerce to float or None.
         for k in ("target_low", "target_high"):
@@ -1878,21 +2249,439 @@ def _extract_verdict(report: str) -> dict:
             })
         data["scenarios"] = normalized_scenarios
 
-        # Derive confirmed from signals: true only if ALL signals confirmed
-        signals = data.get("signals", [])
-        if signals:
-            data["confirmed"] = all(s.get("confirmed", False) for s in signals)
-        else:
-            data["confirmed"] = False
+        raw_signals = data.get("signals", [])
+        if not isinstance(raw_signals, list):
+            raw_signals = []
+        signals = []
+        for sig in raw_signals:
+            n_sig = _normalize_signal(sig)
+            if n_sig is not None:
+                signals.append(n_sig)
+        data["signals"] = signals
+
+        confirmed_any_signal = any(bool(s.get("confirmed", False)) for s in signals)
+        confirmed_all_signals = bool(signals) and all(
+            bool(s.get("confirmed", False)) for s in signals
+        )
+        action_signals = [s for s in signals if _signal_requires_action_confirmation(s)]
+        action_confirmed_signal_count = sum(
+            1 for s in action_signals if bool(s.get("confirmed", False))
+        )
+        decisive_confirmed_signals = [
+            s for s in action_signals if _is_confirmed_decisive_signal(s)
+        ]
+        structural_phase_change_confirmed = _is_structural_phase_change(data["phase_change"])
+        level, tier = _derive_confirmation_level(
+            action_signal_count=len(action_signals),
+            decisive_confirmed_signal_count=len(decisive_confirmed_signals),
+            structural_phase_change_confirmed=structural_phase_change_confirmed,
+        )
+        partial_confirmed = level >= 2
+        action_confirmed = level >= 3
+
+        # 兼容字段：
+        # - confirmed: 严格结构确认（C3，执行口径）
+        # - partial_confirmed: 局部事件确认（C2+，观察/诊断口径）
+        # - confirmed_all_signals: 旧口径（所有 signal 都 confirmed）
+        data["confirmed_any_signal"] = confirmed_any_signal
+        data["confirmed_all_signals"] = confirmed_all_signals
+        data["action_signal_count"] = len(action_signals)
+        data["action_confirmed_signal_count"] = action_confirmed_signal_count
+        data["decisive_confirmed_signal_count"] = len(decisive_confirmed_signals)
+        data["structural_phase_change_confirmed"] = structural_phase_change_confirmed
+        data["partial_confirmed"] = partial_confirmed
+        data["action_confirmed"] = action_confirmed
+        data["confirmation_level"] = level
+        data["confirmation_tier"] = tier
+        data["phase_confidence"] = data["confidence"]
+        data["confirmed"] = action_confirmed
 
         return data
 
     return {"direction": "中性", "confidence": 0.0, "phase": "", "confirmed": False,
             "signals": [], "reason": "verdict_parse_failed",
-            "target_low": None, "target_high": None, "scenarios": []}
+            "target_low": None, "target_high": None, "scenarios": [],
+            "warning_phase": "", "phase_change": {},
+            "confirmed_any_signal": False, "confirmed_all_signals": False,
+            "action_signal_count": 0, "action_confirmed_signal_count": 0,
+            "partial_confirmed": False, "action_confirmed": False, "phase_confidence": 0.0,
+            "confirmation_level": 0, "confirmation_tier": "none",
+            "decisive_confirmed_signal_count": 0,
+            "structural_phase_change_confirmed": False}
 
 
-def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict:
+def _replace_verdict_in_report(report: str, verdict_data: dict) -> str:
+    """Persist the guarded machine verdict so next-day replay sees stable state."""
+    import re
+
+    payload = json.dumps(verdict_data, ensure_ascii=False, default=str)
+    verdict_block = f"<!-- VERDICT: {payload} -->"
+    if re.search(r'<!--\s*VERDICT:\s*\{.*\}\s*-->', report, re.DOTALL):
+        return re.sub(
+            r'<!--\s*VERDICT:\s*\{.*\}\s*-->',
+            verdict_block,
+            report,
+            count=1,
+            flags=re.DOTALL,
+        )
+    return f"{report.rstrip()}\n\n{verdict_block}"
+
+
+def _extract_previous_state(previous_analysis: str) -> dict:
+    """Compress a previous full report into point-in-time state.
+
+    Passing the full old report back to the LLM tends to create narrative
+    anchoring and can bury the latest OHLCV facts. For VPA continuity we only
+    need the stable state and unresolved scenarios/signals.
+    """
+    if not previous_analysis:
+        return {}
+    verdict = _extract_verdict(previous_analysis)
+    if verdict.get("reason") == "verdict_parse_failed" and not verdict.get("phase"):
+        return {}
+
+    scenarios = verdict.get("scenarios", [])
+    if not isinstance(scenarios, list):
+        scenarios = []
+    compact_scenarios = []
+    for sc in scenarios[:3]:
+        if not isinstance(sc, dict):
+            continue
+        compact_scenarios.append({
+            "name": sc.get("name", "") or "",
+            "phase": sc.get("phase", "") or "",
+            "confirmation": sc.get("confirmation", "") or "",
+            "denial": sc.get("denial", "") or "",
+            "status": sc.get("status", "pending") or "pending",
+        })
+
+    return {
+        "direction": verdict.get("direction", "中性"),
+        "confidence": _coerce_confidence(verdict.get("confidence"), default=0.5),
+        "phase": verdict.get("phase", "") or "",
+        "phase_family": _phase_family(verdict.get("phase", "")),
+        "warning_phase": verdict.get("warning_phase", "") or "",
+        "confirmed": bool(verdict.get("confirmed", False)),
+        "reason": verdict.get("reason", "") or "",
+        "scenarios": compact_scenarios,
+    }
+
+
+def _format_previous_state_block(previous_analysis: str) -> str:
+    """Render previous state as strict continuity guidance for the LLM."""
+    state = _extract_previous_state(previous_analysis)
+    if not state:
+        return ""
+
+    lines = [
+        "【上次结构化VPA状态】",
+        f"- previous_phase: {state.get('phase') or '未知'}",
+        f"- previous_phase_family: {state.get('phase_family') or 'unknown'}",
+        f"- previous_direction: {state.get('direction') or '中性'}",
+        f"- previous_confirmed: {state.get('confirmed')}",
+        f"- previous_reason: {state.get('reason') or '无'}",
+    ]
+    if state.get("warning_phase"):
+        lines.append(f"- previous_warning_phase: {state.get('warning_phase')}")
+
+    scenarios = state.get("scenarios", [])
+    if scenarios:
+        lines.append("- previous_scenarios:")
+        for sc in scenarios:
+            lines.append(
+                "  "
+                f"* {sc.get('name') or '未命名'} / {sc.get('phase') or '未知'} "
+                f"/ {sc.get('status') or 'pending'}; "
+                f"confirm={sc.get('confirmation') or '未写'}; "
+                f"deny={sc.get('denial') or '未写'}"
+            )
+
+    lines.extend([
+        "【阶段连续性参考】",
+        "- previous_phase 只是上下文参考，不是必须延续的硬约束。",
+        "- phase 是对当前整段量价结构的描述；如果最新量价结构已经改变，可以直接切换主阶段。",
+        "- 单日异常量价优先写 warning_phase；只有当整段结构支持时才改 phase。",
+        "- confirmed/confirmation_level 用于行动信号强度，不用于阻止 description 层的 phase 读取。",
+    ])
+    return "\n".join(lines)
+
+
+def _signal_text(signal: dict) -> str:
+    parts = [
+        signal.get("name", ""),
+        signal.get("by", ""),
+        signal.get("need", ""),
+        signal.get("deny", ""),
+    ]
+    return " ".join(str(p) for p in parts if p)
+
+
+def _has_decisive_directional_signal(data: dict, target_family: str) -> bool:
+    """Looser structural confirmation for post-guard phase reads.
+
+    This intentionally does not use LLM confidence because older hard-guarded
+    caches clipped confidence to 0.55 even when the raw report contained SOS/SOW.
+    """
+    direction = data.get("direction", "")
+    signals = [s for s in data.get("signals", []) or [] if isinstance(s, dict)]
+    confirmed_signals = [s for s in signals if _is_confirmed_decisive_signal(s)]
+    if not confirmed_signals:
+        return False
+
+    if target_family in BULLISH_PHASE_FAMILIES and direction not in {"看多", "偏多"}:
+        return False
+    if target_family in BEARISH_PHASE_FAMILIES and direction not in {"看空", "偏空"}:
+        return False
+
+    joined = " ".join(_signal_text(s).lower() for s in confirmed_signals)
+    if target_family == "markup":
+        return _contains_phase_keyword(
+            joined,
+            ("sos", "sign of strength", "强势确认", "放量突破", "突破"),
+        )
+    if target_family == "distribution":
+        return _contains_phase_keyword(
+            joined,
+            ("派发", "distribution", "bc", "buying climax", "买入高潮顶部",
+             "psy", "utad", "初步供应", "放量上影"),
+        )
+    if target_family == "markdown":
+        return _contains_phase_keyword(
+            joined,
+            ("sow", "sign of weakness", "弱势确认", "跌破", "破位"),
+        )
+    if target_family == "accumulation":
+        return _contains_phase_keyword(
+            joined,
+            ("spring", "lps", "sc", "selling climax", "恐慌抛售高潮",
+             "最后支撑", "放量止跌", "底部吸收"),
+        )
+    return False
+
+
+def _requires_phase_transition_confirmation(prev_family: str, new_family: str) -> bool:
+    if not prev_family or not new_family or prev_family == new_family:
+        return False
+    if "neutral" in {prev_family, new_family}:
+        return False
+    if "unknown" in {prev_family, new_family}:
+        return False
+    return True
+
+
+def _is_allowed_phase_transition(prev_family: str, new_family: str) -> bool:
+    if not prev_family or not new_family or prev_family == new_family:
+        return True
+    if "neutral" in {prev_family, new_family}:
+        return True
+    if "unknown" in {prev_family, new_family}:
+        return True
+    return (prev_family, new_family) in PHASE_TRANSITION_REQUIREMENTS
+
+
+def _phase_stage_rank(phase: object) -> int:
+    p = _normalize_phase(phase)
+    if not p:
+        return 0
+    for keyword, rank in PHASE_STAGE_RANK_KEYWORDS:
+        if keyword in p:
+            return rank
+    return 1
+
+
+def _has_same_family_upgrade_evidence(data: dict) -> bool:
+    signals = [s for s in data.get("signals", []) or [] if isinstance(s, dict)]
+    return any(_is_confirmed_decisive_signal(s) for s in signals)
+
+
+def _looks_like_ranging_context(phase_context: dict | None, data: dict) -> bool:
+    if not phase_context:
+        return False
+    signals = [s for s in data.get("signals", []) or [] if isinstance(s, dict)]
+    if any(_is_confirmed_decisive_signal(s) for s in signals):
+        return False
+    trend_10d = float(phase_context.get("trend_10d_pct", 0) or 0)
+    range_10d = float(phase_context.get("range_10d_pct", 999) or 999)
+    avg_vol_ratio_5d = float(phase_context.get("avg_volume_ratio_5d", 1) or 1)
+    return abs(trend_10d) <= 3.0 and range_10d <= 12.0 and avg_vol_ratio_5d <= 1.1
+
+
+def _phase_guard_context_from_df(df: pd.DataFrame | None) -> dict:
+    if df is None or len(df) < 10:
+        return {}
+    recent = df.tail(10)
+    last_close = float(recent["close"].iloc[-1])
+    first_close = float(recent["close"].iloc[0])
+    high = float(recent["high"].max())
+    low = float(recent["low"].min())
+    trend_10d = (last_close - first_close) / first_close * 100 if first_close > 0 else 0.0
+    range_10d = (high - low) / last_close * 100 if last_close > 0 else 0.0
+    avg_volume_ratio_5d = float(df["volume_ratio"].tail(5).mean()) if "volume_ratio" in df else 1.0
+    return {
+        "trend_10d_pct": round(trend_10d, 2),
+        "range_10d_pct": round(range_10d, 2),
+        "avg_volume_ratio_5d": round(avg_volume_ratio_5d, 2),
+    }
+
+
+def _strip_stale_phase_guard_reason(reason: object) -> str:
+    text = str(reason or "")
+    stale_prefix = "阶段延续："
+    if not text.startswith(stale_prefix):
+        return text
+    if "；" in text:
+        return text.split("；", 1)[1]
+    return ""
+
+
+def _refresh_confirmation_fields(data: dict, *, structural_phase_change_confirmed: bool | None = None) -> None:
+    signals = [s for s in data.get("signals", []) or [] if isinstance(s, dict)]
+    confirmed_any_signal = any(bool(s.get("confirmed", False)) for s in signals)
+    confirmed_all_signals = bool(signals) and all(bool(s.get("confirmed", False)) for s in signals)
+    action_signals = [s for s in signals if _signal_requires_action_confirmation(s)]
+    action_confirmed_signal_count = sum(
+        1 for s in action_signals if bool(s.get("confirmed", False))
+    )
+    decisive_confirmed_signals = [
+        s for s in action_signals if _is_confirmed_decisive_signal(s)
+    ]
+    if structural_phase_change_confirmed is None:
+        structural_phase_change_confirmed = _is_structural_phase_change(
+            _normalize_phase_change(data.get("phase_change"))
+        )
+    level, tier = _derive_confirmation_level(
+        action_signal_count=len(action_signals),
+        decisive_confirmed_signal_count=len(decisive_confirmed_signals),
+        structural_phase_change_confirmed=structural_phase_change_confirmed,
+    )
+    data["confirmed_any_signal"] = confirmed_any_signal
+    data["confirmed_all_signals"] = confirmed_all_signals
+    data["action_signal_count"] = len(action_signals)
+    data["action_confirmed_signal_count"] = action_confirmed_signal_count
+    data["decisive_confirmed_signal_count"] = len(decisive_confirmed_signals)
+    data["structural_phase_change_confirmed"] = structural_phase_change_confirmed
+    data["partial_confirmed"] = level >= 2
+    data["action_confirmed"] = level >= 3
+    data["confirmation_level"] = level
+    data["confirmation_tier"] = tier
+    data["confirmed"] = level >= 3
+
+
+def _apply_phase_state_guard(
+    verdict_data: dict,
+    previous_analysis: str,
+    phase_context: dict | None = None,
+) -> dict:
+    """Apply lightweight Anna-style phase hygiene after LLM parsing.
+
+    Phase is a description of the current chart structure, not a prescribed
+    Wyckoff path. The guard only smooths same-family subphase jumps and compresses
+    low-volume ranges; it does not override cross-family phase reads.
+    """
+    data = dict(verdict_data or {})
+    data["confidence"] = _coerce_confidence(data.get("confidence"), default=0.5)
+    data["phase_change"] = _normalize_phase_change(data.get("phase_change"))
+    data.setdefault("warning_phase", "")
+    data["raw_phase"] = data.get("raw_phase") or data.get("phase", "")
+    data.setdefault("phase_state_changed", False)
+    data["phase_guard_reason"] = ""
+    data.setdefault("confirmed", False)
+    data["reason"] = _strip_stale_phase_guard_reason(data.get("reason", ""))
+
+    previous_state = _extract_previous_state(previous_analysis)
+    if not previous_state:
+        return data
+
+    previous_phase = previous_state.get("phase", "") or ""
+    previous_family = previous_state.get("phase_family", "") or _phase_family(previous_phase)
+    raw_phase = data.get("raw_phase") or data.get("phase", "") or ""
+    raw_family = _phase_family(raw_phase)
+    data["previous_phase"] = previous_phase
+    data["raw_phase"] = raw_phase
+
+    if _looks_like_ranging_context(phase_context, data):
+        if raw_family in {"accumulation", "distribution"}:
+            data["raw_phase"] = raw_phase
+            data["phase"] = "震荡"
+            data["warning_phase"] = data.get("warning_phase") or raw_phase
+            data["phase_state_changed"] = previous_family != "neutral"
+            data["phase_guard_reason"] = "窄幅低量整理且无决定性VPA事件，主阶段压为震荡"
+            data["confirmed"] = False
+            phase_change = dict(data.get("phase_change") or {})
+            phase_change.update({
+                "from": previous_phase,
+                "to": "震荡",
+                "confirmed": False,
+                "invalidated_by": "",
+                "denial_level": "ranging",
+            })
+            data["phase_change"] = phase_change
+            _refresh_confirmation_fields(data, structural_phase_change_confirmed=False)
+            return data
+
+    if previous_family == raw_family and previous_phase and raw_phase != previous_phase:
+        previous_warning = previous_state.get("warning_phase", "") or ""
+        if raw_phase == previous_warning and _has_same_family_upgrade_evidence(data):
+            data["phase"] = raw_phase
+            data["raw_phase"] = raw_phase
+            data["phase_state_changed"] = True
+            data["phase_guard_reason"] = ""
+            data["reason"] = _strip_stale_phase_guard_reason(data.get("reason", ""))
+            _refresh_confirmation_fields(data)
+            return data
+        data["raw_phase"] = raw_phase
+        data["phase"] = previous_phase
+        data["warning_phase"] = data.get("warning_phase") or raw_phase
+        data["phase_state_changed"] = False
+        data["phase_guard_reason"] = (
+            "同一Wyckoff阶段内的子阶段变化需要连续确认，不能单日跳级"
+        )
+        data["confirmed"] = False
+        phase_change = dict(data.get("phase_change") or {})
+        phase_change.update({
+            "from": previous_phase,
+            "to": raw_phase,
+            "confirmed": False,
+            "invalidated_by": "",
+            "denial_level": "subphase_unconfirmed",
+        })
+        data["phase_change"] = phase_change
+        _refresh_confirmation_fields(data, structural_phase_change_confirmed=False)
+        return data
+
+    data["phase"] = raw_phase
+    data["phase_state_changed"] = bool(
+        previous_phase and raw_phase and previous_family != raw_family
+    )
+    data["phase_guard_reason"] = ""
+    data["reason"] = _strip_stale_phase_guard_reason(data.get("reason", ""))
+    if data["phase_state_changed"]:
+        phase_change = dict(data.get("phase_change") or {})
+        phase_change["from"] = previous_phase
+        phase_change["to"] = raw_phase
+        if phase_change.get("denial_level") in {"illegal_transition", "insufficient"}:
+            phase_change["denial_level"] = ""
+            phase_change["invalidated_by"] = ""
+        data["phase_change"] = phase_change
+    structural_confirmed = bool(
+        data["phase_state_changed"]
+        and _has_decisive_directional_signal(data, raw_family)
+    )
+    if structural_confirmed:
+        phase_change = dict(data.get("phase_change") or {})
+        phase_change["confirmed"] = True
+        data["phase_change"] = phase_change
+    _refresh_confirmation_fields(data, structural_phase_change_confirmed=structural_confirmed)
+    return data
+
+
+def _call_llm_vpa(
+    code: str,
+    vpa_text: str,
+    previous_analysis: str = "",
+    as_of: str | None = None,
+    phase_context: dict | None = None,
+) -> dict:
     """Call LLM with Anna Coulling prompt to interpret VPA data.
 
     Args:
@@ -1932,10 +2721,10 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
         # Build user message with optional previous analysis context
         user_content = f"以下是 {code} 的量价预计算数据，请按 Anna Coulling 理论做完整分析：\n\n{vpa_text}"
 
-        if previous_analysis:
+        previous_state_block = _format_previous_state_block(previous_analysis)
+        if previous_state_block:
             user_content = (
-                f"【上次分析参考】以下是你上次对该股的分析，请对比新数据判断信号是否已确认/否定/演变：\n"
-                f"{previous_analysis[:2000]}\n\n"
+                f"{previous_state_block}\n\n"
                 f"---\n\n"
                 f"【最新数据】{user_content}"
             )
@@ -1944,7 +2733,7 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
         # so the LLM can see its own track record and re-evaluate recent calls.
         try:
             from alpha_agents.evolution import build_vpa_context
-            signal_ctx = build_vpa_context(code)
+            signal_ctx = build_vpa_context(code, as_of=as_of)
             if signal_ctx:
                 user_content = signal_ctx + "\n\n" + user_content
         except Exception as e:
@@ -1963,17 +2752,45 @@ def _call_llm_vpa(code: str, vpa_text: str, previous_analysis: str = "") -> dict
         report = (content or "").strip()
         if not report:
             return {"verdict": "中性", "confidence": 0.0, "report": "",
-                    "signals": [], "confirmed": False, "reason": "empty_response"}
+                    "signals": [], "confirmed": False, "reason": "empty_response",
+                    "confirmed_any_signal": False, "confirmed_all_signals": False,
+                    "action_signal_count": 0, "action_confirmed_signal_count": 0,
+                    "action_confirmed": False, "phase_confidence": 0.0,
+                    "partial_confirmed": False,
+                    "confirmation_level": 0, "confirmation_tier": "none",
+                    "decisive_confirmed_signal_count": 0,
+                    "structural_phase_change_confirmed": False}
 
         # Extract VERDICT from <!-- VERDICT: {...} --> tag at end of report
         verdict_data = _extract_verdict(report)
+        verdict_data = _apply_phase_state_guard(
+            verdict_data, previous_analysis, phase_context=phase_context
+        )
+        report = _replace_verdict_in_report(report, verdict_data)
 
         return {
             "report": report,
             "verdict": verdict_data.get("direction", "中性"),
             "confidence": float(verdict_data.get("confidence", 0.5)),
             "phase": verdict_data.get("phase", ""),
+            "raw_phase": verdict_data.get("raw_phase", verdict_data.get("phase", "")),
+            "warning_phase": verdict_data.get("warning_phase", ""),
+            "phase_change": verdict_data.get("phase_change", {}),
+            "phase_state_changed": verdict_data.get("phase_state_changed", False),
+            "phase_guard_reason": verdict_data.get("phase_guard_reason", ""),
+            "previous_phase": verdict_data.get("previous_phase", ""),
             "confirmed": verdict_data.get("confirmed", False),
+            "action_confirmed": verdict_data.get("action_confirmed", False),
+            "partial_confirmed": verdict_data.get("partial_confirmed", False),
+            "confirmed_any_signal": verdict_data.get("confirmed_any_signal", False),
+            "confirmed_all_signals": verdict_data.get("confirmed_all_signals", False),
+            "action_signal_count": verdict_data.get("action_signal_count", 0),
+            "action_confirmed_signal_count": verdict_data.get("action_confirmed_signal_count", 0),
+            "decisive_confirmed_signal_count": verdict_data.get("decisive_confirmed_signal_count", 0),
+            "structural_phase_change_confirmed": verdict_data.get("structural_phase_change_confirmed", False),
+            "phase_confidence": verdict_data.get("phase_confidence", verdict_data.get("confidence", 0.5)),
+            "confirmation_level": verdict_data.get("confirmation_level", 0),
+            "confirmation_tier": verdict_data.get("confirmation_tier", "none"),
             "signals": verdict_data.get("signals", []),
             "reason": verdict_data.get("reason", ""),
             "target_low": verdict_data.get("target_low"),
@@ -1995,7 +2812,7 @@ def get_vpa_analysis_fn(code: str, name: str = "") -> str:
     try:
         if not code or not code.strip().isdigit() or len(code.strip()) != 6:
             return json.dumps({"code": code, "ok": False, "error": "无效股票代码"}, ensure_ascii=False)
-        result = compute_vpa(code.strip(), name=name or "")
+        result = compute_vpa_with_llm(code.strip(), name=name or "")
         return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as e:
         logger.error("get_vpa_analysis failed for %s: %s", code, e)

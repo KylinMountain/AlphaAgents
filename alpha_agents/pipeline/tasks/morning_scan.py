@@ -302,11 +302,10 @@ async def run_morning_scan() -> str | None:
                         vpa_r = await asyncio.to_thread(compute_vpa_with_llm, code, name)
                         if vpa_r.get("ok") and vpa_r.get("llm_report"):
                             verdict = vpa_r.get("llm_verdict", "?")
-                            conf = vpa_r.get("llm_confidence", 0)
                             phase = vpa_r.get("llm_phase", "?")
                             confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
                             vpa_lines.append(
-                                f"\n▶ {code} {name} [{verdict} 信心{conf} {phase} {confirmed}]"
+                                f"\n▶ {code} {name} [{verdict} {phase} {confirmed}]"
                             )
                             llm_text = vpa_r["llm_report"]
                             if len(llm_text) > 1500:
@@ -422,9 +421,12 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
         try:
             from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
             quotes = json.loads(await asyncio.to_thread(get_stock_quotes_fn, code))
-            q = quotes.get("quotes", [{}])[0]
-            week_chg = q.get("week_change_pct", 0)
-            if week_chg < 15:  # V2 标准: 5日涨幅<15%
+            quote_rows = quotes.get("quotes") or []
+            q = quote_rows[0] if quote_rows else {}
+            week_chg = q.get("week_change_pct")
+            if not q or q.get("error") or week_chg is None:
+                dims.append("位置?")
+            elif week_chg < 15:  # V2 标准: 5日涨幅<15%
                 passes += 1
                 dims.append(f"位置✅({week_chg:+.1f}%)")
             else:

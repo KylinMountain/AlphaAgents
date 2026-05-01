@@ -31,117 +31,11 @@ from alpha_agents.data.market_data import get_stock_history
 
 logger = logging.getLogger(__name__)
 
-# Pattern signal strengths (used by institutional_position integration).
-#
-# Weights calibrated by backtest on 4000 (code, date) samples × forward 5 days
-# against local market_history.db (2024-2026). See scripts/backtest_vpa.py and
-# data/vpa_backtest_4000.csv.
-#
-# Key findings driving these weights:
-#   - Bearish VPA signals are genuinely predictive (57% directional hit).
-#   - Bullish VPA signals alone are NOT predictive in A-share retail market —
-#     "价涨+放量" often precedes a pullback. Use VPA for avoidance, not追涨.
-#   - top_divergence (57.2% hit, -0.12% mean) and very_bearish buckets are
-#     the strongest individual signals.
-#   - healthy_uptrend has 39.8% hit, -0.60% mean — it is a REVERSE signal in
-#     A-share, so we NEGATE it (was +2, now -1).
-#   - bottom_volume_spike (53.4% hit, +0.64% mean) is the best single bullish
-#     signal — kept at +1.
-# ── Regime-adaptive weights ──────────────────────────────────────
-# Walk-forward analysis (280K samples) shows VPA bullish signals are ONLY
-# effective in falling regime (65.3% T+1 hit) and terrible in rising (35.9%).
-# Solution: maintain separate weight tables per regime.
-#
-# DEFAULT (ranging / unknown): conservative — bearish signals only
-PATTERN_SCORES = {
-    # ── Original patterns ──
-    "healthy_uptrend": -1,
-    "top_divergence": -3,
-    "bottom_exhaustion": 0,
-    "bottom_volume_spike": 1,
-    "selling_climax": -1,
-    "buying_climax": -2,
-    "no_demand": -1,
-    "no_supply": 0,
-    "distribution": -1,
-    "absorption": 1,
-    # ── Anna Coulling K-line signals (new) ──
-    "shooting_star": -3,         # 射击十字星+高量=局内人卖出（最强顶部信号之一）
-    "hammer": 2,                 # 锤头线+高量=局内人买入
-    "hanging_man": -2,           # 吊人线（上涨顶部的锤头形态）=卖压第一信号
-    "long_legged_doji_trap": -1, # 长腿十字线+低量=震仓假信号
-    "high_body_low_vol": -2,     # 高实体+低量=陷阱（多头或空头）
-    "low_body_high_vol_yang": -2,# 低实体阳线+高量=牛市力竭
-    "low_body_high_vol_yin": 2,  # 低实体阴线+高量=熊转牛
-    "volume_breakout": 2,        # 真突破：穿越阻力+巨量
-    "fake_breakout": -2,         # 假突破：穿越+低量=陷阱
-    "demand_test_fail": -2,      # 需求测试失败：缩量反弹=买盘耗尽
-    "stopping_volume": 2,        # 放量止跌：长下影+极高量+收上半
-    "topping_volume": -3,        # 放量止涨：实体缩小弧线+量放大=买入高潮顶部
-}
-
-# FALLING regime: Anna Coulling bullish signals work (超跌反弹有效)
-PATTERN_SCORES_FALLING = {
-    "healthy_uptrend": 0,
-    "top_divergence": -2,
-    "bottom_exhaustion": 1,
-    "bottom_volume_spike": 2,
-    "selling_climax": 2,
-    "buying_climax": -2,
-    "no_demand": 0,
-    "no_supply": 1,
-    "distribution": -1,
-    "absorption": 2,
-    # ── Anna Coulling K-line signals ──
-    "shooting_star": -2,         # 弱一些（超跌中射击十字星可能是反弹正常调整）
-    "hammer": 3,                 # 锤头线在下跌底部最强
-    "hanging_man": -1,
-    "long_legged_doji_trap": 0,
-    "high_body_low_vol": -1,
-    "low_body_high_vol_yang": -1,
-    "low_body_high_vol_yin": 3,  # 低实体阴线+高量在底部=最强熊转牛
-    "volume_breakout": 3,        # 突破吸筹区间=起涨
-    "fake_breakout": -1,
-    "demand_test_fail": -1,
-    "stopping_volume": 3,        # 放量止跌在falling最有意义
-    "topping_volume": -2,
-}
-
-# RISING regime: bearish signals strongest, bullish is追高
-PATTERN_SCORES_RISING = {
-    "healthy_uptrend": -2,
-    "top_divergence": -3,
-    "bottom_exhaustion": 0,
-    "bottom_volume_spike": 0,
-    "selling_climax": -1,
-    "buying_climax": -3,
-    "no_demand": -2,
-    "no_supply": 0,
-    "distribution": -2,
-    "absorption": 0,
-    # ── Anna Coulling K-line signals ──
-    "shooting_star": -3,         # 升温期射击十字星=最强顶部信号
-    "hammer": 0,                 # 升温期锤头线=noise
-    "hanging_man": -3,           # 吊人线在上涨顶部=经典反转
-    "long_legged_doji_trap": -2, # 震仓信号在升温期更有意义
-    "high_body_low_vol": -3,     # 高实体低量在升温期=最典型的多头陷阱
-    "low_body_high_vol_yang": -3,# 低实体阳线高量=牛市力竭（升温期最强）
-    "low_body_high_vol_yin": 1,
-    "volume_breakout": 1,
-    "fake_breakout": -3,         # 假突破在升温期=散户被骗
-    "demand_test_fail": -3,      # 需求测试失败=派筹完成
-    "stopping_volume": 0,
-    "topping_volume": -3,        # 放量止涨在升温期=最强买入高潮顶部
-}
-
-
-def get_pattern_scores(regime: str = "") -> dict:
-    """Return the appropriate weight table for the given market regime."""
-    if regime == "falling":
-        return PATTERN_SCORES_FALLING
-    elif regime == "rising":
-        return PATTERN_SCORES_RISING
-    return PATTERN_SCORES
+# Pattern detection emits {pattern, label, bullish, detail} — no numerical
+# strength score. The legacy regime-specific weight tables were used by the
+# (now-removed) compute_vpa() rule-based aggregator; the LLM judges from the
+# pattern names + detail strings + the structural context fed via
+# _format_text. No further code-level scoring lives here.
 
 
 def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
@@ -290,9 +184,8 @@ def _compute_derived(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     return df
 
 
-def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
+def _detect_patterns(df: pd.DataFrame) -> list[dict]:
     """Detect key VPA patterns in the recent 5-day window. Returns structured list."""
-    scores = get_pattern_scores(regime)
     patterns = []
     if len(df) < 5:
         return patterns
@@ -334,7 +227,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             "pattern": "top_divergence",
             "label": "顶部背离",
             "bullish": False,
-            "strength": scores["top_divergence"],
             "detail": f"近5日价格+{price_change_pct:.1f}% 但量能递减，上涨动能衰竭",
         })
     if price_down and vol_up:
@@ -342,7 +234,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             "pattern": "bottom_volume_spike",
             "label": "底部放量",
             "bullish": True,
-            "strength": scores["bottom_volume_spike"],
             "detail": f"近5日价格{price_change_pct:.1f}% 但量能递增，可能恐慌抛售或机构换手",
         })
     if price_down and vol_down:
@@ -350,7 +241,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             "pattern": "bottom_exhaustion",
             "label": "卖压衰竭",
             "bullish": True,
-            "strength": scores["bottom_exhaustion"],
             "detail": f"近5日价格{price_change_pct:.1f}% 且量能递减，空方力量枯竭",
         })
     if price_up and vol_up:
@@ -358,7 +248,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             "pattern": "healthy_uptrend",
             "label": "健康上涨",
             "bullish": True,
-            "strength": scores["healthy_uptrend"],
             "detail": f"近5日价格+{price_change_pct:.1f}% 且量能配合递增",
         })
 
@@ -376,31 +265,25 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if vr > 2.0 and pct < -0.03 and cp > 0.5:
             date_str = str(row.get("date", ""))[-5:]
             range_pos = _range_position(float(row["close"]))
-            base_strength = scores["selling_climax"]
             # Strength adjustment by range position
             if range_pos < 0.2:
                 # Climax at range low = real panic bottom, highest reversal value
-                strength_adjust = +2
                 pos_label = f"区间低位(底部{range_pos*100:.0f}%)"
                 interpretation = "经典恐慌见底信号"
             elif range_pos < 0.4:
-                strength_adjust = +1
                 pos_label = f"区间中低位({range_pos*100:.0f}%)"
                 interpretation = "较强反转信号"
             elif range_pos > 0.7:
                 # At range top — likely just profit-taking or a trap, not a real climax
-                strength_adjust = -2
                 pos_label = f"区间高位({range_pos*100:.0f}%)"
                 interpretation = "高位放量急跌，可能是派发开始而非恐慌见底"
             else:
-                strength_adjust = 0
                 pos_label = f"区间中位({range_pos*100:.0f}%)"
                 interpretation = "中位climax可信度一般"
             patterns.append({
                 "pattern": "selling_climax",
                 "label": "卖出高潮",
                 "bullish": True,
-                "strength": base_strength + strength_adjust,
                 "detail": (
                     f"{date_str} 急跌{pct*100:.1f}% 量比{vr:.1f} 收盘位置{cp:.2f}，"
                     f"{pos_label} — {interpretation}"
@@ -422,30 +305,24 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if vr > 2.0 and pct > 0.03 and upper > 0.4 and cp < 0.5:
             date_str = str(row.get("date", ""))[-5:]
             range_pos = _range_position(float(row["close"]))
-            base_strength = scores["buying_climax"]
             if range_pos > 0.8:
                 # Climax at range high = real distribution top
-                strength_adjust = -2  # More bearish
                 pos_label = f"区间高位(顶部{range_pos*100:.0f}%)"
                 interpretation = "经典派发顶信号"
             elif range_pos > 0.6:
-                strength_adjust = -1
                 pos_label = f"区间中高位({range_pos*100:.0f}%)"
                 interpretation = "较强顶部信号"
             elif range_pos < 0.3:
                 # Mid-low range climax — likely just bounce failure, not top
-                strength_adjust = +2  # Less bearish
                 pos_label = f"区间低位({range_pos*100:.0f}%)"
                 interpretation = "低位冲高回落，可能只是反弹失败而非派发顶"
             else:
-                strength_adjust = 0
                 pos_label = f"区间中位({range_pos*100:.0f}%)"
                 interpretation = "中位climax可信度一般"
             patterns.append({
                 "pattern": "buying_climax",
                 "label": "买入高潮",
                 "bullish": False,
-                "strength": base_strength + strength_adjust,
                 "detail": (
                     f"{date_str} 急涨{pct*100:.1f}% 量比{vr:.1f} 长上影收低位，"
                     f"{pos_label} — {interpretation}"
@@ -466,7 +343,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                 "pattern": "distribution",
                 "label": "放量滞涨",
                 "bullish": False,
-                "strength": scores["distribution"],
                 "detail": f"{date_str} 量比{vr:.1f} 但实体窄、价格几乎不动，多空分歧大（疑似派发）",
             })
             break
@@ -484,7 +360,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                 "pattern": "no_demand",
                 "label": "无需求反弹",
                 "bullish": False,
-                "strength": scores["no_demand"],
                 "detail": f"{date_str} 量比{vr:.1f} 阳线反弹但极度缩量，买方力量不足",
             })
             break
@@ -494,7 +369,6 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                 "pattern": "no_supply",
                 "label": "无供给回调",
                 "bullish": True,
-                "strength": scores["no_supply"],
                 "detail": f"{date_str} 量比{vr:.1f} 阴线但缩量，卖方力量衰竭",
             })
             break
@@ -519,7 +393,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             else:
                 detail = f"{date_str} 射击十字星+平均量({vr:.1f})=中等回调信号"
             patterns.append({"pattern": "shooting_star", "label": "射击十字星",
-                             "bullish": False, "strength": scores.get("shooting_star", -2),
+                             "bullish": False,
                              "detail": detail})
             break
 
@@ -534,7 +408,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             else:
                 detail = f"{date_str} 下跌中锤头线+平均量({vr:.1f})=日内反弹机会"
             patterns.append({"pattern": "hammer", "label": "锤头线(下跌底部)",
-                             "bullish": True, "strength": scores.get("hammer", 2),
+                             "bullish": True,
                              "detail": detail})
             break
 
@@ -542,7 +416,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
             # 上涨趋势中的同样形态 = 吊人线 = bearish (卖压第一信号)
             detail = f"{date_str} 上涨中吊人线+量比({vr:.1f})=卖压出现的第一信号"
             patterns.append({"pattern": "hanging_man", "label": "吊人线(上涨顶部)",
-                             "bullish": False, "strength": scores.get("hanging_man", -2),
+                             "bullish": False,
                              "detail": detail})
             break
 
@@ -550,7 +424,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if spread > 0.03 and vr < 0.7:
             direction = "多头" if bar_type == "阳线" else "空头"
             patterns.append({"pattern": "high_body_low_vol", "label": f"高实体低量{direction}陷阱",
-                             "bullish": False, "strength": scores.get("high_body_low_vol", -2),
+                             "bullish": False,
                              "detail": f"{date_str} 宽实体{bar_type}但量比仅{vr:.1f}=局内人未参与，可能是{direction}陷阱"})
             break
 
@@ -558,18 +432,18 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if spread < 0.01 and vr > 1.5:
             if bar_type == "阳线":
                 patterns.append({"pattern": "low_body_high_vol_yang", "label": "低实体阳线+高量=牛市力竭",
-                                 "bullish": False, "strength": scores.get("low_body_high_vol_yang", -2),
+                                 "bullish": False,
                                  "detail": f"{date_str} 窄阳线+量比{vr:.1f}=多空拉锯，上涨动力衰竭"})
             elif bar_type == "阴线":
                 patterns.append({"pattern": "low_body_high_vol_yin", "label": "低实体阴线+高量=熊转牛",
-                                 "bullish": True, "strength": scores.get("low_body_high_vol_yin", 2),
+                                 "bullish": True,
                                  "detail": f"{date_str} 窄阴线+量比{vr:.1f}=局内人嗅到机会，潜在反转"})
             break
 
         # 长腿十字线 + 低量 = 震仓假信号
         if upper > 0.3 and lower > 0.3 and spread < 0.01 and vr < 0.7:
             patterns.append({"pattern": "long_legged_doji_trap", "label": "长腿十字线+低量=震仓",
-                             "bullish": False, "strength": scores.get("long_legged_doji_trap", -1),
+                             "bullish": False,
                              "detail": f"{date_str} 上下影线都长但缩量({vr:.1f})=局内人制造波动，假信号"})
             break
 
@@ -596,19 +470,19 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         # 真突破: 整理后 + 穿越阻力 + 巨量
         if last_close > resistance and last_vr > 1.5 and is_consolidation:
             patterns.append({"pattern": "volume_breakout", "label": "整理后放量突破",
-                             "bullish": True, "strength": scores.get("volume_breakout", 2),
+                             "bullish": True,
                              "detail": f"{last_date} 整理区间后突破{resistance:.2f}+量比{last_vr:.1f}=真突破（因果定律）"})
 
         # 假突破: 穿越但低量 (不管是否整理)
         elif last_close > resistance and last_vr < 0.8:
             patterns.append({"pattern": "fake_breakout", "label": "假突破(低量)",
-                             "bullish": False, "strength": scores.get("fake_breakout", -2),
+                             "bullish": False,
                              "detail": f"{last_date} 突破{resistance:.2f}但量比仅{last_vr:.1f}=陷阱"})
 
         # 没整理就冲高 + 放量 = 追高不是突破
         elif last_close > resistance and last_vr > 1.5 and not is_consolidation:
             patterns.append({"pattern": "fake_breakout", "label": "无整理冲高(非真突破)",
-                             "bullish": False, "strength": scores.get("fake_breakout", -1),
+                             "bullish": False,
                              "detail": f"{last_date} 冲破{resistance:.2f}+放量但近期无整理=可能是追高"})
 
         # 放量止跌: 跌到支撑附近 + 长下影 + 高量 + 收上半
@@ -617,7 +491,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
         if (last_row["low"] <= support * 1.02 and last_lower > 0.4
                 and last_vr > 1.5 and last_cp > 0.5):
             patterns.append({"pattern": "stopping_volume", "label": "放量止跌",
-                             "bullish": True, "strength": scores.get("stopping_volume", 2),
+                             "bullish": True,
                              "detail": f"{last_date} 触及支撑{support:.2f}+长下影+高量({last_vr:.1f})+收上半=恐慌抛售高潮/底部吸收候选"})
 
         # 需求测试失败: 近期有派发信号 + 缩量反弹
@@ -626,7 +500,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                                 for p in patterns)
         if has_bearish_prior and last_row.get("bar_type") == "阳线" and last_vr < 0.8:
             patterns.append({"pattern": "demand_test_fail", "label": "需求测试失败",
-                             "bullish": False, "strength": scores.get("demand_test_fail", -2),
+                             "bullish": False,
                              "detail": f"{last_date} 派发后缩量反弹({last_vr:.1f})=买盘耗尽，准备下跌"})
 
     # ── 放量止涨 (实体逐渐缩小 + 量放大) ──
@@ -639,7 +513,7 @@ def _detect_patterns(df: pd.DataFrame, regime: str = "") -> list[dict]:
                 and vrs[0] < vrs[1] < vrs[2] and vrs[2] > 1.2 and price_up):
             last_date = str(df.iloc[-1].get("date", ""))[-5:]
             patterns.append({"pattern": "topping_volume", "label": "放量止涨(弧形顶)",
-                             "bullish": False, "strength": scores.get("topping_volume", -3),
+                             "bullish": False,
                              "detail": f"{last_date} 实体逐渐缩小+量逐渐放大=派筹尾声，买入高潮顶部候选"})
 
     return patterns
@@ -1204,7 +1078,7 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
     if patterns:
         for p in patterns:
             marker = "✓" if p["bullish"] else "✗"
-            lines.append(f"- [{marker}] **{p['label']}**（{p['pattern']}, 强度{p['strength']:+d}）: {p['detail']}")
+            lines.append(f"- [{marker}] **{p['label']}**（{p['pattern']}）: {p['detail']}")
     else:
         lines.append("- 近期无显著量价异常模式")
 

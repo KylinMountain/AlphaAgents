@@ -124,23 +124,40 @@ def _phase_size_factor(phase: str, args: argparse.Namespace) -> float:
     return 1.0
 
 
+def _confirmation_level(vpa: dict[str, Any]) -> int:
+    """Read the (possibly vph-corrected) confirmation level from a cache row.
+    Returns 0 when the field is missing so older caches degrade gracefully
+    to "any phase signal counts" semantics under entry-tier=0/exit-tier=0."""
+    raw = vpa.get("llm_confirmation_level", 0)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_entry_signal(
     vpa: dict[str, Any],
     args: argparse.Namespace,
     prev_vpa: dict[str, Any] | None = None,
 ) -> bool:
-    verdict = _norm_verdict(vpa.get("llm_verdict", "中性"))
+    """Entry: bullish-family phase + confirmation level >= entry_tier.
+
+    Tier-based gating mirrors analyze_vpa_strategy_capture.py so the
+    backtest harness and the post-hoc capture analyzer agree on what
+    "an e1x3 strategy" means. The phase guard's vp_harmony correction is
+    already baked into ``llm_confirmation_level`` upstream — this function
+    just reads it.
+    """
     phase = vpa.get("llm_phase", "") or ""
-    if verdict != "bullish":
+    if not _is_bullish_phase(phase):
         return False
     if _is_bearish_phase(phase):
         return False
-    if args.require_bullish_phase and not _is_bullish_phase(phase):
+    if _confirmation_level(vpa) < args.entry_tier:
         return False
-    # Stability filter: bare 吸筹 single-day signals are noise. Require the
-    # previous trading day's verdict to also be bullish so we only enter on
-    # ≥ 2 days of agreement. (Doesn't apply to 拉升/吸筹初期 which are
-    # already higher-quality entries.)
+    # Stability filter retained for callers who explicitly opt in via
+    # --require-phase-stability; defaults off so the tier already
+    # gates noise.
     if args.require_phase_stability and _is_bare_accumulation(phase):
         if prev_vpa is None or not prev_vpa.get("ok"):
             return False
@@ -154,16 +171,20 @@ def _exit_reason(
     args: argparse.Namespace,
     non_bullish_streak: int = 0,
 ) -> str | None:
-    verdict = _norm_verdict(vpa.get("llm_verdict", "中性"))
+    """Exit: bearish-family phase + confirmation level >= exit_tier.
+
+    Without the tier filter, any bearish phase (派发初期 C1, etc.) would
+    fire — that destroys e1x3 capture because the LLM frequently emits
+    pending C1 派发 reads inside a markup pullback that subsequently
+    resolves bullish. The vp_harmony curb has already pulled C2/C3 down
+    to C1/C2 when 5d量价 contradicts the bearish read; with exit-tier=3
+    only structurally-confirmed bearish-with-bearish-vph signals pass.
+    """
     phase = vpa.get("llm_phase", "") or ""
-    if _is_bearish_phase(phase):
+    if _is_bearish_phase(phase) and _confirmation_level(vpa) >= args.exit_tier:
         return f"vpa_phase:{phase}"
-    if verdict == "bearish":
-        return f"vpa_verdict:{vpa.get('llm_verdict', '')}"
-    # Early exit: bullish entry has slipped to non-bullish for ≥ 2 consecutive
-    # days (without yet hitting full 派发). Catches deterioration before the
-    # phase fully turns and avoids the 0% win rate of late 下跌/抛售高峰 exits.
     if args.early_exit_on_verdict_decay and non_bullish_streak >= 2:
+        verdict = _norm_verdict(vpa.get("llm_verdict", "中性"))
         return f"verdict_decay:{verdict}_streak{non_bullish_streak}"
     return None
 
@@ -369,6 +390,9 @@ def _call_vpa_for_code(payload: tuple[str, str, str]) -> tuple[str, dict[str, An
         ),
         "llm_confirmation_level": int(result.get("llm_confirmation_level", 0) or 0),
         "llm_confirmation_tier": str(result.get("llm_confirmation_tier", "none") or "none"),
+        "vp_harmony_score": result.get("vp_harmony_score", "neutral"),
+        "vph_conflict": result.get("vph_conflict", {"exists": False}),
+        "vph_conflict_failures": result.get("vph_conflict_failures", []),
         "llm_reason": result.get("llm_reason", ""),
         "llm_report": result.get("llm_report", ""),
         "error": result.get("error", ""),
@@ -560,6 +584,15 @@ def main() -> None:
                         help="Deprecated/ignored: LLM confidence is not used for decisions")
     parser.add_argument("--sell-confidence", type=float, default=0.0,
                         help="Deprecated/ignored: LLM confidence is not used for decisions")
+    # Tier-based gating — aligns with analyze_vpa_strategy_capture.py.
+    # Validated baseline on the cybetf top20 60-day window:
+    #   e1x3 + vph curb → +28.3% strat, 15/20 winners, escape +8.5pp.
+    parser.add_argument("--entry-tier", type=int, default=1,
+                        help="confirmation_level >= this required for entry "
+                             "(0=any signal, 1=pending+, 2=partial+, 3=strong only)")
+    parser.add_argument("--exit-tier", type=int, default=3,
+                        help="confirmation_level >= this required for exit "
+                             "(3=only structurally-confirmed bearish reads, lower = noisier)")
     parser.add_argument("--no-prev-analysis", action="store_true",
                         help="Disable previous-day report context (avoid narrative lock-in)")
     parser.add_argument("--require-bullish-phase", action="store_true",

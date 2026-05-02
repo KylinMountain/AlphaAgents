@@ -38,21 +38,27 @@ logger = logging.getLogger(__name__)
 # _format_text. No further code-level scoring lives here.
 
 
-def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
+def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = False,
                 as_of: str | None = None) -> Optional[pd.DataFrame]:
-    """Fetch OHLCV data from local market_history.db, fallback to baostock.
+    """Fetch settled OHLCV bars from market_history.db (fallback baostock).
 
-    If include_realtime=True and market is open, appends today's partial bar
-    from Sina realtime API so VPA can see intraday action.
+    Always returns settled bars only. Realtime intraday bars are NEVER mixed
+    in here — they would pollute rolling stats (vol_ma, percentile ranks)
+    by adding a non-stationary partial-day observation. Use
+    ``_fetch_realtime_bar`` and ``_append_realtime_with_derived`` after
+    ``_compute_derived`` to graft the partial bar onto a settled
+    distribution.
+
+    The ``include_realtime`` parameter is kept for back-compat with callers
+    that pass it; it is ignored.
 
     ``as_of`` accepts either ``"YYYY-MM-DD"`` (EOD — include that date's close)
     or ``"YYYY-MM-DD HH:MM"`` (point-in-time — if HH:MM is pre-close, only
     bars < as_of_date are returned; this is what morning / intraday replay
     wants since today's close hasn't happened yet).
     """
+    del include_realtime
     if as_of:
-        include_realtime = False  # can't have "realtime" for a past date
-        # Respect point-in-time cut — pre-close replay excludes same-day EOD bar
         from alpha_agents.evolution.replay_mode import effective_eod_cut_date
         cut = effective_eod_cut_date(as_of) or as_of[:10]
     else:
@@ -60,7 +66,6 @@ def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
 
     history = get_local_history(code, days=days, as_of=cut)
     if not history or len(history) < 25:
-        # Fallback to baostock only when not in historical replay mode
         if not as_of:
             history = get_stock_history(code, days=days)
     if not history or len(history) < 25:
@@ -72,36 +77,109 @@ def _load_ohlcv(code: str, days: int = 60, include_realtime: bool = True,
             return None
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close", "volume"]).reset_index(drop=True)
-
-    # Append today's realtime bar if available and not already in history
-    if include_realtime and len(df) >= 25:
-        try:
-            from alpha_agents.data.market_data import get_realtime_quotes
-            from datetime import datetime
-            today = datetime.now().strftime("%Y-%m-%d")
-            last_date = str(df.iloc[-1].get("date", ""))
-
-            if last_date != today:
-                rt = get_realtime_quotes([code])
-                if rt and code in rt:
-                    q = rt[code]
-                    price = q.get("price", 0)
-                    if price > 0:
-                        today_bar = {
-                            "date": today,
-                            "open": q.get("open", price),
-                            "high": q.get("high", price),
-                            "low": q.get("low", price),
-                            "close": price,
-                            "volume": int(q.get("volume", 0)),
-                        }
-                        df = pd.concat([df, pd.DataFrame([today_bar])], ignore_index=True)
-                        logger.debug("Appended realtime bar for %s: close=%.2f vol=%d",
-                                     code, price, today_bar["volume"])
-        except Exception as e:
-            logger.debug("Realtime bar for %s failed: %s", code, e)
-
     return df if len(df) >= 25 else None
+
+
+def _fetch_realtime_bar(code: str) -> Optional[dict]:
+    """Pull today's partial intraday bar from Sina, or None."""
+    try:
+        from alpha_agents.data.market_data import get_realtime_quotes
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        rt = get_realtime_quotes([code])
+        if not rt or code not in rt:
+            return None
+        q = rt[code]
+        price = q.get("price", 0)
+        if price <= 0:
+            return None
+        return {
+            "date": today,
+            "open": float(q.get("open", price)),
+            "high": float(q.get("high", price)),
+            "low": float(q.get("low", price)),
+            "close": float(price),
+            "volume": int(q.get("volume", 0)),
+        }
+    except Exception as e:
+        logger.debug("Realtime bar for %s failed: %s", code, e)
+        return None
+
+
+def _append_realtime_with_derived(df_settled: pd.DataFrame, bar: dict) -> pd.DataFrame:
+    """Append a partial intraday bar to a derived dataframe.
+
+    The bar's derived columns (vol_ma, volume_ratio, bar_spread, close_position,
+    shadows, pct_change, vp_harmony) are evaluated against the *settled*
+    rolling stats — so the bar is observed against the right baseline rather
+    than allowed to influence its own rolling means. Percentile ranks
+    (vr_pct60, abspct_pct20, spread_pct20) are computed against the trailing
+    settled distributions.
+    """
+    if df_settled is None or len(df_settled) == 0:
+        return df_settled
+    last = df_settled.iloc[-1]
+    if str(last.get("date", "")) == str(bar.get("date", "")):
+        return df_settled  # same date already settled — don't double-count
+
+    settled_vol_ma = float(last.get("vol_ma")) if pd.notna(last.get("vol_ma")) else float("nan")
+    settled_vol_ma5 = float(last.get("vol_ma5")) if pd.notna(last.get("vol_ma5")) else float("nan")
+    last_close = float(last["close"])
+
+    o = float(bar["open"]); h = float(bar["high"]); l = float(bar["low"])
+    c = float(bar["close"]); v = float(bar["volume"])
+    hl = max(h - l, 0.0)
+    spread = hl / c if c > 0 else 0.0
+    cp = ((c - l) / hl) if hl > 0 else 0.5
+    upper = ((h - max(o, c)) / hl) if hl > 0 else 0.0
+    lower = ((min(o, c) - l) / hl) if hl > 0 else 0.0
+    bar_type = "阳线" if c > o else ("阴线" if c < o else "十字星")
+    vol_ratio = (v / settled_vol_ma) if settled_vol_ma and settled_vol_ma > 0 else float("nan")
+    pct = (c - last_close) / last_close if last_close > 0 else 0.0
+
+    if pct > 0 and vol_ratio > 1.0:
+        vph = "一致(涨+放量)"
+    elif pct < 0 and vol_ratio > 1.0:
+        vph = "背离(跌+放量)"
+    elif pct > 0 and vol_ratio < 0.8:
+        vph = "背离(涨+缩量)"
+    elif pct < 0 and vol_ratio < 0.8:
+        vph = "一致(跌+缩量)"
+    else:
+        vph = "中性"
+
+    def _rank_against(value: float, series: pd.Series) -> float:
+        s = series.dropna()
+        if len(s) == 0 or pd.isna(value):
+            return 0.5
+        # Percentile rank: fraction of past values <= the new value.
+        return float((s <= value).sum() / len(s))
+
+    vr_pct60 = _rank_against(
+        vol_ratio,
+        df_settled["volume_ratio"].tail(60),
+    ) if not pd.isna(vol_ratio) else 0.5
+    abspct_pct20 = _rank_against(
+        abs(pct),
+        df_settled["pct_change"].abs().tail(20),
+    )
+    spread_pct20 = _rank_against(
+        spread,
+        df_settled["bar_spread"].tail(20),
+    )
+
+    new_row = {
+        "date": bar["date"], "open": o, "high": h, "low": l, "close": c, "volume": v,
+        "vol_ma": settled_vol_ma, "volume_ratio": vol_ratio,
+        "bar_spread": spread, "close_position": cp, "bar_type": bar_type,
+        "upper_shadow": upper, "lower_shadow": lower,
+        "pct_change": pct, "vol_ma5": settled_vol_ma5,
+        "vol_trend_ratio": (settled_vol_ma5 / settled_vol_ma) if (settled_vol_ma and settled_vol_ma > 0) else float("nan"),
+        "vp_harmony": vph,
+        "vr_pct60": vr_pct60, "abspct_pct20": abspct_pct20, "spread_pct20": spread_pct20,
+        "obv": float(last.get("obv", 0)) + (v if c > last_close else (-v if c < last_close else 0)),
+    }
+    return pd.concat([df_settled, pd.DataFrame([new_row])], ignore_index=True)
 
 
 def _load_ohlcv_60min(code: str, bars: int = 80) -> Optional[pd.DataFrame]:
@@ -160,6 +238,15 @@ def _compute_derived(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     df["vol_ma5"] = df["volume"].rolling(5).mean()
     df["vol_trend_ratio"] = df["vol_ma5"] / df["vol_ma"]
 
+    # Rolling percentile ranks — replace fixed thresholds with stock-adaptive
+    # comparisons to recent norms (Anna Coulling: "qualitative comparison
+    # relative to recent norms"). Each bar's value is ranked within its own
+    # trailing window so a hot small-cap and a quiet bank-stock both get
+    # their "high volume" / "wide bar" detected against the right baseline.
+    df["vr_pct60"] = df["volume_ratio"].rolling(window=60, min_periods=20).rank(pct=True)
+    df["abspct_pct20"] = df["pct_change"].abs().rolling(window=20, min_periods=10).rank(pct=True)
+    df["spread_pct20"] = df["bar_spread"].rolling(window=20, min_periods=10).rank(pct=True)
+
     # Volume-price harmony labels
     df["vp_harmony"] = np.where(
         (df["pct_change"] > 0) & (df["volume_ratio"] > 1.0), "一致(涨+放量)",
@@ -185,13 +272,34 @@ def _compute_derived(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
 
 
 def _detect_patterns(df: pd.DataFrame) -> list[dict]:
-    """Detect key VPA patterns in the recent 5-day window. Returns structured list."""
+    """Detect VPA patterns from the recent window.
+
+    Each match is a *neutral physical observation* (volume rank, body width
+    rank, shadow ratios, close position, range position). Whether the
+    observation is bullish/bearish/inconclusive is decided by the LLM
+    against the Wyckoff framework — the code does not pre-label.
+
+    Threshold philosophy (Anna Coulling: "qualitative comparison relative
+    to recent norms"). Volume / abs-pct-change / body-spread are compared
+    to their own rolling-window percentile rank instead of fixed numbers.
+    Intra-bar geometry (close_position, upper_shadow, lower_shadow) stays
+    as absolute fractions because they are already normalized within the
+    bar.
+    """
     patterns = []
     if len(df) < 5:
         return patterns
 
     recent = df.tail(5)
     last = df.iloc[-1]
+
+    def _rank(row: pd.Series, col: str, default: float = 0.5) -> float:
+        """Return rolling percentile rank of `col` for this row, with default
+        when the rolling window has not yet built up."""
+        v = row.get(col, default)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return default
+        return float(v)
 
     # #9 Climax position weighting — compute 20-day range so climax detectors
     # can distinguish "selling climax at 20-day LOW" (real panic bottom) from
@@ -224,152 +332,137 @@ def _detect_patterns(df: pd.DataFrame) -> list[dict]:
 
     if price_up and vol_down:
         patterns.append({
-            "pattern": "top_divergence",
-            "label": "顶部背离",
-            "bullish": False,
-            "detail": f"近5日价格+{price_change_pct:.1f}% 但量能递减，上涨动能衰竭",
+            "pattern": "price_up_volume_down",
+            "label": "价升量减",
+            "bullish": None,
+            "detail": f"近5日价格+{price_change_pct:.1f}%，末日量/首日量={float(last_vol)/float(first_vol):.2f}",
         })
     if price_down and vol_up:
         patterns.append({
-            "pattern": "bottom_volume_spike",
-            "label": "底部放量",
-            "bullish": True,
-            "detail": f"近5日价格{price_change_pct:.1f}% 但量能递增，可能恐慌抛售或机构换手",
+            "pattern": "price_down_volume_up",
+            "label": "价跌量增",
+            "bullish": None,
+            "detail": f"近5日价格{price_change_pct:.1f}%，末日量/首日量={float(last_vol)/float(first_vol):.2f}",
         })
     if price_down and vol_down:
         patterns.append({
-            "pattern": "bottom_exhaustion",
-            "label": "卖压衰竭",
-            "bullish": True,
-            "detail": f"近5日价格{price_change_pct:.1f}% 且量能递减，空方力量枯竭",
+            "pattern": "price_down_volume_down",
+            "label": "价跌量减",
+            "bullish": None,
+            "detail": f"近5日价格{price_change_pct:.1f}%，末日量/首日量={float(last_vol)/float(first_vol):.2f}",
         })
     if price_up and vol_up:
         patterns.append({
-            "pattern": "healthy_uptrend",
-            "label": "健康上涨",
-            "bullish": True,
-            "detail": f"近5日价格+{price_change_pct:.1f}% 且量能配合递增",
+            "pattern": "price_up_volume_up",
+            "label": "价升量增",
+            "bullish": None,
+            "detail": f"近5日价格+{price_change_pct:.1f}%，末日量/首日量={float(last_vol)/float(first_vol):.2f}",
         })
 
-    # ── Selling Climax: last 3 bars ──
-    # #9: position-aware — climax at range LOW is the real panic bottom;
-    # climax at range MID is mid-trend continuation, often a faux signal.
+    # ── Wide down bar w/ high volume closing in upper half (last 3 bars) ──
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
         pct = row.get("pct_change", 0) or 0
         cp = row.get("close_position", 0.5) or 0.5
-        lower = row.get("lower_shadow", 0) or 0
+        vr_pct = _rank(row, "vr_pct60")
+        ap_pct = _rank(row, "abspct_pct20")
 
-        # Selling Climax: 急跌 + 巨量 + 收回过半
-        if vr > 2.0 and pct < -0.03 and cp > 0.5:
+        if vr_pct >= 0.85 and pct < 0 and ap_pct >= 0.85 and cp > 0.5:
             date_str = str(row.get("date", ""))[-5:]
             range_pos = _range_position(float(row["close"]))
-            # Strength adjustment by range position
-            if range_pos < 0.2:
-                # Climax at range low = real panic bottom, highest reversal value
-                pos_label = f"区间低位(底部{range_pos*100:.0f}%)"
-                interpretation = "经典恐慌见底信号"
-            elif range_pos < 0.4:
-                pos_label = f"区间中低位({range_pos*100:.0f}%)"
-                interpretation = "较强反转信号"
-            elif range_pos > 0.7:
-                # At range top — likely just profit-taking or a trap, not a real climax
-                pos_label = f"区间高位({range_pos*100:.0f}%)"
-                interpretation = "高位放量急跌，可能是派发开始而非恐慌见底"
-            else:
-                pos_label = f"区间中位({range_pos*100:.0f}%)"
-                interpretation = "中位climax可信度一般"
             patterns.append({
-                "pattern": "selling_climax",
-                "label": "卖出高潮",
-                "bullish": True,
+                "pattern": "wide_down_high_vol_close_up",
+                "label": "宽幅下跌巨量收上半",
+                "bullish": None,
                 "detail": (
-                    f"{date_str} 急跌{pct*100:.1f}% 量比{vr:.1f} 收盘位置{cp:.2f}，"
-                    f"{pos_label} — {interpretation}"
+                    f"{date_str} 跌{pct*100:.1f}%(20日{ap_pct*100:.0f}分位) "
+                    f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位) "
+                    f"收盘位置{cp:.2f} 20日区间位置{range_pos*100:.0f}%"
                 ),
             })
             break
 
-    # ── Buying Climax: last 3 bars ──
-    # #9: position-aware — climax at range HIGH is the real distribution top;
-    # climax at mid-range is often a pause before continuation, not a top.
+    # ── Wide up bar w/ high volume, long upper shadow, close in lower half ──
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
         pct = row.get("pct_change", 0) or 0
         upper = row.get("upper_shadow", 0) or 0
         cp = row.get("close_position", 0.5) or 0.5
+        vr_pct = _rank(row, "vr_pct60")
+        ap_pct = _rank(row, "abspct_pct20")
 
-        # Buying Climax: 急涨 + 巨量 + 长上影线 + 收在下半区
-        if vr > 2.0 and pct > 0.03 and upper > 0.4 and cp < 0.5:
+        if vr_pct >= 0.85 and pct > 0 and ap_pct >= 0.85 and upper > 0.4 and cp < 0.5:
             date_str = str(row.get("date", ""))[-5:]
             range_pos = _range_position(float(row["close"]))
-            if range_pos > 0.8:
-                # Climax at range high = real distribution top
-                pos_label = f"区间高位(顶部{range_pos*100:.0f}%)"
-                interpretation = "经典派发顶信号"
-            elif range_pos > 0.6:
-                pos_label = f"区间中高位({range_pos*100:.0f}%)"
-                interpretation = "较强顶部信号"
-            elif range_pos < 0.3:
-                # Mid-low range climax — likely just bounce failure, not top
-                pos_label = f"区间低位({range_pos*100:.0f}%)"
-                interpretation = "低位冲高回落，可能只是反弹失败而非派发顶"
-            else:
-                pos_label = f"区间中位({range_pos*100:.0f}%)"
-                interpretation = "中位climax可信度一般"
             patterns.append({
-                "pattern": "buying_climax",
-                "label": "买入高潮",
-                "bullish": False,
+                "pattern": "wide_up_high_vol_upper_shadow",
+                "label": "宽幅上涨巨量长上影",
+                "bullish": None,
                 "detail": (
-                    f"{date_str} 急涨{pct*100:.1f}% 量比{vr:.1f} 长上影收低位，"
-                    f"{pos_label} — {interpretation}"
+                    f"{date_str} 涨{pct*100:.1f}%(20日{ap_pct*100:.0f}分位) "
+                    f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位) "
+                    f"上影{upper:.2f} 收盘位置{cp:.2f} 20日区间位置{range_pos*100:.0f}%"
                 ),
             })
             break
 
-    # ── 放量滞涨（distribution）──
+    # ── High volume + narrow body (no-progress on heavy turnover) ──
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
         pct = row.get("pct_change", 0) or 0
         spread = row.get("bar_spread", 0) or 0
+        vr_pct = _rank(row, "vr_pct60")
+        ap_pct = _rank(row, "abspct_pct20")
+        sp_pct = _rank(row, "spread_pct20")
 
-        if vr > 1.8 and abs(pct) < 0.01 and spread < 0.015:
+        if vr_pct >= 0.80 and ap_pct <= 0.30 and sp_pct <= 0.25:
             date_str = str(row.get("date", ""))[-5:]
             patterns.append({
-                "pattern": "distribution",
-                "label": "放量滞涨",
-                "bullish": False,
-                "detail": f"{date_str} 量比{vr:.1f} 但实体窄、价格几乎不动，多空分歧大（疑似派发）",
+                "pattern": "high_vol_narrow_body",
+                "label": "高量窄实体",
+                "bullish": None,
+                "detail": (
+                    f"{date_str} 量比{vr:.1f}(60日{vr_pct*100:.0f}分位) "
+                    f"涨跌{pct*100:+.1f}%(20日{ap_pct*100:.0f}分位) "
+                    f"实体{spread:.3f}(20日{sp_pct*100:.0f}分位)"
+                ),
             })
             break
 
-    # ── no_demand / no_supply (reaction bars) ──
+    # ── Low volume up bar / down bar (reaction bars) ──
     for i in range(max(-3, -len(df)), 0):
         row = df.iloc[i]
         vr = row.get("volume_ratio", 0) or 0
         pct = row.get("pct_change", 0) or 0
         bar_type = row.get("bar_type", "")
+        vr_pct = _rank(row, "vr_pct60")
+        ap_pct = _rank(row, "abspct_pct20")
 
-        if vr < 0.7 and pct > 0.005 and bar_type == "阳线":
+        if vr_pct <= 0.20 and ap_pct >= 0.20 and bar_type == "阳线":
             date_str = str(row.get("date", ""))[-5:]
             patterns.append({
-                "pattern": "no_demand",
-                "label": "无需求反弹",
-                "bullish": False,
-                "detail": f"{date_str} 量比{vr:.1f} 阳线反弹但极度缩量，买方力量不足",
+                "pattern": "low_vol_up_bar",
+                "label": "缩量阳线",
+                "bullish": None,
+                "detail": (
+                    f"{date_str} 阳线 涨{pct*100:.1f}%(20日{ap_pct*100:.0f}分位) "
+                    f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                ),
             })
             break
-        if vr < 0.7 and pct < -0.005 and bar_type == "阴线":
+        if vr_pct <= 0.20 and ap_pct >= 0.20 and bar_type == "阴线":
             date_str = str(row.get("date", ""))[-5:]
             patterns.append({
-                "pattern": "no_supply",
-                "label": "无供给回调",
-                "bullish": True,
-                "detail": f"{date_str} 量比{vr:.1f} 阴线但缩量，卖方力量衰竭",
+                "pattern": "low_vol_down_bar",
+                "label": "缩量阴线",
+                "bullish": None,
+                "detail": (
+                    f"{date_str} 阴线 跌{pct*100:.1f}%(20日{ap_pct*100:.0f}分位) "
+                    f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                ),
             })
             break
 
@@ -385,136 +478,178 @@ def _detect_patterns(df: pd.DataFrame) -> list[dict]:
         spread = row.get("bar_spread", 0) or 0
         bar_type = row.get("bar_type", "")
         date_str = str(row.get("date", ""))[-5:]
+        vr_pct = _rank(row, "vr_pct60")
+        sp_pct = _rank(row, "spread_pct20")
 
-        # 射击十字星: 长上影(>0.5) + 实体窄 + 收在下半区(<0.3)
-        if upper > 0.5 and spread < 0.02 and cp < 0.3 and vr > 0.8:
-            if vr > 1.5:
-                detail = f"{date_str} 射击十字星+高量({vr:.1f})=局内人大量卖出，重大反转信号"
-            else:
-                detail = f"{date_str} 射击十字星+平均量({vr:.1f})=中等回调信号"
-            patterns.append({"pattern": "shooting_star", "label": "射击十字星",
-                             "bullish": False,
-                             "detail": detail})
+        # Long upper shadow + narrow body + close in lower third (volume not in low tail)
+        if upper > 0.5 and sp_pct <= 0.40 and cp < 0.3 and vr_pct >= 0.40:
+            patterns.append({"pattern": "long_upper_shadow_narrow_body",
+                             "label": "长上影窄实体收低位",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} 上影{upper:.2f} 实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"收盘位置{cp:.2f} 量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                             )})
             break
 
-        # 锤头线 vs 吊人线: 同一形态（长下影+收高位），趋势方向决定含义
-        # Anna Coulling: 下跌中 = 锤头线(bullish), 上涨中 = 吊人线(bearish)
-        is_hammer_shape = lower > 0.5 and spread < 0.02 and cp > 0.7 and vr > 0.8
+        # Long lower shadow + narrow body + close in upper third
+        is_hammer_shape = lower > 0.5 and sp_pct <= 0.40 and cp > 0.7 and vr_pct >= 0.40
 
         if is_hammer_shape and price_down:
-            # 下跌趋势中的锤头线 = bullish (局内人买入)
-            if vr > 1.5:
-                detail = f"{date_str} 下跌中锤头线+高量({vr:.1f})=局内人大量买入，底部吸收候选"
-            else:
-                detail = f"{date_str} 下跌中锤头线+平均量({vr:.1f})=日内反弹机会"
-            patterns.append({"pattern": "hammer", "label": "锤头线(下跌底部)",
-                             "bullish": True,
-                             "detail": detail})
+            patterns.append({"pattern": "long_lower_shadow_in_downtrend",
+                             "label": "下跌中长下影窄实体",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} 下影{lower:.2f} 实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"收盘位置{cp:.2f} 量比{vr:.1f}(60日{vr_pct*100:.0f}分位) "
+                                 f"5日趋势-{abs(price_change_pct):.1f}%"
+                             )})
             break
 
         if is_hammer_shape and price_up:
-            # 上涨趋势中的同样形态 = 吊人线 = bearish (卖压第一信号)
-            detail = f"{date_str} 上涨中吊人线+量比({vr:.1f})=卖压出现的第一信号"
-            patterns.append({"pattern": "hanging_man", "label": "吊人线(上涨顶部)",
-                             "bullish": False,
-                             "detail": detail})
+            patterns.append({"pattern": "long_lower_shadow_in_uptrend",
+                             "label": "上涨中长下影窄实体",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} 下影{lower:.2f} 实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"收盘位置{cp:.2f} 量比{vr:.1f}(60日{vr_pct*100:.0f}分位) "
+                                 f"5日趋势+{price_change_pct:.1f}%"
+                             )})
             break
 
-        # 高实体 + 低量 = 陷阱
-        if spread > 0.03 and vr < 0.7:
-            direction = "多头" if bar_type == "阳线" else "空头"
-            patterns.append({"pattern": "high_body_low_vol", "label": f"高实体低量{direction}陷阱",
-                             "bullish": False,
-                             "detail": f"{date_str} 宽实体{bar_type}但量比仅{vr:.1f}=局内人未参与，可能是{direction}陷阱"})
+        # Wide body + low volume
+        if sp_pct >= 0.85 and vr_pct <= 0.30:
+            patterns.append({"pattern": "wide_body_low_vol", "label": f"宽实体缩量{bar_type}",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} {bar_type} 实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                             )})
             break
 
-        # 低实体 + 高量 (分阳/阴)
-        if spread < 0.01 and vr > 1.5:
-            if bar_type == "阳线":
-                patterns.append({"pattern": "low_body_high_vol_yang", "label": "低实体阳线+高量=牛市力竭",
-                                 "bullish": False,
-                                 "detail": f"{date_str} 窄阳线+量比{vr:.1f}=多空拉锯，上涨动力衰竭"})
-            elif bar_type == "阴线":
-                patterns.append({"pattern": "low_body_high_vol_yin", "label": "低实体阴线+高量=熊转牛",
-                                 "bullish": True,
-                                 "detail": f"{date_str} 窄阴线+量比{vr:.1f}=局内人嗅到机会，潜在反转"})
+        # Narrow body + high volume
+        if sp_pct <= 0.20 and vr_pct >= 0.75:
+            patterns.append({"pattern": "narrow_body_high_vol",
+                             "label": f"窄实体高量{bar_type}",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} {bar_type} 实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                             )})
             break
 
-        # 长腿十字线 + 低量 = 震仓假信号
-        if upper > 0.3 and lower > 0.3 and spread < 0.01 and vr < 0.7:
-            patterns.append({"pattern": "long_legged_doji_trap", "label": "长腿十字线+低量=震仓",
-                             "bullish": False,
-                             "detail": f"{date_str} 上下影线都长但缩量({vr:.1f})=局内人制造波动，假信号"})
+        # Long-legged doji + low volume
+        if upper > 0.3 and lower > 0.3 and sp_pct <= 0.20 and vr_pct <= 0.30:
+            patterns.append({"pattern": "long_legged_doji_low_vol",
+                             "label": "长腿十字缩量",
+                             "bullish": None,
+                             "detail": (
+                                 f"{date_str} 上影{upper:.2f} 下影{lower:.2f} "
+                                 f"实体{spread:.3f}(20日{sp_pct*100:.0f}分位) "
+                                 f"量比{vr:.1f}(60日{vr_pct*100:.0f}分位)"
+                             )})
             break
 
-    # ── 突破检测 (Anna Coulling: 整理区间积累后的突破) ──
+    # ── Last-bar interactions with 20-day range ──
     if len(df) >= 20:
         last_row = df.iloc[-1]
         last_vr = last_row.get("volume_ratio", 0) or 0
         last_close = last_row["close"]
         last_date = str(last_row.get("date", ""))[-5:]
+        last_vr_pct = _rank(last_row, "vr_pct60")
 
         recent_20 = df.tail(20)
         resistance = recent_20["high"].iloc[:-1].max()
         support = recent_20["low"].iloc[:-1].min()
 
-        # Anna Coulling 因果定律: 整理越久突破越强
-        # 检测是否存在整理区间: 近10日波动率 < 近20日波动率的60%（收窄）
+        # Compression of recent volatility (close-stddev / mean) — relative
+        # ratio, no absolute thresholds. The 0.7 cutoff is a within-stock
+        # comparison: 10d coefficient of variation must be at least 30%
+        # tighter than 20d to count as consolidation.
         if len(df) >= 10:
             vol_10d = df["close"].tail(10).std() / df["close"].tail(10).mean()
             vol_20d = df["close"].tail(20).std() / df["close"].tail(20).mean()
-            is_consolidation = vol_10d < vol_20d * 0.7  # 近期波动收窄=整理
+            is_consolidation = vol_10d < vol_20d * 0.7
         else:
             is_consolidation = False
+            vol_10d = vol_20d = 0.0
 
-        # 真突破: 整理后 + 穿越阻力 + 巨量
-        if last_close > resistance and last_vr > 1.5 and is_consolidation:
-            patterns.append({"pattern": "volume_breakout", "label": "整理后放量突破",
-                             "bullish": True,
-                             "detail": f"{last_date} 整理区间后突破{resistance:.2f}+量比{last_vr:.1f}=真突破（因果定律）"})
+        # Close above 20-day resistance + high volume + prior consolidation
+        if last_close > resistance and last_vr_pct >= 0.75 and is_consolidation:
+            patterns.append({"pattern": "resistance_break_high_vol_after_consolidation",
+                             "label": "整理后破阻力高量",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 收{last_close:.2f}>20日阻力{resistance:.2f} "
+                                 f"量比{last_vr:.1f}(60日{last_vr_pct*100:.0f}分位) "
+                                 f"10日/20日波动率={vol_10d/max(vol_20d,1e-9):.2f}"
+                             )})
 
-        # 假突破: 穿越但低量 (不管是否整理)
-        elif last_close > resistance and last_vr < 0.8:
-            patterns.append({"pattern": "fake_breakout", "label": "假突破(低量)",
-                             "bullish": False,
-                             "detail": f"{last_date} 突破{resistance:.2f}但量比仅{last_vr:.1f}=陷阱"})
+        # Close above 20-day resistance + low volume
+        elif last_close > resistance and last_vr_pct <= 0.25:
+            patterns.append({"pattern": "resistance_break_low_vol",
+                             "label": "破阻力缩量",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 收{last_close:.2f}>20日阻力{resistance:.2f} "
+                                 f"量比{last_vr:.1f}(60日{last_vr_pct*100:.0f}分位)"
+                             )})
 
-        # 没整理就冲高 + 放量 = 追高不是突破
-        elif last_close > resistance and last_vr > 1.5 and not is_consolidation:
-            patterns.append({"pattern": "fake_breakout", "label": "无整理冲高(非真突破)",
-                             "bullish": False,
-                             "detail": f"{last_date} 冲破{resistance:.2f}+放量但近期无整理=可能是追高"})
+        # Close above 20-day resistance + high volume + no prior consolidation
+        elif last_close > resistance and last_vr_pct >= 0.75 and not is_consolidation:
+            patterns.append({"pattern": "resistance_break_high_vol_no_consolidation",
+                             "label": "无整理破阻力高量",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 收{last_close:.2f}>20日阻力{resistance:.2f} "
+                                 f"量比{last_vr:.1f}(60日{last_vr_pct*100:.0f}分位) "
+                                 f"10日/20日波动率={vol_10d/max(vol_20d,1e-9):.2f}"
+                             )})
 
-        # 放量止跌: 跌到支撑附近 + 长下影 + 高量 + 收上半
+        # Touch of support + long lower shadow + high volume + close upper half
         last_lower = last_row.get("lower_shadow", 0) or 0
         last_cp = last_row.get("close_position", 0.5) or 0.5
         if (last_row["low"] <= support * 1.02 and last_lower > 0.4
-                and last_vr > 1.5 and last_cp > 0.5):
-            patterns.append({"pattern": "stopping_volume", "label": "放量止跌",
-                             "bullish": True,
-                             "detail": f"{last_date} 触及支撑{support:.2f}+长下影+高量({last_vr:.1f})+收上半=恐慌抛售高潮/底部吸收候选"})
+                and last_vr_pct >= 0.75 and last_cp > 0.5):
+            patterns.append({"pattern": "support_test_long_lower_shadow_high_vol",
+                             "label": "测试支撑长下影高量",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 低{float(last_row['low']):.2f}≈支撑{support:.2f} "
+                                 f"下影{last_lower:.2f} 量比{last_vr:.1f}(60日{last_vr_pct*100:.0f}分位) "
+                                 f"收盘位置{last_cp:.2f}"
+                             )})
 
-        # 需求测试失败: 近期有派发信号 + 缩量反弹
-        # 简化: 近5日有 distribution/buying_climax + 最新一根是缩量阳线
-        has_bearish_prior = any(p["pattern"] in ("distribution", "buying_climax", "topping_volume")
-                                for p in patterns)
-        if has_bearish_prior and last_row.get("bar_type") == "阳线" and last_vr < 0.8:
-            patterns.append({"pattern": "demand_test_fail", "label": "需求测试失败",
-                             "bullish": False,
-                             "detail": f"{last_date} 派发后缩量反弹({last_vr:.1f})=买盘耗尽，准备下跌"})
+        # Low-volume up-bar following a recent narrow-body-high-vol or wide-up-with-upper-shadow
+        has_recent_topping = any(p["pattern"] in (
+            "high_vol_narrow_body",
+            "wide_up_high_vol_upper_shadow",
+            "topping_progression") for p in patterns)
+        if has_recent_topping and last_row.get("bar_type") == "阳线" and last_vr_pct <= 0.30:
+            patterns.append({"pattern": "low_vol_up_bar_after_topping_pattern",
+                             "label": "高量小实体后缩量阳线",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 阳线 量比{last_vr:.1f}(60日{last_vr_pct*100:.0f}分位)"
+                             )})
 
-    # ── 放量止涨 (实体逐渐缩小 + 量放大) ──
+    # ── 3-bar progression: body shrinks, volume rises, price up ──
     if len(df) >= 5:
         last3 = df.tail(3)
         spreads = last3["bar_spread"].tolist()
         vrs = [v if not pd.isna(v) else 0 for v in last3["volume_ratio"].tolist()]
-        # 实体逐渐缩小 + 量逐渐放大 + 整体在涨
+        last_vr_pct = _rank(df.iloc[-1], "vr_pct60")
         if (len(spreads) == 3 and spreads[0] > spreads[1] > spreads[2]
-                and vrs[0] < vrs[1] < vrs[2] and vrs[2] > 1.2 and price_up):
+                and vrs[0] < vrs[1] < vrs[2] and last_vr_pct >= 0.60 and price_up):
             last_date = str(df.iloc[-1].get("date", ""))[-5:]
-            patterns.append({"pattern": "topping_volume", "label": "放量止涨(弧形顶)",
-                             "bullish": False,
-                             "detail": f"{last_date} 实体逐渐缩小+量逐渐放大=派筹尾声，买入高潮顶部候选"})
+            patterns.append({"pattern": "topping_progression",
+                             "label": "实体递缩量递增",
+                             "bullish": None,
+                             "detail": (
+                                 f"{last_date} 实体{spreads[0]:.3f}→{spreads[1]:.3f}→{spreads[2]:.3f} "
+                                 f"量比{vrs[0]:.1f}→{vrs[1]:.1f}→{vrs[2]:.1f} "
+                                 f"末根60日{last_vr_pct*100:.0f}分位"
+                             )})
 
     return patterns
 
@@ -692,10 +827,14 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
         ctx["volatility_20d"] = round(float(vol_20d * 100), 2)
         if vol_20d > 0 and vol_10d < vol_20d * 0.6:
             ctx["consolidation"] = True
-            ctx["consolidation_note"] = f"近10日波动率({vol_10d*100:.2f}%)明显低于20日({vol_20d*100:.2f}%)，处于整理区间（因果定律：蓄势越久突破越大）"
+            ctx["consolidation_note"] = (
+                f"近10日波动率{vol_10d*100:.2f}% < 20日波动率{vol_20d*100:.2f}% × 0.6"
+            )
         else:
             ctx["consolidation"] = False
-            ctx["consolidation_note"] = f"未检测到整理区间（近10日波动率{vol_10d*100:.2f}% vs 20日{vol_20d*100:.2f}%）"
+            ctx["consolidation_note"] = (
+                f"近10日波动率{vol_10d*100:.2f}% vs 20日波动率{vol_20d*100:.2f}%"
+            )
 
     # ── P0.1 Consolidation DURATION (Anna Coulling 因果定律 — 量化版) ──
     # 静态波动率检测只告诉是/否，但因果定律的关键是"多久"。这里数出连续多少
@@ -710,29 +849,20 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
             else:
                 break
     ctx["consolidation_days"] = consolidation_days
-    if consolidation_days >= 30:
-        ctx["consolidation_strength"] = f"长期整理 ({consolidation_days}日)，蓄势充分，突破后空间大"
-    elif consolidation_days >= 15:
-        ctx["consolidation_strength"] = f"中期整理 ({consolidation_days}日)，蓄势中等"
-    elif consolidation_days >= 7:
-        ctx["consolidation_strength"] = f"短期整理 ({consolidation_days}日)"
-    else:
-        ctx["consolidation_strength"] = f"未形成整理 ({consolidation_days}日)"
+    ctx["consolidation_strength"] = (
+        f"连续 {consolidation_days} 日 close 在 20日 median ±5% 区间内"
+    )
 
-    # ── #10: Re-accumulation vs primary accumulation disambiguation ──
-    # Anna Coulling + Wyckoff: consolidations look the same on the chart but
-    # imply VERY different target sizes depending on what came BEFORE:
-    #   - After a downtrend → PRIMARY accumulation → big move up (2-3× range)
-    #   - After an uptrend   → RE-accumulation → modest continuation (1.2-1.5×)
-    #   - After a flat range → just noise, low conviction either way
-    # This directly informs the target_zone multiplier the LLM uses.
+    # Re-accumulation vs primary accumulation disambiguation. Anna's
+    # cause-and-effect law is qualitative: deeper prior downtrend → stronger
+    # potential rebound after accumulation. We surface ONLY the categorical
+    # context (prior trend %, accumulation type) and let the LLM judge target
+    # magnitude. Numeric multipliers (2-3×, 1.2-1.5× …) used to live here but
+    # had no per-stock backtest validation, so they were removed.
     if consolidation_days >= 7 and median_n > 0:
-        # The consolidation began at index `-consolidation_days` (newest-first).
-        # We want the trend over the ~30 bars IMMEDIATELY before that — i.e.
-        # from index `-(consolidation_days + 30)` to `-consolidation_days`.
         look_back_span = 30
         look_back_start = consolidation_days + look_back_span
-        look_back_end = consolidation_days  # exactly where consolidation began
+        look_back_end = consolidation_days
         if len(closes) >= look_back_start:
             prior_start = closes.iloc[-look_back_start]
             prior_end = closes.iloc[-look_back_end]
@@ -740,32 +870,18 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
             ctx["consolidation_prior_trend_pct"] = round(float(prior_trend_pct), 1)
             if prior_trend_pct < -15:
                 ctx["accumulation_type"] = "primary_accumulation"
-                ctx["accumulation_note"] = (
-                    f"整理之前（约 {look_back_end}~{look_back_start} 根 bar 前）下跌 "
-                    f"{prior_trend_pct:.1f}% — 这是 PRIMARY accumulation（底部吸筹），"
-                    f"突破目标乘数 2-3×（因果定律：下跌越深，反弹越大）"
-                )
             elif prior_trend_pct > 15:
                 ctx["accumulation_type"] = "re_accumulation"
-                ctx["accumulation_note"] = (
-                    f"整理之前上涨 {prior_trend_pct:+.1f}% — 这是 RE-accumulation（中继平台），"
-                    f"突破目标乘数 1.2-1.5×（主升浪已过，二段相对有限）"
-                )
             elif prior_trend_pct < -5:
                 ctx["accumulation_type"] = "shallow_bottom"
-                ctx["accumulation_note"] = (
-                    f"整理前轻微下跌 {prior_trend_pct:.1f}%，乘数 1.5-2×（浅底吸筹）"
-                )
             elif prior_trend_pct > 5:
                 ctx["accumulation_type"] = "shallow_re_accumulation"
-                ctx["accumulation_note"] = (
-                    f"整理前轻微上涨 {prior_trend_pct:+.1f}%，乘数 1.0-1.3×"
-                )
             else:
                 ctx["accumulation_type"] = "flat"
-                ctx["accumulation_note"] = (
-                    f"整理前价格接近平衡（{prior_trend_pct:+.1f}%），低 conviction，乘数 ~1×"
-                )
+            ctx["accumulation_note"] = (
+                f"整理前 {look_back_end}~{look_back_start} bar 期间价格变动 "
+                f"{prior_trend_pct:+.1f}% (类型: {ctx['accumulation_type']})"
+            )
 
     # ── Trend strength (10-day, 20-day) ──
     if len(closes) >= 20:
@@ -897,28 +1013,15 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
                         avg_up_vol = None
                         vol_asymmetry = None
 
-                    # Label: what does the volume pattern tell us?
-                    if avg_down_vol > 1.3:
-                        # Volume significantly elevated on down days
-                        if vol_asymmetry is not None and vol_asymmetry > 0.2:
-                            ctx["volume_rel_strength_label"] = (
-                                f"成交量异常（下跌日放量 {avg_down_vol:.1f}× > 上涨日 {avg_up_vol:.1f}×，"
-                                f"非对称放量 — 机构在下跌日悄悄接货的经典信号）"
-                            )
-                        else:
-                            ctx["volume_rel_strength_label"] = (
-                                f"下跌日放量 {avg_down_vol:.1f}×（高于自身20日均量）— "
-                                f"有买盘承接，不是单向抛售"
-                            )
-                    elif avg_down_vol < 0.7:
+                    # Neutral physical descriptor — the LLM judges what the
+                    # asymmetry means in the current Wyckoff context.
+                    if avg_up_vol is not None:
                         ctx["volume_rel_strength_label"] = (
-                            f"下跌日缩量 {avg_down_vol:.1f}×（低于20日均量）— "
-                            f"抛压不重，但也缺乏买盘兴趣"
+                            f"下跌日均量比 {avg_down_vol:.2f}, 上涨日均量比 {avg_up_vol:.2f}, "
+                            f"差值 {vol_asymmetry:+.2f}"
                         )
                     else:
-                        ctx["volume_rel_strength_label"] = (
-                            f"下跌日量能 {avg_down_vol:.1f}×（正常）"
-                        )
+                        ctx["volume_rel_strength_label"] = f"下跌日均量比 {avg_down_vol:.2f}"
         except Exception:
             pass  # Best-effort signal — don't fail VPA if index data unavailable
 
@@ -1034,7 +1137,36 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
     # ── OBV + volume regime ──
     lines.append(f"**OBV 趋势（10日）**: {_obv_trend(df)}")
     vr = _volume_regime(df)
-    lines.append(f"**近5日量能状态**: {vr['regime']}（5日/20日均量 = {vr['ratio_5d_vs_20d']}）\n")
+    lines.append(f"**近5日量能状态**: {vr['regime']}（5日/20日均量 = {vr['ratio_5d_vs_20d']}）")
+
+    # ── 5-day vp_harmony aggregate (Anna 第一层判据 — challenge gate input) ──
+    last5 = df.tail(5)
+    up_vol = float(last5.loc[last5["close"] > last5["open"], "volume"].sum())
+    down_vol = float(last5.loc[last5["close"] < last5["open"], "volume"].sum())
+    if down_vol <= 0 and up_vol > 0:
+        vph_label, vph_dir = "bullish (跌日无量)", "bullish"
+    elif up_vol <= 0 and down_vol > 0:
+        vph_label, vph_dir = "bearish (涨日无量)", "bearish"
+    elif up_vol > 1.2 * down_vol:
+        vph_label, vph_dir = f"bullish (涨日累计量 {up_vol/max(down_vol,1):.2f}× 跌日累计量)", "bullish"
+    elif down_vol > 1.2 * up_vol:
+        vph_label, vph_dir = f"bearish (跌日累计量 {down_vol/max(up_vol,1):.2f}× 涨日累计量)", "bearish"
+    else:
+        vph_label, vph_dir = "neutral (双向相当)", "neutral"
+    lines.append(
+        f"**近5日量价配合（vp_harmony，第一层挑战层输入）**: **{vph_label}**"
+    )
+    if vph_dir == "bullish":
+        lines.append(
+            "> 你若判定 phase 为 派发尾声/派发中期/下跌系列（与 vph 矛盾）"
+            "→ 必须在 reason 中列出已满足的具体 BC 硬性条件，否则最多标'派发初期 confirmed=false'"
+        )
+    elif vph_dir == "bearish":
+        lines.append(
+            "> 你若判定 phase 为 拉升中期/拉升尾声/上涨系列（与 vph 矛盾）"
+            "→ 必须在 reason 中列出已满足的具体 SC 硬性条件，否则最多标'拉升初期 confirmed=false'"
+        )
+    lines.append("")
 
     # ── Daily K-line table ──
     lines.append("### 逐日量价数据\n")
@@ -1052,35 +1184,45 @@ def _format_text(code: str, name: str, df: pd.DataFrame,
             dt = f"{dt}(盘中实时)"
         pct = (row["pct_change"] * 100) if pd.notna(row["pct_change"]) else 0
         spread = row["bar_spread"]
-        spread_label = "宽" if spread > 0.03 else ("窄" if spread < 0.015 else "中")
+        sp_pct = row.get("spread_pct20", 0.5)
+        if pd.isna(sp_pct):
+            sp_pct = 0.5
+        spread_label = (
+            "宽" if sp_pct >= 0.80 else ("窄" if sp_pct <= 0.20 else "中")
+        )
         cp = row["close_position"]
         cp_label = "高位" if cp > 0.7 else ("低位" if cp < 0.3 else "中位")
         vol_r = row["volume_ratio"] if pd.notna(row["volume_ratio"]) else 0
-        vr_label = f"{vol_r:.1f}"
-        if vol_r > 2.0:
-            vr_label += "(巨量)"
-        elif vol_r > 1.5:
-            vr_label += "(明显放量)"
-        elif vol_r > 1.0:
-            vr_label += "(温和放量)"
-        elif vol_r < 0.5:
-            vr_label += "(极度缩量)"
-        elif vol_r < 0.8:
-            vr_label += "(缩量)"
+        vr_pct = row.get("vr_pct60", 0.5)
+        if pd.isna(vr_pct):
+            vr_pct = 0.5
+        # Bucket via percentile rank (each stock's own recent norm).
+        if vr_pct >= 0.95:
+            vr_tag = "极放量"
+        elif vr_pct >= 0.80:
+            vr_tag = "明显放量"
+        elif vr_pct >= 0.60:
+            vr_tag = "温和放量"
+        elif vr_pct <= 0.05:
+            vr_tag = "极缩量"
+        elif vr_pct <= 0.20:
+            vr_tag = "缩量"
+        else:
+            vr_tag = "中性"
+        vr_label = f"{vol_r:.1f}({vr_tag},60日{vr_pct*100:.0f}分位)"
 
         lines.append(
-            f"| {dt} | {row['bar_type']} | {pct:+.1f}% | {spread_label}({spread:.3f}) "
+            f"| {dt} | {row['bar_type']} | {pct:+.1f}% | {spread_label}({spread:.3f},20日{sp_pct*100:.0f}分位) "
             f"| {cp_label}({cp:.2f}) | {row['upper_shadow']:.2f} | {row['lower_shadow']:.2f} "
             f"| {vr_label} | {row['vp_harmony']} |"
         )
 
-    lines.append("\n### 关键量价模式识别\n")
+    lines.append("\n### 形态识别（中性物理描述，方向由 LLM 在威科夫上下文中判断）\n")
     if patterns:
         for p in patterns:
-            marker = "✓" if p["bullish"] else "✗"
-            lines.append(f"- [{marker}] **{p['label']}**（{p['pattern']}）: {p['detail']}")
+            lines.append(f"- **{p['label']}**（{p['pattern']}）: {p['detail']}")
     else:
-        lines.append("- 近期无显著量价异常模式")
+        lines.append("- 近期无显著形态")
 
     return "\n".join(lines)
 
@@ -1124,15 +1266,14 @@ def _format_60min_section(df_60min: pd.DataFrame, patterns_60min: list[dict]) ->
         )
 
     # 60-min patterns
-    lines.append("\n**60分钟模式**:")
+    lines.append("\n**60分钟形态**（中性物理描述）:")
     if patterns_60min:
         for p in patterns_60min:
-            marker = "✓" if p["bullish"] else "✗"
-            lines.append(f"- [{marker}] {p['label']}: {p['detail']}")
+            lines.append(f"- {p['label']}（{p['pattern']}）: {p['detail']}")
     else:
-        lines.append("- 近12根60分钟bar无显著异常模式")
+        lines.append("- 近12根60分钟bar无显著形态")
 
-    lines.append("\n> 使用指南：60分钟 bar 揭示当日盘中资金行为。如日线看多但60分钟显示 shooting_star，说明入场时机未到；日线横盘但60分钟连续缩量 no_supply，说明底部可能已到。")
+    lines.append("\n> 使用指南：60分钟 bar 揭示当日盘中资金行为，与日线 bar 一同放入威科夫框架解读。")
 
     return "\n".join(lines)
 
@@ -1208,7 +1349,55 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 | 上涨中量能逐步萎缩 | markup 减弱（"volume drying up on advance"）|
 | 下跌中量能逐步萎缩 | markdown 减弱（"selling exhausted"）|
 
-**判 phase 必须先看量价配合方向**——与方向矛盾的 phase 必须在 reason 中说明，不允许用 confidence 数值代替证据。
+**第一层是挑战层（challenge gate），不是禁止令。** 5 日 vp_harmony 标签就在输入数据里——你做 phase 判断之前必须先读它。
+
+**与 5 日 vp_harmony 方向矛盾的 phase 判定必须以结构化 checklist 履行解释义务**——禁止用自然语言空话（如"BC confirmed""量价配合转熊"）应付，必须在 VERDICT JSON 的 `vph_conflict` 字段中**填入具体数字**，让代码可逐项核验。
+
+**触发条件**（满足任一即必须填 `vph_conflict.exists=true`）：
+
+- phase 系列 ∈ {派发尾声, 派发中期, 派发初期, 下跌, 下跌初期, 下跌尾声} 但 5 日 vph = bullish
+- phase 系列 ∈ {拉升, 拉升中期, 拉升尾声, 买入高峰} 但 5 日 vph = bearish
+
+**填充要求**（所有数字必须来自输入数据，不允许估计或留 null）：
+
+```json
+"vph_conflict": {
+  "exists": true,
+  "climax_type": "BC",                  // BC / SC / UTAD / Spring / SOS / SOW
+  "climax_date": "MM-DD",               // 你认为承担 climactic 角色的具体那一根 K 线
+  "extended_trend_20d_pct": +18.5,       // 来自结构性上下文 trend_20d_pct
+  "climax_volume_ratio": 2.3,            // 该日 volume_ratio (来自逐日表)
+  "climax_range_vs_5d_avg_x": 1.7,       // 该日 (high-low) ÷ 近5日平均(high-low)，自己算
+  "climax_shadow_ratio": 0.55,           // BC: 上影线长度 / (high - low), 范围 [0,1] (来自逐日表的"上影"列); SC: 下影线长度 / (high - low), 范围 [0,1] (来自逐日表的"下影"列)。**禁止**用"上影/实体"或"上影/收盘价"等其他比例，必须是占整根 K 线高低差的比例。
+  "climax_close_position": 0.32,         // BC: 必须 < 0.5; SC: 必须 > 0.5
+  "post_bar_reverse_pct_3d": null        // 信号日后 1-3 根 K 线反向走出 %; 不足 3 天则 null
+}
+```
+
+**硬性核验规则**（任一失败 → phase 最多标"初期" 且 confirmed=false，phase_change.confirmed=false）：
+
+| 字段 | BC 通过条件 | SC 通过条件 |
+|---|---|---|
+| extended_trend_20d_pct | ≥ +10% (已延伸涨势) | ≤ −10% |
+| climax_volume_ratio | ≥ 1.5 | ≥ 1.5 |
+| climax_range_vs_5d_avg_x | ≥ 1.5 | ≥ 1.5 |
+| climax_shadow_ratio | ≥ 0.4 (长上影) | ≥ 0.4 (长下影) |
+| climax_close_position | < 0.5 (收下半区) | > 0.5 (收上半区) |
+| post_bar_reverse_pct_3d | ≥ +1.5% 反向 (3 日内) 或 null=待观察 | ≤ −1.5% 或 null=待观察 |
+
+`post_bar_reverse_pct_3d=null` 时，phase 仍可标"初期" 但 `confirmed=false`（候选 BC/SC，等 AR 确认）。
+
+**逃逸通道**（避免锁死真转折点）：
+
+- 真 BC 当天会把 5 日 up-vol 顶得很高使 vph 显示 bullish——只要 6 个数字都通过硬性核验，phase 可正常 confirmed
+- vph_conflict.exists=false 时无需填该字段（phase 与 vph 同向，是正常情况）
+- 如果你判定的 phase 与 vph 不矛盾（如 vph=bullish + phase=拉升），不需要填这个字段
+
+**反例**（v3 实测发现的 hallucination 模式，不要重蹈）：
+
+- ❌ "BC confirmed 12-11" 没列具体 climax_date 上的 6 个数字 → 自然语言空话
+- ❌ climax_date 写的当天 close > open 还说"收下半区" → close_position 数字与事实不符
+- ❌ trend_20d_pct 输入数据是 +5%，但你写 extended_trend_20d_pct=+18% → 编造数字
 
 ### 第二层：结构推进（看价格序列）
 
@@ -1530,7 +1719,7 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 
 ### 七、机读摘要（格式固定，不可省略，不可改动键名）
 报告末尾追加（JSON 必须合法，用双引号）：
-<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "warning_phase": "", "phase_change": {"from": "", "to": "吸筹", "confirmed": false, "invalidated_by": "", "denial_level": "none"}, "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}], "scenarios": [{"name": "初期吸筹", "phase": "吸筹", "signal_names": ["锤头线", "放量止跌"], "confirmation": "scenario级的确认条件（放量突破26.5）", "denial": "scenario级的否定条件（跌破23.0支撑）", "status": "pending"}]} -->
+<!-- VERDICT: {"direction": "看多", "confidence": 0.7, "phase": "吸筹", "warning_phase": "", "phase_change": {"from": "", "to": "吸筹", "confirmed": false, "invalidated_by": "", "denial_level": "none"}, "reason": "不超过30字", "target_low": 12.5, "target_high": 14.0, "vph_conflict": {"exists": false}, "signals": [{"name": "信号名", "date": "04-14", "confirmed": true, "by": "确认K线描述"}, {"name": "信号名", "date": "04-14", "confirmed": false, "need": "确认条件", "deny": "否定条件"}], "scenarios": [{"name": "初期吸筹", "phase": "吸筹", "signal_names": ["锤头线", "放量止跌"], "confirmation": "scenario级的确认条件（放量突破26.5）", "denial": "scenario级的否定条件（跌破23.0支撑）", "status": "pending"}]} -->
 
 字段说明：
 - direction: 看多 / 偏多 / 中性 / 偏空 / 看空
@@ -1541,6 +1730,10 @@ ANNA_COULLING_PROMPT = """你是量价分析师（Volume Price Analysis），严
 - warning_phase: 可选。证据不足以切换 phase 时，把怀疑中的阶段写这里，例如 `派发初期预警`
 - phase_change: 阶段切换证据对象。没有切换时 confirmed=false；发生切换时必须写 from/to/invalidated_by
 - reason: 一句话结论
+- vph_conflict: 第一层挑战层 checklist（详见前文「阶段判定的 Anna Coulling 三层判据 - 第一层」）
+  - exists=false: phase 方向与 5 日 vph 同向或 vph=neutral，无需填其他字段
+  - exists=true: 必须填全 climax_type / climax_date / extended_trend_20d_pct / climax_volume_ratio / climax_range_vs_5d_avg_x / climax_shadow_ratio / climax_close_position / post_bar_reverse_pct_3d
+  - 数字必须来自输入数据，不允许估计或编造；6 项硬性核验任一失败 → phase 最多"初期 confirmed=false"
 - target_low / target_high: 量价维度的目标价区间（基于 Wyckoff 因果定律）
   - 看多/偏多: 突破后的目标涨幅区间，乘数由「吸筹类型」决定（见结构性上下文）：
     - primary_accumulation (整理前深跌): 2-3× 区间宽度
@@ -1595,12 +1788,23 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
 
     Returns dict with both code signals and LLM verdict.
     """
-    # Step 1: code pre-computation (same as before)
+    # Step 1: load settled bars and compute derived stats on the settled
+    # series only. The intraday partial bar (if any) is grafted on
+    # afterwards so that vol_ma / percentile ranks are not contaminated by
+    # a non-stationary in-progress bar.
     df = _load_ohlcv(code, days=days, as_of=as_of)
     if df is None or len(df) < window + 5:
         return {"code": code, "name": name, "ok": False, "error": "数据不足"}
 
     df = _compute_derived(df, window=window)
+
+    # Step 1a: live mode only — append today's intraday bar with derived
+    # columns evaluated against the settled distribution.
+    if not as_of:
+        rt_bar = _fetch_realtime_bar(code)
+        if rt_bar is not None:
+            df = _append_realtime_with_derived(df, rt_bar)
+
     patterns = _detect_patterns(df)
     obv = _obv_trend(df)
     vr = _volume_regime(df)
@@ -1678,6 +1882,9 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
             "llm_phase_confidence": llm_result.get("phase_confidence", llm_result.get("confidence", 0.5)),
             "llm_confirmation_level": llm_result.get("confirmation_level", 0),
             "llm_confirmation_tier": llm_result.get("confirmation_tier", "none"),
+            "vp_harmony_score": llm_result.get("vp_harmony_score", "neutral"),
+            "vph_conflict": llm_result.get("vph_conflict", {"exists": False}),
+            "vph_conflict_failures": llm_result.get("vph_conflict_failures", []),
             "llm_reason": llm_result.get("reason", ""),
             "llm_target_low": llm_result.get("target_low"),
             "llm_target_high": llm_result.get("target_high"),
@@ -2369,15 +2576,23 @@ def _has_same_family_upgrade_evidence(data: dict) -> bool:
 
 
 def _looks_like_ranging_context(phase_context: dict | None, data: dict) -> bool:
+    """Conservative override: collapse a structural phase claim to 震荡 only
+    when the LLM offered NO Wyckoff signal evidence at all AND the data is
+    clearly flat. If the LLM provides any signal — even an unconfirmed
+    one — its Wyckoff frame is respected (Anna's review item 5: trust the
+    prompt when it has reasoning).
+    """
     if not phase_context:
         return False
     signals = [s for s in data.get("signals", []) or [] if isinstance(s, dict)]
-    if any(_is_confirmed_decisive_signal(s) for s in signals):
+    # Any signal at all (confirmed or pending) → defer to LLM frame.
+    if signals:
         return False
     trend_10d = float(phase_context.get("trend_10d_pct", 0) or 0)
     range_10d = float(phase_context.get("range_10d_pct", 999) or 999)
     avg_vol_ratio_5d = float(phase_context.get("avg_volume_ratio_5d", 1) or 1)
-    return abs(trend_10d) <= 3.0 and range_10d <= 12.0 and avg_vol_ratio_5d <= 1.1
+    # Tighter than before — only truly flat windows trigger the override.
+    return abs(trend_10d) <= 2.0 and range_10d <= 8.0 and 0.85 <= avg_vol_ratio_5d <= 1.05
 
 
 def _phase_guard_context_from_df(df: pd.DataFrame | None) -> dict:
@@ -2391,10 +2606,33 @@ def _phase_guard_context_from_df(df: pd.DataFrame | None) -> dict:
     trend_10d = (last_close - first_close) / first_close * 100 if first_close > 0 else 0.0
     range_10d = (high - low) / last_close * 100 if last_close > 0 else 0.0
     avg_volume_ratio_5d = float(df["volume_ratio"].tail(5).mean()) if "volume_ratio" in df else 1.0
+
+    # 5-day volume-price harmony — Anna's first layer ("量价配合是真相").
+    # Compare cumulative volume on up days vs down days over the trailing 5
+    # bars. Ratio > 1.2 → bullish, < 1/1.2 → bearish, else neutral. This is
+    # the binary version validated in backtest (full-harmony e1x3 lifted
+    # strategy from +26.4% to +28.3%, 13→15 winners, escape +2.8pp→+8.5pp).
+    last5 = df.tail(5)
+    up_vol = float(last5.loc[last5["close"] > last5["open"], "volume"].sum())
+    down_vol = float(last5.loc[last5["close"] < last5["open"], "volume"].sum())
+    if down_vol <= 0 and up_vol > 0:
+        vph = "bullish"
+    elif up_vol <= 0 and down_vol > 0:
+        vph = "bearish"
+    elif up_vol > 1.2 * down_vol:
+        vph = "bullish"
+    elif down_vol > 1.2 * up_vol:
+        vph = "bearish"
+    else:
+        vph = "neutral"
+
     return {
         "trend_10d_pct": round(trend_10d, 2),
         "range_10d_pct": round(range_10d, 2),
         "avg_volume_ratio_5d": round(avg_volume_ratio_5d, 2),
+        "vp_harmony_score": vph,
+        "vp_harmony_up_vol": round(up_vol, 0),
+        "vp_harmony_down_vol": round(down_vol, 0),
     }
 
 
@@ -2441,17 +2679,228 @@ def _refresh_confirmation_fields(data: dict, *, structural_phase_change_confirme
     data["confirmed"] = level >= 3
 
 
+_BULLISH_DIRS = ("看多", "偏多")
+_BEARISH_DIRS = ("看空", "偏空")
+
+
+def _apply_vp_harmony_correction(data: dict, phase_context: dict | None) -> None:
+    """Adjust ``confirmation_level`` based on 5-day volume-price harmony.
+
+    Anna's first layer: "量价配合是真相". When direction agrees with the
+    5-day vph, confirmation gets a lift (C1→C2, C2→C3); when direction
+    conflicts, confirmation gets a curb (C3→C2, C2→C1). Validated in
+    backtest as "full-harmony e1x3" (+28.3% strat, 15/20 winners,
+    escape +8.5pp on the cybetf top20 60-day window).
+
+    Mutates ``data`` in place. Records ``vp_harmony_score`` for cache
+    audit. C1 conflict and C3 same-direction are no-ops (the rule has
+    no place to move them within {1, 2, 3}).
+    """
+    score = (phase_context or {}).get("vp_harmony_score", "neutral")
+    data["vp_harmony_score"] = score
+    if score not in ("bullish", "bearish"):
+        return
+    direction = data.get("direction", "") or ""
+    bull = direction in _BULLISH_DIRS
+    bear = direction in _BEARISH_DIRS
+    if not (bull or bear):
+        return
+    try:
+        lvl = int(data.get("confirmation_level", 0))
+    except (TypeError, ValueError):
+        return
+    same = (bull and score == "bullish") or (bear and score == "bearish")
+    conflict = (bull and score == "bearish") or (bear and score == "bullish")
+    new_lvl = lvl
+    if same:
+        if lvl == 1:
+            new_lvl = 2
+        elif lvl == 2:
+            new_lvl = 3
+    elif conflict:
+        if lvl == 3:
+            new_lvl = 2
+        elif lvl == 2:
+            new_lvl = 1
+    if new_lvl == lvl:
+        return
+    tier_map = {0: "none", 1: "pending", 2: "partial", 3: "strong"}
+    data["confirmation_level"] = new_lvl
+    data["confirmation_tier"] = tier_map.get(new_lvl, "none")
+    data["partial_confirmed"] = new_lvl >= 2
+    data["action_confirmed"] = new_lvl >= 3
+    data["confirmed"] = new_lvl >= 3
+
+
+_BC_THRESHOLDS = {
+    "extended_trend_20d_pct_min_abs": 10.0,
+    "climax_volume_ratio_min": 1.5,
+    "climax_range_vs_5d_avg_x_min": 1.5,
+    "climax_shadow_ratio_min": 0.4,
+    "post_bar_reverse_pct_3d_min_abs": 1.5,
+}
+
+_BEARISH_FAMILIES = ("派发", "下跌", "抛售高峰")
+_BULLISH_FAMILIES = ("吸筹", "拉升", "买入高峰", "卖压衰竭")
+
+
+def _phase_in(phase: str, families: tuple) -> bool:
+    return any(f in (phase or "") for f in families)
+
+
+def _validate_vph_conflict_evidence(data: dict, phase_context: dict | None) -> None:
+    """Anna 第一层 challenge gate post-validation.
+
+    When LLM's phase direction conflicts with the 5d vph score, the LLM is
+    required to fill `vph_conflict` with concrete numbers. This function
+    checks each number against the BC/SC hard-condition thresholds and
+    demotes the phase to "初期 confirmed=false" if any number fails OR the
+    field is missing/incomplete.
+
+    The intent is structural — the LLM cannot pass narrative excuses; if
+    the data doesn't support a structural distribution call, the phase
+    label gets walked back even if the LLM insists.
+    """
+    score = (phase_context or {}).get("vp_harmony_score", "neutral")
+    if score not in ("bullish", "bearish"):
+        return
+    phase = data.get("phase", "") or ""
+    bearish_phase = _phase_in(phase, _BEARISH_FAMILIES)
+    bullish_phase = _phase_in(phase, _BULLISH_FAMILIES)
+    # Conflict exists when bearish phase + bullish vph, or bullish phase + bearish vph.
+    conflict = (
+        (bearish_phase and score == "bullish") or
+        (bullish_phase and score == "bearish")
+    )
+    if not conflict:
+        return
+
+    vc = data.get("vph_conflict")
+    if not isinstance(vc, dict):
+        vc = {}
+    data["vph_conflict"] = vc
+
+    failures = []
+    if not vc.get("exists"):
+        failures.append("vph_conflict.exists not set true despite phase-vph mismatch")
+    else:
+        try:
+            ext = float(vc.get("extended_trend_20d_pct") or 0)
+            if abs(ext) < _BC_THRESHOLDS["extended_trend_20d_pct_min_abs"]:
+                failures.append(
+                    f"extended_trend_20d_pct |{ext:.1f}| < "
+                    f"{_BC_THRESHOLDS['extended_trend_20d_pct_min_abs']}%"
+                )
+        except (TypeError, ValueError):
+            failures.append("extended_trend_20d_pct missing/non-numeric")
+        try:
+            vrx = float(vc.get("climax_volume_ratio") or 0)
+            if vrx < _BC_THRESHOLDS["climax_volume_ratio_min"]:
+                failures.append(
+                    f"climax_volume_ratio {vrx:.2f} < "
+                    f"{_BC_THRESHOLDS['climax_volume_ratio_min']}"
+                )
+        except (TypeError, ValueError):
+            failures.append("climax_volume_ratio missing/non-numeric")
+        try:
+            rgx = float(vc.get("climax_range_vs_5d_avg_x") or 0)
+            if rgx < _BC_THRESHOLDS["climax_range_vs_5d_avg_x_min"]:
+                failures.append(
+                    f"climax_range_vs_5d_avg_x {rgx:.2f} < "
+                    f"{_BC_THRESHOLDS['climax_range_vs_5d_avg_x_min']}"
+                )
+        except (TypeError, ValueError):
+            failures.append("climax_range_vs_5d_avg_x missing/non-numeric")
+        try:
+            shr = float(vc.get("climax_shadow_ratio") or 0)
+            if shr < _BC_THRESHOLDS["climax_shadow_ratio_min"]:
+                failures.append(
+                    f"climax_shadow_ratio {shr:.2f} < "
+                    f"{_BC_THRESHOLDS['climax_shadow_ratio_min']}"
+                )
+        except (TypeError, ValueError):
+            failures.append("climax_shadow_ratio missing/non-numeric")
+        try:
+            cp = float(vc.get("climax_close_position") or 0.5)
+            if bearish_phase and cp >= 0.5:
+                failures.append(f"BC close_position {cp:.2f} not in lower half")
+            if bullish_phase and cp <= 0.5:
+                failures.append(f"SC close_position {cp:.2f} not in upper half")
+        except (TypeError, ValueError):
+            failures.append("climax_close_position missing/non-numeric")
+        # post_bar_reverse can legitimately be null (待观察) — only fail when
+        # explicitly numeric and below threshold.
+        post = vc.get("post_bar_reverse_pct_3d")
+        if post is not None:
+            try:
+                p = float(post)
+                if abs(p) < _BC_THRESHOLDS["post_bar_reverse_pct_3d_min_abs"]:
+                    failures.append(
+                        f"post_bar_reverse_pct_3d |{p:.1f}| < "
+                        f"{_BC_THRESHOLDS['post_bar_reverse_pct_3d_min_abs']}%"
+                    )
+            except (TypeError, ValueError):
+                failures.append("post_bar_reverse_pct_3d non-numeric")
+
+    if not failures:
+        return
+
+    data["vph_conflict_failures"] = failures
+    # Demote phase to 初期 within the same family + force confirmed=false.
+    if bearish_phase:
+        if "下跌" in phase:
+            data["phase"] = "下跌初期"
+        else:
+            data["phase"] = "派发初期"
+    elif bullish_phase:
+        if "吸筹" in phase:
+            data["phase"] = "吸筹初期"
+        else:
+            data["phase"] = "拉升初期"
+    data["phase_guard_reason"] = (
+        "vph_conflict checklist 未通过硬性核验：" + "; ".join(failures[:2])
+        + (" …" if len(failures) > 2 else "")
+    )
+    data["confirmed"] = False
+    data["action_confirmed"] = False
+    pc = dict(data.get("phase_change") or {})
+    pc["confirmed"] = False
+    if not pc.get("denial_level"):
+        pc["denial_level"] = "vph_conflict_unverified"
+    data["phase_change"] = pc
+
+
 def _apply_phase_state_guard(
     verdict_data: dict,
     previous_analysis: str,
     phase_context: dict | None = None,
 ) -> dict:
-    """Apply lightweight Anna-style phase hygiene after LLM parsing.
+    """Apply Anna-style phase hygiene + vp_harmony correction after LLM
+    parsing.
 
-    Phase is a description of the current chart structure, not a prescribed
-    Wyckoff path. The guard only smooths same-family subphase jumps and compresses
-    low-volume ranges; it does not override cross-family phase reads.
+    Layers (in order):
+      1. Phase hygiene — same-family subphase smoothing and a tight
+         ranging override (only fires when LLM emits zero signals AND
+         data is strictly flat).
+      2. vph_conflict checklist validation — when phase direction
+         disagrees with 5d vph, structurally verify the LLM's BC/SC
+         numbers; demote to "初期 confirmed=false" on missing/failing
+         evidence (Anna's first-layer challenge gate, code-enforced).
+      3. vp_harmony correction — adjust ``confirmation_level`` against
+         5d volume-price harmony (lift on agreement, curb on conflict).
     """
+    result = _apply_phase_state_guard_core(verdict_data, previous_analysis, phase_context)
+    _validate_vph_conflict_evidence(result, phase_context)
+    _apply_vp_harmony_correction(result, phase_context)
+    return result
+
+
+def _apply_phase_state_guard_core(
+    verdict_data: dict,
+    previous_analysis: str,
+    phase_context: dict | None = None,
+) -> dict:
+    """Phase hygiene only (no vp_harmony). See ``_apply_phase_state_guard``."""
     data = dict(verdict_data or {})
     data["confidence"] = _coerce_confidence(data.get("confidence"), default=0.5)
     data["phase_change"] = _normalize_phase_change(data.get("phase_change"))

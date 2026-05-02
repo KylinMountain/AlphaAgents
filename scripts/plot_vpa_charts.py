@@ -128,7 +128,34 @@ A_SHARE_STYLE = mpf.make_mpf_style(
 )
 
 
-def plot_stock(code: str, ohlc_rows: list, cache: dict, out_path: Path):
+def _load_trades_for(code: str, trades_csv: Path) -> list[dict]:
+    """Read entry/exit dates + prices from a backtest trades CSV. Returns a
+    list ordered by entry_date so the plotting code can draw connector lines
+    in temporal order."""
+    if not trades_csv or not trades_csv.exists():
+        return []
+    import csv
+    out = []
+    with open(trades_csv, encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if r.get("code") != code:
+                continue
+            try:
+                out.append({
+                    "entry_date": r["entry_date"],
+                    "entry_price": float(r["entry_price"]),
+                    "exit_date": r["exit_date"],
+                    "exit_price": float(r["exit_price"]),
+                    "pnl_pct": float(r.get("net_return_pct") or r.get("gross_return_pct") or 0),
+                })
+            except (KeyError, ValueError):
+                continue
+    out.sort(key=lambda t: t["entry_date"])
+    return out
+
+
+def plot_stock(code: str, ohlc_rows: list, cache: dict, out_path: Path,
+               trades: list[dict] | None = None):
     if not ohlc_rows:
         return False
     df = pd.DataFrame(ohlc_rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
@@ -274,6 +301,38 @@ def plot_stock(code: str, ohlc_rows: list, cache: dict, out_path: Path):
                     fontsize=7, color="#c81e1e", ha="center", va="bottom",
                     rotation=90, fontproperties=CJK_FP, alpha=0.55)
 
+    # Trade overlays: blue ▲ at entry-bar low (below candle), purple ▽ at
+    # exit-bar high (below the C2/C3 markers but above the candle), with a
+    # thin connector line from entry to exit so the holding span is visible.
+    if trades:
+        date_index = {d.strftime("%Y-%m-%d"): i for i, d in enumerate(df.index)}
+        for t in trades:
+            ei = date_index.get(t["entry_date"])
+            xi = date_index.get(t["exit_date"])
+            if ei is None or xi is None:
+                continue
+            e_low = float(df.iloc[ei]["Low"])
+            x_high = float(df.iloc[xi]["High"])
+            # entry triangle BELOW the entry candle
+            ax.scatter([ei], [e_low * 0.97], marker="^", s=240, c="#1f6feb",
+                       edgecolors="black", linewidths=0.8, zorder=11, alpha=0.95)
+            ax.annotate(f"BUY {t['entry_price']:.2f}", xy=(ei, e_low * 0.97),
+                        xytext=(ei, e_low * 0.94), fontsize=8, color="#1f4fa8",
+                        ha="center", va="top", fontweight="bold")
+            # exit triangle BELOW the exit candle (also low, so they don't fight C-tier markers up top)
+            x_low = float(df.iloc[xi]["Low"])
+            ax.scatter([xi], [x_low * 0.97], marker="v", s=240, c="#8a2be2",
+                       edgecolors="black", linewidths=0.8, zorder=11, alpha=0.95)
+            pnl_color = "#1f6feb" if t["pnl_pct"] >= 0 else "#d44a4a"
+            ax.annotate(f"SELL {t['exit_price']:.2f}\n{t['pnl_pct']:+.1f}%",
+                        xy=(xi, x_low * 0.97),
+                        xytext=(xi, x_low * 0.92), fontsize=8, color=pnl_color,
+                        ha="center", va="top", fontweight="bold")
+            # connector line just above the lows so the holding span is obvious
+            line_y = min(e_low, x_low) * 0.965
+            ax.plot([ei, xi], [line_y, line_y], color="#1f6feb",
+                    linewidth=1.5, alpha=0.55, zorder=10)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=110, bbox_inches="tight")
     plt.close(fig)
@@ -288,6 +347,9 @@ def main():
     p.add_argument("--start-date", type=str, default="2025-10-17")
     p.add_argument("--end-date", type=str, default="2026-01-12")
     p.add_argument("--out", type=Path, default=REPO / "data/charts")
+    p.add_argument("--trades", type=Path, default=None,
+                   help="Optional trades CSV (from backtest_vpa_daily_policy.py). "
+                        "If provided, entry/exit markers are overlaid per stock.")
     args = p.parse_args()
 
     cache = load_cache(args.cache)
@@ -318,12 +380,14 @@ def main():
             elif level <= 0:
                 level = 0
             level_counts[level] += 1
-        ok = plot_stock(code, ohlc, cache, out_path)
+        trades = _load_trades_for(code, args.trades) if args.trades else []
+        ok = plot_stock(code, ohlc, cache, out_path, trades=trades)
         if ok:
+            extra = f"  trades={len(trades)}" if args.trades else ""
             print(
                 f"  {code}: {len(ohlc)} bars, "
                 f"C3={level_counts[3]} C2={level_counts[2]} "
-                f"C1={level_counts[1]} C0={level_counts[0]} → {out_path.name}"
+                f"C1={level_counts[1]} C0={level_counts[0]}{extra} → {out_path.name}"
             )
 
 

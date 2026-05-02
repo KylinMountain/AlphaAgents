@@ -53,26 +53,22 @@ def test_run_daily_archive_calls_all_sources(monkeypatch):
         archived.append(data_type)
 
     monkeypatch.setattr(daily_archive, "save_snapshot", fake_save)
+    monkeypatch.setattr(daily_archive, "_tushare_archive", lambda today: 0)
 
-    # Mock all data source functions to return valid JSON
+    # Mock current legacy JSON-blob data source functions to return valid JSON
     for fn_name in [
         "get_concept_ranking_fn", "get_sector_ranking_fn",
-        "get_anomaly_stocks_fn", "get_market_breadth_fn",
-        "get_lhb_detail_fn", "get_block_trade_fn",
-        "get_north_flow_fn", "get_margin_data_fn",
+        "get_anomaly_stocks_fn", "get_market_breadth_fn", "get_block_trade_fn",
     ]:
         monkeypatch.setattr(
             daily_archive, fn_name,
             lambda *a, **kw: json.dumps({"data": []}),
         )
 
-    # Mock get_active_themes to return empty (skip theme_fund_flow)
-    monkeypatch.setattr(daily_archive, "get_active_themes", lambda: [])
-
     daily_archive.run_daily_archive()
 
     expected_types = {
         "concept_fund_flow", "industry_fund_flow", "limit_up_pool",
-        "market_breadth", "lhb", "block_trade", "north_flow", "margin",
+        "market_breadth", "block_trade",
     }
     assert expected_types.issubset(set(archived))

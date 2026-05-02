@@ -586,6 +586,23 @@ def get_pending_predictions(date: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_pending_prediction_dates(before_date: str, days: int = 14) -> list[str]:
+    """Recent prediction dates before ``before_date`` still awaiting review."""
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        cutoff = (_dt.strptime(before_date, "%Y-%m-%d") - _td(days=days)).strftime("%Y-%m-%d")
+    except ValueError:
+        cutoff = "0000-00-00"
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT date FROM predictions "
+        "WHERE hit IS NULL AND date < ? AND date >= ? "
+        "ORDER BY date",
+        (before_date, cutoff),
+    ).fetchall()
+    return [r["date"] for r in rows]
+
+
 def get_today_intraday_predictions() -> list[dict]:
     """Get today's intraday predictions for context continuity."""
     conn = _get_conn()

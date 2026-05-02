@@ -32,12 +32,12 @@ def _query_intraday_buckets(days: int = 7, as_of: str | None = None) -> dict:
     During replay, callers must pass the replay target_date so the metric
     reflects that historical day's perspective, not today's.
 
-    A prediction is 'matched' if its features_json matches any currently active
-    playbook. Since matching is a runtime decision not persisted, we re-run
-    match_playbook here against today's active set — conservative but honest.
+    A prediction is 'matched' only if its recommendation-time features_json
+    captured a playbook id/name. Do not re-match historical rows against the
+    current active playbook set; that rewrites point-in-time attribution after
+    playbooks evolve.
     """
     from alpha_agents.data.memory_store import _get_conn
-    from alpha_agents.evolution.playbook import match_playbook
 
     end = (datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now())
     cutoff = (end - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -63,7 +63,11 @@ def _query_intraday_buckets(days: int = 7, as_of: str | None = None) -> dict:
             features = json.loads(r["features_json"] or "{}")
         except json.JSONDecodeError:
             features = {}
-        matched = bool(features and match_playbook(features))
+        matched = bool(
+            features.get("playbook_matched")
+            or features.get("playbook_id")
+            or features.get("playbook_name")
+        )
         if matched:
             m_total += 1
             if r["hit"]:

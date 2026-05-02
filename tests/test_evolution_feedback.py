@@ -127,6 +127,14 @@ def test_inject_vpa_signal_history_no_signals_returns_empty():
         assert inject_vpa_signal_history("300274") == ""
 
 
+def test_inject_vpa_signal_history_forwards_as_of():
+    with patch("alpha_agents.evolution.feedback._query_vpa_signals_for_code",
+               return_value=[]) as mock_query:
+        from alpha_agents.evolution.feedback import inject_vpa_signal_history
+        _ = inject_vpa_signal_history("300274", as_of="2026-01-12")
+    mock_query.assert_called_once_with("300274", as_of="2026-01-12")
+
+
 def test_inject_principles_formats_by_category():
     fake = [
         {"id": 1, "principle": "高位缩量新高长上影 = 派发",

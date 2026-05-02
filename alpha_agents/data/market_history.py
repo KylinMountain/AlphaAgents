@@ -120,8 +120,14 @@ def _to_bs_code(code: str) -> str:
     return f"sz.{code}"
 
 
-def get_all_codes() -> list[str]:
-    """Get all active A-share stock codes from baostock."""
+def get_all_codes(*, include_inactive: bool = True,
+                  start_date: str | None = None) -> list[str]:
+    """Get A-share stock codes from baostock.
+
+    For historical initialization, include stocks that were delisted after the
+    requested start date. This is still limited by baostock's basic table, but
+    avoids the obvious survivorship bias from using only today's active names.
+    """
     _bs_login()
     try:
         rs = bs.query_stock_basic()
@@ -129,11 +135,17 @@ def get_all_codes() -> list[str]:
         while rs.error_code == "0" and rs.next():
             row = rs.get_row_data()
             # row: [code, code_name, ipoDate, outDate, type, status]
-            if row[4] == "1" and row[5] == "1":  # type=stock, status=active
-                # Convert sh.600000 → 600000
-                raw_code = row[0]
-                code = raw_code.split(".")[-1] if "." in raw_code else raw_code
-                codes.append(code)
+            if row[4] != "1":  # type=stock
+                continue
+            out_date = row[3] if len(row) > 3 else ""
+            is_active = row[5] == "1"
+            overlaps_window = bool(start_date and out_date and out_date >= start_date)
+            if not is_active and not (include_inactive and overlaps_window):
+                continue
+            # Convert sh.600000 → 600000
+            raw_code = row[0]
+            code = raw_code.split(".")[-1] if "." in raw_code else raw_code
+            codes.append(code)
         return codes
     finally:
         _bs_logout()
@@ -171,7 +183,7 @@ def init_history(months: int = 6, batch_size: int = BATCH_SIZE) -> int:
         logger.info("Resuming init: %d codes from previous run", len(all_codes))
     else:
         logger.info("Fetching all stock codes...")
-        all_codes = get_all_codes()
+        all_codes = get_all_codes(include_inactive=True, start_date=start_date)
         progress["codes"] = all_codes
         progress["start_date"] = start_date
         progress["end_date"] = end_date

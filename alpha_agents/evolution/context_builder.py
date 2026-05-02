@@ -55,12 +55,12 @@ def build_chat_context(portfolio_summary: str, themes_summary: str,
     return "\n\n".join(sections)
 
 
-def build_vpa_context(code: str) -> str:
+def build_vpa_context(code: str, as_of: str | None = None) -> str:
     """Build the context block injected before VPA LLM analysis.
 
     Phase 1: only VPA signal history (L1 feedback).
     Phase 3 hook: will also include matched playbook info (see spec §VPA build).
     """
-    signal_history = inject_vpa_signal_history(code)
+    signal_history = inject_vpa_signal_history(code, as_of=as_of)
     sections = [s for s in (signal_history,) if s]
     return "\n\n".join(sections)

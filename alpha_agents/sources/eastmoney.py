@@ -14,6 +14,13 @@ def _fetch_news(**kwargs) -> pd.DataFrame:
         return ak.stock_news_em()
 
 
+def _news_col(row, *names: str) -> str:
+    for name in names:
+        if name in row:
+            return str(row.get(name, ""))
+    return ""
+
+
 def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
     """Fetch Eastmoney news. Proxy-aware: replay reads ``news_items`` snapshot."""
     # Replay short-circuit
@@ -35,8 +42,8 @@ def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
         full_items = []
         for _, row in df.iterrows():
             full_items.append({
-                "title": str(row.get("新闻标题", "")),
-                "summary": str(row.get("新闻内容", ""))[:500],
+                "title": _news_col(row, "新闻标题", "标题"),
+                "summary": _news_col(row, "新闻内容", "内容")[:500],
                 "time": str(row.get("发布时间", "")),
                 "source": str(row.get("文章来源", "")),
             })
@@ -47,7 +54,12 @@ def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
             logger.debug("eastmoney news capture failed: %s", e)
 
         if keyword:
-            mask = df["新闻标题"].str.contains(keyword, na=False) | df["新闻内容"].str.contains(keyword, na=False)
+            title_col = "新闻标题" if "新闻标题" in df.columns else "标题"
+            content_col = "新闻内容" if "新闻内容" in df.columns else "内容"
+            mask = (
+                df.get(title_col, pd.Series("", index=df.index)).str.contains(keyword, na=False)
+                | df.get(content_col, pd.Series("", index=df.index)).str.contains(keyword, na=False)
+            )
             df = df[mask]
 
         df = df.head(limit)
@@ -55,8 +67,8 @@ def get_news_fn(limit: int = 50, keyword: str | None = None) -> str:
         news = []
         for _, row in df.iterrows():
             news.append({
-                "title": str(row.get("新闻标题", "")),
-                "summary": str(row.get("新闻内容", ""))[:200],
+                "title": _news_col(row, "新闻标题", "标题"),
+                "summary": _news_col(row, "新闻内容", "内容")[:200],
                 "time": str(row.get("发布时间", "")),
                 "source": str(row.get("文章来源", "")),
             })

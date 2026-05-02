@@ -1,5 +1,6 @@
 """Tests for Phase 1 schema extensions."""
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 
@@ -88,6 +89,37 @@ def test_save_prediction_defaults_features_to_empty(tmp_path, monkeypatch):
     assert row["features_json"] in ("{}", "", None)
 
 
+def test_intraday_metrics_use_saved_playbook_attribution(tmp_path, monkeypatch):
+    import alpha_agents.data.memory_store as ms
+    from alpha_agents.evolution.metrics import _query_intraday_buckets
+
+    db = tmp_path / "memory.db"
+    monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
+    if hasattr(ms._local, "conn"):
+        monkeypatch.delattr(ms._local, "conn", raising=False)
+
+    today = date.today().isoformat()
+    matched_id = ms.save_prediction(
+        date=today, report_type="intraday", code="000001", name="A",
+        direction="bullish", confidence="medium", theme_line="AI",
+        entry_price=10.0, reason="matched",
+        features={"playbook_id": 123, "playbook_name": "PIT"},
+    )
+    unmatched_id = ms.save_prediction(
+        date=today, report_type="intraday", code="000002", name="B",
+        direction="bullish", confidence="medium", theme_line="AI",
+        entry_price=10.0, reason="unmatched",
+        features={"score": 99, "playbook_matched": False},
+    )
+    ms.update_prediction_result(matched_id, next_day_return=1.0, hit=1)
+    ms.update_prediction_result(unmatched_id, next_day_return=1.0, hit=1)
+
+    buckets = _query_intraday_buckets(days=7, as_of=today)
+    assert buckets["intraday_count_7d"] == 2
+    assert buckets["matched_count_7d"] == 1
+    assert buckets["unmatched_count_7d"] == 1
+
+
 def test_daily_lessons_table_exists(tmp_path, monkeypatch):
     import alpha_agents.data.memory_store as ms
     db = tmp_path / "memory.db"
@@ -128,7 +160,8 @@ def test_insert_daily_lesson_and_query(tmp_path, monkeypatch):
     if hasattr(ms._local, "conn"):
         monkeypatch.delattr(ms._local, "conn", raising=False)
 
-    ms.insert_daily_lesson("2026-04-17", "failure", "数据中心",
+    today = date.today().isoformat()
+    ms.insert_daily_lesson(today, "failure", "数据中心",
                             "东方国信破5日线才预警", tags="5日线,止损时机")
     rows = ms.get_recent_daily_lessons(days=7)
     assert len(rows) == 1
@@ -144,8 +177,9 @@ def test_insert_daily_lesson_deduplicates(tmp_path, monkeypatch):
     monkeypatch.setattr(ms, "MEMORY_DB_PATH", db)
     if hasattr(ms._local, "conn"):
         monkeypatch.delattr(ms._local, "conn", raising=False)
-    ms.insert_daily_lesson("2026-04-17", "insight", None, "相同内容")
-    ms.insert_daily_lesson("2026-04-17", "insight", None, "相同内容")
+    today = date.today().isoformat()
+    ms.insert_daily_lesson(today, "insight", None, "相同内容")
+    ms.insert_daily_lesson(today, "insight", None, "相同内容")
     rows = ms.get_recent_daily_lessons(days=1)
     assert len(rows) == 1
 
@@ -281,7 +315,8 @@ def test_upsert_evolution_metrics_and_trend(tmp_path, monkeypatch):
     if hasattr(ms._local, "conn"):
         monkeypatch.delattr(ms._local, "conn", raising=False)
 
-    ms.upsert_evolution_metrics("2026-04-17", {
+    today = date.today().isoformat()
+    ms.upsert_evolution_metrics(today, {
         "intraday_hit_rate_7d": 0.62, "intraday_count_7d": 200,
         "matched_hit_rate_7d": 0.75, "matched_count_7d": 40,
         "unmatched_hit_rate_7d": 0.55, "unmatched_count_7d": 160,
@@ -290,7 +325,7 @@ def test_upsert_evolution_metrics_and_trend(tmp_path, monkeypatch):
         "lessons_count_7d": 18,
     })
     # Upserts re-insert same date:
-    ms.upsert_evolution_metrics("2026-04-17", {
+    ms.upsert_evolution_metrics(today, {
         "intraday_hit_rate_7d": 0.65, "intraday_count_7d": 201,
         "matched_hit_rate_7d": 0.75, "matched_count_7d": 40,
         "unmatched_hit_rate_7d": 0.55, "unmatched_count_7d": 160,

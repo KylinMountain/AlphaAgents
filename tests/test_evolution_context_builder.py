@@ -19,6 +19,14 @@ def test_build_vpa_context_empty_when_no_signals():
     assert result == ""
 
 
+def test_build_vpa_context_forwards_as_of():
+    with patch("alpha_agents.evolution.context_builder.inject_vpa_signal_history",
+               return_value="") as mock_inject:
+        from alpha_agents.evolution.context_builder import build_vpa_context
+        _ = build_vpa_context("300274", as_of="2026-01-12")
+    mock_inject.assert_called_once_with("300274", as_of="2026-01-12")
+
+
 def test_build_morning_context_includes_sentiment_and_cognition():
     with patch("alpha_agents.evolution.context_builder.inject_sentiment",
                return_value="【情绪周期】升温 — 可追强势"), \

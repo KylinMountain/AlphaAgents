@@ -187,7 +187,7 @@ def _parse_response(text: str) -> list[dict]:
         except (ValueError, TypeError):
             imp = 0
         e["importance"] = max(0, min(imp, 5))
-        if e["importance"] >= 2:
+        if e["importance"] >= 3:
             valid.append(e)
 
     # Sort by importance desc, then credibility (high > medium > low)

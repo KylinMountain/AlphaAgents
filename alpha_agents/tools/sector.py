@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 _ths_lock = threading.Lock()
 
 
+def _fetch_sector_fund_flow() -> pd.DataFrame:
+    """Backward-compatible concept fund-flow fetcher used by tests and callers."""
+    return get_concept_fund_flow()
+
+
 def _lookup_in_df(df: pd.DataFrame, query: str, name_col: str) -> pd.DataFrame:
     """Try exact → fuzzy contains → reverse contains → 2-char keyword split."""
     row = df[df[name_col] == query]
@@ -57,8 +62,7 @@ def get_sector_data_fn(sector_name: str) -> str:
     """
     try:
         with _ths_lock:
-            df_c = get_concept_fund_flow()
-            df_i = get_industry_fund_flow()
+            df_c = _fetch_sector_fund_flow()
 
         # Concept table first (primary)
         if df_c is not None and not df_c.empty:
@@ -73,6 +77,8 @@ def get_sector_data_fn(sector_name: str) -> str:
                     return json.dumps(payload, ensure_ascii=False)
 
         # Industry fallback
+        with _ths_lock:
+            df_i = get_industry_fund_flow()
         if df_i is not None and not df_i.empty:
             name_col = "行业" if "行业" in df_i.columns else ("名称" if "名称" in df_i.columns else None)
             if name_col:

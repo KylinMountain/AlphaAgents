@@ -23,7 +23,7 @@ def populated_db(tmp_path):
         "INSERT INTO stocks (code, name, market_cap, industry, is_st, is_suspended) "
         "VALUES ('300236', '上海新阳', 8000000000, '化工', 0, 0)"
     )
-    conn.execute("INSERT INTO concept_stocks (concept_id, stock_code) VALUES (1, '688001')")
+    conn.execute("INSERT INTO concept_stocks (concept_id, stock_code) VALUES (1, '300236')")
     conn.execute("INSERT INTO concept_stocks (concept_id, stock_code) VALUES (2, '688001')")
     conn.execute("INSERT INTO concept_stocks (concept_id, stock_code) VALUES (2, '300236')")
     conn.commit()
@@ -37,7 +37,7 @@ def test_search_exact_match(populated_db):
     assert len(parsed["matches"]) == 1
     assert parsed["matches"][0]["concept"] == "国产替代"
     assert len(parsed["matches"][0]["stocks"]) == 1
-    assert parsed["matches"][0]["stocks"][0]["code"] == "688001"
+    assert parsed["matches"][0]["stocks"][0]["code"] == "300236"
 
 
 def test_search_fuzzy_match(populated_db):

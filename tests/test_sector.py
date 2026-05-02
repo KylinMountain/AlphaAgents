@@ -16,16 +16,18 @@ def _mock_sector_fund_flow():
     })
 
 
+@patch("alpha_agents.tools.sector.get_industry_fund_flow", side_effect=lambda: pd.DataFrame())
 @patch("alpha_agents.tools.sector._fetch_sector_fund_flow", side_effect=lambda: _mock_sector_fund_flow())
-def test_get_sector_data(mock_flow):
+def test_get_sector_data(mock_flow, mock_industry):
     result = get_sector_data_fn("半导体")
     parsed = json.loads(result)
     assert parsed["sector_name"] == "半导体"
     assert parsed["change_pct"] == 2.5
 
 
+@patch("alpha_agents.tools.sector.get_industry_fund_flow", side_effect=lambda: pd.DataFrame())
 @patch("alpha_agents.tools.sector._fetch_sector_fund_flow", side_effect=lambda: _mock_sector_fund_flow())
-def test_get_sector_data_not_found(mock_flow):
+def test_get_sector_data_not_found(mock_flow, mock_industry):
     result = get_sector_data_fn("火星板块")
     parsed = json.loads(result)
     assert parsed["error"] is not None

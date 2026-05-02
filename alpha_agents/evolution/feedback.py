@@ -64,21 +64,37 @@ def inject_cognition() -> str:
     return "\n".join(lines)
 
 
-def _query_vpa_signals_for_code(code: str, days: int = 14) -> list[dict]:
+def _query_vpa_signals_for_code(
+    code: str, days: int = 14, as_of: str | None = None
+) -> list[dict]:
     """Return VPA signals for this code within last N days, newest first.
 
     Pulled out so tests can mock this without a real DB.
     """
     from datetime import datetime, timedelta
     from alpha_agents.data.memory_store import _get_conn
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    rows = _get_conn().execute(
+    if as_of:
+        try:
+            anchor = datetime.strptime(as_of, "%Y-%m-%d")
+        except ValueError:
+            anchor = datetime.now()
+            as_of = None
+    else:
+        anchor = datetime.now()
+    cutoff = (anchor - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    sql = (
         "SELECT signal_type, signal_date, direction, status, resolved_by, resolved_date "
         "FROM vpa_pending_signals "
         "WHERE code = ? AND signal_date >= ? "
-        "ORDER BY signal_date DESC LIMIT 8",
-        (code, cutoff),
-    ).fetchall()
+    )
+    params: list[str] = [code, cutoff]
+    if as_of:
+        # Point-in-time guard: replay/backtest cannot see same-day/future signals.
+        sql += "AND signal_date < ? "
+        params.append(as_of)
+    sql += "ORDER BY signal_date DESC LIMIT 8"
+    rows = _get_conn().execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -91,7 +107,7 @@ _SIGNAL_STATUS_ICON = {
 _VPA_SIGNAL_BUDGET = 400
 
 
-def inject_vpa_signal_history(code: str) -> str:
+def inject_vpa_signal_history(code: str, as_of: str | None = None) -> str:
     """Format this stock's recent VPA signal history for the VPA LLM prompt.
 
     Closes the feedback loop: signals predicted by prior VPA analyses are
@@ -100,7 +116,7 @@ def inject_vpa_signal_history(code: str) -> str:
     """
     if not code or not code.isdigit() or len(code) != 6:
         return ""
-    signals = _query_vpa_signals_for_code(code)
+    signals = _query_vpa_signals_for_code(code, as_of=as_of)
     if not signals:
         return ""
     lines = ["【该股VPA信号历史】"]

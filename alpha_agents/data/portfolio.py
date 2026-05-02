@@ -27,6 +27,50 @@ MAX_THEME_PCT = 0.30             # 同主线最多占总资金 30%
 LOT_SIZE = 100                   # A股一手 = 100股
 ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 
+# Conservative A-share execution assumptions for virtual portfolio P&L.
+# Net return includes buy/sell slippage, commissions, transfer fees, and
+# sell-side stamp duty so the portfolio is not evaluated on frictionless fills.
+COMMISSION_RATE = 0.0003         # 0.03% each side
+MIN_COMMISSION = 5.0             # RMB minimum per order
+STAMP_DUTY_SELL_RATE = 0.0005    # 0.05% on sell side
+TRANSFER_FEE_RATE = 0.00001      # 0.001% each side
+SLIPPAGE_RATE = 0.0005           # 5 bps each side
+
+
+def _estimate_net_close_result(open_price: float, close_price: float, shares: int) -> dict:
+    """Estimate net round-trip P&L for an A-share virtual trade."""
+    if open_price <= 0 or close_price <= 0 or shares <= 0:
+        return {
+            "return_pct": 0.0,
+            "return_amount": 0.0,
+            "gross_amount": 0.0,
+            "costs": 0.0,
+        }
+
+    buy_price = open_price * (1 + SLIPPAGE_RATE)
+    sell_price = close_price * (1 - SLIPPAGE_RATE)
+    buy_value = buy_price * shares
+    sell_value = sell_price * shares
+
+    buy_commission = max(buy_value * COMMISSION_RATE, MIN_COMMISSION)
+    sell_commission = max(sell_value * COMMISSION_RATE, MIN_COMMISSION)
+    buy_transfer = buy_value * TRANSFER_FEE_RATE
+    sell_transfer = sell_value * TRANSFER_FEE_RATE
+    stamp_duty = sell_value * STAMP_DUTY_SELL_RATE
+
+    cost_basis = buy_value + buy_commission + buy_transfer
+    net_proceeds = sell_value - sell_commission - sell_transfer - stamp_duty
+    net_amount = net_proceeds - cost_basis
+    gross_amount = (close_price - open_price) * shares
+
+    return {
+        "return_pct": round(net_amount / cost_basis * 100, 2) if cost_basis else 0.0,
+        "return_amount": round(net_amount, 2),
+        "gross_amount": round(gross_amount, 2),
+        "costs": round(gross_amount - net_amount, 2),
+    }
+
+
 def get_sentiment_exposure_limit() -> float:
     """Get max total exposure based on sentiment cycle phase."""
     try:
@@ -346,6 +390,47 @@ def get_open_positions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def open_position(
+    *,
+    code: str,
+    name: str,
+    theme: str,
+    open_date: str,
+    open_price: float,
+    stop_loss: float | None = None,
+    target_price: float | None = None,
+    source: str = "manual",
+    reason: str = "",
+    shares: int | None = None,
+) -> int | None:
+    """Compatibility helper to insert an already-filled virtual position."""
+    if open_price <= 0:
+        return None
+    if shares is None:
+        shares = _calc_shares(open_price, TOTAL_CAPITAL * MAX_POSITION_PCT)
+    if shares <= 0:
+        return None
+
+    with _write_lock:
+        conn = _get_conn()
+        existing = conn.execute(
+            "SELECT id FROM virtual_portfolio WHERE code = ? AND status IN ('pending', 'open')",
+            (code,),
+        ).fetchone()
+        if existing:
+            return None
+        cur = conn.execute(
+            "INSERT INTO virtual_portfolio "
+            "(code, name, theme, order_date, open_date, open_price, shares, "
+            " stop_loss, target_price, status, source, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+            (code, name, theme, open_date, open_date, open_price, shares,
+             stop_loss, target_price, source, reason),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
 def close_position(
     position_id: int,
     *,
@@ -365,8 +450,9 @@ def close_position(
 
         open_price = row["open_price"] or 0
         shares = row["shares"] or 0
-        return_pct = round((close_price - open_price) / open_price * 100, 2) if open_price else 0
-        return_amount = round((close_price - open_price) * shares, 2)
+        net_result = _estimate_net_close_result(open_price, close_price, shares)
+        return_pct = net_result["return_pct"]
+        return_amount = net_result["return_amount"]
         today = datetime.now().strftime("%Y-%m-%d")
 
         conn.execute(
@@ -377,9 +463,9 @@ def close_position(
              return_amount, close_reason, position_id),
         )
         conn.commit()
-        logger.info("Closed #%d: %d股 @ %.2f → %.2f (%+.2f%%, %+.0f元) %s",
+        logger.info("Closed #%d: %d股 @ %.2f → %.2f (net %+.2f%%, %+.0f元, friction %.0f元) %s",
                      position_id, shares, open_price, close_price,
-                     return_pct, return_amount, close_reason)
+                     return_pct, return_amount, net_result["costs"], close_reason)
         return True
 
 
@@ -411,15 +497,18 @@ def _is_phase_bearish() -> tuple[bool, str]:
 def _vpa_phase_action(phase: str, verdict: str) -> tuple[float | None, str]:
     """Map VPA phase to a stop-tightening factor (Anna Coulling phase priority).
 
-    Phase is more decisive than verdict in Wyckoff theory:
-      - 派发 (initial/middle): insiders are selling → tighten aggressively (96%)
-      - 派发尾声 / 抛售高峰: terminal exhaustion → DO NOT tighten
-        (these are reversal/buy signals, not sell signals — even if verdict
-         appears bearish because the panic isn't done)
+    Terminology note (critical — opposite of English Wyckoff):
+      - 买入高峰 = Accumulation climax at BOTTOM (insiders buying) → bullish reversal UP
+      - 抛售高峰 = Distribution climax at TOP   (insiders selling) → bearish reversal DOWN
+    See vpa.py:1436-1443 for the prompt definitions the LLM follows.
+
+    Phase priority (more decisive than verdict):
+      - 抛售高峰: top distribution climax → tighten MAXIMALLY (95%)
+      - 派发 / 派发尾声: insiders selling → tighten aggressively (96%/97%)
       - 下跌: trend in progress → tighten moderately (97%)
+      - 买入高峰: bottom reversal → DO NOT tighten (let it bounce)
       - 吸筹 / 拉升: bullish phases → never tighten on phase alone
       - 震荡: ambiguous → defer to verdict-based logic (return None)
-      - 买入高峰: bottom reversal → DO NOT tighten
 
     Returns (factor, reason) or (None, "") if phase is non-decisive.
     factor is what to multiply current price by; lower = tighter stop.
@@ -428,9 +517,11 @@ def _vpa_phase_action(phase: str, verdict: str) -> tuple[float | None, str]:
         return None, ""
     # Order matters — check more specific labels first
     if "买入高峰" in phase:
-        return None, ""  # Strong bottom reversal; do not tighten
-    if "抛售高峰" in phase or "派发尾声" in phase:
-        return None, ""  # Terminal exhaustion; possible reversal up
+        return None, ""  # Bottom reversal UP; do not tighten
+    if "抛售高峰" in phase:
+        return 0.95, f"VPA{phase}(顶部派发高潮)"
+    if "派发尾声" in phase:
+        return 0.97, f"VPA{phase}"
     if "派发" in phase:
         # Catches "派发", "派发初期", "派发中期"
         return 0.96, f"VPA派发({phase})"
@@ -450,7 +541,9 @@ def _check_bearish_signals(
     Implements V2 principle #2 (资金行为优先) on the sell side. Five signals,
     in priority order:
       1. **VPA phase (NEW v2.5)**: Wyckoff phase decides direction first.
-         派发 → 96%; 下跌 → 97%; 派发尾声/抛售高峰/吸筹/拉升 → DO NOT tighten.
+         抛售高峰 → 95% (顶部派发高潮，最强收紧);
+         派发 → 96%; 派发尾声 → 97%; 下跌 → 97%;
+         买入高峰/吸筹/拉升 → DO NOT tighten (bullish phases).
          Only fall through to verdict if phase is ambiguous (震荡).
       2. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
       3. P1 VPA verdict (fallback when phase didn't decide)
@@ -711,15 +804,17 @@ def check_positions(
             if not success:
                 continue
             shares = pos.get("shares", 0)
-            pnl = round((price - open_price) * shares, 2) if shares else 0
+            net_result = _estimate_net_close_result(open_price, price, shares)
             alert.update({
                 "code": code,
                 "name": pos.get("name", ""),
                 "shares": shares,
                 "open_price": open_price,
                 "close_price": price,
-                "return_pct": current_return,
-                "return_amount": pnl,
+                "return_pct": net_result["return_pct"],
+                "return_amount": net_result["return_amount"],
+                "gross_return_pct": current_return,
+                "estimated_costs": net_result["costs"],
                 "holding_days": holding_days,
             })
             alerts.append(alert)

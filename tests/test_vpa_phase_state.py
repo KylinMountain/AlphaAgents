@@ -194,7 +194,11 @@ def test_guard_can_upgrade_same_family_after_repeated_warning_and_decisive_signa
     assert guarded["phase_state_changed"] is True
 
 
-def test_guard_compresses_low_volume_range_to_neutral_warning():
+def test_guard_respects_llm_frame_when_signals_present_in_ranging_data():
+    """Anna review item 5: if the LLM provides any Wyckoff signal — even an
+    unconfirmed one — its phase frame is respected even on flat data. The
+    ranging override is reserved for hallucinated phase claims with zero
+    evidence."""
     proposed = {
         "direction": "偏多",
         "confidence": 0.72,
@@ -211,9 +215,29 @@ def test_guard_compresses_low_volume_range_to_neutral_warning():
         PREV_MARKUP_REPORT,
         phase_context={"trend_10d_pct": 1.2, "range_10d_pct": 7.5, "avg_volume_ratio_5d": 0.7},
     )
+    assert guarded["phase"] == "吸筹尾声"
+    assert guarded["phase_change"].get("denial_level") != "ranging"
+
+
+def test_guard_overrides_to_ranging_only_when_zero_signals_and_truly_flat():
+    """Strict ranging override fires only when the LLM emits no signal AND
+    the window is tightly flat (|trend|<=2%, range<=8%, vol_ratio in
+    [0.85,1.05])."""
+    proposed = {
+        "direction": "偏多",
+        "confidence": 0.55,
+        "phase": "吸筹初期",
+        "reason": "horizontal range",
+        "signals": [],  # no Wyckoff evidence supplied
+        "scenarios": [],
+    }
+    guarded = _apply_phase_state_guard(
+        proposed,
+        PREV_MARKUP_REPORT,
+        phase_context={"trend_10d_pct": 0.5, "range_10d_pct": 6.0, "avg_volume_ratio_5d": 0.95},
+    )
     assert guarded["phase"] == "震荡"
-    assert guarded["warning_phase"] == "吸筹尾声"
-    assert guarded["confirmed"] is False
+    assert guarded["warning_phase"] == "吸筹初期"
     assert guarded["phase_change"]["denial_level"] == "ranging"
 
 

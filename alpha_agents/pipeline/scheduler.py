@@ -16,6 +16,7 @@ from typing import Callable, Awaitable
 import akshare as ak
 
 from alpha_agents.config import no_proxy, DATA_DIR
+from alpha_agents.data.activity_log import log_activity
 
 logger = logging.getLogger(__name__)
 
@@ -202,10 +203,21 @@ class TradingDayScheduler:
             for task in self._tasks:
                 if task.should_run(now, is_trading):
                     logger.info("Running task: %s (timeout=%ds)", task.name, task.timeout_seconds)
+                    log_activity("task_start", task=task.name, status="running",
+                                 message=f"开始 {task.name}")
+                    started = datetime.now()
                     try:
                         result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
                         task._last_run = datetime.now()
                         logger.info("Task %s completed", task.name)
+                        took = (task._last_run - started).total_seconds()
+                        preview = result if isinstance(result, str) else ""
+                        log_activity(
+                            "task_done", task=task.name, status="ok",
+                            message=preview[:2000] or f"{task.name} 完成",
+                            detail={"seconds": round(took, 1),
+                                    "has_output": bool(preview)},
+                        )
                         # Notify chat terminal if callback is set
                         if self._on_task_output and result and isinstance(result, str):
                             self._on_task_output(task.name, result)
@@ -215,9 +227,13 @@ class TradingDayScheduler:
                                      "their blocking call returns)",
                                      task.name, task.timeout_seconds)
                         task._last_run = datetime.now()
-                    except Exception:
+                        log_activity("task_failed", task=task.name, status="timeout",
+                                     message=f"{task.name} 超时 ({task.timeout_seconds}s)")
+                    except Exception as e:
                         logger.exception("Task %s failed", task.name)
                         task._last_run = datetime.now()
+                        log_activity("task_failed", task=task.name, status="failed",
+                                     message=f"{task.name} 失败: {e}"[:500])
                     self._save_state()
 
             # Check custom tasks from DB

@@ -15,6 +15,7 @@ from alpha_agents.data.memory_store import (
     save_prediction,
 )
 from alpha_agents.pipeline.digest import digest_news
+from alpha_agents.data.scoring import confidence_to_prob
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
@@ -449,6 +450,7 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
 
         # ── Scoring ──
         dims_str = " ".join(dims)
+        r["dims_passed"] = passes
         if passes >= 3:
             r["confidence"] = "high"
             validated.append(r)
@@ -503,6 +505,17 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                 theme_line=r.get("theme", ""),
                 entry_price=entry_prices.get(code),
                 reason=r.get("reason", "")[:100],
+                # G1: grade this on Brier, not on next-day direction.
+                prob=confidence_to_prob(r.get("confidence"),
+                                        dims_passed=r.get("dims_passed")),
+                # Morning picks used to carry no features at all, which
+                # kept half the recommendations out of playbook learning.
+                features={
+                    "theme": r.get("theme", ""),
+                    "dims_passed": r.get("dims_passed"),
+                    "confidence": r.get("confidence", ""),
+                    "rec_type": "morning",
+                },
             )
             saved += 1
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",

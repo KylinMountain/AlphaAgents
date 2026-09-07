@@ -12,6 +12,7 @@ from alpha_agents.sources.wallstreetcn import get_wallstreetcn_fn
 from alpha_agents.sources.whitehouse import get_whitehouse_fn
 from alpha_agents.sources.pboc import get_pboc_news_fn
 from alpha_agents.sources.jin10 import get_jin10_fn
+from alpha_agents.sources.sina_7x24 import get_sina_7x24_fn
 from alpha_agents.sources.xinhua import get_xinhua_fn
 from alpha_agents.sources.fed import get_fed_news_fn
 from alpha_agents.sources.sec import get_sec_news_fn
@@ -39,6 +40,7 @@ NEWS_SOURCES = [
     ("whitehouse", "白宫", lambda: get_whitehouse_fn(limit=10)),
     ("pboc", "人民银行", lambda: get_pboc_news_fn(limit=10)),
     ("jin10", "金十数据", lambda: get_jin10_fn(limit=NEWS_FETCH_LIMIT)),
+    ("sina_7x24", "新浪7x24", lambda: get_sina_7x24_fn(limit=NEWS_FETCH_LIMIT)),
     ("xinhua", "新华社", lambda: get_xinhua_fn(limit=20)),
     ("fed", "美联储", lambda: get_fed_news_fn(limit=10)),
     ("sec", "SEC", lambda: get_sec_news_fn(limit=10)),

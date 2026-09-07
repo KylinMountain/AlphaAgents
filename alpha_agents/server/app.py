@@ -133,6 +133,7 @@ async def get_sources():
         {"id": "cls", "name": "财联社电报", "type": "domestic"},
         {"id": "wallstreetcn", "name": "华尔街见闻", "type": "domestic"},
         {"id": "jin10", "name": "金十数据", "type": "domestic"},
+        {"id": "sina_7x24", "name": "新浪7x24", "type": "domestic"},
         {"id": "xinhua", "name": "新华社", "type": "domestic"},
         {"id": "pboc", "name": "人民银行", "type": "domestic"},
         {"id": "world_rss", "name": "BBC/CNBC/Google", "type": "international"},

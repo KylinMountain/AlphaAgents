@@ -289,58 +289,26 @@ async def run_morning_scan() -> str | None:
             recs = await _cross_validate_recommendations(recs)
             _save_recommendations_list(recs)
 
-            # 7. LLM VPA analysis for each recommended stock (Anna Coulling deep analysis)
-            try:
-                from alpha_agents.tools.vpa import compute_vpa_with_llm
-                vpa_lines = ["\n\n【量价深度分析】（Anna Coulling VPA）"]
-                for r in recs[:5]:  # Top 5 recommendations
-                    code = r.get("code", "")
-                    name = r.get("name", "")
-                    if not code:
-                        continue
-                    try:
-                        vpa_r = await asyncio.to_thread(compute_vpa_with_llm, code, name)
-                        if vpa_r.get("ok") and vpa_r.get("llm_report"):
-                            verdict = vpa_r.get("llm_verdict", "?")
-                            phase = vpa_r.get("llm_phase", "?")
-                            confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
-                            vpa_lines.append(
-                                f"\n▶ {code} {name} [{verdict} {phase} {confirmed}]"
-                            )
-                            llm_text = vpa_r["llm_report"]
-                            if len(llm_text) > 1500:
-                                llm_text = llm_text[:1500] + f"\n...(完整报告: vpa {code})"
-                            vpa_lines.append(llm_text)
-                    except Exception as e:
-                        logger.debug("Morning VPA for %s failed: %s", code, e)
-                if len(vpa_lines) > 1:
-                    report += "\n".join(vpa_lines)
-                    logger.info("Added VPA analysis for %d stocks to morning report", len(vpa_lines) - 1)
-            except Exception as e:
-                logger.debug("Morning VPA section failed: %s", e)
-
     return report
 
 
 async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
-    """Code-driven 5-dimension cross-validation (V2 模式4 upgrade).
+    """Code-driven 4-dimension cross-validation (V2 模式4 upgrade).
 
-    Replaces the old LLM+regex approach with deterministic rules + VPA.
+    Replaces the old LLM+regex approach with deterministic rules.
 
-    5 dimensions:
+    4 dimensions:
       1. 资金面: 主力资金方向（get_stock_fund_flow_fn）
       2. 基本面: ROE / 净利润增长 / 负债率（get_financial_data_fn, 30d 缓存）
       3. 位置面: 近5日涨幅（get_stock_quotes_fn）
       4. 情绪面: 大盘涨跌比（get_market_breadth_fn）
-      5. VPA面: Anna Coulling 量价分析（compute_vpa_with_llm）
 
-    Scoring: 4+/5 pass → high, 3/5 → medium, ≤2 → removed.
+    Scoring: 3+/4 pass → high, 2/4 → medium, ≤1 → removed.
 
     **Strict mode** (fixed 2026-04-15): Data-unavailable dimensions count as
     "unknown" (?) and DO NOT contribute to passes. Previously they were
-    default-pass, which meant a stock with all 5 tool failures could score
-    5/5 → high confidence (hallucination amplifier). VPA "中性" also no
-    longer counts as pass — must be explicit 看多/偏多 to contribute.
+    default-pass, which meant a stock with all tool failures could score
+    full marks → high confidence (hallucination amplifier).
     """
     import asyncio
 
@@ -443,37 +411,18 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
         else:
             dims.append("情绪❌")
 
-        # ── Dim 5: VPA 量价分析 ──
-        # Only 看多/偏多 contributes. 中性 = no signal = no pass.
-        try:
-            from alpha_agents.tools.vpa import compute_vpa_with_llm
-            vpa_r = await asyncio.to_thread(compute_vpa_with_llm, code, name)
-            if vpa_r.get("ok"):
-                verdict = vpa_r.get("llm_verdict", "中性")
-                if verdict in ("看多", "偏多"):
-                    passes += 1
-                    dims.append(f"VPA✅({verdict})")
-                elif verdict in ("看空", "偏空"):
-                    dims.append(f"VPA❌({verdict})")
-                else:
-                    dims.append(f"VPA~({verdict})")  # 中性 no pass
-            else:
-                dims.append("VPA?")
-        except Exception:
-            dims.append("VPA?")
-
         # ── Scoring ──
         dims_str = " ".join(dims)
-        if passes >= 4:
+        if passes >= 3:
             r["confidence"] = "high"
             validated.append(r)
-            logger.info("  CV: %s %s → high (%d/5) [%s]", code, name, passes, dims_str)
-        elif passes >= 3:
+            logger.info("  CV: %s %s → high (%d/4) [%s]", code, name, passes, dims_str)
+        elif passes >= 2:
             r["confidence"] = "medium"
             validated.append(r)
-            logger.info("  CV: %s %s → medium (%d/5) [%s]", code, name, passes, dims_str)
+            logger.info("  CV: %s %s → medium (%d/4) [%s]", code, name, passes, dims_str)
         else:
-            logger.info("  CV: %s %s → removed (%d/5) [%s]", code, name, passes, dims_str)
+            logger.info("  CV: %s %s → removed (%d/4) [%s]", code, name, passes, dims_str)
 
     if not validated:
         logger.info("Cross-validation removed all recommendations")
@@ -533,9 +482,6 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                     entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                 if stop_loss_val is None:
                     stop_loss_val = parse_stop_loss(r.get("action", ""))
-                # P0.2: pull VPA-derived take-profit target if available
-                from alpha_agents.data.portfolio import get_vpa_target_for_code
-                target_price = get_vpa_target_for_code(code)
                 create_pending_order(
                     code=code,
                     name=r.get("name", ""),
@@ -544,7 +490,6 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                     entry_low=entry_low,
                     entry_high=entry_high,
                     stop_loss=stop_loss_val,
-                    target_price=target_price,
                     source="morning",
                     reason=r.get("reason", "")[:100],
                 )

@@ -157,32 +157,6 @@ async def handle_best(arg: str, ctx: ChatContext) -> None:
     ctx.console.print(Panel(get_sector_best_stocks_fn(arg), title="板块选股", border_style="cyan"))
 
 
-async def handle_vpa(arg: str, ctx: ChatContext) -> None:
-    m = re.match(r"^(\d{6})(?:\s+(.+))?$", arg)
-    if not m:
-        ctx.console.print("[red]用法: /vpa <6位代码> [名称][/red]  例: /vpa 002364 中恒电气")
-        return
-    code = m.group(1)
-    name = (m.group(2) or "").strip()
-    ctx.console.print(f"[dim]正在进行 Anna Coulling 量价分析 {code} {name}...[/dim]")
-    from alpha_agents.tools.vpa import compute_vpa_with_llm
-    r = compute_vpa_with_llm(code, name=name)
-    if not r.get("ok"):
-        ctx.console.print(f"[red]VPA 分析失败: {r.get('error', '未知错误')}[/red]")
-        return
-    verdict = r.get("llm_verdict", "中性")
-    phase = r.get("llm_phase", "?")
-    confirmed = r.get("llm_confirmed", False)
-    reason = r.get("llm_reason", "")
-    report = r.get("llm_report", "")
-
-    color_map = {"看多": "green", "偏多": "green", "看空": "red", "偏空": "red", "中性": "yellow"}
-    border = color_map.get(verdict, "cyan")
-    confirm_str = "已确认" if confirmed else "待确认"
-    title = f"VPA 量价分析 — {code} {name} [{verdict} {phase} {confirm_str}]"
-    ctx.console.print(Panel(Markdown(report or reason), title=title, border_style=border))
-
-
 async def handle_lhb(arg: str, ctx: ChatContext) -> None:
     from alpha_agents.agents.chat import show_lhb
     ctx.console.print(Panel(show_lhb._fn(), title="龙虎榜", border_style="red"))
@@ -387,8 +361,6 @@ REGISTRY: tuple[Command, ...] = (
             aliases=("/查",), usage="/quote <6位代码>"),
     Command("/best", "行情", "板块内多因子选股", handle_best,
             aliases=("/选股",), usage="/best <板块名>"),
-    Command("/vpa", "行情", "量价分析（Wyckoff/Anna Coulling）", handle_vpa,
-            aliases=("/量价",), usage="/vpa <6位代码> [名称]"),
     Command("/lhb", "行情", "今日龙虎榜机构动向", handle_lhb),
     Command("/north", "行情", "北向资金流向", handle_north),
     Command("/limitup", "行情", "涨停板分布", handle_limitup),

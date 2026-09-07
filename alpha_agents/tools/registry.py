@@ -35,7 +35,6 @@ from alpha_agents.tools.fund_flow import (
 )
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
-from alpha_agents.tools.vpa import get_vpa_analysis_fn
 from alpha_agents.tools.market_snapshot import get_market_snapshot_fn
 from alpha_agents.tools.institutional_position import get_institutional_position_fn
 from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
@@ -361,29 +360,6 @@ def get_sector_best_stocks(concept_name: str, top_n: int = 10) -> str:
 
 
 @function_tool
-def get_vpa_analysis(code: str, name: str = "") -> str:
-    """获取股票的量价分析（VPA, Volume Price Analysis, Anna Coulling 体系）。
-
-    基于 K 线 + 成交量的**结构化**关系分析（非散户技术指标），识别机构行为：
-    - 量价一致/背离（涨+放量=健康，涨+缩量=顶部背离）
-    - 卖出高潮 Selling Climax（急跌巨量收回过半 → 潜在底部）
-    - 买入高潮 Buying Climax（急涨巨量冲高回落 → 潜在顶部）
-    - 放量滞涨 Distribution（巨量但价不动 → 派发）
-    - 无需求反弹 / 无供给回调（缩量反向走势）
-    - OBV 10日趋势
-
-    所有模式和数值均为代码预计算，LLM 只读解读。
-
-    返回：verdict(bullish/bearish/neutral) + net_score + 模式列表 + 近15日逐日量价表。
-
-    参数:
-        code: 6位股票代码
-        name: 可选，股票名称（仅用于报告展示）
-    """
-    return get_vpa_analysis_fn(code=code, name=name)
-
-
-@function_tool
 def get_sentiment_phase() -> str:
     """获取当前市场情绪周期阶段（冰点/修复/升温/狂热/分歧/退潮）。
 
@@ -443,7 +419,7 @@ STOCK_TOOLS = [
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
     get_stock_fund_flow, get_sector_ranking, get_concept_ranking, get_anomaly_stocks,
     get_market_snapshot, get_institutional_position,
-    get_sector_best_stocks, get_vpa_analysis,
+    get_sector_best_stocks,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,
     get_sentiment_phase,

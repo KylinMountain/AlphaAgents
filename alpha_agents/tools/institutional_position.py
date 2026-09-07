@@ -59,7 +59,6 @@ def _do_institutional_position(code: str, market: str) -> str:
         "institutional_cost": None,
         "relative_strength": None,
         "turnover_regime": None,
-        "vpa": None,
         "signal_summary": None,
         "action": None,
     }
@@ -80,42 +79,13 @@ def _do_institutional_position(code: str, market: str) -> str:
     turnover = _analyze_turnover(code)
     result["turnover_regime"] = turnover
 
-    # ── 5. Volume Price Analysis (VPA, Wyckoff/Anna Coulling 体系) ──
-    vpa = _compute_vpa_compact(code)
-    result["vpa"] = vpa
-
-    # ── 6. Synthesize signals → action ──
+    # ── 5. Synthesize signals → action ──
     result["signal_summary"], result["action"] = _synthesize(
-        code, fund_flow, inst_cost, price_info, turnover, vpa
+        code, fund_flow, inst_cost, price_info, turnover
     )
 
     return json.dumps(result, ensure_ascii=False)
 
-
-def _compute_vpa_compact(code: str) -> dict:
-    """Compact LLM-VPA result for integration.
-
-    All VPA paths now go through the LLM pipeline. Returns the LLM's verdict
-    (中文: 看多/偏多/中性/偏空/看空) plus phase / confidence / confirmed for
-    downstream signal synthesis.
-    """
-    try:
-        from alpha_agents.tools.vpa import compute_vpa_with_llm
-        # skip_save=True so this analytical call does not pollute production VPA
-        # history; we only need the LLM's verdict here.
-        r = compute_vpa_with_llm(code, skip_save=True)
-        if not r.get("ok"):
-            return {"error": r.get("error", "VPA 计算失败")}
-        return {
-            "verdict": r.get("llm_verdict"),       # 看多 / 偏多 / 中性 / 偏空 / 看空
-            "phase": r.get("llm_phase"),
-            "confidence": r.get("llm_confidence"),
-            "confirmed": r.get("llm_confirmed"),
-            "reason": r.get("llm_reason"),
-        }
-    except Exception as e:
-        logger.debug("VPA compact failed for %s: %s", code, e)
-        return {"error": str(e)}
 
 
 def _analyze_fund_flow(code: str, market: str, realtime_price: float | None = None) -> dict:
@@ -503,14 +473,12 @@ def _synthesize(
     inst_cost: dict,
     price_info: dict,
     turnover: dict,
-    vpa: dict | None = None,
 ) -> tuple[dict, dict]:
     """Synthesize all signals into a summary and actionable recommendation."""
 
     bullish_signals = []
     bearish_signals = []
     confidence_penalty = 0
-    vpa = vpa or {}
 
     # Check if sub-analyzers returned errors
     if fund_flow.get("error"):
@@ -556,32 +524,9 @@ def _synthesize(
     elif regime == "缩量上涨(量价背离，需警惕)":
         bearish_signals.append("缩量上涨，量价背离")
 
-    # VPA signals (5th dimension) — now derived from LLM verdict.
-    # 看多/偏多 → bullish；偏空/看空 → bearish；中性 → none.
-    # Score contribution scales with verdict strength × LLM confidence so a
-    # tentative call (conf 0.55) doesn't dominate a confident one (0.85).
-    vpa_score = 0
-    if isinstance(vpa, dict) and vpa.get("verdict"):
-        vd = vpa["verdict"]
-        conf = float(vpa.get("confidence") or 0.5)
-        confirmed = bool(vpa.get("confirmed"))
-        verdict_to_score = {"看多": 3, "偏多": 1, "中性": 0, "偏空": -1, "看空": -3}
-        base = verdict_to_score.get(vd, 0)
-        # Confidence weighting (0.5..1.0 → 0.5..1.0). Confirmed signals get +0.2 boost.
-        weight = max(0.5, min(1.0, conf)) + (0.2 if confirmed else 0.0)
-        vpa_score = int(round(base * weight))
-        phase = vpa.get("phase") or ""
-        tag = f"VPA-{vd}({phase}, conf {conf:.2f}{', cfm=T' if confirmed else ''})"
-        if vpa_score > 0:
-            bullish_signals.append(tag)
-        elif vpa_score < 0:
-            bearish_signals.append(tag)
-
     # Overall score: -10 to +10
     score = len(bullish_signals) * 2 - len(bearish_signals) * 2
     score += ff_momentum
-    # VPA verdict-derived score directly contributes (typically -3..+3)
-    score += vpa_score
     score -= confidence_penalty
     score = min(10, max(-10, score))
 

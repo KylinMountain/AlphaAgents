@@ -504,15 +504,6 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Sentiment cycle computation failed: %s", e)
 
-    # Check VPA pending signals — auto-confirm/deny/expire
-    try:
-        vpa_updates = await asyncio.to_thread(_check_vpa_signals, today)
-        if vpa_updates:
-            report += "\n\n" + vpa_updates
-            logger.info("VPA signal check: %s", vpa_updates[:200])
-    except Exception as e:
-        logger.warning("VPA signal check failed: %s", e)
-
     # Phase 2: extract lessons + consolidate principles
     try:
         from alpha_agents.evolution import post_review
@@ -523,92 +514,3 @@ async def run_review() -> str | None:
         logger.warning("Evolution post_review failed: %s", e)
 
     return report
-
-
-def _check_vpa_signals(today: str) -> str:
-    """Check all pending VPA signals against today's K-line data.
-
-    For each pending signal:
-      - Expired? → mark expired
-      - Confirmed? → re-analyze with LLM, let LLM judge
-      - Still pending? → keep
-
-    Returns text summary of changes for the report.
-    """
-    from alpha_agents.data.memory_store import (
-        get_pending_vpa_signals, resolve_vpa_signal, expire_old_vpa_signals,
-        get_pending_vpa_scenarios, expire_old_vpa_scenarios,
-    )
-
-    # Step 1: Expire old signals + scenarios (scenarios expire at 10 days,
-    # signals at 3 — both use the same per-row expire_date set at create)
-    expired_count = expire_old_vpa_signals(today)
-    expired_scenarios = expire_old_vpa_scenarios(today)
-
-    # Step 2: Check remaining pending signals
-    pending = get_pending_vpa_signals()
-    pending_scenarios = get_pending_vpa_scenarios()
-    if not pending and not pending_scenarios and expired_count == 0 and expired_scenarios == 0:
-        return ""
-
-    lines = ["【VPA 信号追踪】"]
-    if expired_count > 0:
-        lines.append(f"• {expired_count} 个信号已过期（超过 3 天未确认）")
-    if expired_scenarios > 0:
-        lines.append(f"• {expired_scenarios} 个 scenario 已过期（超过 10 天未确认）")
-    if pending_scenarios:
-        lines.append(f"• {len(pending_scenarios)} 个 scenario 仍在追踪:")
-        for sc in pending_scenarios[:5]:  # cap display
-            sigs = "+".join(sc.get("signal_names") or [])
-            lines.append(
-                f"  - {sc['code']} {sc.get('name', '')}: {sc['scenario_name']} "
-                f"({sc.get('phase', '')}) — 等 {sc.get('confirmation_criteria', '')[:30]}"
-            )
-
-    # Step 3: For each pending signal, check confirmation with LLM VPA + realtime quote.
-    # All VPA paths now go through the LLM pipeline (compute_vpa_with_llm).
-    if pending:
-        from alpha_agents.tools.vpa import compute_vpa_with_llm
-        from alpha_agents.data.market_data import get_realtime_quotes
-        for sig in pending[:10]:
-            code = sig["code"]
-            name = sig.get("name", "")
-            try:
-                # skip_save=True so review-time confirmation does not pollute
-                # the production VPA history; we only need ok/llm_verdict here.
-                r = compute_vpa_with_llm(code, name=name, skip_save=True)
-                if not r.get("ok"):
-                    continue
-
-                # Simple confirmation heuristic:
-                # If signal was bearish and stock dropped today → confirmed
-                # If signal was bearish and stock rose significantly → denied
-                rt = get_realtime_quotes([code])
-                today_chg = rt.get(code, {}).get("change_pct", 0) if rt else 0
-
-                if sig["direction"] in ("偏空", "看空"):
-                    if today_chg < -2:
-                        resolve_vpa_signal(sig["id"], "confirmed",
-                                          resolved_by=f"今日跌{today_chg:.1f}%")
-                        lines.append(f"• ✅ {code} {name} [{sig['signal_type']}] → 已确认（今日{today_chg:+.1f}%）")
-                    elif today_chg > 3:
-                        resolve_vpa_signal(sig["id"], "denied",
-                                          resolved_by=f"今日涨{today_chg:.1f}%否定看空")
-                        lines.append(f"• ❌ {code} {name} [{sig['signal_type']}] → 已否定（今日{today_chg:+.1f}%）")
-                    else:
-                        lines.append(f"• ⏳ {code} {name} [{sig['signal_type']}] → 仍待确认（今日{today_chg:+.1f}%）")
-                elif sig["direction"] in ("偏多", "看多"):
-                    if today_chg > 2:
-                        resolve_vpa_signal(sig["id"], "confirmed",
-                                          resolved_by=f"今日涨{today_chg:.1f}%")
-                        lines.append(f"• ✅ {code} {name} [{sig['signal_type']}] → 已确认（今日{today_chg:+.1f}%）")
-                    elif today_chg < -3:
-                        resolve_vpa_signal(sig["id"], "denied",
-                                          resolved_by=f"今日跌{today_chg:.1f}%否定看多")
-                        lines.append(f"• ❌ {code} {name} [{sig['signal_type']}] → 已否定（今日{today_chg:+.1f}%）")
-                    else:
-                        lines.append(f"• ⏳ {code} {name} [{sig['signal_type']}] → 仍待确认（今日{today_chg:+.1f}%）")
-            except Exception as e:
-                logger.debug("VPA signal check for %s failed: %s", code, e)
-
-    return "\n".join(lines) if len(lines) > 1 else ""

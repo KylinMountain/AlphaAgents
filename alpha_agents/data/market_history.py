@@ -9,6 +9,7 @@ import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import baostock as bs
@@ -97,6 +98,24 @@ def get_available_dates() -> list[str]:
         "SELECT DISTINCT date FROM daily_kline ORDER BY date"
     ).fetchall()
     return [r["date"] for r in rows]
+
+
+@lru_cache(maxsize=512)
+def get_latest_trading_day_at_or_before(cut: str) -> str | None:
+    """Most recent market-wide trading day in daily_kline with date <= cut.
+
+    Used by VPA loaders to detect suspended stocks: if a stock's most
+    recent bar is older than the market-wide latest trading day, the
+    stock has missed sessions and analysis would use stale data.
+
+    Memoized — backtests call per-stock per-day but ``cut`` only takes
+    a few hundred distinct values across a multi-month run.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT MAX(date) FROM daily_kline WHERE date <= ?", (cut,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
 
 
 # ── Baostock Helpers ─────────────────────────────────────────

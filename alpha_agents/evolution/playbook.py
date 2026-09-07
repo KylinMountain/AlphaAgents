@@ -280,6 +280,64 @@ def _pattern_signature(pattern_json_str: str) -> frozenset:
     )
 
 
+# Hard ceiling on active playbooks. Self-improvement preserves PAC
+# learnability only when the policy-reachable model capacity is uniformly
+# bounded (arXiv:2510.04399); an ever-growing playbook is the standard
+# counterexample, and it is also how a context window fills with noise.
+# When full, the weakest earns its way out before a new one comes in.
+MAX_ACTIVE_PLAYBOOKS = 12
+
+
+def _playbook_utility(pb: dict) -> float:
+    """Ranking score for eviction. Higher survives.
+
+    Hit rate is the signal; trade count is confidence in it. An untested
+    playbook sits at the 0.5 base rate rather than at zero, so a brand new
+    one is not evicted before it has had a chance to be measured.
+    """
+    trades = pb.get("total_trades", 0) or 0
+    hit_rate = pb.get("hit_rate", 0.0) or 0.0
+    if trades < 3:
+        hit_rate = 0.5
+    # Shrink toward the base rate when evidence is thin.
+    confidence = min(trades / 10.0, 1.0)
+    return 0.5 + (hit_rate - 0.5) * confidence
+
+
+def enforce_capacity(today: str) -> list[int]:
+    """Retire the weakest playbooks once the active set exceeds the cap.
+
+    Returns the ids retired. Deprecating rather than deleting keeps the
+    audit trail — a pattern that was tried and failed is worth knowing.
+    """
+    from alpha_agents.data.memory_store import update_playbook_status
+
+    active = [pb for pb in get_all_playbooks() if pb.get("status") == "active"]
+    if len(active) <= MAX_ACTIVE_PLAYBOOKS:
+        return []
+
+    ranked = sorted(active, key=_playbook_utility)
+    doomed = ranked[:len(active) - MAX_ACTIVE_PLAYBOOKS]
+    retired = []
+    for pb in doomed:
+        update_playbook_status(
+            pb["id"], status="deprecated", weight=0.0,
+            reason=(f"容量上限 {MAX_ACTIVE_PLAYBOOKS}，效用最低 "
+                    f"(hit_rate={pb.get('hit_rate', 0) or 0:.2f}, "
+                    f"trades={pb.get('total_trades', 0) or 0})"),
+            hit_rate_at_change=pb.get("hit_rate", 0.0) or 0.0,
+            today=today,
+        )
+        retired.append(pb["id"])
+        logger.info(
+            "Retired playbook #%d '%s' on capacity: utility=%.3f "
+            "(hit_rate=%.2f, trades=%d)",
+            pb["id"], pb.get("name", ""), _playbook_utility(pb),
+            pb.get("hit_rate", 0) or 0, pb.get("total_trades", 0) or 0,
+        )
+    return retired
+
+
 def scan_and_auto_create(today: str) -> list[int]:
     """Scan hit clusters and create a new playbook for each novel pattern.
     Returns list of newly-created playbook IDs."""
@@ -287,9 +345,14 @@ def scan_and_auto_create(today: str) -> list[int]:
     if not clusters:
         return []
 
+    # Make room first, so a genuinely new pattern is not rejected merely
+    # because a stale one is occupying the last slot.
+    enforce_capacity(today)
+
     existing = get_all_playbooks()
     existing_sigs = {_pattern_signature(pb.get("pattern_json", "{}"))
                      for pb in existing}
+    active_count = sum(1 for pb in existing if pb.get("status") == "active")
 
     created = []
     for c in clusters:
@@ -310,7 +373,12 @@ def scan_and_auto_create(today: str) -> list[int]:
         if c.get("institutional_present"):
             name_parts.append("机构")
         name = f"Auto: {'-'.join(name_parts)}"
+        if active_count >= MAX_ACTIVE_PLAYBOOKS:
+            logger.info("Playbook capacity %d reached — skipping '%s'",
+                        MAX_ACTIVE_PLAYBOOKS, name)
+            break
         pid = create_playbook(name=name, pattern_json=pattern, today=today)
+        active_count += 1
         existing_sigs.add(sig)
         created.append(pid)
         logger.info("Auto-created playbook #%d: %s (hits=%d/%d)",

@@ -220,7 +220,7 @@ async def post_review(today: str, review_report: str) -> str:
 
     # Phase 3: playbook daily lifecycle
     from alpha_agents.evolution.playbook import (
-        update_playbook_stats, scan_and_auto_create,
+        update_playbook_stats, scan_and_auto_create, enforce_capacity,
     )
     try:
         playbook_ops = await asyncio.to_thread(update_playbook_stats, today)
@@ -232,6 +232,15 @@ async def post_review(today: str, review_report: str) -> str:
     except Exception as e:
         logger.warning("Playbook auto-create failed: %s", e)
         created_ids = []
+
+    # G4: enforce the cap unconditionally. scan_and_auto_create only runs
+    # it when there are new clusters, so without this an over-capacity set
+    # could sit unpruned indefinitely on quiet days.
+    try:
+        evicted = await asyncio.to_thread(enforce_capacity, today)
+    except Exception as e:
+        logger.warning("Playbook capacity enforcement failed: %s", e)
+        evicted = []
 
     # Phase 4: daily metrics snapshot — always computed (self-measurement)
     try:

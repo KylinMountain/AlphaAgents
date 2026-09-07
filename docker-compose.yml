@@ -1,0 +1,39 @@
+services:
+  scheduler:
+    build: .
+    image: alphaagents:local
+    container_name: alphaagents-scheduler
+    restart: always
+    command: python main.py run-v2
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+    # The box runs ~10 other containers on 7.6Gi; cap this one so an
+    # embedding or backtest burst cannot starve them.
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Optional pipeline UI. Host port 8002 — 8000/8001 belong to TradingAgents.
+  # Start with: docker compose --profile web up -d
+  web:
+    build: .
+    image: alphaagents:local
+    container_name: alphaagents-web
+    restart: always
+    profiles: ["web"]
+    command: python main.py web --host 0.0.0.0 --port 8000
+    ports:
+      - "8002:8000"
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

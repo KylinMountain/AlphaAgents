@@ -43,22 +43,48 @@ def _fetch_flash_list(limit: int = 30) -> list[dict]:
 
 
 def _parse_item(item: dict) -> dict:
-    """Convert a raw Jin10 flash item into a standardised news dict."""
+    """Convert a raw Jin10 flash item into a standardised news dict.
+
+    Keeps the editorial metadata the feed carries — Jin10 flags its own
+    market-moving items with ``important``, and ``type`` separates a plain
+    flash (0) from a 市场要闻 write-up (2). Dropping those threw away the
+    only ranking signal in the payload, leaving every headline equal.
+    """
     inner = item.get("data", {}) or {}
-    content = (inner.get("content") or "").strip()
+    # VIP items have an empty body and put the headline in vip_title.
+    content = (inner.get("content") or inner.get("vip_title") or "").strip()
     time_str = (item.get("time") or "").strip()
-    title = content[:50] if content else ""
+
+    # Headlines are wrapped in 【】 when present.
+    if content.startswith("【") and "】" in content:
+        title = content[1:content.index("】")]
+    else:
+        title = content[:50]
 
     return {
         "title": title,
         "summary": content[:300],
         "time": time_str,
         "source": "金十数据",
+        # Extras beyond the common schema; unknown keys are ignored
+        # downstream.
+        "important": bool(item.get("important")),
+        "type": item.get("type", 0),
+        "origin": (inner.get("source") or "").strip(),
+        "link": (inner.get("source_link") or inner.get("link") or "").strip(),
     }
 
 
-def get_jin10_fn(limit: int = 30, keyword: str | None = None) -> str:
-    """Fetch Jin10 real-time flash news. Replay-aware."""
+def get_jin10_fn(limit: int = 30, keyword: str | None = None,
+                 important_only: bool = False) -> str:
+    """Fetch Jin10 real-time flash news. Replay-aware.
+
+    Args:
+        limit: maximum items to return.
+        keyword: filter on title and summary.
+        important_only: keep only what Jin10 itself flagged as
+            market-moving — roughly 5% of the feed.
+    """
     from alpha_agents.data.snapshot_store import replay_news_response, save_news
     replay = replay_news_response(["金十数据"], limit, keyword)
     if replay is not None:
@@ -73,6 +99,9 @@ def get_jin10_fn(limit: int = 30, keyword: str | None = None) -> str:
         except Exception as e:
             logger.debug("jin10 capture failed: %s", e)
 
+        if important_only:
+            news = [n for n in news if n.get("important")]
+
         if keyword:
             kw = keyword.lower()
             news = [
@@ -81,8 +110,12 @@ def get_jin10_fn(limit: int = 30, keyword: str | None = None) -> str:
             ]
 
         news = news[:limit]
+        important_count = sum(1 for n in news if n.get("important"))
 
-        return json.dumps({"news": news, "count": len(news)}, ensure_ascii=False)
+        return json.dumps(
+            {"news": news, "count": len(news), "important_count": important_count},
+            ensure_ascii=False,
+        )
     except Exception as e:
         logger.error("Failed to fetch Jin10 flash news: %s", e)
         return json.dumps({"news": [], "count": 0, "error": str(e)}, ensure_ascii=False)

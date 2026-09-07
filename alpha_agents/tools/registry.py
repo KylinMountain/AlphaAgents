@@ -9,6 +9,7 @@ from alpha_agents.sources.wallstreetcn import get_wallstreetcn_fn
 from alpha_agents.sources.whitehouse import get_whitehouse_fn
 from alpha_agents.sources.pboc import get_pboc_news_fn
 from alpha_agents.sources.jin10 import get_jin10_fn
+from alpha_agents.sources.sina_7x24 import get_sina_7x24_fn
 from alpha_agents.sources.xinhua import get_xinhua_fn
 from alpha_agents.sources.fed import get_fed_news_fn
 from alpha_agents.sources.sec import get_sec_news_fn
@@ -84,6 +85,24 @@ def get_pboc_news(limit: int = 20, keyword: str = "") -> str:
 def get_jin10(limit: int = 30, keyword: str = "") -> str:
     """获取金十数据实时快讯。覆盖全球宏观、外汇、商品。"""
     return get_jin10_fn(limit=limit, keyword=keyword or None)
+
+
+@function_tool
+def get_sina_7x24(limit: int = 30, keyword: str = "", stocks_only: bool = False) -> str:
+    """获取新浪财经7x24快讯。
+
+    与其他快讯源的区别：新浪已为每条快讯标注**关联标的**，公司新闻直接带
+    6位股票代码，无需再猜。同时带分类标签（公司/市场/国际/其他）。
+
+    参数:
+        limit: 返回条数
+        keyword: 可选关键词过滤
+        stocks_only: 只返回已关联标的的快讯（想直接拿"新闻→个股"映射时用）
+
+    返回: news 列表，每条含 stocks(关联标的) / tags(分类) / link。
+    """
+    return get_sina_7x24_fn(limit=limit, keyword=keyword or None,
+                            stocks_only=stocks_only)
 
 
 @function_tool
@@ -418,7 +437,7 @@ STOCK_TOOLS = [
     get_stock_quotes, get_financial_data, get_market_breadth, get_earnings_calendar,
     get_lhb_detail, get_block_trade, get_north_flow, get_margin_data,
     get_stock_fund_flow, get_sector_ranking, get_concept_ranking, get_anomaly_stocks,
-    get_market_snapshot, get_institutional_position,
+    get_market_snapshot, get_institutional_position, get_sina_7x24,
     get_sector_best_stocks,
     get_us_market, get_bond_yields, get_global_overview,
     web_search, web_fetch, get_pizzint,

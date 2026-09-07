@@ -65,6 +65,18 @@ async def get_predictions(date: str):
     return JSONResponse({"date": date, "predictions": preds})
 
 
+@app.get("/api/activity")
+async def get_activity_api(limit: int = 100, since_id: int | None = None):
+    """Live scheduler activity — the message stream the dashboard renders.
+
+    Read from SQLite rather than the in-process event bus so it works when
+    the scheduler and the web UI are separate containers.
+    """
+    from alpha_agents.data.activity_log import get_activity
+    rows = await asyncio.to_thread(get_activity, limit, since_id)
+    return JSONResponse({"activity": rows, "count": len(rows)})
+
+
 @app.get("/api/event-graph")
 async def get_event_graph_api():
     """Get event relationship graph for visualization."""

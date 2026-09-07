@@ -4,18 +4,20 @@ import StatCards from './components/StatCards'
 import ReportPanel from './components/ReportPanel'
 import ReviewPanel from './components/ReviewPanel'
 import SourceGrid from './components/SourceGrid'
+import ActivityStream from './components/ActivityStream'
 import { useDashboard, summarizeReviews } from './hooks/useDashboard'
 import { useWebSocket } from './hooks/useWebSocket'
 
 const TABS = [
+  { id: 'stream', label: '消息流' },
   { id: 'reports', label: '分析报告' },
   { id: 'reviews', label: '复盘验证' },
 ]
 
 export default function App() {
-  const { reports, reviews, sources, loading, reload } = useDashboard()
+  const { reports, reviews, sources, activity, loading, reload } = useDashboard()
   const { connected } = useWebSocket()
-  const [tab, setTab] = useState('reports')
+  const [tab, setTab] = useState('stream')
   const [dark, setDark] = useState(
     () => localStorage.getItem('aa-theme') === 'dark' ||
       (!localStorage.getItem('aa-theme') &&
@@ -72,7 +74,8 @@ export default function App() {
                 >
                   {t.label}
                   <span className="ml-1.5 text-xs opacity-70">
-                    {t.id === 'reports' ? reports.length : reviews.length}
+                    {{ stream: activity.length, reports: reports.length,
+                       reviews: reviews.length }[t.id]}
                   </span>
                 </button>
               ))}
@@ -82,6 +85,8 @@ export default function App() {
               <div className="card text-center py-12 text-sm text-slate-500 dark:text-slate-400">
                 加载中…
               </div>
+            ) : tab === 'stream' ? (
+              <ActivityStream activity={activity} />
             ) : tab === 'reports' ? (
               <ReportPanel reports={reports} />
             ) : (

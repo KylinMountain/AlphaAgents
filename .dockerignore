@@ -1,0 +1,30 @@
+# Secrets — supplied at runtime via env_file, never baked into the image.
+.env
+.env.*
+!.env.example
+
+# Runtime data (SQLite DBs, Chroma index, caches) — bind-mounted instead.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Not needed at runtime.
+tests/
+docs/
+research/
+scripts/
+web/
+deploy/
+autoresearch/
+*.log
+*.csv
+*.tsv

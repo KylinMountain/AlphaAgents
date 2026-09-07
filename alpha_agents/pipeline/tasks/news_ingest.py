@@ -14,8 +14,8 @@ meet if each task calls the APIs itself with ``limit=N``:
   * Raise ``limit`` instead and every run re-reads what it already saw.
 
 So ingestion is decoupled from consumption: this task polls every five
-minutes and
-cheaply — no LLM, no analysis, just write-through to ``news_items``,
+minutes and cheaply — no LLM, no analysis, just write-through to
+``news_items``,
 which already dedups on md5(source|title|published_at). Tasks then read
 a *time window* out of the store via ``read_news(since=..., as_of=...)``
 and get exactly what arrived, once.

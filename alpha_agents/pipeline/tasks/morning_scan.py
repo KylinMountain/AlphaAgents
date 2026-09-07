@@ -16,6 +16,7 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.data.scoring import confidence_to_prob
+from alpha_agents.data.decision_context import build_decision_context, merge_features
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
@@ -140,6 +141,34 @@ def _format_events(events: list[dict]) -> str:
 _OVERNIGHT_HOURS = {0: 66, 6: 42}   # Monday: since Friday 15:00; Sunday: Friday
 _DEFAULT_OVERNIGHT_HOURS = 16       # 15:00 yesterday → 07:00 today
 
+# What the last window read covered, so the decision context can record
+# it alongside each recommendation (G6).
+_WINDOW_STATE: dict = {"hours": None, "count": None}
+
+
+def _safe_regime() -> str | None:
+    """Market regime for the decision context; never raises.
+
+    Context is documentation of the decision, not part of it — failing to
+    record it must not stop a recommendation being saved.
+    """
+    try:
+        from alpha_agents.tools.exit_signals import get_market_regime
+        regime, _pct = get_market_regime()
+        return regime if regime != "unknown" else None
+    except Exception as e:
+        logger.debug("Decision context: regime unavailable: %s", e)
+        return None
+
+
+def _safe_sentiment_phase() -> str | None:
+    try:
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        return get_sentiment_cycle().get("phase") or None
+    except Exception as e:
+        logger.debug("Decision context: sentiment unavailable: %s", e)
+        return None
+
 
 def _read_overnight_window(limit: int = 400) -> list[dict]:
     """News published between yesterday's close and now, from the store.
@@ -157,6 +186,7 @@ def _read_overnight_window(limit: int = 400) -> list[dict]:
 
     items = read_news(sources=None, as_of=now.strftime("%Y-%m-%d %H:%M:%S"),
                       since=since, limit=limit)
+    _WINDOW_STATE.update(hours=hours, count=len(items))
     if items:
         logger.info("Morning scan: %d items from store since %s", len(items), since)
         return items
@@ -489,6 +519,16 @@ def _save_recommendations_list(recs: list[dict]) -> None:
         except Exception as e:
             logger.debug("Failed to fetch entry prices: %s", e)
 
+    # G6: one context per run, shared by every pick it produced.
+    _decision_ctx = build_decision_context(
+        task="morning_scan",
+        news_window_hours=_WINDOW_STATE.get("hours"),
+        news_count=_WINDOW_STATE.get("count"),
+        themes=themes,
+        market_regime=_safe_regime(),
+        sentiment_phase=_safe_sentiment_phase(),
+    )
+
     saved = 0
     for r in recs:
         code = r.get("code", "")
@@ -510,12 +550,17 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                                         dims_passed=r.get("dims_passed")),
                 # Morning picks used to carry no features at all, which
                 # kept half the recommendations out of playbook learning.
-                features={
-                    "theme": r.get("theme", ""),
-                    "dims_passed": r.get("dims_passed"),
-                    "confidence": r.get("confidence", ""),
-                    "rec_type": "morning",
-                },
+                # G6: record what was visible at the decision point, so
+                # this day can be replayed later.
+                features=merge_features(
+                    {
+                        "theme": r.get("theme", ""),
+                        "dims_passed": r.get("dims_passed"),
+                        "confidence": r.get("confidence", ""),
+                        "rec_type": "morning",
+                    },
+                    _decision_ctx,
+                ),
             )
             saved += 1
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",

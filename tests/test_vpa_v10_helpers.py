@@ -3,7 +3,8 @@
 Pins down the behavior of the safety helpers and validators added during
 the multi-AI review round so refactors can't silently break:
 
-- _as_bool: bool("false") == True bug class
+- _coerce_bool (imported here as _as_bool): bool("false") == True bug class.
+  llm.py used to carry an identical copy; deduplicated into verdict.py.
 - _as_float: malformed string (Chinese / lists) shouldn't drop entire reports
 - _redact_secrets: API keys / Bearer tokens scrubbed before logging
 - _validate_absorbed_test_signals: deterministic v10.2 hard-rule enforcement
@@ -17,9 +18,9 @@ from __future__ import annotations
 
 import json
 
+from alpha_agents.tools.vpa.verdict import _coerce_bool as _as_bool
 from alpha_agents.tools.vpa.llm import (
     PROMPT_VERSION,
-    _as_bool,
     _as_float,
     _as_confidence,
     _redact_secrets,

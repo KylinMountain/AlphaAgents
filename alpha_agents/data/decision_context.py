@@ -86,6 +86,7 @@ def build_decision_context(
     return ctx
 
 
+
 def merge_features(features: dict | None, context: dict | None) -> dict:
     """Combine per-stock features with the shared decision context.
 

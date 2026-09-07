@@ -12,6 +12,7 @@ import re as _re
 
 from .guard import _apply_phase_state_guard
 from .verdict import (
+    _coerce_bool,
     _extract_raw_verdict,
     _extract_verdict,
     _format_previous_state_block,
@@ -49,27 +50,6 @@ def _redact_secrets(text: str) -> str:
         return text
     return _API_KEY_RE.sub("[REDACTED]", text)
 
-
-def _as_bool(value, default: bool = False) -> bool:
-    """Safe bool coercion. JSON sometimes gives ``"false"`` strings which
-    Python's bool() would coerce to True — caused real bugs in
-    cross_family_blocked / signal.confirmed.
-
-    GPT P1.3 followup: also handle int/float (some models emit ``1``/``0``).
-    """
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in {"true", "1", "yes", "y", "是"}:
-            return True
-        if v in {"false", "0", "no", "n", "否", ""}:
-            return False
-    return default
 
 
 _NUM_RE = _re.compile(r"[-+]?\d+(?:\.\d+)?")
@@ -1167,7 +1147,7 @@ def _call_llm_vpa(
         # VERDICT JSON only has phase_change.confirmed and signals[].confirmed.
         # Derive it from phase_change.confirmed (the closest analog).
         phase_change = verdict_data.get("phase_change") or {}
-        derived_confirmed = _as_bool(
+        derived_confirmed = _coerce_bool(
             phase_change.get("confirmed") if isinstance(phase_change, dict) else False
         )
 
@@ -1205,18 +1185,18 @@ def _call_llm_vpa(
             "raw_phase": verdict_data.get("raw_phase", verdict_data.get("phase", "")),
             "warning_phase": verdict_data.get("warning_phase", ""),
             "phase_change": verdict_data.get("phase_change", {}),
-            "phase_state_changed": _as_bool(verdict_data.get("phase_state_changed")),
+            "phase_state_changed": _coerce_bool(verdict_data.get("phase_state_changed")),
             "phase_guard_reason": verdict_data.get("phase_guard_reason", ""),
             "previous_phase": verdict_data.get("previous_phase", ""),
             "confirmed": derived_confirmed,
-            "action_confirmed": _as_bool(verdict_data.get("action_confirmed")),
-            "partial_confirmed": _as_bool(verdict_data.get("partial_confirmed")),
-            "confirmed_any_signal": _as_bool(verdict_data.get("confirmed_any_signal")),
-            "confirmed_all_signals": _as_bool(verdict_data.get("confirmed_all_signals")),
+            "action_confirmed": _coerce_bool(verdict_data.get("action_confirmed")),
+            "partial_confirmed": _coerce_bool(verdict_data.get("partial_confirmed")),
+            "confirmed_any_signal": _coerce_bool(verdict_data.get("confirmed_any_signal")),
+            "confirmed_all_signals": _coerce_bool(verdict_data.get("confirmed_all_signals")),
             "action_signal_count": verdict_data.get("action_signal_count", 0),
             "action_confirmed_signal_count": verdict_data.get("action_confirmed_signal_count", 0),
             "decisive_confirmed_signal_count": verdict_data.get("decisive_confirmed_signal_count", 0),
-            "structural_phase_change_confirmed": _as_bool(verdict_data.get("structural_phase_change_confirmed")),
+            "structural_phase_change_confirmed": _coerce_bool(verdict_data.get("structural_phase_change_confirmed")),
             "phase_confidence": _as_confidence(
                 verdict_data.get("phase_confidence", verdict_data.get("confidence")), 0.5
             ),
@@ -1228,11 +1208,11 @@ def _call_llm_vpa(
             "vp_harmony_level_adjustment": verdict_data.get("vp_harmony_level_adjustment", 0),
             "vph_conflict": verdict_data.get("vph_conflict", {"exists": False}),
             "vph_conflict_failures": verdict_data.get("vph_conflict_failures", []),
-            "vph_conflict_validated": _as_bool(verdict_data.get("vph_conflict_validated")),
+            "vph_conflict_validated": _coerce_bool(verdict_data.get("vph_conflict_validated")),
             "selected_climax": verdict_data.get(
                 "selected_climax", {"candidate_id": None, "climax_type": None, "rationale": ""}
             ),
-            "cross_family_blocked": _as_bool(verdict_data.get("cross_family_blocked")),
+            "cross_family_blocked": _coerce_bool(verdict_data.get("cross_family_blocked")),
             "signals": verdict_data.get("signals", []),
             "reason": verdict_data.get("reason", ""),
             "target_low": verdict_data.get("target_low"),

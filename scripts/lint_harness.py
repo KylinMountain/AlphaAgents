@@ -240,10 +240,18 @@ def check_duplication(files: list[tuple[Path, ast.AST]]) -> list[Violation]:
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if len(node.body) < 5:
+            body = node.body
+            # Strip the docstring before comparing. Two copies of the same
+            # helper usually get reworded docstrings, and comparing those
+            # made the check miss real duplication — it did, in this repo.
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            if len(body) < 4:
                 continue          # trivial wrappers are not duplication
-            body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
-            bodies[body].append((path, node.lineno, node.name))
+            key = ast.dump(ast.Module(body=body, type_ignores=[]))
+            bodies[key].append((path, node.lineno, node.name))
 
     out = []
     for _body, sites in bodies.items():

@@ -404,6 +404,64 @@ def _format_stats(stats: dict) -> str:
     return f"近7天命中率: {stats.get('hit_rate', 0):.1f}% ({stats.get('hits', 0)}/{total})"
 
 
+def _score_due_predictions() -> str:
+    """Grade probabilistic predictions whose horizon has elapsed.
+
+    This is the G1 signal: Brier plus factor-residual alpha, both from
+    market data. Unlike the next-day hit flag it is a proper scoring rule
+    and it is neutralised for style exposure, so it measures picking
+    rather than beta — and it reaches useful precision in hundreds of
+    observations instead of years.
+    """
+    from datetime import datetime as _dt
+    from alpha_agents.data.memory_store import (
+        get_predictions_due_for_scoring, save_prediction_score,
+        get_scored_predictions,
+    )
+    from alpha_agents.data.scoring import (
+        score_prediction, summarize_scores, DEFAULT_HORIZON_DAYS,
+    )
+
+    today = _dt.now().strftime("%Y-%m-%d")
+    due = get_predictions_due_for_scoring(today, DEFAULT_HORIZON_DAYS)
+    scored = 0
+    for pred in due:
+        try:
+            result = score_prediction(pred["code"], pred["date"], pred["prob"],
+                                      DEFAULT_HORIZON_DAYS)
+        except Exception as e:
+            logger.debug("Scoring failed for #%s: %s", pred["id"], e)
+            continue
+        if result:
+            save_prediction_score(pred["id"], result)
+            scored += 1
+
+    if scored:
+        logger.info("Scored %d/%d due predictions", scored, len(due))
+
+    summary = summarize_scores(get_scored_predictions(days=30))
+    if not summary.get("n"):
+        return ""
+
+    skill = summary["brier_skill"]
+    verdict = ("概率带信息" if skill > 0.02
+               else "概率无信息" if skill > -0.02 else "概率反向")
+    lines = [
+        "【预测质量】(近30天，市场数据评分)",
+        f"• 样本 {summary['n']} 条 | Brier {summary['brier']:.3f} "
+        f"(基准0.25) | 技能分 {skill:+.3f} → {verdict}",
+        f"• 跑赢市场比例 {summary['hit_rate']*100:.0f}% | "
+        f"中位超额 {summary['median_excess']:+.2f}%"
+        if summary.get("median_excess") is not None else "",
+    ]
+    if summary.get("median_residual_alpha") is not None:
+        lines.append(
+            f"• 中位残差alpha {summary['median_residual_alpha']:+.2f}% "
+            f"(剔除动量/反转/波动/换手后，n={summary['n_with_residual']})"
+        )
+    return "\n".join(x for x in lines if x)
+
+
 async def run_review() -> str | None:
     """Execute the post-market review task.
 
@@ -422,6 +480,13 @@ async def run_review() -> str | None:
 
     # 0. Verify yesterday's predictions against actual prices
     await asyncio.to_thread(_verify_predictions)
+
+    # G1: grade probabilistic forecasts on Brier + residual alpha.
+    try:
+        score_block = await asyncio.to_thread(_score_due_predictions)
+    except Exception as e:
+        logger.warning("Prediction scoring failed: %s", e)
+        score_block = ""
 
     # 1. Verify today's predictions in Python (batch, no LLM needed)
     pending = get_pending_predictions(today)
@@ -487,6 +552,12 @@ async def run_review() -> str | None:
     if portfolio_ctx:
         full_stats_ctx = stats_ctx + "\n\n" + portfolio_ctx
     report = await run_review_analysis(pred_ctx, themes_ctx, full_stats_ctx)
+
+    # Prepend the market-scored quality block. It goes above the LLM's own
+    # narrative deliberately: these numbers come from price data, so they
+    # are the part of the report that cannot be talked into looking good.
+    if score_block:
+        report = score_block + "\n\n" + report
 
     # 5. Retire stale themes
     retired = retire_stale_themes()

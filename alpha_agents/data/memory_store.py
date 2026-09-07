@@ -40,7 +40,17 @@ CREATE TABLE IF NOT EXISTS predictions (
     next_day_return REAL,
     week_return REAL,
     hit INTEGER,
-    review_note TEXT
+    review_note TEXT,
+    features_json TEXT DEFAULT '{}',
+    -- G1: probabilistic forecast and its market-derived scores. Declared
+    -- here so a fresh database has them natively; the ALTER TABLE
+    -- migrations in _get_conn exist for databases created before this.
+    prob REAL,
+    brier REAL,
+    log_score REAL,
+    excess_return REAL,
+    residual_alpha REAL,
+    scored_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions(date);
 CREATE INDEX IF NOT EXISTS idx_pred_code ON predictions(code);
@@ -325,6 +335,27 @@ def _get_conn() -> sqlite3.Connection:
             # Column already exists — expected on every restart after first migration.
             if "duplicate column name" not in str(e).lower():
                 raise
+
+        # G1 migration: probabilistic forecasts and their scores.
+        # A prediction states P(this beats the market over the horizon)
+        # rather than a bare 看多/看空, so it can be graded with a proper
+        # scoring rule — cumulative return needs years to reach
+        # significance, Brier needs hundreds of observations. See
+        # docs/self_improvement_roadmap.md G1.
+        for migration in (
+            "ALTER TABLE predictions ADD COLUMN prob REAL",
+            "ALTER TABLE predictions ADD COLUMN brier REAL",
+            "ALTER TABLE predictions ADD COLUMN log_score REAL",
+            "ALTER TABLE predictions ADD COLUMN excess_return REAL",
+            "ALTER TABLE predictions ADD COLUMN residual_alpha REAL",
+            "ALTER TABLE predictions ADD COLUMN scored_at TEXT",
+        ):
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        conn.commit()
+
         _local.conn = conn
     return conn
 
@@ -535,12 +566,19 @@ def save_prediction(
     entry_price: float | None,
     reason: str,
     features: dict | None = None,
+    prob: float | None = None,
 ) -> int:
     """Record a stock recommendation.
 
     ``features`` (Phase 1): optional dict of decision-time features used by the
     Playbook clustering in Phase 3. Serialized to ``features_json`` column.
     Pass None for legacy callers (stored as empty '{}').
+
+    ``prob`` (G1): P(this beats the market over the scoring horizon). This
+    is what makes a prediction gradable with a proper scoring rule —
+    a bare 看多/看空 can only be scored on accuracy, which says nothing
+    about confidence and needs years of P&L to reach significance. Legacy
+    callers pass None and are simply never scored.
     """
     features_json = json.dumps(features or {}, ensure_ascii=False)
     with _write_lock:
@@ -560,22 +598,73 @@ def save_prediction(
             conn.execute(
                 "UPDATE predictions SET name = ?, direction = ?, confidence = ?, "
                 "theme_line = ?, entry_price = COALESCE(entry_price, ?), "
-                "reason = ?, features_json = ? WHERE id = ?",
+                "reason = ?, features_json = ?, prob = COALESCE(?, prob) "
+                "WHERE id = ?",
                 (name, direction, confidence, theme_line, entry_price,
-                 reason, features_json, existing["id"]),
+                 reason, features_json, prob, existing["id"]),
             )
             conn.commit()
             return existing["id"]
 
         cur = conn.execute(
             "INSERT INTO predictions (date, report_type, code, name, direction, "
-            "confidence, theme_line, entry_price, reason, features_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "confidence, theme_line, entry_price, reason, features_json, prob) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (date, report_type, code, name, direction, confidence, theme_line,
-             entry_price, reason, features_json),
+             entry_price, reason, features_json, prob),
         )
         conn.commit()
         return cur.lastrowid
+
+
+def get_predictions_due_for_scoring(as_of: str, horizon_days: int = 5,
+                                    limit: int = 200) -> list[dict]:
+    """Probabilistic predictions whose horizon has elapsed but are unscored.
+
+    Only rows carrying a ``prob`` can be graded — legacy rows without one
+    are skipped rather than back-filled with a guess.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, date, code, name, prob FROM predictions "
+        "WHERE prob IS NOT NULL AND scored_at IS NULL "
+        "AND date <= date(?, ?) ORDER BY date LIMIT ?",
+        (as_of, f"-{horizon_days} days", limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_prediction_score(pred_id: int, score: dict) -> None:
+    """Persist a graded prediction.
+
+    ``hit`` is kept in sync with the scored outcome so the legacy hit-rate
+    reports agree with the Brier numbers instead of drifting apart.
+    """
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE predictions SET brier = ?, log_score = ?, "
+            "excess_return = ?, residual_alpha = ?, scored_at = ?, hit = ? "
+            "WHERE id = ?",
+            (score.get("brier"), score.get("log_score"),
+             score.get("excess_return"), score.get("residual_alpha"),
+             score.get("scored_at"), 1 if score.get("outcome") else 0,
+             pred_id),
+        )
+        conn.commit()
+
+
+def get_scored_predictions(days: int = 30, report_type: str | None = None) -> list[dict]:
+    """Graded predictions from the last ``days``, newest first."""
+    conn = _get_conn()
+    q = ["SELECT * FROM predictions WHERE scored_at IS NOT NULL "
+         "AND date >= date('now', ?)"]
+    params: list = [f"-{days} days"]
+    if report_type:
+        q.append("AND report_type = ?")
+        params.append(report_type)
+    q.append("ORDER BY date DESC")
+    return [dict(r) for r in conn.execute(" ".join(q), params).fetchall()]
 
 
 def update_prediction_result(pred_id: int, *, next_day_return: float | None = None,

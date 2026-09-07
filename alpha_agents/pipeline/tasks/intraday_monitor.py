@@ -1120,6 +1120,11 @@ def _save_intraday_recommendations(report: str) -> None:
                 entry_price=entry_price,
                 reason=r.get("reason", "")[:100],
                 features=features,
+                # G1: gradable on Brier. A limit-up 'signal' row is an
+                # observation, not a forecast, so only 'actionable' picks
+                # carry a probability.
+                prob=(confidence_to_prob(confidence)
+                      if rec_type == "actionable" else None),
             )
             saved += 1
             tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")

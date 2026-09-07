@@ -36,6 +36,7 @@ with the one store that cannot be rebuilt.
 | `data/market_snapshots.db` | News items, market snapshots | Yes, by re-ingesting |
 | `data/market_history.db` | Full-market daily K-lines, ~1.1 GB | Yes, slowly (`init-history`) |
 | `data/activity.db` | The live activity feed | Yes, it is a feed |
+| `data/chroma/concepts.db` | Concept embedding vectors | Yes (`build-embeddings`) |
 
 ## The day
 

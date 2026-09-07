@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "News-driven autonomous stock screening system"
 requires-python = ">=3.11"
 dependencies = [
-    "claude-agent-sdk",
+    # NOTE: claude-agent-sdk was listed here but never imported. It pulled
+    # 198MB into the runtime image, including mypy, ruff and pytest-cov —
+    # dev tooling declared as runtime deps upstream. Removed 2026-09-07.
     "akshare",
     "baostock>=0.9.3",
     "anyio",
-    "chromadb>=1.5.5",
+    "numpy>=1.26",
     "httpx>=0.28.1",
     "openai>=2.30.0",
     "openai-agents>=0.16.0",

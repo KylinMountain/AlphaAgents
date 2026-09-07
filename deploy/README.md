@@ -13,6 +13,20 @@ keyed to the A-share calendar, so the container's TZ is fixed to
 └── .env                secrets, chmod 600, never committed or baked in
 ```
 
+## Images
+
+Built and published by GitHub Actions to
+`ghcr.io/kylinmountain/alphaagents`. Nothing is built on the box.
+
+| Trigger | Tag |
+|---|---|
+| push to `main` | `main` |
+| tag `vX.Y.Z` | `X.Y.Z` and `latest` |
+| any build | `sha-<short>` |
+
+`docker-compose.yml` defaults to `main`; pin a release with
+`IMAGE_TAG=v0.1.0` in `.env`.
+
 ## First deploy
 
 ```bash
@@ -22,8 +36,13 @@ mkdir -p data
 
 # Secrets — copy from a trusted machine, do not commit.
 scp your-mac:~/path/to/.env ./.env && chmod 600 .env
+ln -s ../.env repo/.env
+echo "DATA_DIR=$HOME/docker/alphaagents/data" >> .env
 
-cd repo && docker build -t alphaagents:local .
+# Private package: authenticate once before the first pull.
+echo "$GHCR_PAT" | docker login ghcr.io -u KylinMountain --password-stdin
+
+cd repo && docker compose pull
 ```
 
 ### Seed the data directory
@@ -34,11 +53,11 @@ is faster to copy than to rebuild.
 ```bash
 # stocks.db — concept/industry index (~5 min)
 docker run --rm --env-file ../.env -v ~/docker/alphaagents/data:/app/data \
-  alphaagents:local python main.py build-index
+  ghcr.io/kylinmountain/alphaagents:main python main.py build-index
 
 # chroma/ — semantic search vectors
 docker run --rm --env-file ../.env -v ~/docker/alphaagents/data:/app/data \
-  alphaagents:local python main.py build-embeddings
+  ghcr.io/kylinmountain/alphaagents:main python main.py build-embeddings
 ```
 
 `market_history.db` (full-market daily K-lines) can be built with
@@ -71,8 +90,10 @@ it (`ln -s ../.env .env`) or run compose with `--env-file ../.env`.
 
 ```bash
 cd ~/docker/alphaagents/repo
-git pull && docker compose build && docker compose up -d
+git pull && docker compose pull && docker compose up -d
 ```
+
+`git pull` only refreshes the compose file; the code ships in the image.
 
 ## Ports
 

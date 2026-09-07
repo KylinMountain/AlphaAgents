@@ -1,7 +1,8 @@
+# Images are built and published by GitHub Actions to ghcr.io.
+# Pin a release with IMAGE_TAG (e.g. v0.1.0); defaults to the main build.
 services:
   scheduler:
-    build: .
-    image: alphaagents:local
+    image: ghcr.io/kylinmountain/alphaagents:${IMAGE_TAG:-main}
     container_name: alphaagents-scheduler
     restart: always
     command: python main.py run-v2
@@ -20,8 +21,7 @@ services:
   # Optional pipeline UI. Host port 8002 — 8000/8001 belong to TradingAgents.
   # Start with: docker compose --profile web up -d
   web:
-    build: .
-    image: alphaagents:local
+    image: ghcr.io/kylinmountain/alphaagents:${IMAGE_TAG:-main}
     container_name: alphaagents-web
     restart: always
     profiles: ["web"]

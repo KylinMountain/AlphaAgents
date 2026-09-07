@@ -1,15 +1,16 @@
 # AlphaAgents — trading-day scheduler + optional web UI
 FROM python:3.12-slim
 
-# libgomp1: lightgbm runtime. curl: healthcheck. tzdata: Asia/Shanghai scheduling.
+# curl: healthcheck. tzdata: Asia/Shanghai scheduling.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 curl tzdata \
+        curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
@@ -19,11 +20,11 @@ WORKDIR /app
 
 # Dependency layer — rebuilt only when the lockfile changes.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen --no-install-project --no-dev
 
 COPY alpha_agents/ ./alpha_agents/
 COPY main.py ./
-RUN uv sync --frozen
+RUN uv sync --frozen --no-dev
 
 # data/ holds SQLite DBs and the Chroma index; always bind-mount it.
 VOLUME ["/app/data"]

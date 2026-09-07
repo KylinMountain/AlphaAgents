@@ -25,7 +25,7 @@ load_env()
 # Suppress OpenAI Agents SDK trace export warning (we don't use OpenAI tracing)
 os.environ.setdefault("OPENAI_AGENTS_DISABLE_TRACING", "1")
 
-from alpha_agents.config import DB_PATH, CHROMA_PATH, MONITOR_INTERVAL_SECONDS
+from alpha_agents.config import DB_PATH, CHROMA_PATH, DATA_DIR, MONITOR_INTERVAL_SECONDS
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -37,8 +37,54 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
+def _build_lock():
+    """Hold an exclusive file lock while first-run indexes are built.
+
+    The scheduler and the web UI are separate containers sharing data/,
+    and both call _ensure_index on startup. Deployed together on an empty
+    volume they raced: two processes ran build_index at once and the
+    loser died on "database is locked", restarted, and raced again. The
+    lock makes the second one wait and then find the work already done.
+
+    Yields a bool: True if this process took the lock, False if locking
+    is unavailable (non-POSIX), in which case behaviour is as before.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _lock():
+        try:
+            import fcntl
+        except ImportError:
+            yield False          # Windows: no flock, keep old behaviour
+            return
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        path = DATA_DIR / ".index-build.lock"
+        with open(path, "w") as fh:
+            logging.debug("Waiting for index build lock...")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield True
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+    return _lock()
+
+
 def _ensure_index() -> None:
     """Build stock index + embeddings if not already done."""
+    with _build_lock():
+        _ensure_index_locked()
+
+
+def _ensure_index_locked() -> None:
+    """The actual check-and-build. Callers hold the build lock.
+
+    The existence check is deliberately inside the lock: by the time a
+    waiting process acquires it, the other one has usually finished, and
+    this returns early instead of rebuilding.
+    """
     if DB_PATH.exists():
         from alpha_agents.data.db import get_connection, init_db
         # Always run init_db to create any missing tables (e.g. watchlist)
@@ -57,16 +103,26 @@ def _ensure_index() -> None:
 
 
 def _ensure_embeddings() -> None:
-    """Build concept embeddings if not already done."""
+    """Build concept embeddings if not already done.
+
+    Shares the index build lock — the two containers race here too, and
+    the loser would otherwise re-embed everything and pay the API cost
+    twice.
+    """
+    with _build_lock():
+        _ensure_embeddings_locked()
+
+
+def _ensure_embeddings_locked() -> None:
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collection = client.get_or_create_collection("concepts")
-        if collection.count() > 0:
-            logging.info("Embeddings exist (%d vectors), skipping build.", collection.count())
+        # chromadb was removed; the store is data/vector_store.py now.
+        from alpha_agents.data.embeddings import _get_store
+        n = _get_store().count()
+        if n > 0:
+            logging.info("Embeddings exist (%d vectors), skipping build.", n)
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Embedding store check failed, will rebuild: %s", e)
 
     if not DB_PATH.exists():
         logging.warning("No index DB, skipping embeddings.")

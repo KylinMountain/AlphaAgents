@@ -1,16 +1,21 @@
 """Concept embedding management for semantic stock search.
 
-Uses OpenAI-compatible embedding API + ChromaDB for local vector storage.
-Default: SiliconFlow free BGE-M3. Configurable to any provider.
+Embeddings come from an OpenAI-compatible API (default: SiliconFlow's
+free BGE-M3) and are stored locally by data/vector_store.py — a SQLite
+table plus a numpy matmul.
+
+That store replaced ChromaDB, which brought 134MB of transitive
+dependencies for a corpus of a few thousand vectors. See vector_store.py
+for the reasoning.
 """
 
 import logging
 import sqlite3
 from functools import lru_cache
 
-import chromadb
 from openai import OpenAI
 
+from alpha_agents.data.vector_store import VectorStore
 from alpha_agents.config import (
     CHROMA_PATH,
     EMBEDDING_API_KEY,
@@ -24,18 +29,10 @@ COLLECTION_NAME = "concepts"
 BATCH_SIZE = 64
 
 
-def _get_chroma_client() -> chromadb.ClientAPI:
-    """Get persistent ChromaDB client."""
-    CHROMA_PATH.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(CHROMA_PATH))
-
-
-def _get_collection(client: chromadb.ClientAPI) -> chromadb.Collection:
-    """Get or create the concepts collection."""
-    return client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
+@lru_cache(maxsize=1)
+def _get_store() -> VectorStore:
+    """The concept vector store. Cached — it holds a SQLite connection."""
+    return VectorStore(CHROMA_PATH / f"{COLLECTION_NAME}.db")
 
 
 def _get_openai_client() -> OpenAI:
@@ -82,10 +79,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def build_concept_embeddings(conn: sqlite3.Connection) -> int:
-    """Generate and store embeddings for all concepts in ChromaDB.
+    """Generate and store embeddings for every concept not yet embedded.
 
     Returns:
-        Number of concepts embedded.
+        Number of concepts embedded this run.
     """
     rows = conn.execute("SELECT id, name FROM concepts").fetchall()
     if not rows:
@@ -95,39 +92,30 @@ def build_concept_embeddings(conn: sqlite3.Connection) -> int:
     ids = [str(row["id"]) for row in rows]
     names = [row["name"] for row in rows]
 
-    client = _get_chroma_client()
-    collection = _get_collection(client)
+    store = _get_store()
+    existing = store.existing_ids(ids)
 
-    # Check which concepts already exist in ChromaDB
-    existing = set()
-    try:
-        result = collection.get(ids=ids)
-        existing = set(result["ids"])
-    except Exception:
-        pass
-
-    new_ids = [i for i in ids if i not in existing]
-    new_names = [names[ids.index(i)] for i in new_ids]
+    # Pair by position rather than ids.index(i) — that was O(n²) and, on a
+    # duplicate name, would have looked up the wrong one.
+    pending = [(i, n) for i, n in zip(ids, names) if i not in existing]
+    new_ids = [i for i, _ in pending]
+    new_names = [n for _, n in pending]
 
     if not new_ids:
-        logger.info("All %d concepts already embedded in ChromaDB", len(ids))
+        logger.info("全部 %d 个概念已有向量", len(ids))
         return 0
 
     logger.info("Embedding %d concepts via %s (%s)...", len(new_ids), EMBEDDING_MODEL, EMBEDDING_BASE_URL)
     embeddings = embed_texts(new_names)
 
-    # Upsert into ChromaDB in batches
     for i in range(0, len(new_ids), BATCH_SIZE):
-        batch_ids = new_ids[i : i + BATCH_SIZE]
-        batch_embeddings = embeddings[i : i + BATCH_SIZE]
-        batch_docs = new_names[i : i + BATCH_SIZE]
-        collection.upsert(
-            ids=batch_ids,
-            embeddings=batch_embeddings,
-            documents=batch_docs,
+        store.upsert(
+            ids=new_ids[i : i + BATCH_SIZE],
+            embeddings=embeddings[i : i + BATCH_SIZE],
+            documents=new_names[i : i + BATCH_SIZE],
         )
 
-    logger.info("Embedded %d concepts into ChromaDB", len(new_ids))
+    logger.info("已写入 %d 个概念向量", len(new_ids))
     return len(new_ids)
 
 
@@ -143,7 +131,7 @@ def search_concepts_semantic(
     query: str,
     top_k: int = 10,
 ) -> list[dict]:
-    """Search concepts by semantic similarity using ChromaDB.
+    """Search concepts by cosine similarity over the local vector store.
 
     Args:
         conn: SQLite connection (used to map concept IDs).
@@ -153,33 +141,20 @@ def search_concepts_semantic(
     Returns:
         List of dicts with 'id', 'name', 'score'.
     """
-    client = _get_chroma_client()
-    collection = _get_collection(client)
-
-    if collection.count() == 0:
+    store = _get_store()
+    if store.count() == 0:
         return []
 
     # Embed query via API (cached to avoid repeated calls for same/similar queries)
     query_embedding = list(_get_query_embedding(query))
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k, collection.count()),
-    )
-
-    matches = []
-    if results["ids"] and results["ids"][0]:
-        for concept_id, doc, distance in zip(
-            results["ids"][0],
-            results["documents"][0],
-            results["distances"][0],
-        ):
-            # ChromaDB cosine distance = 1 - similarity
-            score = 1.0 - distance
-            matches.append({
-                "id": int(concept_id),
-                "name": doc,
-                "score": round(score, 4),
-            })
-
-    return matches
+    # The store returns cosine similarity directly, best first — no
+    # distance-to-similarity conversion to get backwards.
+    return [
+        {
+            "id": int(hit["id"]),
+            "name": hit["document"],
+            "score": round(hit["score"], 4),
+        }
+        for hit in store.query(query_embedding, top_k=top_k)
+    ]

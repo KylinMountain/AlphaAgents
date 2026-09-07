@@ -2,15 +2,28 @@ import json
 import sqlite3
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from alpha_agents.data.embeddings import (
     embed_texts,
     build_concept_embeddings,
     search_concepts_semantic,
-    _get_chroma_client,
-    _get_collection,
+    _get_store,
     COLLECTION_NAME,
 )
 from alpha_agents.data.db import init_db, get_connection
+
+
+@pytest.fixture(autouse=True)
+def _isolate_store():
+    """_get_store is lru_cached and holds a connection to one file.
+
+    Without clearing it, every test after the first would silently query
+    the first test's tmp_path store — passing for the wrong reason.
+    """
+    _get_store.cache_clear()
+    yield
+    _get_store.cache_clear()
 
 
 def _mock_call_embedding_api(texts):
@@ -35,7 +48,7 @@ def test_embed_texts_calls_api():
 
 
 def test_build_and_search(tmp_path):
-    """End-to-end: build embeddings into ChromaDB and search."""
+    """End-to-end: build embeddings into the local store and search."""
     db_path = tmp_path / "test.db"
     init_db(db_path)
     conn = get_connection(db_path)
@@ -45,8 +58,8 @@ def test_build_and_search(tmp_path):
         conn.execute("INSERT INTO concepts (name, source) VALUES (?, 'test')", (name,))
     conn.commit()
 
-    # Mock both the API call and ChromaDB path
-    chroma_path = tmp_path / "chroma"
+    # Mock the API; point the store at a temp dir.
+    chroma_path = tmp_path / "vectors"
 
     with patch("alpha_agents.data.embeddings._call_embedding_api", side_effect=_mock_call_embedding_api), \
          patch("alpha_agents.data.embeddings.CHROMA_PATH", chroma_path):
@@ -72,7 +85,7 @@ def test_build_embeddings_incremental(tmp_path):
     conn.execute("INSERT INTO concepts (name, source) VALUES (?, 'test')", ("测试概念",))
     conn.commit()
 
-    chroma_path = tmp_path / "chroma"
+    chroma_path = tmp_path / "vectors"
     with patch("alpha_agents.data.embeddings._call_embedding_api", side_effect=_mock_call_embedding_api) as mock_api, \
          patch("alpha_agents.data.embeddings.CHROMA_PATH", chroma_path):
 
@@ -87,12 +100,12 @@ def test_build_embeddings_incremental(tmp_path):
 
 
 def test_search_empty_collection(tmp_path):
-    """Search on empty ChromaDB should return empty list."""
+    """Search with nothing stored returns an empty list."""
     db_path = tmp_path / "test.db"
     init_db(db_path)
     conn = get_connection(db_path)
 
-    chroma_path = tmp_path / "chroma"
+    chroma_path = tmp_path / "vectors"
     with patch("alpha_agents.data.embeddings._call_embedding_api", side_effect=_mock_call_embedding_api), \
          patch("alpha_agents.data.embeddings.CHROMA_PATH", chroma_path):
         results = search_concepts_semantic(conn, "测试")

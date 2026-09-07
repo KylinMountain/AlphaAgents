@@ -17,6 +17,7 @@ _Last updated 2026-09-07._
 | `data/decision_context.py` | **A** | 19 tests; replay verified | No history to replay |
 | `tools/exit_signals.py` | **B** | 19 tests; regime rule forward-tested over 24 windows | Patterns kept for display are known-useless |
 | `evolution/playbook.py` | **B** | 13 capacity tests | Clustering lost a dimension (D5) |
+| `data/vector_store.py` | **A** | 21 tests incl. 3000-vector scale and a naive-numpy cross-check | — |
 | `sources/` | **B** | 16 structural tests; all 13 feeds probed live | CLS down upstream; 2 feeds degraded |
 | `pipeline/tasks/news_ingest.py` | **B** | Window reads tested; ingest verified live | No test for a multi-hour outage |
 | `data/portfolio.py` | **C** | Lifecycle exercised indirectly | Service code in the storage layer (D1) |

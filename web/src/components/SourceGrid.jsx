@@ -1,78 +1,59 @@
-const SOURCES = [
-  { id: 'eastmoney', label: '东方财富', group: 'domestic' },
-  { id: 'eastmoney_live', label: '东财7x24', group: 'domestic' },
-  { id: 'cls', label: '财联社', group: 'domestic' },
-  { id: 'wallstreetcn', label: '华尔街见闻', group: 'domestic' },
-  { id: 'jin10', label: '金十数据', group: 'domestic' },
-  { id: 'xinhua', label: '新华社', group: 'domestic' },
-  { id: 'pboc', label: '人民银行', group: 'domestic' },
-  { id: 'world_rss', label: '国际RSS', group: 'intl' },
-  { id: 'whitehouse', label: '白宫', group: 'intl' },
-  { id: 'fed', label: '美联储', group: 'intl' },
-  { id: 'sec', label: 'SEC', group: 'intl' },
-  { id: 'social', label: '社交媒体', group: 'intl' },
-]
+import { Globe, Landmark, MessageCircle } from 'lucide-react'
 
-const statusColors = {
-  idle: 'var(--text-muted)',
-  running: 'var(--accent-blue)',
-  success: 'var(--accent-green)',
-  error: 'var(--accent-red)',
+const TYPE_META = {
+  domestic: { label: '国内', icon: Landmark },
+  international: { label: '海外', icon: Globe },
+  social: { label: '社交', icon: MessageCircle },
 }
 
-function SourceItem({ source, stage }) {
-  const status = stage?.status || 'idle'
-  const color = statusColors[status] || statusColors.idle
-  const count = stage?.data?.count
-  const isRunning = status === 'running'
-  const isSkipped = stage?.data?.skipped
+export default function SourceGrid({ sources }) {
+  if (!sources.length) {
+    return (
+      <div className="card">
+        <h3 className="text-sm font-semibold mb-2">数据源</h3>
+        <p className="text-xs text-slate-500 dark:text-slate-400">暂无健康数据</p>
+      </div>
+    )
+  }
+
+  const groups = sources.reduce((acc, s) => {
+    ;(acc[s.type] ||= []).push(s)
+    return acc
+  }, {})
 
   return (
-    <div
-      className="flex items-center gap-2 px-3 py-1.5 card-hover"
-      style={{ borderBottom: '1px solid var(--border)' }}
-    >
-      <div
-        className={`w-1.5 h-1.5 rounded-full shrink-0 ${isRunning ? 'animate-pulse-dot' : ''}`}
-        style={{ background: color }}
-      />
-      <span className="flex-1 text-xs truncate" style={{
-        color: isSkipped ? 'var(--text-muted)' : 'var(--text-secondary)',
-        textDecoration: isSkipped ? 'line-through' : 'none',
-      }}>
-        {source.label}
-      </span>
-      {count !== undefined && (
-        <span className="text-xs tabular-nums" style={{ color: count > 0 ? 'var(--accent-green)' : 'var(--text-muted)' }}>
-          {count}
-        </span>
-      )}
-      {status === 'error' && !isSkipped && (
-        <span className="text-xs" style={{ color: 'var(--accent-red)' }}>!</span>
-      )}
-    </div>
-  )
-}
-
-export default function SourceGrid({ stages }) {
-  const domestic = SOURCES.filter(s => s.group === 'domestic')
-  const intl = SOURCES.filter(s => s.group === 'intl')
-
-  return (
-    <div>
-      <div className="px-3 py-1.5 text-xs" style={{ color: 'var(--text-muted)', background: 'var(--bg-secondary)' }}>
-        国内 ({domestic.length})
+    <div className="card">
+      <h3 className="text-sm font-semibold mb-3">数据源健康</h3>
+      <div className="space-y-4">
+        {Object.entries(groups).map(([type, list]) => {
+          const meta = TYPE_META[type] || { label: type, icon: Globe }
+          const Icon = meta.icon
+          return (
+            <div key={type}>
+              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium
+                              text-slate-500 dark:text-slate-400">
+                <Icon className="w-3.5 h-3.5" />
+                {meta.label}
+              </div>
+              <div className="space-y-1.5">
+                {list.map((s) => (
+                  <div key={s.id} className="flex items-center gap-2 text-xs">
+                    <span className={s.healthy ? 'status-dot-green' : 'status-dot-orange'} />
+                    <span className="truncate flex-1 text-slate-700 dark:text-slate-300">
+                      {s.name}
+                    </span>
+                    {s.total_items > 0 && (
+                      <span className="tabular-nums text-slate-400 dark:text-slate-500">
+                        {s.total_items}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })}
       </div>
-      {domestic.map(s => (
-        <SourceItem key={s.id} source={s} stage={stages[`source_${s.id}`]} />
-      ))}
-
-      <div className="px-3 py-1.5 text-xs" style={{ color: 'var(--text-muted)', background: 'var(--bg-secondary)' }}>
-        国际 ({intl.length})
-      </div>
-      {intl.map(s => (
-        <SourceItem key={s.id} source={s} stage={stages[`source_${s.id}`]} />
-      ))}
     </div>
   )
 }

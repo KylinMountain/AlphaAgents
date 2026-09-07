@@ -1,95 +1,177 @@
 @import "tailwindcss";
 
-:root {
-  --bg-primary: #0a0e1a;
-  --bg-secondary: #111827;
-  --bg-card: #151d2e;
-  --bg-card-hover: #1a2435;
-  --border: #1e2d42;
-  --border-bright: #2a3f5f;
-  --text-primary: #e2e8f0;
-  --text-secondary: #8892a4;
-  --text-muted: #4a5568;
-  --accent-blue: #3b82f6;
-  --accent-green: #10b981;
-  --accent-red: #ef4444;
-  --accent-yellow: #f59e0b;
-  --accent-purple: #8b5cf6;
-  --accent-cyan: #06b6d4;
-  --accent-orange: #f97316;
+/* Design system mirrors TradingAgents-AShare so this dashboard can be
+   embedded there later without a visual seam: slate palette, Inter +
+   PingFang SC, .card / .badge-* / .status-dot-* primitives, light and
+   dark driven by the `dark` class on <html>. */
+
+@layer base {
+  * {
+    @apply border-slate-200 dark:border-slate-700;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+    font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-slate-100 dark:bg-slate-800 rounded;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 dark:bg-slate-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400 dark:bg-slate-500;
+  }
 }
 
-body {
-  margin: 0;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 13px;
-  -webkit-font-smoothing: antialiased;
+@utility badge {
+  @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold;
 }
 
-/* Hide ReactFlow attribution */
-.react-flow__attribution { display: none; }
-
-/* Scrollbar — thin, minimal */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
-
-/* Glow animations */
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+@utility status-dot {
+  @apply w-2.5 h-2.5 rounded-full;
 }
 
-@keyframes scan-line {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+@layer components {
+  .card {
+    @apply bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl p-4;
+    @apply shadow-sm dark:shadow-lg;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 rounded-lg font-medium text-white transition-all duration-200;
+    @apply bg-gradient-to-r from-blue-500 to-blue-600;
+    @apply hover:from-blue-600 hover:to-blue-700;
+    @apply shadow-md hover:shadow-lg;
+  }
+
+  .btn-primary:disabled {
+    @apply opacity-50 cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200;
+    @apply bg-slate-100 text-slate-700 border border-slate-300;
+    @apply dark:bg-slate-700 dark:text-slate-200 dark:border-slate-600;
+    @apply hover:bg-slate-200 dark:hover:bg-slate-600;
+  }
+
+  .badge-green {
+    @apply badge bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400;
+    @apply border border-green-200 dark:border-green-500/30;
+  }
+
+  .badge-red {
+    @apply badge bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400;
+    @apply border border-red-200 dark:border-red-500/30;
+  }
+
+  .badge-blue {
+    @apply badge bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400;
+    @apply border border-blue-200 dark:border-blue-500/30;
+  }
+
+  .badge-orange {
+    @apply badge bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-400;
+    @apply border border-orange-200 dark:border-orange-500/30;
+  }
+
+  .badge-purple {
+    @apply badge bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-400;
+    @apply border border-purple-200 dark:border-purple-500/30;
+  }
+
+  .badge-slate {
+    @apply badge bg-slate-100 text-slate-600 dark:bg-slate-700/60 dark:text-slate-300;
+    @apply border border-slate-200 dark:border-slate-600;
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-blue-500 via-purple-500 to-cyan-400;
+  }
+
+  .status-dot-green {
+    @apply status-dot bg-green-500;
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+  }
+
+  .status-dot-blue {
+    @apply status-dot bg-blue-500;
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
+  }
+
+  .status-dot-orange {
+    @apply status-dot bg-orange-500;
+    box-shadow: 0 0 8px rgba(249, 115, 22, 0.6);
+  }
+
+  .status-dot-slate {
+    @apply status-dot bg-slate-400 dark:bg-slate-500;
+  }
+
+  /* Reports arrive as agent-authored Markdown; keep tables readable and
+     scrollable rather than letting them widen the page. */
+  .report-prose {
+    @apply text-sm leading-relaxed text-slate-700 dark:text-slate-300;
+  }
+
+  .report-prose h1,
+  .report-prose h2,
+  .report-prose h3 {
+    @apply font-semibold text-slate-900 dark:text-slate-100 mt-5 mb-2;
+  }
+
+  .report-prose h1 { @apply text-lg; }
+  .report-prose h2 { @apply text-base; }
+  .report-prose h3 { @apply text-sm; }
+
+  .report-prose p { @apply my-2; }
+  .report-prose ul { @apply list-disc pl-5 my-2 space-y-1; }
+  .report-prose ol { @apply list-decimal pl-5 my-2 space-y-1; }
+  .report-prose strong { @apply font-semibold text-slate-900 dark:text-slate-100; }
+  .report-prose code {
+    @apply px-1.5 py-0.5 rounded text-xs bg-slate-100 dark:bg-slate-700;
+  }
+  .report-prose pre {
+    @apply p-3 rounded-lg overflow-x-auto bg-slate-100 dark:bg-slate-900 my-3;
+  }
+  .report-prose table {
+    @apply w-full text-xs border-collapse my-3;
+  }
+  .report-prose th {
+    @apply px-3 py-2 text-left font-semibold bg-slate-100 dark:bg-slate-700/60;
+    @apply border border-slate-200 dark:border-slate-600 whitespace-nowrap;
+  }
+  .report-prose td {
+    @apply px-3 py-2 border border-slate-200 dark:border-slate-700;
+  }
+  .report-prose blockquote {
+    @apply border-l-4 pl-3 my-3 text-slate-600 dark:text-slate-400;
+  }
 }
 
-@keyframes fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+@layer utilities {
+  .animate-in {
+    animation: animateIn 0.3s ease-out;
+  }
 
-.animate-fade-in {
-  animation: fade-in 0.3s ease-out;
-}
-
-.animate-pulse-dot {
-  animation: pulse-dot 1.5s ease-in-out infinite;
-}
-
-/* Status indicator glow */
-.glow-green { box-shadow: 0 0 8px #10b98155, 0 0 2px #10b981; }
-.glow-blue { box-shadow: 0 0 8px #3b82f655, 0 0 2px #3b82f6; }
-.glow-red { box-shadow: 0 0 8px #ef444455, 0 0 2px #ef4444; }
-.glow-yellow { box-shadow: 0 0 8px #f59e0b55, 0 0 2px #f59e0b; }
-.glow-purple { box-shadow: 0 0 8px #8b5cf655, 0 0 2px #8b5cf6; }
-
-/* Category tag colors */
-.tag-政策 { background: #3b82f618; color: #60a5fa; border: 1px solid #3b82f633; }
-.tag-地缘 { background: #ef444418; color: #f87171; border: 1px solid #ef444433; }
-.tag-宏观 { background: #f59e0b18; color: #fbbf24; border: 1px solid #f59e0b33; }
-.tag-行业 { background: #10b98118; color: #34d399; border: 1px solid #10b98133; }
-.tag-市场 { background: #8b5cf618; color: #a78bfa; border: 1px solid #8b5cf633; }
-
-/* Importance bar gradient */
-.importance-bar {
-  background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444);
-}
-
-/* Card hover effect */
-.card-hover {
-  transition: background 0.15s, border-color 0.15s;
-}
-.card-hover:hover {
-  background: var(--bg-card-hover);
-  border-color: var(--border-bright);
-}
-
-/* Report content styling */
-.report-content h1, .report-content h2, .report-content h3 {
-  color: var(--text-primary);
+  @keyframes animateIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
 }

@@ -2,22 +2,71 @@
 
 CLS Telegraph is one of the fastest A-share news flash sources in China.
 Uses akshare's stock_info_global_cls() which handles CLS API auth internally.
+
+Known outage (verified 2026-09-07): the endpoint akshare 1.18.50 calls,
+``https://www.cls.cn/nodeapi/telegraphList``, now returns 404, and CLS's
+current API rejects unsigned requests with ``{"errno":"10012","msg":"签名
+错误"}`` while the web page is client-rendered. There is no fetch path
+left that does not involve defeating their request signing, so this source
+stays down until akshare ships a working endpoint.
+
+The practical hazard is not the failure but its shape: akshare wraps the
+call in ``make_request_with_retry_json(max_retries=10)``, so a dead
+endpoint presents as a multi-minute hang that stalls the whole scan.
+_FETCH_TIMEOUT bounds it.
 """
 
 import json
 import logging
+import threading
 
 from alpha_agents.config import no_proxy
 
 logger = logging.getLogger(__name__)
 
+# akshare retries 10x internally; cap the total so one dead upstream can
+# never hold up a morning scan or an intraday cycle.
+_FETCH_TIMEOUT = 20
+
 
 def _fetch_telegraph() -> list[dict]:
     """Fetch telegraph items via akshare (handles CLS API auth)."""
+    # A raw daemon thread, not ThreadPoolExecutor: pool workers are
+    # non-daemon and concurrent.futures registers an atexit hook that
+    # joins them, so a thread stuck in akshare's retry loop would hold up
+    # interpreter shutdown even after shutdown(wait=False). A daemon
+    # thread is abandoned cleanly.
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["df"] = _fetch_telegraph_blocking()
+        except Exception as exc:            # noqa: BLE001 — surfaced below
+            result["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True, name="cls-telegraph")
+    worker.start()
+    worker.join(timeout=_FETCH_TIMEOUT)
+
+    if worker.is_alive():
+        raise TimeoutError(
+            f"CLS telegraph fetch exceeded {_FETCH_TIMEOUT}s "
+            "(akshare endpoint returns 404 and retries 10x)"
+        )
+    if "error" in result:
+        raise result["error"]
+
+    return _rows_to_items(result["df"])
+
+
+def _fetch_telegraph_blocking():
+    """The raw akshare call. Runs on a worker thread so it can be timed out."""
     import akshare as ak
     with no_proxy():
-        df = ak.stock_info_global_cls()
+        return ak.stock_info_global_cls()
 
+
+def _rows_to_items(df) -> list[dict]:
     items = []
     for _, row in df.iterrows():
         title = str(row.get("标题", "")).strip()

@@ -28,6 +28,34 @@ from alpha_agents.data.market_data import get_realtime_quotes
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_regime() -> str | None:
+    """Market regime for the decision context; never raises."""
+    try:
+        from alpha_agents.tools.exit_signals import get_market_regime
+        regime, _pct = get_market_regime()
+        return regime if regime != "unknown" else None
+    except Exception as e:
+        logger.debug("Decision context: regime unavailable: %s", e)
+        return None
+
+
+def _safe_sentiment_phase() -> str | None:
+    try:
+        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
+        return get_sentiment_cycle().get("phase") or None
+    except Exception as e:
+        logger.debug("Decision context: sentiment unavailable: %s", e)
+        return None
+
+
+def _safe_active_themes() -> list[dict] | None:
+    try:
+        return get_active_themes()
+    except Exception as e:
+        logger.debug("Decision context: themes unavailable: %s", e)
+        return None
+
 # Scheduler reference for boost — set by main.py before scheduler starts
 _scheduler = None
 
@@ -1088,6 +1116,15 @@ def _save_intraday_recommendations(report: str) -> None:
     except Exception as e:
         logger.debug("Failed to fetch prices for intraday recs: %s", e)
 
+    # G6: one context per cycle, shared by the picks it produced.
+    _intraday_ctx = build_decision_context(
+        task="intraday_monitor",
+        themes=_safe_active_themes(),
+        market_regime=_safe_regime(),
+        sentiment_phase=_safe_sentiment_phase(),
+        extra={"has_anomaly": True},
+    )
+
     saved = 0
     for r in valid_recs:
         code = r["code"]
@@ -1109,6 +1146,8 @@ def _save_intraday_recommendations(report: str) -> None:
                 "playbook_matched": bool(r.get("playbook_id")),
                 "rec_type": rec_type,  # 'signal' vs 'actionable'
             }
+            # G6: what was visible when this call was made.
+            features = merge_features(features, _intraday_ctx)
             save_prediction(
                 date=today,
                 report_type=report_type,

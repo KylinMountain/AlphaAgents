@@ -545,6 +545,28 @@ def save_prediction(
     features_json = json.dumps(features or {}, ensure_ascii=False)
     with _write_lock:
         conn = _get_conn()
+        # Intraday monitoring re-saves its whole top-5 every cycle, so a
+        # single recommendation used to land dozens of times a day. That
+        # inflates playbooks.total_trades by an order of magnitude and
+        # turns the "hits >= 3" auto-create threshold into "one stock went
+        # up once". One row per (date, code, report_type); later cycles
+        # refresh it in place.
+        existing = conn.execute(
+            "SELECT id FROM predictions "
+            "WHERE date = ? AND code = ? AND report_type = ?",
+            (date, code, report_type),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE predictions SET name = ?, direction = ?, confidence = ?, "
+                "theme_line = ?, entry_price = COALESCE(entry_price, ?), "
+                "reason = ?, features_json = ? WHERE id = ?",
+                (name, direction, confidence, theme_line, entry_price,
+                 reason, features_json, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+
         cur = conn.execute(
             "INSERT INTO predictions (date, report_type, code, name, direction, "
             "confidence, theme_line, entry_price, reason, features_json) "

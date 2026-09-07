@@ -7,7 +7,7 @@ dependencies = [
     "claude-agent-sdk",
     "openai-agents>=0.22.0",
     "akshare",
-    "baostock",
+    "baostock>=0.9.3",
     "anyio",
     "chromadb>=1.5.5",
     "httpx>=0.28.1",

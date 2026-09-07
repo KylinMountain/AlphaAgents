@@ -87,7 +87,7 @@ dev = [
 requires-dist = [
     { name = "akshare" },
     { name = "anyio" },
-    { name = "baostock" },
+    { name = "baostock", specifier = ">=0.9.3" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "chromadb", specifier = ">=1.5.5" },
     { name = "claude-agent-sdk" },
@@ -161,14 +161,14 @@ wheels = [
 
 [[package]]
 name = "baostock"
-version = "0.8.9"
+version = "0.9.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pandas" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/d5/0fb2c61f392f89b1655490acb17a02861f1f1c38e973c9fc6aa049e54401/baostock-0.8.9.tar.gz", hash = "sha256:8169cdbed14fa442ace63c59549bef3f92b0c3dd1df9e5d9069f7bd04a76b0da", size = 21876, upload-time = "2024-05-31T02:56:54.546Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/1d/e62f47577d49d5dd98ff20c2e3fccc318e2b7984a06fb9abb9b1136f046c/baostock-0.9.3.tar.gz", hash = "sha256:16699d82d05037a8c133577fcdeb9ac0d5a7f31edc2432c4e883004e0a95e3f7", size = 26798, upload-time = "2026-07-10T06:02:54.081Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/37/bbabac2d33723d71bd8dbd5e819d9cbe5dc1e031b7dd12ed7de8fa040816/baostock-0.8.9-py3-none-any.whl", hash = "sha256:7a51fb30cd6b4325f5517198e350dc2fffaaab2923cd132b9f747b8b73ae7303", size = 45923, upload-time = "2024-05-31T02:56:53.161Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/16/f28fef16a5d9af31def7435b73efd91ed66b40b9c249387d6c11cdf2ba35/baostock-0.9.3-py3-none-any.whl", hash = "sha256:acbd19403285bc4e254cee8297cf0e2646ae2276e5af7e549deed3988ab02293", size = 51125, upload-time = "2026-07-10T06:02:52.767Z" },
 ]
 
 [[package]]

@@ -38,6 +38,20 @@ logger = logging.getLogger(__name__)
 # not punch a hole in the stream. Overlap is free — the store dedups.
 _INGEST_LIMIT = max(NEWS_FETCH_LIMIT, 50)
 
+# Ceiling on any one source. Measured on the box: every source returned
+# within 11s except 社交媒体, which took 139s — it walks several
+# twitter/google-news handles in sequence and each unreachable one burns
+# its own retries. That single source was what kept cancelling the sweep,
+# taking the twelve that had already answered down with it.
+#
+# 40s sits well above the 11s the healthy sources need and well below the
+# task's own ceiling.
+#
+# A slow source is dropped for this cycle, not permanently: the next sweep
+# is five minutes away and the store dedups, so the only cost of skipping
+# one is a few minutes of latency on that feed.
+_PER_SOURCE_TIMEOUT = 40
+
 
 async def _ingest_one(source_id: str, name: str, fetch_fn_factory) -> tuple[str, int, str]:
     """Fetch one source and let it write through to the store.
@@ -46,11 +60,18 @@ async def _ingest_one(source_id: str, name: str, fetch_fn_factory) -> tuple[str,
     only has to trigger the fetch and count what came back.
     """
     try:
-        raw = await asyncio.to_thread(fetch_fn_factory)
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(fetch_fn_factory), timeout=_PER_SOURCE_TIMEOUT,
+        )
         data = json.loads(raw)
         if data.get("error"):
             return name, 0, str(data["error"])[:120]
         return name, len(data.get("news", [])), ""
+    except asyncio.TimeoutError:
+        # The worker thread keeps running until its blocking call returns;
+        # it is a daemon of the default executor and writes through to the
+        # store on its own if it ever finishes.
+        return name, 0, f"超过 {_PER_SOURCE_TIMEOUT}s"
     except Exception as e:
         return name, 0, f"{type(e).__name__}: {e}"[:120]
 

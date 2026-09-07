@@ -29,24 +29,6 @@ from alpha_agents.data.market_data import get_realtime_quotes
 logger = logging.getLogger(__name__)
 
 
-def _safe_regime() -> str | None:
-    """Market regime for the decision context; never raises."""
-    try:
-        from alpha_agents.tools.exit_signals import get_market_regime
-        regime, _pct = get_market_regime()
-        return regime if regime != "unknown" else None
-    except Exception as e:
-        logger.debug("Decision context: regime unavailable: %s", e)
-        return None
-
-
-def _safe_sentiment_phase() -> str | None:
-    try:
-        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-        return get_sentiment_cycle().get("phase") or None
-    except Exception as e:
-        logger.debug("Decision context: sentiment unavailable: %s", e)
-        return None
 
 
 def _safe_active_themes() -> list[dict] | None:
@@ -1120,8 +1102,8 @@ def _save_intraday_recommendations(report: str) -> None:
     _intraday_ctx = build_decision_context(
         task="intraday_monitor",
         themes=_safe_active_themes(),
-        market_regime=_safe_regime(),
-        sentiment_phase=_safe_sentiment_phase(),
+        market_regime=safe_market_regime(),
+        sentiment_phase=safe_sentiment_phase(),
         extra={"has_anomaly": True},
     )
 

@@ -16,7 +16,10 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.data.scoring import confidence_to_prob
-from alpha_agents.data.decision_context import build_decision_context, merge_features
+from alpha_agents.data.decision_context import (
+    build_decision_context, merge_features,
+)
+from alpha_agents.pipeline.tasks import safe_market_regime, safe_sentiment_phase
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
@@ -146,28 +149,6 @@ _DEFAULT_OVERNIGHT_HOURS = 16       # 15:00 yesterday → 07:00 today
 _WINDOW_STATE: dict = {"hours": None, "count": None}
 
 
-def _safe_regime() -> str | None:
-    """Market regime for the decision context; never raises.
-
-    Context is documentation of the decision, not part of it — failing to
-    record it must not stop a recommendation being saved.
-    """
-    try:
-        from alpha_agents.tools.exit_signals import get_market_regime
-        regime, _pct = get_market_regime()
-        return regime if regime != "unknown" else None
-    except Exception as e:
-        logger.debug("Decision context: regime unavailable: %s", e)
-        return None
-
-
-def _safe_sentiment_phase() -> str | None:
-    try:
-        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-        return get_sentiment_cycle().get("phase") or None
-    except Exception as e:
-        logger.debug("Decision context: sentiment unavailable: %s", e)
-        return None
 
 
 def _read_overnight_window(limit: int = 400) -> list[dict]:
@@ -525,8 +506,8 @@ def _save_recommendations_list(recs: list[dict]) -> None:
         news_window_hours=_WINDOW_STATE.get("hours"),
         news_count=_WINDOW_STATE.get("count"),
         themes=themes,
-        market_regime=_safe_regime(),
-        sentiment_phase=_safe_sentiment_phase(),
+        market_regime=safe_market_regime(),
+        sentiment_phase=safe_sentiment_phase(),
     )
 
     saved = 0

@@ -135,28 +135,41 @@ class VectorStore:
         if not rows:
             return []
 
+        if top_k <= 0:
+            return []
+
         q = np.asarray(embedding, dtype=np.float32)
         norm = float(np.linalg.norm(q))
         if norm == 0:
             return []
         q = q / norm
+        dim = q.shape[0]
+        expected_bytes = dim * 4          # float32
 
-        # Rows of a different dimension are from an older embedding model;
-        # comparing them would silently produce meaningless scores.
-        usable = [r for r in rows if r["dim"] == q.shape[0]]
+        # Two ways a row can be unusable, and neither should take the
+        # search down with it:
+        #   - a different dim, i.e. written by an older embedding model;
+        #   - a blob whose length disagrees with its own dim column, i.e.
+        #     a truncated or corrupted write. Left in, that one turns a
+        #     single bad row into a ValueError from reshape and kills
+        #     every search until someone finds it by hand.
+        usable = [
+            r for r in rows
+            if r["dim"] == dim and len(r["vector"]) == expected_bytes
+        ]
         skipped = len(rows) - len(usable)
         if skipped:
             logger.warning(
-                "跳过 %d 条维度不匹配的向量 (期望 %d) — 换过 embedding 模型？"
-                "重建索引: python main.py build-embeddings",
-                skipped, q.shape[0],
+                "跳过 %d 条不可用向量 (期望 dim=%d/%d字节) — 换过 embedding "
+                "模型或写入损坏；重建: python main.py build-embeddings",
+                skipped, dim, expected_bytes,
             )
         if not usable:
             return []
 
         matrix = np.frombuffer(
             b"".join(r["vector"] for r in usable), dtype=np.float32,
-        ).reshape(len(usable), q.shape[0])
+        ).reshape(len(usable), dim)
 
         scores = matrix @ q          # both sides are unit vectors
         k = min(top_k, len(usable))

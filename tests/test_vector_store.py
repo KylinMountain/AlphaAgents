@@ -113,6 +113,29 @@ class TestQuery:
         store.upsert(["1"], [_unit(1, 0)], ["x"])
         assert store.query([0.0, 0.0]) == []
 
+    @pytest.mark.parametrize("k", [0, -1, -5])
+    def test_non_positive_top_k_returns_nothing(self, store, k):
+        """min(k, n) with a negative k fed argpartition a negative kth,
+        which numpy reads as an index from the end — so top_k=-1 used to
+        return a result instead of none."""
+        store.upsert(["1", "2"], [_unit(1, 0), _unit(0, 1)], ["a", "b"])
+        assert store.query(_unit(1, 0), top_k=k) == []
+
+    def test_corrupted_blob_is_skipped_not_fatal(self, store):
+        """A blob whose length disagrees with its dim column used to make
+        reshape throw, killing every search until someone found the row."""
+        store.upsert(["good"], [_unit(1, 0)], ["正常"])
+        conn = store._connection()
+        conn.execute(
+            "INSERT INTO concept_vectors (id, document, dim, vector) "
+            "VALUES ('bad', '损坏', 2, ?)",
+            (np.array([1, 2, 3], dtype=np.float32).tobytes(),),
+        )
+        conn.commit()
+
+        hits = store.query(_unit(1, 0), top_k=5)
+        assert [h["document"] for h in hits] == ["正常"]
+
     def test_dimension_mismatch_is_skipped_not_scored(self, store):
         """A model change leaves old vectors behind; scoring them would be
         meaningless rather than merely wrong."""

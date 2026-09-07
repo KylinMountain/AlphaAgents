@@ -17,12 +17,15 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
+# web/ IS needed: stage 1 builds the dashboard from it.
+web/node_modules/
+web/dist/
+
 # Not needed at runtime.
 tests/
 docs/
 research/
 scripts/
-web/
 deploy/
 autoresearch/
 *.log

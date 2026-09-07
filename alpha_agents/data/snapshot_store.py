@@ -1025,12 +1025,57 @@ def _news_hash(source: str, title: str, published_at: str) -> str:
     return hashlib.md5(key).hexdigest()
 
 
+_TS_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d",
+    "%a, %d %b %Y %H:%M:%S %z",   # RFC 2822 — RSS feeds
+    "%a, %d %b %Y %H:%M:%S",
+    "%a, %d %b %Y",
+    "%a %b %d %H:%M:%S %z %Y",    # Twitter/X
+    "%a %b %d %H:%M",             # X syndication — no year
+)
+
+
+def normalise_published_at(raw: str) -> str:
+    """Coerce a source's timestamp into 'YYYY-MM-DD HH:MM:SS'.
+
+    Sources disagree wildly — RSS sends RFC 2822 ('Mon, 07 Sep 2026 …'),
+    PBOC sends a bare date, X syndication omits the year entirely. Stored
+    verbatim these do not order, and since/as_of window queries compare
+    ``published_at`` as a *string*, so a mixed table silently returns the
+    wrong rows. Normalising at write time is what makes the window read
+    meaningful.
+
+    Returns '' when nothing parses, and the caller drops the row rather
+    than poisoning the ordering with an unparseable value.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+
+    from datetime import datetime as _dt
+    for fmt in _TS_FORMATS:
+        try:
+            parsed = _dt.strptime(raw, fmt)
+        except ValueError:
+            continue
+        # Formats without a year default to 1900; assume the current one.
+        if parsed.year == 1900:
+            parsed = parsed.replace(year=_dt.now().year)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return ""
+
+
 def save_news(source: str, items: list[dict],
               captured_at: str | None = None) -> int:
     """Persist news items. Input format: [{title, summary, time, url?}, ...].
 
-    Dedup by md5(source|title|published_at). ``time`` field may be 'YYYY-MM-DD
-    HH:MM:SS' or 'YYYY-MM-DD HH:MM' — we store as-is.
+    Dedup by md5(source|title|published_at). ``time`` is normalised to
+    'YYYY-MM-DD HH:MM:SS' first — see normalise_published_at.
     """
     if not items:
         return 0
@@ -1038,7 +1083,7 @@ def save_news(source: str, items: list[dict],
     rows = []
     for item in items:
         title = (item.get("title") or "").strip()
-        published = (item.get("time") or "").strip()
+        published = normalise_published_at(item.get("time") or "")
         if not title or not published:
             continue
         h = _news_hash(source, title, published)
@@ -1065,15 +1110,30 @@ def save_news(source: str, items: list[dict],
 
 def read_news(sources: list[str] | None, as_of: str,
               keyword: str | None = None, limit: int = 50,
-              source_prefix: str | None = None) -> list[dict]:
-    """Read news items published <= as_of. Source filter is either an exact
-    list (``sources``) or a prefix pattern (``source_prefix``, e.g. 'X/@')
-    for dynamic source labels like truthsocial handles."""
+              source_prefix: str | None = None,
+              since: str | None = None) -> list[dict]:
+    """Read news items published <= as_of, optionally >= since.
+
+    ``since`` turns this into a window read, which is what the flash
+    sources need: they are continuous streams, so a task wants
+    "everything published between the last run and now", not "the latest
+    N items" — the latter silently drops whatever arrived beyond N and
+    re-reads what it already saw.
+
+    Source filter is either an exact list (``sources``) or a prefix
+    pattern (``source_prefix``, e.g. 'X/@') for dynamic source labels
+    like truthsocial handles.
+    """
     if len(as_of) == 10:
         as_of = as_of + " 23:59:59"
     q = ["SELECT source, published_at, title, summary, url FROM news_items "
          "WHERE published_at <= ?"]
     params: list = [as_of]
+    if since:
+        if len(since) == 10:
+            since = since + " 00:00:00"
+        q.append("AND published_at >= ?")
+        params.append(since)
     if sources:
         placeholders = ",".join("?" * len(sources))
         q.append(f"AND source IN ({placeholders})")

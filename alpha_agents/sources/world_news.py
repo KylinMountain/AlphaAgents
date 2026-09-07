@@ -6,6 +6,7 @@ France24, DW, RT, Middle East Eye, Haaretz — no API key required.
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -110,16 +111,30 @@ def get_world_news_fn(limit: int = 30, keyword: str | None = None) -> str:
 
     all_news: list[dict] = []
 
-    with client_session() as client:
-        for source_name, url in RSS_FEEDS:
-            try:
+    # Fetched in parallel, not in sequence. Five of these fourteen feeds
+    # are dead and each burns its own connect timeout plus retries, so
+    # serially the slow ones added up past the ingest task's ceiling and
+    # cancelled the whole sweep — including the feeds that had already
+    # answered. In parallel the cost is the slowest feed, not their sum.
+    def _one(source_name: str, url: str) -> list[dict]:
+        try:
+            with client_session() as client:
                 resp = client.get(url)
                 resp.raise_for_status()
                 items = _parse_rss(resp.text, source_name)
-                all_news.extend(items)
-                logger.debug("Fetched %d items from %s", len(items), source_name)
-            except Exception as e:
-                logger.warning("Failed to fetch %s: %s", source_name, e)
+            logger.debug("Fetched %d items from %s", len(items), source_name)
+            return items
+        except Exception as e:
+            logger.warning("Failed to fetch %s: %s", source_name, e)
+            return []
+
+    with ThreadPoolExecutor(max_workers=min(8, len(RSS_FEEDS))) as pool:
+        futures = {
+            pool.submit(_one, name, url): name
+            for name, url in RSS_FEEDS
+        }
+        for fut in as_completed(futures):
+            all_news.extend(fut.result())
 
     # Capture per-source to preserve source attribution in news_items
     for source_name in feed_names:

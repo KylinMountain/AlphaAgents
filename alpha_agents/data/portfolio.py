@@ -437,7 +437,77 @@ def close_position(
         logger.info("Closed #%d: %d股 @ %.2f → %.2f (net %+.2f%%, %+.0f元, friction %.0f元) %s",
                      position_id, shares, open_price, close_price,
                      return_pct, return_amount, net_result["costs"], close_reason)
-        return True
+
+    # Outside the write lock — _feed_close_to_learning takes it again.
+    _feed_close_to_learning(position_id, return_pct, close_reason)
+    return True
+
+
+def _feed_close_to_learning(position_id: int, return_pct: float,
+                            close_reason: str) -> None:
+    """Write a realised round trip back into the learning layer.
+
+    Without this the virtual portfolio and the learning system are
+    parallel worlds: review.py grades predictions on next-day direction,
+    which is not what the portfolio actually earned. A stop-out at -8%
+    after a +2% first day counts as a hit under the old scheme.
+
+    The realised net return — costs included, held to the actual exit —
+    is the honest label, so it overwrites the prediction's outcome and
+    drives the playbook stats. Best-effort: a failure here must never
+    prevent a position from closing.
+    """
+    try:
+        conn = _get_conn()
+        pos = conn.execute(
+            "SELECT code, open_date, theme FROM virtual_portfolio WHERE id = ?",
+            (position_id,),
+        ).fetchone()
+        if not pos:
+            return
+
+        # The prediction that originated this order: same stock, on or
+        # just before the fill. Orders can sit pending for
+        # PENDING_EXPIRE_DAYS, so allow that much slack and take the
+        # newest match.
+        pred = conn.execute(
+            "SELECT id, features_json FROM predictions "
+            "WHERE code = ? AND date <= ? AND date >= date(?, ?) "
+            "ORDER BY date DESC, id DESC LIMIT 1",
+            (pos["code"], pos["open_date"], pos["open_date"],
+             f"-{PENDING_EXPIRE_DAYS + 1} days"),
+        ).fetchone()
+        if not pred:
+            return
+
+        hit = 1 if return_pct > 0 else 0
+        with _write_lock:
+            conn.execute(
+                "UPDATE predictions SET hit = ?, week_return = ?, review_note = ? "
+                "WHERE id = ?",
+                (hit, return_pct, f"实盘平仓 {return_pct:+.2f}% ({close_reason})",
+                 pred["id"]),
+            )
+            conn.commit()
+
+        # Feed the playbook the realised outcome rather than the
+        # next-day proxy.
+        try:
+            import json as _json
+            from alpha_agents.data.memory_store import record_playbook_trade
+            feats = _json.loads(pred["features_json"] or "{}")
+            pb_id = feats.get("playbook_id")
+            if pb_id:
+                record_playbook_trade(int(pb_id), hit=bool(hit),
+                                      return_pct=return_pct)
+        except Exception as e:
+            logger.debug("Playbook feedback failed for #%d: %s", position_id, e)
+
+        logger.info("Learning feedback: %s prediction #%d ← 实盘 %+.2f%%",
+                    pos["code"], pred["id"], return_pct)
+    except Exception as e:
+        logger.debug("Close-to-learning feedback failed for #%d: %s",
+                     position_id, e)
 
 
 def _status_from_reason(reason: str) -> str:

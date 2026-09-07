@@ -31,6 +31,28 @@ from alpha_agents.data.portfolio import (
 logger = logging.getLogger(__name__)
 
 
+def _market_return_pct(rt: dict) -> float:
+    """Today's market move, as the median change across quoted stocks.
+
+    Grading a pick on raw direction makes every stock a "hit" on a day the
+    whole market rose 1.5%, so the recorded hit rate tracks beta rather
+    than skill. Median, not mean, because A-share daily returns are
+    right-skewed. Returns 0.0 when there is too little to judge, which
+    degrades to the old absolute-return behaviour.
+    """
+    changes = [
+        q.get("change_pct") for q in rt.values()
+        if isinstance(q.get("change_pct"), (int, float))
+    ]
+    if len(changes) < 5:
+        return 0.0
+    changes.sort()
+    mid = len(changes) // 2
+    if len(changes) % 2:
+        return float(changes[mid])
+    return float((changes[mid - 1] + changes[mid]) / 2)
+
+
 def _verify_prediction_date(pred_date: str, rt: dict) -> int:
     """Verify one prior prediction date against today's actual prices."""
     predictions = get_pending_predictions(pred_date)
@@ -38,6 +60,7 @@ def _verify_prediction_date(pred_date: str, rt: dict) -> int:
         logger.info("No pending predictions from %s to verify", pred_date)
         return 0
 
+    market_pct = _market_return_pct(rt)
     verified = 0
     for pred in predictions:
         code = pred.get("code")
@@ -59,12 +82,16 @@ def _verify_prediction_date(pred_date: str, rt: dict) -> int:
                 continue
 
         return_pct = round((today_close - entry_price) / entry_price * 100, 2) if entry_price else 0
+        # Grade on excess return: beating the market is the claim a stock
+        # pick makes. Absolute direction would score the whole book as
+        # hits on an up day and misses on a down day.
+        excess_pct = round(return_pct - market_pct, 2)
         direction = pred.get("direction", "")
         is_bullish = direction in ("看多", "bullish", "买入", "long")
         if is_bullish:
-            hit_val = 1 if return_pct > 0 else 0
+            hit_val = 1 if excess_pct > 0 else 0
         else:
-            hit_val = 1 if return_pct < 0 else 0
+            hit_val = 1 if excess_pct < 0 else 0
 
         update_prediction_result(pred["id"], next_day_return=return_pct, hit=hit_val)
 

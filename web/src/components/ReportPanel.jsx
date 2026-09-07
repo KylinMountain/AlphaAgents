@@ -1,151 +1,91 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { Clock, FileText } from 'lucide-react'
 
-const categoryColors = {
-  '政策': { bg: '#3b82f618', text: '#60a5fa', border: '#3b82f633' },
-  '地缘': { bg: '#ef444418', text: '#f87171', border: '#ef444433' },
-  '宏观': { bg: '#f59e0b18', text: '#fbbf24', border: '#f59e0b33' },
-  '行业': { bg: '#10b98118', text: '#34d399', border: '#10b98133' },
-  '市场': { bg: '#8b5cf618', text: '#a78bfa', border: '#8b5cf633' },
+function fmtTime(r) {
+  const raw = r.created_at || (r.timestamp ? r.timestamp * 1000 : null)
+  if (!raw) return ''
+  const d = new Date(typeof raw === 'number' ? raw : raw.replace(' ', 'T') + 'Z')
+  if (Number.isNaN(d.getTime())) return String(raw)
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-function EventBadge({ event }) {
-  const cat = categoryColors[event.category] || { bg: '#1e2d42', text: '#8892a4', border: '#2a3f5f' }
-  return (
-    <div className="flex items-center gap-2 py-1">
-      <span className="text-xs px-1.5 py-0.5 rounded shrink-0"
-            style={{ background: cat.bg, color: cat.text, border: `1px solid ${cat.border}` }}>
-        {event.category || '未知'}
-      </span>
-      <span className="text-xs flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-        {event.event}
-      </span>
-      <span className="text-xs tabular-nums" style={{ color: 'var(--text-muted)' }}>
-        {event.importance && `${event.importance}/5`}
-      </span>
-    </div>
-  )
-}
-
-function ReportSection({ label, content, color, defaultOpen = false }) {
-  const [open, setOpen] = useState(defaultOpen)
-  if (!content) return null
-
-  return (
-    <div className="rounded-lg overflow-hidden"
-         style={{ border: `1px solid var(--border)` }}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left"
-        style={{ background: 'var(--bg-secondary)', border: 'none', cursor: 'pointer' }}
-      >
-        <span className="w-1 h-3 rounded-full shrink-0" style={{ background: color }} />
-        <span className="text-xs font-semibold flex-1" style={{ color }}>{label}</span>
-        <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-          {open ? '▼' : '▶'}
-        </span>
-      </button>
-      {open && (
-        <pre className="px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap overflow-auto"
-             style={{ color: 'var(--text-secondary)', maxHeight: 500, background: 'var(--bg-card)', margin: 0 }}>
-          {content}
-        </pre>
-      )}
-    </div>
-  )
-}
-
-function ReportCard({ report }) {
-  const time = new Date(report.timestamp * 1000).toLocaleString('zh-CN')
-  const hasRoutes = report.routes && (report.routes.stock > 0 || report.routes.futures > 0)
-
-  return (
-    <div
-      className="rounded-lg p-4 animate-fade-in"
-      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-mono" style={{ color: 'var(--accent-purple)' }}>
-            #{report.cycle}
-          </span>
-          <span className="text-xs tabular-nums" style={{ color: 'var(--text-muted)' }}>
-            {time}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {hasRoutes && (
-            <>
-              {report.routes.stock > 0 && (
-                <span className="text-xs px-1.5 py-0.5 rounded"
-                      style={{ background: '#3b82f612', color: '#60a5fa', border: '1px solid #3b82f625' }}>
-                  股票 {report.routes.stock}
-                </span>
-              )}
-              {report.routes.futures > 0 && (
-                <span className="text-xs px-1.5 py-0.5 rounded"
-                      style={{ background: '#f59e0b12', color: '#fbbf24', border: '1px solid #f59e0b25' }}>
-                  期货 {report.routes.futures}
-                </span>
-              )}
-            </>
-          )}
-          <span className="text-xs px-1.5 py-0.5 rounded"
-                style={{ background: '#10b98112', color: '#34d399', border: '1px solid #10b98125' }}>
-            {report.event_count} 事件
-          </span>
-        </div>
-      </div>
-
-      {/* Events */}
-      {report.events_summary && (
-        <div className="mb-3 pb-3" style={{ borderBottom: '1px solid var(--border)' }}>
-          {report.events_summary.slice(0, 5).map((e, i) => (
-            <EventBadge key={i} event={e} />
-          ))}
-          {report.events_summary.length > 5 && (
-            <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-              +{report.events_summary.length - 5} more
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Report sections */}
-      <div className="space-y-2">
-        <ReportSection
-          label="股票分析报告"
-          content={report.report}
-          color="var(--accent-blue)"
-        />
-        <ReportSection
-          label="期货分析报告"
-          content={report.futures_report}
-          color="var(--accent-yellow)"
-        />
-      </div>
-    </div>
-  )
+/** Reports carry no explicit kind, so label them by the hour they landed —
+ *  the schedule is fixed (06:30 晨扫 / 盘中 / 15:30 复盘 / 20:00 夜扫). */
+function kindOf(r) {
+  const raw = r.created_at || (r.timestamp ? r.timestamp * 1000 : null)
+  if (!raw) return { label: '报告', cls: 'badge-slate' }
+  const d = new Date(typeof raw === 'number' ? raw : raw.replace(' ', 'T') + 'Z')
+  const h = d.getHours()
+  if (h < 9) return { label: '晨报', cls: 'badge-blue' }
+  if (h < 15) return { label: '盘中', cls: 'badge-orange' }
+  if (h < 19) return { label: '复盘', cls: 'badge-green' }
+  return { label: '夜报', cls: 'badge-purple' }
 }
 
 export default function ReportPanel({ reports }) {
-  if (!reports || reports.length === 0) {
+  const sorted = useMemo(
+    () => [...reports].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0) || (b.id || 0) - (a.id || 0)),
+    [reports],
+  )
+  const [selected, setSelected] = useState(0)
+
+  useEffect(() => { setSelected(0) }, [reports.length])
+
+  if (!sorted.length) {
     return (
-      <div className="p-8 text-center">
-        <div className="text-2xl mb-3 opacity-20">📊</div>
-        <div className="text-xs" style={{ color: 'var(--text-muted)' }}>暂无分析报告</div>
-        <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>等待第一轮分析完成...</div>
+      <div className="card text-center py-12">
+        <FileText className="w-8 h-8 mx-auto mb-3 text-slate-300 dark:text-slate-600" />
+        <p className="text-sm text-slate-500 dark:text-slate-400">暂无报告</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+          调度器会在 06:30 晨扫、15:30 复盘后写入
+        </p>
       </div>
     )
   }
 
-  const sorted = [...reports].reverse()
+  const active = sorted[Math.min(selected, sorted.length - 1)]
 
   return (
-    <div className="p-4 space-y-3">
-      {sorted.map((r, i) => (
-        <ReportCard key={r.cycle || i} report={r} />
-      ))}
+    <div className="grid lg:grid-cols-[240px_1fr] gap-3">
+      <div className="card !p-2 max-h-[70vh] overflow-y-auto">
+        {sorted.map((r, i) => {
+          const k = kindOf(r)
+          const on = i === Math.min(selected, sorted.length - 1)
+          return (
+            <button
+              key={r.id ?? i}
+              onClick={() => setSelected(i)}
+              className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors mb-1
+                ${on ? 'bg-blue-50 dark:bg-blue-500/15' : 'hover:bg-slate-50 dark:hover:bg-slate-700/50'}`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className={k.cls}>{k.label}</span>
+                {r.event_count > 0 && (
+                  <span className="text-xs text-slate-400">{r.event_count} 事件</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                <Clock className="w-3 h-3" />
+                {fmtTime(r)}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="card max-h-[70vh] overflow-y-auto animate-in">
+        <div className="flex items-center gap-2 mb-3 pb-3 border-b border-slate-200 dark:border-slate-700">
+          <span className={kindOf(active).cls}>{kindOf(active).label}</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">{fmtTime(active)}</span>
+        </div>
+        <div className="report-prose">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {active.report_text || active.text || '（报告内容为空）'}
+          </ReactMarkdown>
+        </div>
+      </div>
     </div>
   )
 }

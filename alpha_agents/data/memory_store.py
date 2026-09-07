@@ -1283,3 +1283,80 @@ def get_evolution_metrics_trend(days: int = 30) -> list[dict]:
         (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+# ── VPA prior state (v7) ─────────────────────────────────────
+# Read by the vpa package to carry the previous session's phase
+# into the next analysis. Live mode requires the exact previous
+# trading day; backtest mode takes the newest row strictly before
+# the as-of date.
+
+def get_prior_state_live(code: str) -> dict | None:
+    """v7 spec §2.5: return the most recent VPA analysis row whose date
+    equals the previous trading day. Used by live mode.
+
+    Returns None if the most recent row is older than yesterday's trading day
+    (treat as cold start).
+
+    v7 review I#82: selected_candidate_id is now read from the persisted
+    column (default None for legacy rows) rather than hardcoded to None.
+    """
+    from alpha_agents.tools.vpa import _prev_trading_day
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    expected = _prev_trading_day(today)
+    if not expected:
+        return None
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT analysis_date, phase, verdict, signals_json, reason,
+               selected_candidate_id
+        FROM vpa_analysis_history
+        WHERE code = ? AND analysis_date = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (code, expected),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "analysis_date": row["analysis_date"],
+        "phase": row["phase"],
+        "verdict": row["verdict"],
+        "selected_candidate_id": row["selected_candidate_id"],
+        "rationale": row["reason"] or "",
+    }
+
+
+def get_prior_state_backtest(code: str, as_of: str) -> dict | None:
+    """v7 spec §2.5: return the largest-dated VPA analysis row strictly
+    before ``as_of`` for ``code``. Used by backtest harness.
+
+    Returns dict with keys {analysis_date, phase, verdict, selected_candidate_id,
+    rationale} or None if no prior row exists.
+
+    v7 review I#82: selected_candidate_id is now read from the persisted
+    column (default None for legacy rows) rather than hardcoded to None.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT analysis_date, phase, verdict, signals_json, reason,
+               selected_candidate_id
+        FROM vpa_analysis_history
+        WHERE code = ? AND analysis_date < ?
+        ORDER BY analysis_date DESC
+        LIMIT 1
+        """,
+        (code, as_of[:10]),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "analysis_date": row["analysis_date"],
+        "phase": row["phase"],
+        "verdict": row["verdict"],
+        "selected_candidate_id": row["selected_candidate_id"],
+        "rationale": row["reason"] or "",
+    }

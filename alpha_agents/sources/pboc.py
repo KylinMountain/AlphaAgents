@@ -80,9 +80,13 @@ def _parse_pboc_html(html_text: str) -> list[dict]:
 
     # Pattern: <a> tags with title attribute followed by date spans
     # PBOC uses patterns like: <a href="..." title="新闻标题">新闻标题</a> ... <span>2026-04-01</span>
+    #
+    # \stitle= — not bare title= — because PBOC article anchors also carry
+    # istitle="true", and an unanchored `title=` matches the tail of that
+    # attribute, giving every real article the headline "true".
     link_pattern = re.compile(
-        r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*title=["\']([^"\']+)["\']'
-        r'|<a\s+[^>]*title=["\']([^"\']+)["\'][^>]*href=["\']([^"\']+)["\']'
+        r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*\stitle=["\']([^"\']+)["\']'
+        r'|<a\s+[^>]*\stitle=["\']([^"\']+)["\'][^>]*href=["\']([^"\']+)["\']'
     )
     date_pattern = re.compile(r"(\d{4}[-./]\d{1,2}[-./]\d{1,2})")
 
@@ -102,8 +106,14 @@ def _parse_pboc_html(html_text: str) -> list[dict]:
         if not title or not href:
             continue
 
+        # Every article row carries its publication date in a sibling
+        # <span class="hui12">. Site-chrome links (内设部门, 上海总部, …)
+        # have a title attribute too but no date, so requiring one keeps
+        # navigation out of the feed.
         date_match = date_pattern.search(segment)
-        date_str = date_match.group(1) if date_match else ""
+        if not date_match:
+            continue
+        date_str = date_match.group(1)
 
         if href.startswith("http"):
             full_link = href

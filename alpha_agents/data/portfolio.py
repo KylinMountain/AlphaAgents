@@ -118,35 +118,6 @@ def get_theme_exposure(theme: str) -> float:
 
 # ── Pending Orders (挂单) ───────────────────────────────────
 
-def get_vpa_target_for_code(code: str) -> float | None:
-    """Look up the latest VPA-derived target price (take-profit) for a code.
-
-    Reads vpa_analysis_history.target_low/target_high and returns their
-    midpoint — a balance between conservative (target_low: first profit
-    pause) and stretch (target_high: full Wyckoff projection).
-
-    Returns None if no recent VPA target zone is available. Callers should
-    treat this as best-effort; positions without a target_price still work
-    with trailing-stop only.
-    """
-    try:
-        from alpha_agents.data.memory_store import get_latest_vpa_analysis
-        vpa = get_latest_vpa_analysis(code)
-        if not vpa:
-            return None
-        tl = vpa.get("target_low")
-        th = vpa.get("target_high")
-        if tl and th and tl > 0 and th > 0:
-            return round((tl + th) / 2, 2)
-        # Partial data: use whichever is present
-        if th and th > 0:
-            return float(th)
-        if tl and tl > 0:
-            return float(tl)
-        return None
-    except Exception:
-        return None
-
 
 def create_pending_order(
     *,
@@ -494,61 +465,20 @@ def _is_phase_bearish() -> tuple[bool, str]:
         return False, ""
 
 
-def _vpa_phase_action(phase: str, verdict: str) -> tuple[float | None, str]:
-    """Map VPA phase to a stop-tightening factor (Anna Coulling phase priority).
-
-    Terminology note (critical — opposite of English Wyckoff):
-      - 买入高峰 = Accumulation climax at BOTTOM (insiders buying) → bullish reversal UP
-      - 抛售高峰 = Distribution climax at TOP   (insiders selling) → bearish reversal DOWN
-    See vpa.py:1436-1443 for the prompt definitions the LLM follows.
-
-    Phase priority (more decisive than verdict):
-      - 抛售高峰: top distribution climax → tighten MAXIMALLY (95%)
-      - 派发 / 派发尾声: insiders selling → tighten aggressively (96%/97%)
-      - 下跌: trend in progress → tighten moderately (97%)
-      - 买入高峰: bottom reversal → DO NOT tighten (let it bounce)
-      - 吸筹 / 拉升: bullish phases → never tighten on phase alone
-      - 震荡: ambiguous → defer to verdict-based logic (return None)
-
-    Returns (factor, reason) or (None, "") if phase is non-decisive.
-    factor is what to multiply current price by; lower = tighter stop.
-    """
-    if not phase:
-        return None, ""
-    # Order matters — check more specific labels first
-    if "买入高峰" in phase:
-        return None, ""  # Bottom reversal UP; do not tighten
-    if "抛售高峰" in phase:
-        return 0.95, f"VPA{phase}(顶部派发高潮)"
-    if "派发尾声" in phase:
-        return 0.97, f"VPA{phase}"
-    if "派发" in phase:
-        # Catches "派发", "派发初期", "派发中期"
-        return 0.96, f"VPA派发({phase})"
-    if "下跌" in phase:
-        return 0.97, f"VPA下跌phase"
-    if "吸筹" in phase or "拉升" in phase:
-        return None, ""  # Bullish phases — let trailing stop work normally
-    # 震荡 or unrecognized — fall through to verdict-based logic
-    return None, ""
-
 
 def _check_bearish_signals(
     pos: dict, price: float, phase_bearish: bool, phase_name: str
 ) -> tuple[float, list[str]]:
     """Detect bearish signals on a position and compute a tightened stop.
 
-    Implements V2 principle #2 (资金行为优先) on the sell side. Five signals,
+    Implements V2 principle #2 (资金行为优先) on the sell side. Four signals,
     in priority order:
-      1. **VPA phase (NEW v2.5)**: Wyckoff phase decides direction first.
-         抛售高峰 → 95% (顶部派发高潮，最强收紧);
-         派发 → 96%; 派发尾声 → 97%; 下跌 → 97%;
-         买入高峰/吸筹/拉升 → DO NOT tighten (bullish phases).
-         Only fall through to verdict if phase is ambiguous (震荡).
+      1. **量价派发** (alpha_agents.tools.exit_signals): 顶背离 95%/97%,
+         放量滞涨 96%, 放量下跌 97%, 高位缩量 98%. Deterministic, computed
+         from the local K-line — no LLM, so it is backtestable.
       2. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
-      3. P1 VPA verdict (fallback when phase didn't decide)
-      4. P2 情绪周期：分歧/退潮 phase → 97% of current price
-      5. P3 主线速率：2日内强度下降≥3 → 98% of current price
+      3. P1 情绪周期：分歧/退潮 phase → 97% of current price
+      4. P2 主线速率：2日内强度下降≥3 → 98% of current price
 
     Returns (tightest_stop, reasons). tightest_stop is 0 if no signal.
     The caller integrates this with trailing stop logic (take the max).
@@ -571,39 +501,19 @@ def _check_bearish_signals(
             tightest_stop = candidate
         reasons.append(label)
 
-    # ── Signal 1 (highest priority): VPA phase + verdict ──
-    # Anna Coulling: phase IS the direction. A "中性" verdict in 派发 phase is
-    # actually a sell signal — insiders are unwinding even if the bar-by-bar
-    # indicators look ambiguous. Conversely, "偏空" verdict in 抛售高峰 is a
-    # buy signal — the panic isn't done but the bottom is forming.
+    # ── Signal 1 (highest priority): 大盘弱势 ──
+    # Forward-testing showed the exit question is answered by market
+    # regime, not by per-stock distribution patterns: for positions
+    # already up ≥15%, a weak market costs -1.73% of median excess return
+    # by day 3 and -6.48% by day 20. Tighten hard when the market turns.
+    # (See alpha_agents/tools/exit_signals for the numbers.)
     try:
-        from alpha_agents.data.memory_store import get_latest_vpa_analysis
-        vpa = get_latest_vpa_analysis(code)
-        if vpa:
-            verdict = vpa.get("verdict", "") or ""
-            phase = vpa.get("phase", "") or ""
-            analysis_date = vpa.get("analysis_date", "")
-            analysis_fresh = False
-            try:
-                a_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
-                now_dt = datetime.now()
-                analysis_fresh = (now_dt - a_dt).days <= 3
-            except (ValueError, TypeError):
-                pass
-            if analysis_fresh:
-                # Phase first
-                phase_factor, phase_reason = _vpa_phase_action(phase, verdict)
-                if phase_factor is not None:
-                    _apply(phase_factor, phase_reason)
-                else:
-                    # Phase didn't decide (震荡 or 吸筹/拉升 or terminal phase) —
-                    # fall back to verdict-based check, but ONLY in 震荡.
-                    # In 吸筹/拉升 or terminal phases, even bearish verdict is
-                    # likely noise — skip.
-                    if (not phase or "震荡" in phase) and verdict in ("看空", "偏空"):
-                        _apply(0.97, f"VPA{verdict}(震荡)")
+        from alpha_agents.tools.exit_signals import get_market_regime
+        regime, regime_pct = get_market_regime()
+        if regime == "weak":
+            _apply(0.96, f"大盘弱势({regime_pct:+.1f}%)")
     except Exception as e:
-        logger.debug("VPA phase check failed for %s: %s", code, e)
+        logger.debug("Regime check failed for %s: %s", code, e)
 
     # ── Signal 2: 资金流 ──
     try:
@@ -651,13 +561,13 @@ def check_positions(
       1. Hard stop / trailing stop triggered → close
       2. Target price hit → close
       3. Theme declining/weakening → close
-      4. Bearish signals (fund flow / VPA / phase / theme velocity) → tighten
+      4. Bearish signals (量价派发 / fund flow / sentiment / theme) → tighten
          stop (may trigger #1 on next tick)
 
     The bearish-signal mechanism implements V2 principle #2 (资金行为优先) on
     the sell side: we no longer wait for the price to touch the original
-    stop — we proactively raise it whenever the fund-flow / VPA / phase /
-    theme signals say the position is at risk.
+    stop — we proactively raise it whenever the 量价 / fund-flow / sentiment
+    / theme signals say the position is at risk.
     """
     conn = _get_conn()
     positions = conn.execute(
@@ -795,6 +705,21 @@ def check_positions(
                     alert = {"type": "expired", "reason": f"主线走弱({pos['theme']}强度{theme_strength}，阈值{_exit_threshold})，持仓{holding_days}天"}
                 # peak/active + strength >= 4 → 继续持有，不设天数上限
                 # 靠移动止损保护利润
+
+        # Regime-conditional holding cap — the one exit rule that survived
+        # forward testing. A position already up ≥15% bleeds median excess
+        # return the longer it is held, and faster the weaker the market:
+        # 强势 is flat only through day 3, 震荡 is already negative by day 3,
+        # 弱势 loses 1.7% by day 3 and 6.5% by day 20. Riding the theme past
+        # that point gives back the catalyst move.
+        if not alert:
+            try:
+                from alpha_agents.tools.exit_signals import check_holding_period
+                should_close, hp_reason = check_holding_period(code, holding_days)
+                if should_close:
+                    alert = {"type": "expired", "reason": hp_reason}
+            except Exception as e:
+                logger.debug("Holding period check failed for %s: %s", code, e)
 
         # No theme → fallback to moving stop only (no fixed day limit)
         # The trailing stop + theme lifecycle is the exit mechanism, not calendar days

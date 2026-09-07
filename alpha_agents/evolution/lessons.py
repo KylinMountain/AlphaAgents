@@ -207,6 +207,18 @@ async def post_review(today: str, review_report: str) -> str:
     else:
         counts = {"created": 0, "reinforced": 0, "weakened": 0}
 
+    # G2: run the held-out gate before anything is promoted. The gate
+    # abstains until there is enough validation data, which is the correct
+    # behaviour for a system with no track record.
+    try:
+        from alpha_agents.evolution.holdout_gate import run_gate
+        # Validation accrues after the candidate existed; a candidate
+        # created today has none yet, and the gate will abstain.
+        gate = await asyncio.to_thread(run_gate, "daily_playbook", today, today)
+    except Exception as e:
+        logger.warning("Holdout gate failed: %s", e)
+        gate = {}
+
     # G3: the market, not the model, decides which principles survive.
     # Runs unconditionally — principles age out on evidence even on a day
     # that produced no new lessons.

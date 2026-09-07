@@ -5,6 +5,7 @@ description = "News-driven autonomous stock screening system"
 requires-python = ">=3.11"
 dependencies = [
     "claude-agent-sdk",
+    "openai-agents>=0.22.0",
     "akshare",
     "baostock",
     "anyio",
@@ -16,12 +17,13 @@ dependencies = [
     "websockets>=16.0",
     "tiktoken>=0.7.0",
     "trafilatura>=1.8.0",
-    "duckduckgo-search>=6.0.0",
+    "ddgs>=9.0.0",
     "beautifulsoup4>=4.12.0",
     "json-repair>=0.58.7",
     "prompt-toolkit>=3.0.52",
     "rich>=14.3.3",
     "tushare>=1.4.29",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]

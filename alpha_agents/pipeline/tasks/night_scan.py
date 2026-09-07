@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 NIGHT_TOOLS = [get_global_overview, get_us_market, get_bond_yields, get_pizzint, web_search]
 
 
-def _create_model() -> OpenAIChatCompletionsModel:
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
-    return OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
+from alpha_agents.agents.model_factory import (
+    create_model as _create_model,
+    create_model_settings,
+)
 
 
 def _format_themes(themes: list[dict]) -> str:
@@ -105,6 +106,7 @@ async def run_night_scan() -> str | None:
         name="night_analyst",
         instructions=prompt_text,
         model=_create_model(),
+        model_settings=create_model_settings(),
         tools=NIGHT_TOOLS,
     )
 

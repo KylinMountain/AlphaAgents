@@ -1,95 +1,112 @@
 """Fetch news flashes from 财联社电报 (CLS Telegraph).
 
-CLS Telegraph is one of the fastest A-share news flash sources in China.
-Uses akshare's stock_info_global_cls() which handles CLS API auth internally.
+One of the fastest A-share flash sources.
 
-Known outage (verified 2026-09-07): the endpoint akshare 1.18.50 calls,
-``https://www.cls.cn/nodeapi/telegraphList``, now returns 404, and CLS's
-current API rejects unsigned requests with ``{"errno":"10012","msg":"签名
-错误"}`` while the web page is client-rendered. There is no fetch path
-left that does not involve defeating their request signing, so this source
-stays down until akshare ships a working endpoint.
+Endpoint history: akshare's ``stock_info_global_cls`` calls
+``cls.cn/nodeapi/telegraphList``, which CLS retired around 2026-05 and now
+404s — and akshare wraps that in a ten-attempt retry, so a dead endpoint
+presented as a multi-minute hang rather than an error. This module calls
+the current ``/v1/roll/get_roll_list`` directly.
 
-The practical hazard is not the failure but its shape: akshare wraps the
-call in ``make_request_with_retry_json(max_retries=10)``, so a dead
-endpoint presents as a multi-minute hang that stalls the whole scan.
-_FETCH_TIMEOUT bounds it.
+Signing: CLS requires a ``sign`` parameter, computed locally as
+``md5(sha1(query sorted by key))``. No secret is involved — it is a
+request-shape check, not authentication, so nothing here works around an
+access control.
 """
 
+import hashlib
 import json
 import logging
-import threading
+import time
+from urllib.parse import urlencode
 
-from alpha_agents.config import no_proxy
+from alpha_agents.http_client import fetch
 
 logger = logging.getLogger(__name__)
 
-# akshare retries 10x internally; cap the total so one dead upstream can
-# never hold up a morning scan or an intraday cycle.
-_FETCH_TIMEOUT = 20
+ROLL_URL = "https://www.cls.cn/v1/roll/get_roll_list"
+
+_EXTRA_HEADERS = {"Referer": "https://www.cls.cn/telegraph"}
+
+# Bump if CLS starts rejecting the version; it is sent as-is.
+_CLIENT_VERSION = "8.4.6"
+
+FETCH_TIMEOUT = 20
 
 
-def _fetch_telegraph() -> list[dict]:
-    """Fetch telegraph items via akshare (handles CLS API auth)."""
-    # A raw daemon thread, not ThreadPoolExecutor: pool workers are
-    # non-daemon and concurrent.futures registers an atexit hook that
-    # joins them, so a thread stuck in akshare's retry loop would hold up
-    # interpreter shutdown even after shutdown(wait=False). A daemon
-    # thread is abandoned cleanly.
-    result: dict = {}
+def _sign(params: dict) -> str:
+    """md5(sha1(query sorted by key)) — CLS's request-shape check.
 
-    def _run() -> None:
-        try:
-            result["df"] = _fetch_telegraph_blocking()
-        except Exception as exc:            # noqa: BLE001 — surfaced below
-            result["error"] = exc
+    Values are stringified first. urlencode turns 20 into "20" on the
+    way out, so signing the int and sending the string would produce a
+    signature nobody — including us — can reproduce from the sent URL.
+    """
+    query = urlencode(sorted((k, str(v)) for k, v in params.items()))
+    return hashlib.md5(
+        hashlib.sha1(query.encode()).hexdigest().encode()
+    ).hexdigest()
 
-    worker = threading.Thread(target=_run, daemon=True, name="cls-telegraph")
-    worker.start()
-    worker.join(timeout=_FETCH_TIMEOUT)
 
-    if worker.is_alive():
-        raise TimeoutError(
-            f"CLS telegraph fetch exceeded {_FETCH_TIMEOUT}s "
-            "(akshare endpoint returns 404 and retries 10x)"
+def _build_url(limit: int) -> str:
+    params = {
+        "app": "CailianpressWeb",
+        "os": "web",
+        "sv": _CLIENT_VERSION,
+        "last_time": int(time.time()),
+        "refresh_type": 1,
+        "rn": max(1, min(limit, 50)),
+        "category": "",
+    }
+    params["sign"] = _sign(params)
+    return f"{ROLL_URL}?{urlencode(params)}"
+
+
+def _parse_item(item: dict) -> dict | None:
+    """One roll_data row into the project's standard news dict."""
+    content = (item.get("content") or item.get("brief") or "").strip()
+    title = (item.get("title") or "").strip()
+    if not title and content:
+        # Headlines are wrapped in 【】 when present.
+        title = (content[1:content.index("】")]
+                 if content.startswith("【") and "】" in content
+                 else content[:50])
+    if not title:
+        return None
+
+    ctime = item.get("ctime")
+    try:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ctime)))
+    except (TypeError, ValueError):
+        stamp = ""
+
+    return {
+        "title": title,
+        "summary": content[:300] or title,
+        "time": stamp,
+        "source": "财联社电报",
+        # CLS marks the items it considers market-moving.
+        "important": bool(item.get("level") in ("A", "B")
+                          or item.get("is_ad") == 0 and item.get("level") == "A"),
+        "link": (item.get("shareurl") or "").strip(),
+    }
+
+
+def _fetch_telegraph(limit: int = 30) -> list[dict]:
+    resp = fetch(_build_url(limit), headers=_EXTRA_HEADERS, timeout=FETCH_TIMEOUT)
+    payload = json.loads(resp.text)
+
+    if payload.get("errno"):
+        raise RuntimeError(
+            f"CLS errno={payload.get('errno')} msg={payload.get('msg', '')}"
         )
-    if "error" in result:
-        raise result["error"]
 
-    return _rows_to_items(result["df"])
-
-
-def _fetch_telegraph_blocking():
-    """The raw akshare call. Runs on a worker thread so it can be timed out."""
-    import akshare as ak
-    with no_proxy():
-        return ak.stock_info_global_cls()
+    rows = (payload.get("data") or {}).get("roll_data") or []
+    items = [_parse_item(r) for r in rows if isinstance(r, dict)]
+    return [i for i in items if i]
 
 
-def _rows_to_items(df) -> list[dict]:
-    items = []
-    for _, row in df.iterrows():
-        title = str(row.get("标题", "")).strip()
-        content = str(row.get("内容", "")).strip()
-        date_str = str(row.get("发布日期", "")).strip()
-        time_str = str(row.get("发布时间", "")).strip()
-        timestamp = f"{date_str} {time_str}".strip()
-
-        # Use content as title if title is empty
-        if not title and content:
-            title = content[:50]
-
-        if title:
-            items.append({
-                "title": title,
-                "summary": content[:300] if content else title,
-                "time": timestamp,
-                "source": "财联社电报",
-            })
-    return items
-
-
-def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
+def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None,
+                         important_only: bool = False) -> str:
     """Fetch CLS Telegraph news flashes.
 
     Proxy-aware: live fetch captures to ``news_items``; replay reads from
@@ -98,6 +115,7 @@ def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
     Args:
         limit: Maximum number of news items to return.
         keyword: Optional keyword to filter results on title and content.
+        important_only: Keep only what CLS flagged as market-moving.
     """
     # Replay short-circuit — read from snapshot, NEVER touch live API
     try:
@@ -112,7 +130,7 @@ def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
         return json.dumps({"news": news, "count": len(news)}, ensure_ascii=False)
 
     try:
-        news = _fetch_telegraph()
+        news = _fetch_telegraph(limit)
 
         # Capture to snapshot BEFORE filtering (so replay can keyword-search
         # the full corpus, not just what this particular call retrieved).
@@ -122,6 +140,9 @@ def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
         except Exception as e:
             logger.debug("cls news capture failed: %s", e)
 
+        if important_only:
+            news = [n for n in news if n.get("important")]
+
         if keyword:
             kw = keyword.lower()
             news = [
@@ -130,8 +151,12 @@ def get_cls_telegraph_fn(limit: int = 30, keyword: str | None = None) -> str:
             ]
 
         news = news[:limit]
-
-        return json.dumps({"news": news, "count": len(news)}, ensure_ascii=False)
+        return json.dumps(
+            {"news": news, "count": len(news),
+             "important_count": sum(1 for n in news if n.get("important"))},
+            ensure_ascii=False,
+        )
     except Exception as e:
         logger.error("Failed to fetch CLS telegraph: %s", e)
-        return json.dumps({"news": [], "count": 0, "error": str(e)}, ensure_ascii=False)
+        return json.dumps({"news": [], "count": 0, "error": str(e)},
+                          ensure_ascii=False)

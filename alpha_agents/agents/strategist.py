@@ -16,14 +16,10 @@ from alpha_agents.agents.reflection import run_reflection
 logger = logging.getLogger(__name__)
 
 
-def _create_model() -> OpenAIChatCompletionsModel:
-    """Create OpenAI-compatible model from config."""
-    client = AsyncOpenAI(
-        api_key=AGENT_API_KEY,
-        base_url=AGENT_BASE_URL,
-    )
-    model_name = AGENT_MODEL or "qwen-plus"
-    return OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+from alpha_agents.agents.model_factory import (
+    create_model as _create_model,
+    create_model_settings,
+)
 
 
 def _create_strategist() -> Agent:
@@ -37,6 +33,7 @@ def _create_strategist() -> Agent:
         name="strategist",
         instructions=system_prompt,
         model=model,
+        model_settings=create_model_settings(),
         tools=STOCK_TOOLS,
         handoffs=[geopolitical],
     )

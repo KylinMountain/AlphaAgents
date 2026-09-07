@@ -24,7 +24,7 @@ from alpha_agents.data.portfolio import get_portfolio_stats, format_portfolio_st
 logger = logging.getLogger(__name__)
 
 
-from alpha_agents.agents.model_factory import (
+from alpha_agents.model_factory import (
     create_model as _create_model,
     create_model_settings,
 )

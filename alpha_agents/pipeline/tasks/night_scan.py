@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 NIGHT_TOOLS = [get_global_overview, get_us_market, get_bond_yields, get_pizzint, web_search]
 
 
-from alpha_agents.agents.model_factory import (
+from alpha_agents.model_factory import (
     create_model as _create_model,
     create_model_settings,
 )

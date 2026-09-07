@@ -130,6 +130,38 @@ def _extract_domain(url: str) -> str:
     return urlparse(url).netloc
 
 
+# Worker reachability, probed once and cached. Deployed on a host that
+# cannot reach workers.dev, every overseas source failed three retries
+# each and the whole ingest timed out — even though those sites were
+# directly reachable from the same container. The proxy exists to dodge
+# anti-scraping, so losing it degrades quality; losing every overseas
+# source outright is worse.
+_WORKER_HEALTHY: bool | None = None
+_WORKER_PROBE_TIMEOUT = 8
+
+
+def _worker_reachable() -> bool:
+    """Whether the Worker answers at all. Probed once per process."""
+    global _WORKER_HEALTHY
+    if _WORKER_HEALTHY is not None:
+        return _WORKER_HEALTHY
+    if not _CF_WORKER_URL:
+        _WORKER_HEALTHY = False
+        return False
+
+    try:
+        with httpx.Client(timeout=_WORKER_PROBE_TIMEOUT, trust_env=False) as c:
+            c.get(_CF_WORKER_URL)
+        _WORKER_HEALTHY = True
+    except Exception as e:
+        logger.warning(
+            "CF Worker %s 不可达 (%s) — 海外源改为直连，可能触发对方反爬",
+            _CF_WORKER_URL, type(e).__name__,
+        )
+        _WORKER_HEALTHY = False
+    return _WORKER_HEALTHY
+
+
 def _fetch_via_worker(
     url: str,
     method: str,
@@ -232,7 +264,8 @@ def fetch(
         httpx.ConnectError: After all retries exhausted.
     """
     domain = _extract_domain(url)
-    use_worker = bool(_CF_WORKER_URL) and not _is_domestic(domain)
+    use_worker = (bool(_CF_WORKER_URL) and not _is_domestic(domain)
+                  and _worker_reachable())
     req_headers = get_headers(headers)
 
     # Worker proxy doesn't support separate params — encode them into the URL

@@ -148,6 +148,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from datetime import time as dtime
     from alpha_agents.pipeline.scheduler import Task, TradingDayScheduler
     from alpha_agents.pipeline.tasks.morning_scan import run_morning_scan
+    from alpha_agents.pipeline.tasks.news_ingest import run_news_ingest
     from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor, set_scheduler
     from alpha_agents.pipeline.tasks.review import run_review
@@ -181,6 +182,15 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     else:
         scheduler = TradingDayScheduler()
     set_scheduler(scheduler)
+
+    # News ingest: every 3 min, all day, every day. Keeps the local store
+    # fed from the continuous flash streams so the windowed tasks below can
+    # read a real time range instead of "the latest N", which on these feeds
+    # is only about the last hour. No LLM — just write-through.
+    scheduler.add_task(Task("news_ingest", run_news_ingest, dtime(0, 0),
+                            end_at=dtime(23, 59), interval_minutes=3,
+                            trading_day_only=False, timeout_seconds=120,
+                            catch_up_grace_minutes=None))
 
     # Morning scan: 09:00, every day (non-trading days still useful for global news)
     scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0),

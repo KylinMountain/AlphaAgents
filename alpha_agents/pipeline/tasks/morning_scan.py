@@ -134,6 +134,44 @@ def _format_events(events: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Overnight window: back to yesterday's close. Monday reaches back over
+# the weekend, which is where policy announcements land.
+_OVERNIGHT_HOURS = {0: 66, 6: 42}   # Monday: since Friday 15:00; Sunday: Friday
+_DEFAULT_OVERNIGHT_HOURS = 16       # 15:00 yesterday → 07:00 today
+
+
+def _read_overnight_window(limit: int = 400) -> list[dict]:
+    """News published between yesterday's close and now, from the store.
+
+    Falls back to a direct fetch when the store is empty — a fresh
+    install has no history, and an empty morning report would be worse
+    than a short one.
+    """
+    from datetime import datetime, timedelta
+    from alpha_agents.data.snapshot_store import read_news
+
+    now = datetime.now()
+    hours = _OVERNIGHT_HOURS.get(now.weekday(), _DEFAULT_OVERNIGHT_HOURS)
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+    items = read_news(sources=None, as_of=now.strftime("%Y-%m-%d %H:%M:%S"),
+                      since=since, limit=limit)
+    if items:
+        logger.info("Morning scan: %d items from store since %s", len(items), since)
+        return items
+
+    logger.info("Morning scan: store empty since %s — falling back to live fetch",
+                since)
+    fallback = []
+    for _source_id, name, fetch_fn_factory in NEWS_SOURCES:
+        try:
+            data = json.loads(fetch_fn_factory())
+            fallback.extend(data.get("news", []))
+        except Exception as e:
+            logger.debug("Morning scan fallback: %s unavailable: %s", name, e)
+    return fallback
+
+
 async def run_morning_scan() -> str | None:
     """Execute the morning scan task.
 
@@ -149,19 +187,17 @@ async def run_morning_scan() -> str | None:
 
     logger.info("Morning scan starting...")
 
-    # 1. Fetch news from all sources
-    news_items = []
-    for source_id, name, fetch_fn_factory in NEWS_SOURCES:
-        try:
-            raw = await asyncio.to_thread(fetch_fn_factory)
-            data = json.loads(raw)
-            items = data.get("news", [])
-            news_items.extend(items)
-        except Exception as e:
-            logger.debug("Morning scan: %s unavailable: %s", name, e)
+    # 1. Read the overnight window out of the local store.
+    #
+    # Not a direct API call per source: the flash feeds are continuous
+    # streams, and `limit=50` on them covers roughly the last hour. A
+    # 06:30 scan needs the fifteen hours since yesterday's close — the
+    # overnight policy and offshore news it exists to read. news_ingest
+    # keeps the store fed between tasks; here we take the window.
+    news_items = await asyncio.to_thread(_read_overnight_window)
 
     if not news_items:
-        logger.info("Morning scan: no news items")
+        logger.info("Morning scan: no news items in the overnight window")
         return None
 
     # 2. Auto-discover themes from current sector data

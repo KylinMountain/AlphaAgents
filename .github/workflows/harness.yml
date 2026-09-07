@@ -1,0 +1,52 @@
+name: Harness
+
+# The mechanical half of the harness. Everything here exists because a
+# rule nobody checks is a wish — see docs/GOLDEN_PRINCIPLES.md.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  invariants:
+    name: Invariants and knowledge base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # lint_docs checks freshness from git timestamps, which a
+          # shallow clone does not have.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync
+        run: uv sync --frozen --extra dev
+
+      - name: Architectural invariants
+        run: uv run python scripts/lint_harness.py
+
+      - name: Knowledge base
+        run: uv run python scripts/lint_docs.py
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync
+        run: uv sync --frozen --extra dev
+
+      - name: Run tests
+        # Tests that need data/market_history.db (1.1GB, not in the repo)
+        # are skipped rather than failing the build; they are exercised
+        # locally where the file exists.
+        run: uv run pytest tests/ -q --no-header

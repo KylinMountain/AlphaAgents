@@ -1,83 +1,89 @@
-# Codex Review Instructions
+# AGENTS.md
 
-## Anna Coulling Quant Review Mode
+A map, not a manual. Everything here points somewhere; nothing here is the
+full story. Read the pointer that matches your task — loading all of it
+crowds out the code you came to change.
 
-When the user explicitly asks for code review, architecture review, backtest review, prompt review, or production-readiness review, act as:
+## What this is
 
-**Anna Coulling as Quantitative Review Architect**
+A-share analysis run as scheduled tasks: overnight scan → intraday
+attribution → post-market review → weekly. Recommendations are
+probabilistic and graded against market data, not against opinion.
 
-Apply Anna Coulling's public Volume Price Analysis mindset to quantitative trading code, trading system architecture, and prompt review.
+Start with `ARCHITECTURE.md` for the domain map and layering.
 
-Do not imitate private personality, do not invent personal opinions, and do not provide investment advice. Use the persona as a reasoning anchor.
+## Non-negotiable invariants
 
-Core mapping:
+Enforced mechanically by `scripts/lint_harness.py` (run in CI). Violating
+one fails the build; the error message tells you how to fix it.
 
-- Price = visible claim, output, backtest result, benchmark, architecture diagram, prompt response, performance metric.
-- Volume = evidence behind the claim: sample size, trade count, liquidity, data lineage, timestamp integrity, logs, tests, monitoring, failure handling, reproducibility, and live execution constraints.
+1. **Layer direction.** `sources → data → tools → pipeline → agents →
+   server`. Never import backwards. Cross-cutting (`config`,
+   `http_client`, `notify`) may be imported from anywhere.
+2. **No LLM grades its own output.** Utility of a memory, principle or
+   playbook comes from market data only. See `docs/GOLDEN_PRINCIPLES.md`.
+3. **Parse at the boundary.** Every external payload is shaped before it
+   reaches business logic. How is up to you.
+4. **File size.** 1200 lines. Past that, split by responsibility.
+5. **Structured logging.** `logger.info("msg %s", x)`, never f-strings —
+   lazy formatting and greppable messages.
+6. **No bare `except:`** and no silent `except Exception: pass` on a path
+   that can lose data.
 
-Default review question:
+## Where the truth lives
 
-> Where is the volume behind this price?
+| Question | File |
+|---|---|
+| How is the code laid out? | `ARCHITECTURE.md` |
+| What rules keep it coherent? | `docs/GOLDEN_PRINCIPLES.md` |
+| What is the strategy, and does it work? | `docs/strategy_evaluation_2026-09.md` |
+| What is being built next, and why? | `docs/self_improvement_roadmap.md` |
+| What is in flight? | `docs/exec-plans/active/` |
+| What was decided and shipped? | `docs/exec-plans/completed/` |
+| What do we owe? | `docs/exec-plans/tech-debt-tracker.md` |
+| How healthy is each area? | `docs/QUALITY_SCORE.md` |
+| How is it deployed? | `deploy/README.md` |
 
-## Review Priorities
+## Before you write code
 
-When reviewing quant code, check for:
+- **Small change** — no plan file. Make it, test it, commit it.
+- **Anything spanning files or changing behaviour** — write
+  `docs/exec-plans/active/<slug>.md` first: goal, acceptance criteria
+  that a machine can check, decision log. Move it to `completed/` when
+  done.
 
-- look-ahead bias
-- data leakage
-- survivorship bias
-- timestamp misalignment
-- same-bar signal/execution mistakes
-- missing transaction costs
-- missing slippage
-- unrealistic liquidity assumptions
-- overfitting
-- weak out-of-sample validation
-- insufficient trade count
-- non-reproducible backtests
-- missing tests
-- missing logs
-- weak exception handling
+State acceptance criteria as numbers wherever you can. "Improve the exit
+rule" is not checkable; "median excess return over 24 windows does not
+degrade" is.
 
-When reviewing architecture, check for:
+## Verification
 
-- data ingestion and validation
-- feature generation
-- signal generation
-- portfolio construction
-- risk control
-- order generation
-- execution
-- reconciliation
-- monitoring
-- alerting
-- kill switch
-- rollback path
-- backtest/live consistency
+```bash
+uv run pytest tests/ -q          # must pass before every commit
+uv run python scripts/lint_harness.py   # invariants
+uv run python scripts/lint_docs.py      # knowledge-base freshness
+```
 
-When reviewing prompts, check for:
+Tests are the contract. A change without a test that would have caught
+its absence is not finished.
 
-- unclear role
-- unclear task
-- missing input boundaries
-- missing output schema
-- missing refusal conditions
-- missing uncertainty handling
-- missing evidence requirements
-- prompt injection risk
-- overconfident trading conclusions
-- lack of evaluation examples
+## Evidence rules
 
-## Required Output Format
+This repo makes claims about markets, and it is easy to fool yourself.
 
-For every review, return:
+- Compare **median to median**. A-share cross-sections are right-skewed;
+  a group median against a market mean manufactures a fake edge. This has
+  already produced one wrong conclusion here — see the note in
+  `alpha_agents/tools/exit_signals.py`.
+- **n < 50 does not ship.** A first pass on six sparse windows gave the
+  exact opposite ranking to the dense run.
+- **Validation is forward.** Never evaluate on days the rule was distilled
+  from.
+- Report what the data said, including when it contradicts the reason the
+  work was started.
 
-1. Verdict: PASS / PASS WITH CAUTION / REWORK / BLOCK
-2. Price / Volume confirmation table
-3. Major divergences
-4. P0 / P1 / P2 red flags
-5. Specific review notes
-6. Required tests
-7. Minimum fix before re-review
+## Review mode
 
-Be skeptical, direct, evidence-driven, and specific. Do not praise without evidence.
+When asked for a code, architecture, backtest or prompt review, use
+`docs/REVIEW.md` — the Anna Coulling volume-price mindset applied to
+engineering: *where is the volume behind this price?*

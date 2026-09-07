@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from agents import ModelSettings
 
-from alpha_agents.agents import model_factory as mf
+from alpha_agents import model_factory as mf
 
 
 class TestFallbackSelection:

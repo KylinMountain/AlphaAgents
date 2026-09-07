@@ -69,18 +69,19 @@ _CONSOLIDATION_SYSTEM_PROMPT = """你是交易经验沉淀师。
 读今天新增的 daily_lessons（实盘观察）+ 已有 trading_principles（历史沉淀的量价经验，风格类似 Anna Coulling《量价分析》的法则），判断是否：
 - CREATE: 今天的 lesson 揭示了新的可复用模式，创建新 principle（必须带具体 pattern_description + action_guidance + 至少1条 evidence）
 - REINFORCE: 今天的 lesson 是已有 principle 的新一个佐证案例
-- WEAKEN: 今天的 lesson 反驳了某条 principle（或 principle 的 evidence 胜率已低于40%）
 
 输出**只能**是这个 JSON（不要其他内容）：
 {"operations": [
   {"op": "create", "principle": "...", "pattern_description": "...", "category": "vpa_signal|theme_timing|entry|exit|risk", "action_guidance": "...", "evidence": [{"code":"...", "date":"...", "outcome":"..."}]},
-  {"op": "reinforce", "principle_id": 123, "new_case": {"code":"...", "date":"...", "outcome":"..."}},
-  {"op": "weaken", "principle_id": 456, "reason": "..."}
+  {"op": "reinforce", "principle_id": 123, "new_case": {"code":"...", "date":"...", "outcome":"..."}}
 ]}
 
 原则:
 - principle 要具体到**量价形态+位置+量能配合**，不要空话
-- 每条 principle 必须有证据支撑
+- **evidence 里的 code/date 必须是真实的历史推荐**，系统会用当时的行情
+  数据给它打分（Brier + 因子残差），principle 的存废由这个分数决定
+- 不要评判已有 principle 的好坏，也不要请求删除或削弱它们：那由市场
+  数据判定，不由你判定
 - 若今天没值得沉淀的东西，输出 {"operations": []}"""
 
 
@@ -123,9 +124,23 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
 
 
 def consolidate_principles(today: str) -> dict:
-    """Run the daily consolidation: LLM decides create/reinforce/weaken.
+    """Daily consolidation. The LLM may propose; only the market judges.
 
-    Returns dict {created, reinforced, weakened} counts.
+    G3: `weaken` used to be an LLM verdict on its own past output — the
+    Echo Gap, where a model accepts its own wrong memories 31-54% of the
+    time, and which a stronger judge model provably does not fix
+    (residual error correlation stays >= +0.30 without
+    error-independence). Retirement now comes solely from
+    principle_scoring.rescore_all_principles, which reads graded
+    predictions.
+
+    What the LLM is still allowed to do is *propose* a principle and
+    attach evidence to an existing one. Both are claims to be tested, not
+    verdicts: a created principle starts unproven and earns or loses its
+    place on the (code, date) cases it cites.
+
+    Returns dict {created, reinforced, weakened} counts; `weakened` stays
+    0 here and is reported by the scoring pass instead.
     """
     lessons = get_recent_daily_lessons(days=1)  # only today's
     if not lessons:
@@ -163,8 +178,14 @@ def consolidate_principles(today: str) -> dict:
                 )
                 counts["reinforced"] += 1
             elif kind == "weaken":
-                set_principle_status(op["principle_id"], "weakened")
-                counts["weakened"] += 1
+                # Ignored by design — see the docstring. Logged so a model
+                # that keeps asking is visible rather than silently denied.
+                logger.info(
+                    "Ignoring LLM weaken request for principle #%s (%s): "
+                    "retirement is decided by market scoring, not by the "
+                    "model that wrote it",
+                    op.get("principle_id"), op.get("reason", "")[:80],
+                )
         except Exception as e:
             logger.warning("Consolidation op %s failed: %s", op, e)
     return counts
@@ -185,6 +206,17 @@ async def post_review(today: str, review_report: str) -> str:
         counts = await asyncio.to_thread(consolidate_principles, today)
     else:
         counts = {"created": 0, "reinforced": 0, "weakened": 0}
+
+    # G3: the market, not the model, decides which principles survive.
+    # Runs unconditionally — principles age out on evidence even on a day
+    # that produced no new lessons.
+    try:
+        from alpha_agents.evolution.principle_scoring import rescore_all_principles
+        health = await asyncio.to_thread(rescore_all_principles)
+        counts["weakened"] = health.get("retired", 0)
+        counts["rescored"] = health.get("scored", 0)
+    except Exception as e:
+        logger.warning("Principle rescoring failed: %s", e)
 
     # Phase 3: playbook daily lifecycle
     from alpha_agents.evolution.playbook import (

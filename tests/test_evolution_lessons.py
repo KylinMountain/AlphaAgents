@@ -110,7 +110,14 @@ def test_consolidate_principles_reinforces_existing():
     m_reinf.assert_called_once()
 
 
-def test_consolidate_principles_weakens_on_bad_evidence():
+def test_consolidate_principles_ignores_llm_weaken_requests():
+    """G3: a model may propose principles; only market data retires them.
+
+    Asking the writer to judge its own memories is the Echo Gap — models
+    accept their own wrong memories 31-54% of the time, and a stronger
+    judge model provably does not fix it. Retirement moved to
+    principle_scoring, which reads graded predictions.
+    """
     lessons = [{"id": 3, "date": "2026-04-17", "lesson_type": "failure",
                 "theme": "数据中心", "content": "数据中心再次失败", "relevance_tags": ""}]
     existing = [{"id": 9, "principle": "数据中心 = 稳健加仓方向",
@@ -128,5 +135,5 @@ def test_consolidate_principles_weakens_on_bad_evidence():
          patch("alpha_agents.evolution.lessons.set_principle_status") as m_status:
         from alpha_agents.evolution.lessons import consolidate_principles
         result = consolidate_principles("2026-04-17")
-    assert result["weakened"] == 1
-    m_status.assert_called_once_with(9, "weakened")
+    assert result["weakened"] == 0
+    m_status.assert_not_called()

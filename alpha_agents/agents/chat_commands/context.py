@@ -26,9 +26,9 @@ class ChatContext:
 class Command:
     """Single registered slash command."""
 
-    name: str                                     # canonical, e.g. "/vpa"
+    name: str                                     # canonical, e.g. "/lhb"
     group: str                                    # help section, e.g. "行情"
     summary: str                                  # one-line /help description
     handler: Callable[[str, ChatContext], Awaitable[None]]
     aliases: tuple[str, ...] = ()                 # e.g. ("/量价",)
-    usage: str = ""                               # e.g. "/vpa <6位代码> [名称]"
+    usage: str = ""                               # e.g. "/quote <6位代码>"

@@ -95,37 +95,6 @@ def _refresh_theme_strengths() -> None:
         logger.debug("Theme strength refresh failed: %s", e)
 
 
-def _vpa_gate_for_candidate(code: str, name: str) -> tuple[str, str, dict | None]:
-    """Run LLM VPA (Anna Coulling) on an actionable candidate.
-
-    Returns (verdict, note, full_result) where verdict maps Chinese to English:
-      看多/偏多 → bullish, 看空/偏空 → bearish, 中性 → neutral
-    full_result is the raw compute_vpa_with_llm dict (or None on failure) so
-    callers can reuse the llm_report without a second LLM call.
-
-    Uses LLM full analysis with history context. Saves to DB automatically.
-    """
-    if not code or not code.strip().isdigit() or len(code.strip()) != 6:
-        return ("unknown", "", None)
-    try:
-        from alpha_agents.tools.vpa import compute_vpa_with_llm
-        r = compute_vpa_with_llm(code.strip(), name=name)
-        if not r.get("ok"):
-            return ("unknown", "", r)
-        raw_v = r.get("llm_verdict", "中性")
-        verdict_map = {"看多": "bullish", "偏多": "bullish",
-                       "看空": "bearish", "偏空": "bearish", "中性": "neutral"}
-        verdict = verdict_map.get(raw_v, "neutral")
-        phase = r.get("llm_phase", "")
-        reason = r.get("llm_reason", "")
-        note = f"{phase}: {reason}" if phase else reason
-        return (verdict, note, r)
-    except Exception as e:
-        logger.debug("VPA gate for %s failed: %s", code, e)
-        return ("unknown", "", None)
-
-
-
 def _detect_style_rotation() -> list[str]:
     """Industry-level fund flow → style rotation signals (aux context).
 
@@ -564,7 +533,7 @@ async def run_intraday_monitor() -> str | None:
     except Exception as e:
         logger.warning("Signal detection failed: %s", e)
 
-    # ── Step 2: Code selects actionable stocks, then parallel VPA filter ──
+    # ── Step 2: Code selects actionable stocks ──
     # Phase A: Collect candidates that match the fund-flow anomaly direction.
     #
     # V2 principle #2: 资金行为优先. Intraday anomaly = sector with fund inflow.
@@ -596,52 +565,28 @@ async def run_intraday_monitor() -> str | None:
         except Exception as e:
             logger.debug("Sector best stocks failed for %s: %s", sector, e)
 
-    # Phase B: Parallel VPA gate on all candidates (LLM calls run concurrently)
+    # Phase B: build actionable entries from candidates
     actionable = []
-    if raw_candidates:
-        async def _vpa_check(sector, s):
-            try:
-                vpa_verdict, vpa_note, vpa_result = await asyncio.to_thread(
-                    _vpa_gate_for_candidate, s["code"], s["name"]
-                )
-            except Exception:
-                vpa_verdict, vpa_note, vpa_result = "unknown", "", None
-            return sector, s, vpa_verdict, vpa_note, vpa_result
+    for sector, s in raw_candidates:
+        price = s.get("price", 0)
+        entry_high = round(price, 2) if price else None
+        entry_low = round(price * 0.97, 2) if price else None
+        stop_loss_val = round(price * 0.93, 2) if price else None
 
-        vpa_tasks = [_vpa_check(sector, s) for sector, s in raw_candidates]
-        vpa_results = await asyncio.gather(*vpa_tasks, return_exceptions=True)
-
-        for item in vpa_results:
-            if isinstance(item, Exception):
-                continue
-            sector, s, vpa_verdict, vpa_note, vpa_result = item
-            if vpa_verdict == "bearish":
-                logger.info("Actionable filtered out by VPA: %s %s — %s",
-                            s["code"], s["name"], vpa_note)
-                continue
-
-            price = s.get("price", 0)
-            entry_high = round(price, 2) if price else None
-            entry_low = round(price * 0.97, 2) if price else None
-            stop_loss_val = round(price * 0.93, 2) if price else None
-
-            actionable.append({
-                "code": s["code"],
-                "name": s["name"],
-                "price": price,
-                "change_pct": s.get("today_change_pct", 0),
-                "score": s.get("score", 0),
-                "beta": s.get("beta_weighted", 0),
-                "note": s.get("note", ""),
-                "theme": sector,
-                "institutional": s.get("institutional", ""),
-                "vpa_verdict": vpa_verdict,
-                "vpa_note": vpa_note,
-                "vpa_result": vpa_result,
-                "entry_low": entry_low,
-                "entry_high": entry_high,
-                "stop_loss": stop_loss_val,
-            })
+        actionable.append({
+            "code": s["code"],
+            "name": s["name"],
+            "price": price,
+            "change_pct": s.get("today_change_pct", 0),
+            "score": s.get("score", 0),
+            "beta": s.get("beta_weighted", 0),
+            "note": s.get("note", ""),
+            "theme": sector,
+            "institutional": s.get("institutional", ""),
+            "entry_low": entry_low,
+            "entry_high": entry_high,
+            "stop_loss": stop_loss_val,
+        })
 
     # Phase 3: apply playbook weights (regime-aware — returns None if <2 active)
     try:
@@ -719,8 +664,8 @@ async def run_intraday_monitor() -> str | None:
 
     # Actionable stocks (code-generated, zero hallucination)
     report_lines.append("【可操作标的】")
-    report_lines.append("| 代码 | 名称 | 现价 | 涨幅 | 评分 | VPA | 操作建议 |")
-    report_lines.append("|------|------|------|------|------|-----|---------|")
+    report_lines.append("| 代码 | 名称 | 现价 | 涨幅 | 评分 | 操作建议 |")
+    report_lines.append("|------|------|------|------|------|---------|")
     if actionable:
         for a in actionable:
             el = a.get("entry_low")
@@ -739,14 +684,9 @@ async def run_intraday_monitor() -> str | None:
             inst_str = f" [{inst}]" if inst and inst != "无" else ""
             pb_name = a.get("playbook", "")
             pb_bit = f" [{pb_name}×{a.get('playbook_weight', 1.0):.1f}]" if pb_name else ""
-            vpa_verdict = a.get("vpa_verdict", "unknown")
-            vpa_note = a.get("vpa_note", "")
-            vpa_cell = f"{vpa_verdict}"
-            if vpa_note:
-                vpa_cell = f"{vpa_verdict}({vpa_note})"
             report_lines.append(
                 f"| {a['code']} | {a['name']} | {a['price']:.2f}元 | "
-                f"{a['change_pct']:+.2f}% | {a['score']:.0f} | {vpa_cell} | "
+                f"{a['change_pct']:+.2f}% | {a['score']:.0f} | "
                 f"{action}{sl_str}{inst_str}{pb_bit} |"
             )
     else:
@@ -763,30 +703,6 @@ async def run_intraday_monitor() -> str | None:
     if sentiment_ctx:
         report_lines.append(sentiment_ctx)
         report_lines.append("")
-
-    # ── LLM VPA deep analysis for all actionable stocks ──
-    # Gate已在Phase B对每只候选跑过完整 compute_vpa_with_llm，结果缓存在
-    # a["vpa_result"] 里。这里直接复用 llm_report，不再触发第二次 LLM 调用。
-    if actionable:
-        try:
-            report_lines.append("【量价深度分析】（Anna Coulling VPA）")
-            for a in actionable:
-                vpa_r = a.get("vpa_result")
-                if not vpa_r or not vpa_r.get("ok") or not vpa_r.get("llm_report"):
-                    continue
-                verdict = vpa_r.get("llm_verdict", "?")
-                phase = vpa_r.get("llm_phase", "?")
-                confirmed = "已确认" if vpa_r.get("llm_confirmed") else "待确认"
-                report_lines.append(
-                    f"\n▶ {a['code']} {a['name']} [{verdict} {phase} {confirmed}]"
-                )
-                llm_text = vpa_r["llm_report"]
-                if len(llm_text) > 1500:
-                    llm_text = llm_text[:1500] + "\n...(完整报告请用 chat: vpa " + a["code"] + ")"
-                report_lines.append(llm_text)
-            report_lines.append("")
-        except Exception as e:
-            logger.debug("LLM VPA section failed: %s", e)
 
     # Build RECOMMENDATIONS JSON (code-generated)
     recs_json = []
@@ -810,8 +726,6 @@ async def run_intraday_monitor() -> str | None:
             "entry_high": a.get("entry_high"),
             "stop_loss": a.get("stop_loss"),
             # Phase 1: decision features flow through to save_prediction
-            "vpa_verdict": a.get("vpa_verdict", "unknown"),
-            "vpa_phase": (a.get("vpa_result") or {}).get("llm_phase", ""),
             "score": a.get("score", 0),
             "change_pct": a.get("change_pct", 0),
             "institutional": a.get("institutional", ""),
@@ -1186,8 +1100,6 @@ def _save_intraday_recommendations(report: str) -> None:
             # Phase 1: capture decision-time features for Playbook clustering (Phase 3).
             # Fields match the available_fields list in the evolution spec.
             features = {
-                "vpa_verdict": r.get("vpa_verdict", "unknown"),
-                "vpa_phase": (r.get("vpa_result") or {}).get("llm_phase", ""),
                 "theme": r.get("theme", ""),
                 "score": r.get("score", 0),
                 "change_pct": r.get("change_pct", 0),
@@ -1225,9 +1137,6 @@ def _save_intraday_recommendations(report: str) -> None:
                         entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                     if stop_loss_val is None:
                         stop_loss_val = parse_stop_loss(r.get("action", ""))
-                    # P0.2: pull VPA-derived take-profit target if available
-                    from alpha_agents.data.portfolio import get_vpa_target_for_code
-                    target_price = get_vpa_target_for_code(code)
                     create_pending_order(
                         code=code,
                         name=r.get("name", ""),
@@ -1236,7 +1145,6 @@ def _save_intraday_recommendations(report: str) -> None:
                         entry_low=entry_low,
                         entry_high=entry_high,
                         stop_loss=stop_loss_val,
-                        target_price=target_price,
                         source="intraday",
                         reason=r.get("reason", "")[:100],
                     )

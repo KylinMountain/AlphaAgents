@@ -51,13 +51,17 @@ def test_extract_verdict_keeps_phase_change_and_warning_phase():
 
 
 def test_prompt_uses_consistent_schema_and_climax_thresholds():
+    # Negative assertions: legacy phrases that must NOT have crept back.
     assert "cfm=False" not in ANNA_COULLING_PROMPT
     assert "20 日均量 **3 倍**" not in ANNA_COULLING_PROMPT
     assert "range > 近 5 日均 range × 2" not in ANNA_COULLING_PROMPT
     assert "拉升→派发必须停止创20日新高" not in PHASE_TRANSITION_REQUIREMENTS[
         ("markup", "distribution")
     ]
-    assert "创新高本身不否定派发" in ANNA_COULLING_PROMPT
+    # Positive: v11 markup-bias correction phrasing — phase=派发初期 切换不要求 vph bearish.
+    # (v9.1's "创新高本身不否定派发" was simplified out in v11; the equivalent
+    # rule lives in §一 Step 5 phase continuity.)
+    assert "vph bullish 不可否决" in ANNA_COULLING_PROMPT
 
 
 def test_previous_state_block_is_structured_not_raw_report():
@@ -220,9 +224,9 @@ def test_guard_respects_llm_frame_when_signals_present_in_ranging_data():
 
 
 def test_guard_overrides_to_ranging_only_when_zero_signals_and_truly_flat():
-    """Strict ranging override fires only when the LLM emits no signal AND
-    the window is tightly flat (|trend|<=2%, range<=8%, vol_ratio in
-    [0.85,1.05])."""
+    """v7 §3.3: ranging override fires only when the LLM emits no signal AND
+    the window is unusually flat *for this stock* (per-stock ranks in the
+    bottom 20% for trend/range; vol in mid-40%)."""
     proposed = {
         "direction": "偏多",
         "confidence": 0.55,
@@ -234,7 +238,11 @@ def test_guard_overrides_to_ranging_only_when_zero_signals_and_truly_flat():
     guarded = _apply_phase_state_guard(
         proposed,
         PREV_MARKUP_REPORT,
-        phase_context={"trend_10d_pct": 0.5, "range_10d_pct": 6.0, "avg_volume_ratio_5d": 0.95},
+        phase_context={
+            "abs_trend_10d_pct_rank": 0.10,   # was: trend_10d_pct: 0.5
+            "range_10d_pct_rank": 0.10,        # was: range_10d_pct: 6.0
+            "vol_ratio_5d_rank": 0.50,         # was: avg_volume_ratio_5d: 0.95
+        },
     )
     assert guarded["phase"] == "震荡"
     assert guarded["warning_phase"] == "吸筹初期"

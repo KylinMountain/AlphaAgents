@@ -26,9 +26,10 @@ REVIEW_TOOLS = [
 ]
 
 
-def _create_model() -> OpenAIChatCompletionsModel:
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
-    return OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
+from alpha_agents.agents.model_factory import (
+    create_model as _create_model,
+    create_model_settings,
+)
 
 
 def _create_review_agent() -> Agent:
@@ -37,6 +38,7 @@ def _create_review_agent() -> Agent:
         name="review_analyst",
         instructions=prompt,
         model=_create_model(),
+        model_settings=create_model_settings(),
         tools=REVIEW_TOOLS,
     )
 

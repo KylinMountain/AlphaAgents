@@ -243,9 +243,15 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     # fed from the continuous flash streams so the windowed tasks below can
     # read a real time range instead of "the latest N", which on these feeds
     # is only about the last hour. No LLM — just write-through.
+    # 150s, not 120: measured on the box, a full sweep of 13 sources runs
+    # past two minutes because several are slow by nature — five of
+    # world_news's RSS feeds are dead and each burns its own connect
+    # timeout, and CLS spends a fixed 20s failing. The interval is 5 min,
+    # so the ceiling has to sit below that with room to spare rather than
+    # near the sweep's own duration.
     scheduler.add_task(Task("news_ingest", run_news_ingest, dtime(0, 0),
-                            end_at=dtime(23, 59), interval_minutes=3,
-                            trading_day_only=False, timeout_seconds=120,
+                            end_at=dtime(23, 59), interval_minutes=5,
+                            trading_day_only=False, timeout_seconds=150,
                             catch_up_grace_minutes=None))
 
     # Morning scan: 09:00, every day (non-trading days still useful for global news)

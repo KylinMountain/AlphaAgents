@@ -41,7 +41,7 @@ with the one store that cannot be rebuilt.
 ## The day
 
 ```
-00:00–23:59  news_ingest      every 3 min, all week — keeps the store fed
+00:00–23:59  news_ingest      every 5 min, all week — keeps the store fed
 09:00        morning_scan     reads the window back to yesterday's close
 09:25        opening_reminder
 09:30–15:00  intraday_monitor every 5 min; anomaly-gated

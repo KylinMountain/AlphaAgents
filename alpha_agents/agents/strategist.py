@@ -16,7 +16,7 @@ from alpha_agents.agents.reflection import run_reflection
 logger = logging.getLogger(__name__)
 
 
-from alpha_agents.agents.model_factory import (
+from alpha_agents.model_factory import (
     create_model as _create_model,
     create_model_settings,
 )

@@ -41,7 +41,7 @@ LAYERS = ["data", "sources", "tools", "evolution", "pipeline", "agents", "server
 # force 60+ readers to thread a parameter through for a value that is
 # ambient by design. The linter surfaced this — the model was wrong, not
 # the code.
-CROSS_CUTTING = {"config", "http_client", "notify"}
+CROSS_CUTTING = {"config", "http_client", "notify", "model_factory"}
 CROSS_CUTTING_MODULES = {"alpha_agents.evolution.replay_mode"}
 
 MAX_FILE_LINES = 1200

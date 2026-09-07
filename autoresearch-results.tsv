@@ -1,0 +1,24 @@
+# metric_direction: higher_is_better
+# Goal: 让 selector-safe 行能通过全部 4 门槛 (hit10>=70%, win>=70%, excess>=30pp, annual>=100%)
+# Metric: GATES_PASS * 1000 + best_row_composite_score (smooth gradient via gates_met*25 + bounded excess/annual/win)
+# Verify: uv run python scripts/walkforward_goal_portfolio_search.py --use-concept-features --max-rules 80 --cache-dir data/walkforward_cache/concept_v1 --out-dir <out> | grep -oP 'METRIC=\K[0-9.]+'
+# Scope: scripts/walkforward_goal_portfolio_search.py (primary), scripts/research_30d_big_move.py / analyze_walkforward_exits.py (helper)
+iteration	commit	metric	delta	gates_pass	status	description
+0	509ce1f	72.1348	0.0	0	baseline	从 _concept_policy CSV 算出: best row pred_p20+mf_positive+hold_20d+3slots, hit10=69.4 win=55.6 excess=34.3 annual=101.8
+1	-	72.1348	0.0	0	discard	objective +per_trade bonus, win 0.24->0.18 — 20/80 balanced 行变化但 best row 来自 gate_annual_first 不受影响
+2	9a7e6f4	103.2670	+31.13	0	keep	gate_trend_friendly 新 policy: trail_6+5 on pred_p20+mfne+top3 上 3/4 门槛过 (win 69.77 差 0.23pp)
+3	f72a8f7	1141.0856	+1037.82	1	keep	gate_trend_friendly 排序 [slots asc, win desc, avg_ret desc]: 选中 ma_5_break+3 — 全 4 门槛过 (hit10=70.5 win=77.8 excess=71.7 annual=147.5)
+4	c08ade5	2141.0856	+1000.00	2	keep	gate_trend_trail policy: trail_6+3 also passes on pred_p20+mfne+top3 (win 70.4 annual 131 excess 58.7)
+5(diagnostic)	-	-	-	0	discard	H1 fold (chop validation +4.49%) baseline: METRIC=110.52 GATES_PASS=0. 全 13 个高 hit10 池 × 8 rules × 4 slots 中无任何组合同时过 win>=70 + annual>=100 (互斥)
+5	-	2141.0856/110.5249	0/0	0	discard	tp+stop hybrid exit rules: H2/H1 metric unchanged. 新规则被一些 policy 选中但 selector 仍漏掉 H1 passing 组合
+6	-	2141.0856/110.5249	0/0	0	discard	dd10 penalty 0.24->0.05: H2/H1 metric 不变. 13个 picked 行变化但 passing 池仍没进 picked (dd10 不是唯一过滤项)
+7	-	79.02/2139.72	0/2	discard	mf_positive quota 20-by-train_hit_10: H1 跳到 2140 (2 passing)! 但 H2 winner pred_p20+mfne+top_3 被高 hit 大池挤出 picked, H2 降到 79
+8	-	79.02/1139.67	0/1	discard	mf 配额按 top_k 分小/大 (各 10): H2 winner train_hit_10=82.8 仍排 #11 被挤掉; H1 保留 1 个 passing
+9	307458a	79.02/1139.67	0/1	discard	add mf_small_by_obj slice (quota 10): H2 winner rank #12 仍超 quota; combined<baseline
+10	9f52559	2141.09/3143.16	+0/+1992	2/3	keep	mf_small quota 15: H2 winner preserved + H1 GAINED 3 passing rows. 全样本目标达成!
+11	-	84.76/26146.49	0/26	diagnostic	moneyflow_stock backfill 2020+: 模型 retrain 后 H2 lost (84) H1 暴涨 (26146). 新模型预测过度集中 val_days 11-49 vs H1 100+
+12	77ed996	80.22/22146.49	0/22	discard	wide_coverage slice (train_days>=50 + train_avg_fwd30_close): H2 仍 0 passing — 该 slice 偏向高 train_hit 大池, 错过 train_hit=0.75 的目标小池
+13	d064922	80.16/32146.49	0/32	discard	predp_small slice: 把 pred_p20+mf_positive+top_3 加入 picked 但 policies 仍选错 exit
+14	ab427f3	80.16/40146.49	0/8	discard	gate_high_avgret policy: H1+8 passing 但 H2 选 tp20 (val annual -34) 而非 hold_30d
+15	64b415c	2140.86/40146.49	2/40	keep	gate_hold_30d 无条件 policy: H2 选中 hold_30d+3 → val annual 214% win 76% PASS! H1 仍 40 passing. 全样本目标 + 模型升级达成!
+16-18	f6f2ae3	regime gate	-	-	infra	universe filter + execution friction + regime gate (20d/-5%). research/H2 oracle 极限 2/4 & 3/4, 4/4 不可达

@@ -66,8 +66,15 @@
 ```
 <!--RECOMMENDATIONS
 [
-  {"code": "000001", "name": "示例股票A", "theme": "主线名称", "reason": "推荐理由", "confidence": "high", "action": "回调至X元可介入", "entry_low": null, "entry_high": "从工具获取的价格", "stop_loss": "从工具获取的价格"},
-  {"code": "000002", "name": "示例股票B", "theme": "主线名称", "reason": "推荐理由", "confidence": "medium", "action": "突破X元跟进", "entry_low": "从工具获取的价格", "entry_high": null, "stop_loss": "从工具获取的价格"}
+  {"code": "000001", "name": "示例股票A", "theme": "主线名称", "reason": "推荐理由",
+   "confidence": "high", "action": "回调至X元可介入",
+   "entry_low": null, "entry_high": "从工具获取的价格", "stop_loss": "从工具获取的价格",
+   "prob": 0.65, "horizon_days": 5,
+   "claim": "我认为会发生什么，一句话，带可验证的对象",
+   "invalidations": [
+     {"kind": "theme_daily_score_below", "value": 0, "note": "主线当天转弱"},
+     {"kind": "drawdown_from_peak", "value": 5, "note": "冲高回落说明是一日游"}
+   ]}
 ]
 RECOMMENDATIONS-->
 ```
@@ -83,6 +90,36 @@ RECOMMENDATIONS-->
 - 这个 JSON 块的内容必须与报告中【推荐关注】表格一致
 - 这个块不会展示给用户，仅供程序解析
 
+### 论点字段（prob / horizon_days / claim / invalidations）
+
+这四个字段决定了这笔仓位**建仓之后**系统怎么管它。写完就不再问你了——
+盘中每 5 分钟由代码检查 invalidations，触发就平仓。所以这里写什么，
+就是你真正的交易计划。
+
+**prob** — 你自己给的概率，0 到 1，表示"这个论点在 horizon_days 内兑现"的
+可能性。不要都写 0.7。复盘会按 prob 分桶统计你的实际兑现率，然后把校准
+曲线给你看：如果你说 70% 的那批实际只中 45%，你会知道自己系统性高估。
+**这条是你唯一能持续变准的途径，敷衍它等于放弃它。**
+
+**horizon_days** — 给自己多久证明是对的。到期还没走出方向（浮动在 ±1% 内）
+会被记为"到期未兑现"，不是失败但也不是成功。
+
+**claim** — 一句话说清你认为会发生什么，要能被事后验证。
+  好："小金属主线资金连续流入，东方钽业作为高beta标的补涨"
+  差："基本面良好，值得关注"（无法验证，事后无法判断对错）
+
+**invalidations** — **什么情况下你就是错的**。这是整个字段里最重要的一个。
+只能从下面这个列表里选 kind，写别的会被丢弃（丢弃意味着这条风险没人看）：
+
+{VOCAB}
+
+选 2-3 条，要覆盖**不同的失效路径**——价格、主线、时间各一条比三条价格
+条件有用得多。想清楚"这笔交易可能怎么亏"，然后把它写下来。
+
+复盘会区分两种亏损：按你列出的条件失效（推理没问题，只是没赌赢，不改
+行为），和**你没列出的原因导致的亏损**（盲点，这才是要学的）。
+所以漏写一条真实风险，代价不是这一笔，是你以后还会栽在同一个地方。
+
 ## 重要原则
 
 - **所有价格数据必须来自工具返回值**，绝对不能凭记忆编造。你的训练数据里的股价是过时的，可能差几倍。每次提到具体价格、涨跌幅时，必须是刚刚调用 get_stock_quotes 或 get_institutional_position 返回的数字
@@ -92,3 +129,4 @@ RECOMMENDATIONS-->
 - 标注预测命中率，让用户知道系统的可靠度
 - 不使用emoji，不使用markdown标题(#)
 - 报告末尾必须附带 <!--RECOMMENDATIONS ... RECOMMENDATIONS--> JSON 块
+- 每条推荐必须写 prob / horizon_days / claim / invalidations，缺一条就等于放弃对这笔仓位的控制权

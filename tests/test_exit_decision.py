@@ -176,6 +176,55 @@ class TestHardFloor:
         assert not portfolio._is_hard_exit({"theme": ""}, -4.9)
 
 
+POS = [{"id": 1, "code": "600835", "name": "上海机电",
+        "open_price": 18.4, "theme": "", "reason": ""}]
+SIGNAL = [{"type": "signal", "code": "600835", "reason": "移动止损触发"}]
+
+
+class TestWhoReachesTheModel:
+    """Since theses moved the routine checks into code, a model call has to
+    earn its place: a narrative condition due for review, or a rule signal
+    on a position with no plan on file. A quiet cycle costs nothing."""
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_cycle_calls_nothing(self):
+        with patch.object(exit_decision, "get_open_positions", return_value=POS), \
+             patch("alpha_agents.data.thesis.get_active", return_value=[]), \
+             patch.object(exit_decision, "decide") as decide:
+            assert await exit_decision.run({"600835": 18.5}, []) == []
+        decide.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_signal_on_a_position_with_a_thesis_is_left_to_the_thesis(self):
+        """The plan already covers it; asking again is what we removed."""
+        with patch.object(exit_decision, "get_open_positions", return_value=POS), \
+             patch("alpha_agents.data.thesis.get_active",
+                   return_value=["a thesis"]), \
+             patch.object(exit_decision, "decide") as decide:
+            assert await exit_decision.run({"600835": 18.5}, SIGNAL) == []
+        decide.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_signal_with_no_thesis_does_reach_the_model(self):
+        with patch.object(exit_decision, "get_open_positions", return_value=POS), \
+             patch("alpha_agents.data.thesis.get_active", return_value=[]), \
+             patch.object(exit_decision, "_news_for_theme", return_value=[]), \
+             patch.object(exit_decision, "decide", return_value=[]) as decide:
+            await exit_decision.run({"600835": 18.5}, SIGNAL)
+        decide.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_narrative_review_reaches_the_model(self):
+        from alpha_agents.data.thesis import Thesis
+        due = [(Thesis(code="600835"), None)]
+        with patch.object(exit_decision, "get_open_positions", return_value=POS), \
+             patch("alpha_agents.data.thesis.get_active", return_value=[]), \
+             patch.object(exit_decision, "_news_for_theme", return_value=[]), \
+             patch.object(exit_decision, "decide", return_value=[]) as decide:
+            await exit_decision.run({"600835": 18.5}, [], narrative_due=due)
+        decide.assert_called_once()
+
+
 class TestRunDegradesToHold:
     @pytest.mark.asyncio
     async def test_no_positions_is_a_no_op(self):
@@ -184,14 +233,13 @@ class TestRunDegradesToHold:
 
     @pytest.mark.asyncio
     async def test_an_agent_failure_holds(self, caplog):
-        pos = [{"id": 1, "code": "600835", "name": "上海机电",
-                "open_price": 18.4, "theme": "", "reason": ""}]
-        with patch.object(exit_decision, "get_open_positions", return_value=pos), \
+        with patch.object(exit_decision, "get_open_positions", return_value=POS), \
+             patch("alpha_agents.data.thesis.get_active", return_value=[]), \
              patch.object(exit_decision, "_news_for_theme", return_value=[]), \
              patch.object(exit_decision, "decide",
                           side_effect=RuntimeError("model down")), \
              patch.object(exit_decision, "close_position") as close, \
              caplog.at_level("WARNING"):
-            assert await exit_decision.run({"600835": 18.5}, []) == []
+            assert await exit_decision.run({"600835": 18.5}, SIGNAL) == []
         close.assert_not_called()
         assert any("holding all" in r.getMessage() for r in caplog.records)

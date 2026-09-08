@@ -40,6 +40,11 @@ from alpha_agents.model_factory import (
 
 def _create_morning_agent() -> Agent:
     prompt = (PROMPTS_DIR / "morning_scan.md").read_text(encoding="utf-8")
+    # The invalidation vocabulary is rendered from the same table the
+    # evaluator reads, so the prompt cannot offer a condition the checker
+    # would drop, and a kind added to the checker is offered immediately.
+    from alpha_agents.data.thesis import prompt_vocabulary
+    prompt = prompt.replace("{VOCAB}", prompt_vocabulary())
     return Agent(
         name="morning_analyst",
         instructions=prompt,

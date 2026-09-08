@@ -33,6 +33,13 @@ def build_morning_context(themes: list[dict], stats: str,
     for part in (inject_portfolio(), inject_sentiment(), inject_cognition()):
         if part:
             sections.append(part)
+    # Calibration goes to the agent that states the probabilities. Without
+    # this the agent writes a prob every morning and never learns anything
+    # from having written it.
+    from alpha_agents.evolution.calibration import inject_calibration
+    cal = inject_calibration()
+    if cal:
+        sections.append(cal)
     if mode != "baseline":
         for part in (inject_principles(), inject_recent_lessons(),
                      inject_playbooks()):

@@ -17,6 +17,7 @@ Public API:
     match_playbook, update_playbook_stats  — L3 playbooks
 """
 
+from alpha_agents.evolution.calibration import inject_calibration
 from alpha_agents.evolution.feedback import (
     inject_cognition,
     inject_portfolio,
@@ -44,6 +45,7 @@ __all__ = [
     "build_chat_context",
     "build_morning_context",
     "build_vpa_context",
+    "inject_calibration",
     "inject_cognition",
     "inject_portfolio",
     "inject_sentiment",

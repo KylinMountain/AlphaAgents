@@ -483,6 +483,61 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
 
 
 
+def _save_thesis(rec: dict, code: str, today: str) -> int | None:
+    """Turn one recommendation into a thesis the monitor can evaluate.
+
+    A recommendation with no usable invalidation still becomes a thesis —
+    it just becomes one that can only end at the horizon or under the hard
+    floor. Refusing it outright would silently drop the pick; recording it
+    with an empty condition list makes the omission countable, and the
+    review can then say how often the agent skipped writing down its risk.
+    """
+    from alpha_agents.data.thesis import Thesis, create, validate_condition
+
+    raw = rec.get("invalidations")
+    conditions = []
+    if isinstance(raw, list):
+        for item in raw:
+            cond = validate_condition(item)
+            if cond:
+                conditions.append(cond)
+    if not conditions:
+        logger.warning("Recommendation %s carries no usable invalidation — "
+                       "the position can only exit on horizon or hard stop",
+                       code)
+
+    try:
+        prob = float(rec.get("prob"))
+        prob = min(max(prob, 0.05), 0.95)
+    except (TypeError, ValueError):
+        # No stated probability: fall back to the label-derived seed so the
+        # calibration series still gets a row, flagged by conviction 0.5.
+        prob = confidence_to_prob(rec.get("confidence"))
+
+    try:
+        horizon = max(1, min(30, int(rec.get("horizon_days") or 5)))
+    except (TypeError, ValueError):
+        horizon = 5
+
+    try:
+        return create(Thesis(
+            code=code,
+            name=rec.get("name", ""),
+            theme=rec.get("theme", ""),
+            claim=(rec.get("claim") or rec.get("reason") or "")[:300],
+            horizon_days=horizon,
+            prob=prob,
+            # Conviction tracks the agent's own probability rather than a
+            # separate number it would have to keep consistent by hand.
+            conviction=round((prob - 0.5) * 2, 3) if prob > 0.5 else 0.0,
+            conditions=conditions,
+            created_by="morning",
+        ))
+    except Exception as e:
+        logger.warning("Could not save thesis for %s: %s", code, e)
+        return None
+
+
 def _save_recommendations_list(recs: list[dict]) -> None:
     """Save pre-validated recommendations as predictions, fetching entry prices."""
     today = time.strftime("%Y-%m-%d")
@@ -559,6 +614,12 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                     entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                 if stop_loss_val is None:
                     stop_loss_val = parse_stop_loss(r.get("action", ""))
+                # Thesis before order. The order is the mechanism; the
+                # thesis is what the position is *for*, and the monitor
+                # evaluates it every cycle. Written first so the fill can
+                # bind to it, and so a recommendation that cannot state
+                # what would prove it wrong is visible as such.
+                _save_thesis(r, code, today)
                 create_pending_order(
                     code=code,
                     name=r.get("name", ""),

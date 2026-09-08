@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+/* Bind Tailwind's `dark:` to the `.dark` class App.jsx toggles.
+ *
+ * Tailwind v4 dropped the config file, and its default dark variant is
+ * `@media (prefers-color-scheme: dark)` — the OS, not the class. So on a
+ * machine set to dark mode, a page the user had switched to *light* still
+ * got every `dark:` rule: report body text became `text-slate-300` on a
+ * white card and was barely legible. The toggle looked like it worked
+ * because terminal.css keys off `[data-theme]`, which does respond. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Design system mirrors TradingAgents-AShare so this dashboard can be
    embedded there later without a visual seam: slate palette, Inter +
    PingFang SC, .card / .badge-* / .status-dot-* primitives, light and
@@ -125,15 +135,21 @@
   }
 
   /* Reports arrive as agent-authored Markdown; keep tables readable and
-     scrollable rather than letting them widen the page. */
+     scrollable rather than letting them widen the page.
+     Colours come from terminal.css's tokens rather than a second slate
+     scale, so the report body cannot drift out of step with the card it
+     sits on the way it did when the two stylesheets disagreed about
+     which theme was active. */
   .report-prose {
-    @apply text-sm leading-relaxed text-slate-700 dark:text-slate-300;
+    @apply text-sm leading-relaxed;
+    color: var(--text-2);
   }
 
   .report-prose h1,
   .report-prose h2,
   .report-prose h3 {
-    @apply font-semibold text-slate-900 dark:text-slate-100 mt-5 mb-2;
+    @apply font-semibold mt-5 mb-2;
+    color: var(--text);
   }
 
   .report-prose h1 { @apply text-lg; }
@@ -143,25 +159,31 @@
   .report-prose p { @apply my-2; }
   .report-prose ul { @apply list-disc pl-5 my-2 space-y-1; }
   .report-prose ol { @apply list-decimal pl-5 my-2 space-y-1; }
-  .report-prose strong { @apply font-semibold text-slate-900 dark:text-slate-100; }
+  .report-prose strong { @apply font-semibold; color: var(--text); }
   .report-prose code {
-    @apply px-1.5 py-0.5 rounded text-xs bg-slate-100 dark:bg-slate-700;
+    @apply px-1.5 py-0.5 rounded text-xs;
+    background: var(--surface-3);
   }
   .report-prose pre {
-    @apply p-3 rounded-lg overflow-x-auto bg-slate-100 dark:bg-slate-900 my-3;
+    @apply p-3 rounded-lg overflow-x-auto my-3;
+    background: var(--surface-3);
   }
   .report-prose table {
     @apply w-full text-xs border-collapse my-3;
   }
   .report-prose th {
-    @apply px-3 py-2 text-left font-semibold bg-slate-100 dark:bg-slate-700/60;
-    @apply border border-slate-200 dark:border-slate-600 whitespace-nowrap;
+    @apply px-3 py-2 text-left font-semibold whitespace-nowrap;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
   }
   .report-prose td {
-    @apply px-3 py-2 border border-slate-200 dark:border-slate-700;
+    @apply px-3 py-2;
+    border: 1px solid var(--border);
   }
   .report-prose blockquote {
-    @apply border-l-4 pl-3 my-3 text-slate-600 dark:text-slate-400;
+    @apply border-l-4 pl-3 my-3;
+    color: var(--muted);
   }
 }
 

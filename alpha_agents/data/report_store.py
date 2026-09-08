@@ -19,6 +19,18 @@ from alpha_agents.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+
+def _now() -> str:
+    """Local wall-clock stamp.
+
+    Written explicitly rather than left to the column DEFAULT: SQLite's
+    datetime('now') is UTC, and CREATE TABLE IF NOT EXISTS does not update
+    the DEFAULT of a table that already exists — so fixing the schema
+    string left every deployed database still eight hours out.
+    """
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 REPORTS_DB_PATH = DATA_DIR / "reports.db"
 
 _lock = threading.Lock()
@@ -137,10 +149,10 @@ def save_report(
     with _lock:
         conn = _get_conn()
         cur = conn.execute(
-            "INSERT INTO reports (cycle, timestamp, event_count, categories, events_json, report_text) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reports (cycle, timestamp, event_count, categories, "
+            "events_json, report_text, created_at) VALUES (?,?,?,?,?,?,?)",
             (cycle, timestamp, len(events), json.dumps(categories, ensure_ascii=False),
-             json.dumps(events, ensure_ascii=False), report_text),
+             json.dumps(events, ensure_ascii=False), report_text, _now()),
         )
         report_id = cur.lastrowid
         conn.commit()
@@ -163,8 +175,10 @@ def save_task_report(task: str, report_text: str,
         conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO reports (cycle, timestamp, event_count, categories, "
-            " events_json, report_text, report_type) VALUES (?,?,?,?,?,?,?)",
-            (None, timestamp or time.time(), 0, None, None, report_text, task),
+            " events_json, report_text, report_type, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (None, timestamp or time.time(), 0, None, None, report_text, task,
+             _now()),
         )
         conn.commit()
         return cur.lastrowid

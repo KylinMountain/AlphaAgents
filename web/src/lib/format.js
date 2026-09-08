@@ -114,6 +114,31 @@ export function stageOf(status) {
   return { label, cls }
 }
 
+/** Remove a ``` fence that wraps the entire body.
+ *
+ * The agents hand back their report inside a code fence, so the renderer
+ * showed the whole thing as literal text — every heading, table and bullet
+ * verbatim. An inner fence (a real code sample) is left alone: only a
+ * fence that opens on the first content line and closes on the last is
+ * treated as wrapping.
+ */
+export function stripWrappingFence(text) {
+  const lines = String(text).split('\n')
+  const fences = []
+  lines.forEach((l, i) => { if (/^\s*```/.test(l)) fences.push(i) })
+  if (fences.length !== 2) return text
+
+  let last = lines.length - 1
+  while (last > 0 && !lines[last].trim()) last -= 1
+  // Only unwrap when the fence closes the body. A fence that closes
+  // mid-report is a real code sample and has to stay a code sample.
+  if (fences[1] !== last) return text
+
+  const preamble = lines.slice(0, fences[0])
+  const inner = lines.slice(fences[0] + 1, fences[1])
+  return [...preamble, ...inner].join('\n')
+}
+
 /** Turn an agent report into markdown the renderer can give structure to.
  *
  * The prompts produce 【小节】 headers and full-width rule lines, not
@@ -127,7 +152,7 @@ export function stageOf(status) {
  */
 export function reportToMarkdown(text) {
   if (!text) return ''
-  return String(text)
+  return stripWrappingFence(String(text))
     .split('\n')
     .map((line) => {
       const t = line.trim()
@@ -145,4 +170,38 @@ export function reportToMarkdown(text) {
     .join('\n')
     // Collapse the runs of rules the separators leave behind.
     .replace(/(?:^---$\n?){2,}/gm, '---\n')
+}
+
+/** A one-line headline for a report card.
+ *
+ * The first non-empty line is the agent's preamble ("现在我已经收集了足够
+ * 的数据，可以撰写完整的分析报告了。"), which says nothing about the
+ * market. Prefer the first real section header, then the first line that
+ * carries a fact.
+ */
+export function reportHeadline(text) {
+  const lines = stripWrappingFence(String(text || '')).split('\n')
+  const clean = lines
+    .map((l) => l.trim())
+    .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
+
+  const section = clean.find((l) => /^【(.+?)】\s*(.+)$/.test(l))
+  if (section) {
+    const m = /^【(.+?)】\s*(.+)$/.exec(section)
+    return `${m[1]}：${m[2]}`.slice(0, 60)
+  }
+  const fact = clean.find((l) => /[0-9%]/.test(l) && l.length > 8)
+  if (fact) return fact.slice(0, 60)
+  return clean[0] ? clean[0].slice(0, 60) : '报告已生成'
+}
+
+/** A short body for a report card: the first few lines that carry content,
+ *  with the fence, rules and preamble already gone. */
+export function reportSummary(text, limit = 240) {
+  const body = stripWrappingFence(String(text || ''))
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
+    .join(' ')
+  return body.length > limit ? `${body.slice(0, limit)}…` : body
 }

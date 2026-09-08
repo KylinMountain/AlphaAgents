@@ -149,6 +149,24 @@ async def get_market_overview_api():
     })
 
 
+@app.get("/api/portfolio")
+async def get_portfolio_api():
+    """Virtual portfolio: what the picks turned into.
+
+    The intraday and morning tasks create a pending order per pick, with an
+    entry zone and a stop. Those rows existed with no way to see them — the
+    dashboard showed the recommendation and nothing about what happened to
+    it next, which is the half that decides whether any of this works.
+    """
+    from alpha_agents.data.portfolio import get_open_positions, get_pending_orders
+    pending = await asyncio.to_thread(get_pending_orders)
+    positions = await asyncio.to_thread(get_open_positions)
+    return JSONResponse({
+        "pending": pending, "positions": positions,
+        "pending_count": len(pending), "position_count": len(positions),
+    })
+
+
 @app.get("/api/event-graph")
 async def get_event_graph_api():
     """Get event relationship graph for visualization."""

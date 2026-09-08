@@ -28,13 +28,58 @@ os.environ.setdefault("OPENAI_AGENTS_DISABLE_TRACING", "1")
 from alpha_agents.config import DB_PATH, CHROMA_PATH, DATA_DIR, MONITOR_INTERVAL_SECONDS
 
 
+LOG_DIR = DATA_DIR / "logs"
+LOG_FILE = LOG_DIR / "alphaagents.log"
+LOG_MAX_BYTES = 20 * 1024 * 1024
+LOG_BACKUPS = 5
+
+
 def setup_logging(verbose: bool = False) -> None:
+    """Console plus a rotating file under data/logs/.
+
+    stdout alone means the only record of a failure lives in a container's
+    log buffer, capped and gone on the next redeploy — and unreachable
+    from the other container sharing the same volume. A file in data/
+    survives both, and is greppable by task name, module and level, which
+    is how a diagnosis actually starts:
+
+        grep 'intraday_monitor' data/logs/alphaagents.log
+        grep -E '\\[(ERROR|WARNING)\\]' data/logs/alphaagents.log | tail -50
+
+    Module names are in every line precisely so a search can be narrowed
+    to one layer (alpha_agents.sources.cls_telegraph, say) rather than
+    read end to end.
+    """
+    from logging.handlers import RotatingFileHandler
+
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        # Every process writing the same file is safe enough here: entries
+        # are single writes under the size cap, and losing interleaving
+        # precision matters far less than losing the record entirely.
+        file_handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+        logging.getLogger(__name__).info("Logging to %s", LOG_FILE)
+    except OSError as e:
+        logging.getLogger(__name__).warning(
+            "File logging unavailable (%s) — console only", e)
 
 
 def _build_lock():

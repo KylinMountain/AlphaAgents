@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS predictions (
     -- G1: probabilistic forecast and its market-derived scores. Declared
     -- here so a fresh database has them natively; the ALTER TABLE
     -- migrations in _get_conn exist for databases created before this.
+    -- Wall-clock of the call. `date` alone cannot order the intraday
+    -- signals of one session, which is exactly what the 实时异动 timeline
+    -- needs: it rendered every row's time as a dash.
+    created_at TEXT,
     prob REAL,
     brier REAL,
     log_score REAL,
@@ -349,6 +353,7 @@ def _get_conn() -> sqlite3.Connection:
             "ALTER TABLE predictions ADD COLUMN excess_return REAL",
             "ALTER TABLE predictions ADD COLUMN residual_alpha REAL",
             "ALTER TABLE predictions ADD COLUMN scored_at TEXT",
+            "ALTER TABLE predictions ADD COLUMN created_at TEXT",
         ):
             try:
                 conn.execute(migration)
@@ -606,12 +611,15 @@ def save_prediction(
             conn.commit()
             return existing["id"]
 
+        # created_at is set on first insert only: it marks when the call
+        # was made, and a later cycle refreshing the row must not move it.
         cur = conn.execute(
             "INSERT INTO predictions (date, report_type, code, name, direction, "
-            "confidence, theme_line, entry_price, reason, features_json, prob) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "confidence, theme_line, entry_price, reason, features_json, prob, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (date, report_type, code, name, direction, confidence, theme_line,
-             entry_price, reason, features_json, prob),
+             entry_price, reason, features_json, prob,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
         return cur.lastrowid
@@ -719,8 +727,9 @@ def get_today_intraday_predictions() -> list[dict]:
     conn = _get_conn()
     today = datetime.now().strftime("%Y-%m-%d")
     rows = conn.execute(
-        "SELECT code, name, direction, confidence, theme_line, entry_price, reason "
-        "FROM predictions WHERE date = ? AND report_type = 'intraday' "
+        "SELECT id, date, created_at, code, name, direction, confidence, "
+        "theme_line, entry_price, reason, next_day_return, hit "
+        "FROM predictions WHERE date = ? AND report_type LIKE 'intraday%' "
         "ORDER BY id DESC",
         (today,),
     ).fetchall()

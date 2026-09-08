@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import {
   DASH, bodyOf, fmtAge, fmtClock, fmtPct, fmtYi, sourceClass, stageOf, trendClass,
 } from '../lib/format'
@@ -35,11 +35,14 @@ function riskAppetite(breadth) {
 }
 
 export default function HomeView({ themes, stats, news, signals, market, reports }) {
-  const [tab, setTab] = useState('all')
   const breadth = market?.breadth || null
   const risk = riskAppetite(breadth)
 
   const topTheme = themes[0] || null
+  // Sum of the sectors the API returns, which is the top slice by inflow —
+  // NOT the whole market. Labelled accordingly: calling it "全市场净流入"
+  // would be a number that looks authoritative and is simply wrong.
+  const sectorCount = (market?.sectors || []).length
   const netFlow = useMemo(() => {
     const rows = market?.sectors || []
     if (!rows.length) return null
@@ -53,19 +56,16 @@ export default function HomeView({ themes, stats, news, signals, market, reports
     return sorted[0] || null
   }, [reports])
 
-  const feed = useMemo(() => {
-    const newsItems = news.slice(0, 12).map((n) => ({
-      kind: 'news', time: n.time, source: n.source,
-      title: n.title, body: bodyOf(n),
-    }))
-    const signalItems = signals.slice(0, 6).map((s) => ({
-      kind: 'anomaly', time: s.created_at || s.date,
-      title: `${s.name || s.code} · ${s.theme_line || s.theme || '盘中信号'}`,
-      body: s.reason || '',
-    }))
-    return [...signalItems, ...newsItems]
-      .filter((x) => tab === 'all' || x.kind === tab)
-  }, [news, signals, tab])
+  // News only. Interleaving the intraday picks here put an input (a flash
+  // someone published) and a conclusion (a stock this system chose) in one
+  // chronological list, where nothing distinguishes the fact from the
+  // judgement. The picks have their own card below, and their own page.
+  const feed = useMemo(
+    () => news.slice(0, 14).map((n) => ({
+      time: n.time, source: n.source, title: n.title, body: bodyOf(n),
+    })),
+    [news],
+  )
 
   return (
     <section className="view active">
@@ -90,7 +90,7 @@ export default function HomeView({ themes, stats, news, signals, market, reports
           note={topTheme ? `强度 ${topTheme.strength}` : '主线由复盘/夜扫写入'}
         />
         <Kpi
-          label="行业资金净流入"
+          label={sectorCount ? `前 ${sectorCount} 行业净流入` : '行业资金净流入'}
           value={fmtYi(netFlow)}
           valueClass={trendClass(netFlow)}
           note={market?.captured_at ? `快照 ${fmtClock(market.captured_at)}` : '盘中监控未运行'}
@@ -105,7 +105,8 @@ export default function HomeView({ themes, stats, news, signals, market, reports
       </div>
 
       <div className="grid g12">
-        <article className="card alpha-brief">
+        <article className="card alpha-brief"
+                 style={latestReport ? undefined : { alignSelf: 'start' }}>
           <div className="section-kicker">
             最新报告 · {latestReport ? fmtClock(latestReport.created_at) : DASH}
           </div>
@@ -137,15 +138,13 @@ export default function HomeView({ themes, stats, news, signals, market, reports
           )}
         </article>
 
-        <aside className="card intel-rail">
-          <div className="tabs">
-            {[['all', '实时情报'], ['anomaly', '异动'], ['news', '快讯']].map(([id, label]) => (
-              <button key={id}
-                      className={`tab ${tab === id ? 'active' : ''}`}
-                      onClick={() => setTab(id)}>
-                {label}
-              </button>
-            ))}
+        {/* The rail sets the row height, so with an empty brief beside it
+            a 580px feed left half the screen blank. */}
+        <aside className="card intel-rail"
+               style={latestReport ? undefined : { maxHeight: 320 }}>
+          <div className="card-title" style={{ padding: '13px 14px 0', margin: 0 }}>
+            <h3>实时快讯</h3>
+            <span>{news.length} 条缓存</span>
           </div>
           <div className="feed">
             {feed.length === 0 && <p className="empty-note" style={{ padding: '12px' }}>暂无内容</p>}
@@ -154,9 +153,9 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                 <div className="time">{fmtClock(item.time)}</div>
                 <div>
                   <div className="headline">
-                    {item.kind === 'anomaly'
-                      ? <span className="severity mid">盘中</span>
-                      : <span className={`source-tag ${sourceClass(item.source)}`}>{item.source}</span>}
+                    <span className={`source-tag ${sourceClass(item.source)}`}>
+                      {item.source}
+                    </span>
                     {item.title}
                   </div>
                   {item.body && <div className="summary">{item.body}</div>}
@@ -185,7 +184,12 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                     <div className="bar">
                       <i style={{ width: `${Math.min(100, Math.max(0, t.strength * 10))}%` }} />
                     </div>
-                    <small>{t.catalyst ? String(t.catalyst).slice(0, 10) : DASH}</small>
+                    <small title={t.catalyst || ''} style={{
+                      overflow: 'hidden', textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {t.catalyst || DASH}
+                    </small>
                     <small>{t.leader_code || DASH}</small>
                   </div>
                 )

@@ -44,7 +44,12 @@ export default function AnomaliesView({ signals }) {
           </p>
         ) : signals.map((s) => (
           <div className="timeline-row" key={s.id ?? `${s.code}-${s.created_at}`}>
-            <div className="timeline-time">{fmtClock(s.created_at)}</div>
+            <div className="timeline-time">
+              {/* Rows saved before predictions gained created_at have only
+                  the date; showing a dash there implied missing data when
+                  the time simply was never recorded. */}
+              {s.created_at ? fmtClock(s.created_at) : (s.date || DASH)}
+            </div>
             <div>
               <span className={`severity ${s.confidence === 'signal' ? 'high' : 'mid'}`}>
                 {s.confidence === 'signal' ? '涨停确认' : s.confidence || '观察'}
@@ -52,7 +57,8 @@ export default function AnomaliesView({ signals }) {
             </div>
             <div className="timeline-content">
               <b>{s.name || s.code} · {s.code}</b>
-              <p>{s.reason || '未记录理由'}</p>
+              <p>{s.reason
+                || 'agent 未给出理由 — 该标的来自主线内的量化筛选（beta / 涨幅 / 流动性），不是新闻归因'}</p>
               <div className="cause-chain">
                 {(s.theme_line || s.theme) && <span>{s.theme_line || s.theme}</span>}
                 {s.direction && <><i className="arrow">→</i><span>{s.direction}</span></>}

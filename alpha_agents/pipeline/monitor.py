@@ -21,6 +21,7 @@ from alpha_agents.sources.eastmoney_live import get_eastmoney_live_fn
 from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 from alpha_agents.agents.futures import run_futures_analysis
+from alpha_agents.data.activity_log import log_activity
 from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
 from alpha_agents.pipeline.event_linker import analyze_event_links
 from alpha_agents.notify import notify_all, format_report_notification
@@ -267,6 +268,15 @@ class NewsMonitor:
                     continue
 
                 logger.info("Found %d new news items, running digest...", len(new_items))
+                # The activity feed is written by the scheduler for its own
+                # tasks; the monitor wrote nothing, so a dashboard watching
+                # a live pipeline showed the last scheduler row from hours
+                # earlier and read as "nothing is running".
+                log_activity("task_start", task="monitor_cycle",
+                             status="running",
+                             message=f"第 {cycle} 轮：{len(new_items)} 条新消息进入 digest",
+                             detail={"cycle": cycle, "new_items": len(new_items),
+                                     "raw_items": len(raw_items)})
 
                 # 2. Cheap model pre-filters and aggregates into events
                 await self._emit("digest", "running",
@@ -328,6 +338,22 @@ class NewsMonitor:
                 report_id = await asyncio.to_thread(
                     save_report, cycle, ts, events, categories, combined_result)
                 logger.info("Saved report #%d", report_id)
+                failed_agents = [
+                    name for name, text in (("stock", stock_result),
+                                            ("futures", futures_result))
+                    if text and text.lstrip().startswith("[")
+                ]
+                log_activity(
+                    "task_done" if not failed_agents else "source_degraded",
+                    task="monitor_cycle",
+                    status="ok" if not failed_agents else "degraded",
+                    message=(f"第 {cycle} 轮：{len(events)} 个事件 → 报告 #{report_id}"
+                             + (f"（{'/'.join(failed_agents)} agent 失败）"
+                                if failed_agents else "")),
+                    detail={"cycle": cycle, "events": len(events),
+                            "report_id": report_id,
+                            "categories": categories},
+                )
 
                 # 6. Extract predictions from events and save
                 predictions = []

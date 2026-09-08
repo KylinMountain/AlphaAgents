@@ -1,4 +1,4 @@
-import { DASH, fmtPct, trendClass } from '../lib/format'
+import { DASH, fmtPct } from '../lib/format'
 
 /* Prediction validation.
  *
@@ -70,7 +70,13 @@ export default function MemoryView({ stats, reviews }) {
                       <td><b>{r.date}</b></td>
                       <td>{r.predictions_count ?? DASH}</td>
                       <td>{r.correct_count ?? DASH}</td>
-                      <td className={trendClass(rate == null ? null : rate - 50)}>
+                      {/* Deliberately not the up/down colours: those mean
+                          "price rose / fell" and A-share red-for-up would
+                          paint a good hit rate as a loss. */}
+                      <td style={rate == null ? undefined : {
+                        color: rate >= 50 ? 'var(--blue)' : 'var(--muted)',
+                        fontWeight: 650,
+                      }}>
                         {rate == null ? DASH : fmtPct(rate, 0).replace('+', '')}
                       </td>
                       <td>{(r.summary || r.review_text || '').slice(0, 60) || DASH}</td>

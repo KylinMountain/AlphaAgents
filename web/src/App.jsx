@@ -44,10 +44,19 @@ function sessionLabel(now) {
     : { text: '休市', live: false }
 }
 
+/* The view lives in the URL hash so a page can be linked, reloaded and
+   screenshotted directly. Held in memory only, every view but the default
+   was unreachable from the outside — including to a headless browser
+   checking the deploy. */
+function viewFromHash() {
+  const id = window.location.hash.replace(/^#\/?/, '')
+  return TITLES[id] ? id : 'home'
+}
+
 export default function App() {
   const d = useDashboard()
   const { connected } = useWebSocket()
-  const [view, setView] = useState('home')
+  const [view, setView] = useState(viewFromHash)
   const [now, setNow] = useState(() => new Date())
   const [dark, setDark] = useState(() => {
     try {
@@ -69,6 +78,12 @@ export default function App() {
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30000)
     return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    const onHash = () => setView(viewFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
   const counts = {
@@ -97,7 +112,11 @@ export default function App() {
             {g.items.map((it) => (
               <button key={it.id}
                       className={`nav-item ${view === it.id ? 'active' : ''}`}
-                      onClick={() => { setView(it.id); window.scrollTo({ top: 0 }) }}>
+                      onClick={() => {
+                        window.location.hash = `#/${it.id}`
+                        setView(it.id)
+                        window.scrollTo({ top: 0 })
+                      }}>
                 <span className="ico">{it.icon}</span>
                 <span>{it.label}</span>
                 {it.count && counts[it.count] > 0 && (

@@ -27,6 +27,13 @@ MAX_OUTPUT_TOKENS = 4096
 _RESERVED_TOKENS = MAX_OUTPUT_TOKENS + 2000  # ~2K for system prompt
 # Model context window (configurable, default 32K for Qwen free tier)
 MODEL_CONTEXT_WINDOW = int(os.environ.get("DIGEST_CONTEXT_WINDOW", "32768"))
+
+# Measured against MiMo: 10 items 79s, 30 items 91s, 60 items 91s, 100
+# items 81s, 150 items 110s. Latency tracks output generation, not input
+# size, so capping items per batch would only multiply the calls at the
+# same cost each. Batching stays token-bound; the timeout is what needed
+# raising — 90s cut off calls that finish in 110.
+DIGEST_TIMEOUT = int(os.environ.get("DIGEST_TIMEOUT", "240"))
 MAX_INPUT_TOKENS = MODEL_CONTEXT_WINDOW - _RESERVED_TOKENS
 
 _encoder = tiktoken.get_encoding("cl100k_base")
@@ -214,7 +221,7 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
     response = await client.chat.completions.create(
         model=DIGEST_MODEL,
         max_tokens=MAX_OUTPUT_TOKENS,
-        timeout=90,
+        timeout=DIGEST_TIMEOUT,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
@@ -269,14 +276,38 @@ async def digest_news(news_items: list[dict]) -> list[dict]:
 
     client = _get_client()
     all_events = []
+    failures = 0
 
     for i, batch in enumerate(batches):
         try:
             events = await _digest_batch(client, batch)
             all_events.extend(events)
         except Exception as e:
+            failures += 1
             logger.error("News digest batch %d/%d failed: %s: %s",
                          i + 1, len(batches), type(e).__name__, e)
+
+    # An empty result has two very different causes, and they used to be
+    # indistinguishable: the market really was quiet, or every batch failed.
+    # The monitor logged "No significant events" either way, so a dead
+    # digest read as a calm session on the dashboard.
+    if failures and failures == len(batches):
+        logger.error(
+            "News digest produced nothing: all %d batches failed. "
+            "This is a pipeline failure, NOT an absence of news.", len(batches))
+        try:
+            from alpha_agents.data.activity_log import log_activity
+            log_activity(
+                "source_degraded", task="digest", status="failed",
+                message=f"digest 全部 {len(batches)} 个批次失败，本轮没有事件"
+                        f"是因为管线失败，不是市场平静",
+                detail={"batches": len(batches), "items": len(news_items)},
+            )
+        except Exception as e:
+            logger.debug("digest activity log failed: %s", e)
+    elif failures:
+        logger.warning("News digest: %d of %d batches failed — event list is "
+                       "partial", failures, len(batches))
 
     # Deduplicate by event title (keep highest importance)
     seen = {}

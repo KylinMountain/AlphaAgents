@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  DASH, fmtClock, fmtDateTime, fmtPct, reportToMarkdown, trendClass,
+  DASH, confidenceLabel, directionLabel, fmtClock, fmtDateTime, fmtPct,
+  reportToMarkdown, trendClass,
 } from '../lib/format'
 
 /* 盘中追因 timeline.
@@ -12,7 +13,7 @@ import {
  * reason — so those are what this shows. Inventing the percentage would be
  * the one thing a validation-focused dashboard must not do. */
 
-export default function AnomaliesView({ signals, reports, portfolio }) {
+export default function AnomaliesView({ signals, reports }) {
   // The picks were the only thing this page could show, so it answered
   // "which stocks" without ever answering "why" — the agent's actual
   // attribution (fund flow, limit-up structure, style rotation) is a
@@ -84,37 +85,6 @@ export default function AnomaliesView({ signals, reports, portfolio }) {
         </article>
       )}
 
-      {(portfolio?.pending || []).length > 0 && (
-        <article className="card table-wrap" style={{ marginBottom: 14 }}>
-          <div className="card-title" style={{ padding: '14px 14px 0' }}>
-            <h3>虚拟挂单</h3>
-            <span>
-              {portfolio.pending.length} 笔待成交
-              {portfolio.positions?.length ? ` · ${portfolio.positions.length} 笔持仓` : ''}
-            </span>
-          </div>
-          <table className="table">
-            <thead>
-              <tr><th>标的</th><th>主线</th><th>入场区间</th><th>止损</th><th>下单日</th></tr>
-            </thead>
-            <tbody>
-              {portfolio.pending.map((o) => (
-                <tr key={o.id}>
-                  <td><b>{o.name}</b> · {o.code}</td>
-                  <td>{o.theme || DASH}</td>
-                  <td className="tabular">
-                    {o.entry_low != null && o.entry_high != null
-                      ? `${o.entry_low} – ${o.entry_high}` : DASH}
-                  </td>
-                  <td className="down">{o.stop_loss ?? DASH}</td>
-                  <td>{o.order_date || DASH}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </article>
-      )}
-
       <div className="card timeline-card">
         <div className="timeline-head">
           <span>时间</span><span>类型</span><span>标的 / 追因</span><span>记录</span>
@@ -135,7 +105,7 @@ export default function AnomaliesView({ signals, reports, portfolio }) {
             </div>
             <div>
               <span className={`severity ${s.confidence === 'signal' ? 'high' : 'mid'}`}>
-                {s.confidence === 'signal' ? '涨停确认' : s.confidence || '观察'}
+                {confidenceLabel(s.confidence)}
               </span>
             </div>
             <div className="timeline-content">
@@ -144,7 +114,9 @@ export default function AnomaliesView({ signals, reports, portfolio }) {
                 || 'agent 未给出理由 — 该标的来自主线内的量化筛选（beta / 涨幅 / 流动性），不是新闻归因'}</p>
               <div className="cause-chain">
                 {(s.theme_line || s.theme) && <span>{s.theme_line || s.theme}</span>}
-                {s.direction && <><i className="arrow">→</i><span>{s.direction}</span></>}
+                {s.direction && (
+                  <><i className="arrow">→</i><span>{directionLabel(s.direction)}</span></>
+                )}
                 {s.report_type && <><i className="arrow">→</i><span>{s.report_type}</span></>}
               </div>
             </div>

@@ -10,6 +10,7 @@ import ThemesView from './views/ThemesView'
 import GraphView from './views/GraphView'
 import ReportsView from './views/ReportsView'
 import MemoryView from './views/MemoryView'
+import PortfolioView from './views/PortfolioView'
 import SystemView from './views/SystemView'
 
 const NAV = [
@@ -18,6 +19,7 @@ const NAV = [
     { id: 'realtime', icon: '◉', label: '实时资讯', count: 'news' },
     { id: 'anomalies', icon: '⚡', label: '实时异动', count: 'signals' },
     { id: 'themes', icon: '⌁', label: '投资主线', count: 'themes' },
+    { id: 'portfolio', icon: '▦', label: '虚拟持仓', count: 'positions' },
     { id: 'graph', icon: '◇', label: '事件图谱' },
   ] },
   { group: 'Research', items: [
@@ -87,6 +89,8 @@ export default function App() {
   }, [])
 
   const counts = {
+    positions: (d.portfolio?.positions?.length || 0)
+      + (d.portfolio?.pending?.length || 0),
     news: d.news.length,
     signals: d.signals.length,
     themes: d.themes.length,
@@ -189,6 +193,7 @@ export default function App() {
               {view === 'realtime' && <RealtimeView {...d} />}
               {view === 'anomalies' && <AnomaliesView {...d} />}
               {view === 'themes' && <ThemesView {...d} />}
+              {view === 'portfolio' && <PortfolioView {...d} />}
               {view === 'graph' && <GraphView {...d} />}
               {view === 'reports' && <ReportsView {...d} />}
               {view === 'memory' && <MemoryView {...d} />}

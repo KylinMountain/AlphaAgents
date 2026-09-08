@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import {
   DASH, bodyOf, fmtAge, fmtClock, fmtPct, fmtYi, reportHeadline,
-  reportSummary, sourceClass, stageOf, trendClass,
+  reportStamp, reportSummary, sourceClass, stageOf, trendClass,
+  confidenceLabel,
 } from '../lib/format'
 
 /* The prototype's home screen, on real data.
@@ -106,10 +107,12 @@ export default function HomeView({ themes, stats, news, signals, market, reports
       </div>
 
       <div className="grid g12">
-        <article className="card alpha-brief"
-                 style={latestReport ? undefined : { alignSelf: 'start' }}>
+        {/* alignSelf: the grid stretches a row's items to its tallest
+            member, so this card grew to the news rail's height and ended
+            in a screenful of empty box. */}
+        <article className="card alpha-brief" style={{ alignSelf: 'start' }}>
           <div className="section-kicker">
-            最新报告 · {latestReport ? fmtClock(latestReport.created_at) : DASH}
+            最新报告 · {latestReport ? fmtClock(reportStamp(latestReport)) : DASH}
           </div>
           {latestReport ? (
             <>
@@ -121,7 +124,7 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                 <div className="confidence">
                   <span>覆盖事件</span>
                   <b>{latestReport.event_count ?? DASH}</b>
-                  <em>{fmtAge(latestReport.created_at)}</em>
+                  <em>{fmtAge(reportStamp(latestReport))}</em>
                 </div>
               </div>
               <div className="evidence">
@@ -213,7 +216,7 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                   <div className="anomaly-top">
                     <b>{s.name || s.code}</b>
                     <span className={`severity ${s.confidence === 'signal' ? 'high' : 'mid'}`}>
-                      {s.confidence === 'signal' ? '涨停确认' : s.confidence || '观察'}
+                      {confidenceLabel(s.confidence)}
                     </span>
                   </div>
                   <div className="meta">

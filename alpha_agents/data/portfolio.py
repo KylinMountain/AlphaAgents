@@ -361,6 +361,23 @@ def get_open_positions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_closed_positions(limit: int = 50) -> list[dict]:
+    """Trades that finished, newest first.
+
+    The dashboard could see what was bought and never what happened to
+    it, which is the half that says whether any of the picking works.
+    Includes cancelled orders: an order that expired without filling is a
+    real outcome, not an absence of one.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM virtual_portfolio WHERE status NOT IN ('pending', 'open') "
+        "ORDER BY COALESCE(close_date, order_date) DESC, id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def open_position(
     *,
     code: str,

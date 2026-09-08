@@ -327,7 +327,7 @@ def _save_phase_to_db(date: str, result: dict) -> None:
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(date) DO UPDATE SET "
             "phase=excluded.phase, phase_en=excluded.phase_en, confidence=excluded.confidence, "
-            "indicators=excluded.indicators, strategy=excluded.strategy, created_at=datetime('now')",
+            "indicators=excluded.indicators, strategy=excluded.strategy, created_at=datetime('now','localtime')",
             (date, result["phase"], result["phase_en"], result["confidence"],
              json.dumps(result.get("indicators", {}), ensure_ascii=False),
              json.dumps(result.get("strategy", {}), ensure_ascii=False)),

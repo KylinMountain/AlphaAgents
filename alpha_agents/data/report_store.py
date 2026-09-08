@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS reports (
     events_json TEXT,         -- JSON array of digested events
     report_text TEXT,         -- full agent output
     report_type TEXT,         -- 'monitor' | scheduled task name
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS predictions (
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     accuracy REAL,
     review_text TEXT,           -- LLM 生成的回顾分析
     market_data TEXT,           -- JSON: 当日实际行情数据
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS events (

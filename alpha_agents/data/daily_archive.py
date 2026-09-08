@@ -23,7 +23,7 @@ def save_snapshot(date: str, data_type: str, data: dict) -> None:
         conn.execute(
             "INSERT INTO daily_snapshots (date, data_type, data) VALUES (?, ?, ?) "
             "ON CONFLICT(date, data_type) DO UPDATE SET data = excluded.data, "
-            "created_at = datetime('now')",
+            "created_at = datetime('now','localtime')",
             (date, data_type, json.dumps(data, ensure_ascii=False)),
         )
         conn.commit()

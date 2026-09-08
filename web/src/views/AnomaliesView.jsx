@@ -1,4 +1,9 @@
-import { DASH, fmtClock, fmtPct, trendClass } from '../lib/format'
+import { useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import {
+  DASH, fmtClock, fmtDateTime, fmtPct, reportToMarkdown, trendClass,
+} from '../lib/format'
 
 /* 盘中追因 timeline.
  *
@@ -7,7 +12,19 @@ import { DASH, fmtClock, fmtPct, trendClass } from '../lib/format'
  * reason — so those are what this shows. Inventing the percentage would be
  * the one thing a validation-focused dashboard must not do. */
 
-export default function AnomaliesView({ signals }) {
+export default function AnomaliesView({ signals, reports }) {
+  // The picks were the only thing this page could show, so it answered
+  // "which stocks" without ever answering "why" — the agent's actual
+  // attribution (fund flow, limit-up structure, style rotation) is a
+  // multi-thousand-character report that only reached the notification.
+  const [openReport, setOpenReport] = useState(false)
+  const attribution = useMemo(() => {
+    const rows = (reports || [])
+      .filter((r) => r.report_type === 'intraday_monitor' && r.report_text)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    return rows[0] || null
+  }, [reports])
+
   const confirmed = signals.filter((s) => s.confidence === 'signal').length
   const actionable = signals.length - confirmed
 
@@ -26,13 +43,46 @@ export default function AnomaliesView({ signals }) {
 
       <div className="anomaly-hero">
         <div className="card anomaly-stat"><span>今日信号</span><b>{signals.length}</b></div>
-        <div className="card anomaly-stat"><span>涨停确认</span><b className="up">{confirmed}</b></div>
+        <div className="card anomaly-stat"><span>涨停确认</span>{/* a price fact: A-share red */}
+          <b className="up">{confirmed}</b></div>
         <div className="card anomaly-stat"><span>可操作标的</span><b>{actionable}</b></div>
         <div className="card anomaly-stat">
           <span>覆盖主线</span>
           <b>{new Set(signals.map((s) => s.theme_line || s.theme).filter(Boolean)).size}</b>
         </div>
       </div>
+
+      {attribution ? (
+        <article className="card pad" style={{ marginBottom: 14 }}>
+          <div className="card-title">
+            <h3>本轮追因</h3>
+            <span>
+              {fmtDateTime(attribution.timestamp
+                ? attribution.timestamp * 1000 : attribution.created_at)}
+            </span>
+          </div>
+          <div className="report-prose" style={{
+            maxHeight: openReport ? 'none' : 220, overflow: 'hidden',
+            position: 'relative',
+          }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {reportToMarkdown(attribution.report_text)}
+            </ReactMarkdown>
+          </div>
+          <button className="filter" style={{ marginTop: 8 }}
+                  onClick={() => setOpenReport((v) => !v)}>
+            {openReport ? '收起追因' : '展开完整追因'}
+          </button>
+        </article>
+      ) : signals.length > 0 && (
+        <article className="card pad" style={{ marginBottom: 14 }}>
+          <p className="empty-note">
+            下面的标的来自主线内的量化筛选。完整的异动追因（资金流、涨停结构、
+            风格轮动）由调度器运行 intraday_monitor 时写入报告表，手工触发的单次
+            运行不会留下这份记录。
+          </p>
+        </article>
+      )}
 
       <div className="card timeline-card">
         <div className="timeline-head">

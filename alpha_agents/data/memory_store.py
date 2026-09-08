@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS daily_snapshots (
     date TEXT NOT NULL,
     data_type TEXT NOT NULL,
     data TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
     UNIQUE(date, data_type)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_date ON daily_snapshots(date);
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     source TEXT,
     reason TEXT,
     close_reason TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
 CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS custom_tasks (
     interval TEXT DEFAULT 'once',
     status TEXT DEFAULT 'active',
     last_run TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS price_alerts (
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS price_alerts (
     target_price REAL NOT NULL,
     reason TEXT,
     status TEXT DEFAULT 'active',
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
     triggered_at TEXT
 );
 
@@ -159,14 +159,14 @@ CREATE TABLE IF NOT EXISTS sentiment_phase (
     confidence REAL,
     indicators TEXT,
     strategy TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS chat_memory (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,
     summary TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS vpa_analysis_history (
@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS vpa_analysis_history (
     signals_json TEXT,
     target_low REAL,                 -- v2.5: VPA推导目标价区间下限
     target_high REAL,                -- v2.5: VPA推导目标价区间上限
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_vpa_history_code_date ON vpa_analysis_history(code, analysis_date);
 
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS vpa_pending_signals (
     source_analysis_id INTEGER,
     resolved_date TEXT,
     resolved_by TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (source_analysis_id) REFERENCES vpa_analysis_history(id)
 );
 CREATE INDEX IF NOT EXISTS idx_vpa_signals_status ON vpa_pending_signals(status);
@@ -225,7 +225,7 @@ CREATE TABLE IF NOT EXISTS vpa_scenarios (
     resolved_by TEXT,
     expire_date TEXT,
     source_analysis_id INTEGER,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (source_analysis_id) REFERENCES vpa_analysis_history(id)
 );
 CREATE INDEX IF NOT EXISTS idx_vpa_scenarios_status ON vpa_scenarios(status);
@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS financial_cache (
     code TEXT PRIMARY KEY,
     data TEXT NOT NULL,          -- JSON blob from get_financial_data_fn
     report_date TEXT,            -- 最新报告日 (e.g. "20241231")
-    cached_at TEXT DEFAULT (datetime('now'))
+    cached_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_financial_cached_at ON financial_cache(cached_at);
 
@@ -397,7 +397,7 @@ def update_custom_task_last_run(task_id: int) -> None:
     with _write_lock:
         conn = _get_conn()
         conn.execute(
-            "UPDATE custom_tasks SET last_run = datetime('now') WHERE id = ?",
+            "UPDATE custom_tasks SET last_run = datetime('now','localtime') WHERE id = ?",
             (task_id,),
         )
         # If one-time task, mark as done
@@ -442,7 +442,7 @@ def trigger_price_alert(alert_id: int) -> None:
     with _write_lock:
         conn = _get_conn()
         conn.execute(
-            "UPDATE price_alerts SET status = 'triggered', triggered_at = datetime('now') WHERE id = ?",
+            "UPDATE price_alerts SET status = 'triggered', triggered_at = datetime('now','localtime') WHERE id = ?",
             (alert_id,),
         )
         conn.commit()
@@ -1074,7 +1074,7 @@ def save_cached_financials(code: str, data: dict) -> None:
         report_date = data.get("report_date", "") if isinstance(data, dict) else ""
         conn.execute(
             "INSERT OR REPLACE INTO financial_cache (code, data, report_date, cached_at) "
-            "VALUES (?, ?, ?, datetime('now'))",
+            "VALUES (?, ?, ?, datetime('now','localtime'))",
             (code, json.dumps(data, ensure_ascii=False), report_date),
         )
         conn.commit()

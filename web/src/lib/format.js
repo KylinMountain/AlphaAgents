@@ -113,3 +113,36 @@ export function stageOf(status) {
   const [label, cls] = STAGE_LABEL[status] || [status || '未知', 'stage-active']
   return { label, cls }
 }
+
+/** Turn an agent report into markdown the renderer can give structure to.
+ *
+ * The prompts produce 【小节】 headers and full-width rule lines, not
+ * markdown. Rendered as-is every section became another anonymous
+ * paragraph and the rules became paragraphs of dashes — a wall of text
+ * with no hierarchy, which is what the report page showed.
+ *
+ * The conversion is deliberately conservative: only a line that is
+ * entirely a 【…】 header becomes a heading, so an inline 【…】 inside a
+ * sentence is left alone.
+ */
+export function reportToMarkdown(text) {
+  if (!text) return ''
+  return String(text)
+    .split('\n')
+    .map((line) => {
+      const t = line.trim()
+      // Separator rules: three or more box-drawing/dash characters and
+      // nothing else. The prompts use several of them interchangeably —
+      // ═ was missing at first and left a paragraph of double lines.
+      if (/^[\s─━═—–\-=_~*]{3,}$/.test(t)) return '---'
+      const header = /^【(.+?)】\s*$/.exec(t)
+      if (header) return `### ${header[1]}`
+      // "【小节】正文" on one line: promote the header, keep the body.
+      const inline = /^【(.+?)】\s*(.+)$/.exec(t)
+      if (inline) return `### ${inline[1]}\n\n${inline[2]}`
+      return line
+    })
+    .join('\n')
+    // Collapse the runs of rules the separators leave behind.
+    .replace(/(?:^---$\n?){2,}/gm, '---\n')
+}

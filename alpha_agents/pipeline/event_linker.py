@@ -5,6 +5,7 @@ between events within the same analysis cycle.
 """
 
 import json
+import re
 import logging
 
 from openai import AsyncOpenAI
@@ -12,6 +13,34 @@ from openai import AsyncOpenAI
 from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 
 logger = logging.getLogger(__name__)
+
+# The model is asked for a bare JSON array and mostly complies, but a
+# preamble ("好的，以下是…") or a trailing note is enough for a strict
+# json.loads to fail on the whole response. Take the first balanced array
+# instead of trusting the surrounding prose.
+_ARRAY_RE = re.compile(r"\[.*\]", re.S)
+
+
+def _extract_json_array(text: str) -> list | None:
+    """First JSON array in the text, or None when there is not one."""
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else None
+    except json.JSONDecodeError:
+        # Expected whenever the model wraps its answer in prose, which is
+        # the case this function exists for. Fall through to the search.
+        logger.debug("Event links: response is not bare JSON, searching for "
+                     "an array inside it")
+    m = _ARRAY_RE.search(text)
+    if not m:
+        return None
+    try:
+        parsed = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
 
 SYSTEM_PROMPT = """\
 你是一个事件关系分析专家。给定一组金融事件，判断它们之间是否存在因果、强化、对冲或关联关系。
@@ -95,8 +124,14 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
             if text.endswith("```"):
                 text = text[:-3].strip()
 
-        links = json.loads(text)
-        if not isinstance(links, list):
+        links = _extract_json_array(text)
+        if links is None:
+            # Log what actually came back. "Expecting value: line 1 column 1"
+            # says the string was not JSON but not what it was, so every
+            # diagnosis needed a fresh run to see the model's output.
+            logger.warning(
+                "Event linking: model returned no JSON array (%d chars): %r",
+                len(text), text[:300])
             return []
 
         # Validate
@@ -129,5 +164,5 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
         return valid
 
     except Exception as e:
-        logger.warning("Event linking failed: %s", e)
+        logger.warning("Event linking failed: %s: %s", type(e).__name__, e)
         return []

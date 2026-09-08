@@ -68,7 +68,8 @@ export default function RealtimeView({ news, activity, sources }) {
         <div className="kpi"><div className="kpi-head"><span>资讯来源</span></div>
           <b>{counts.length}</b><small>有数据的源</small></div>
         <div className="kpi"><div className="kpi-head"><span>数据源健康</span></div>
-          <b className={healthy === sources.length ? 'up' : ''}>
+          <b style={sources.length && healthy === sources.length
+            ? { color: 'var(--green)' } : undefined}>
             {sources.length ? `${healthy} / ${sources.length}` : DASH}
           </b>
           <small>{sources.length - healthy} 个源降级</small></div>

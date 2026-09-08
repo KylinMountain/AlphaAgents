@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     concepts TEXT NOT NULL DEFAULT '[]',
-    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+    added_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 """
 

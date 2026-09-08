@@ -162,8 +162,14 @@ def test_check_positions_t1_skip():
 def test_get_portfolio_stats():
     from alpha_agents.data.portfolio import open_position, close_position, get_portfolio_stats
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
-        mock.return_value = _make_test_conn()
+    # Writes go through portfolio, the read goes through portfolio_report
+    # since the split — both bind _get_conn from memory_store, so both
+    # names need the same test connection.
+    conn = _make_test_conn()
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_report._get_conn") as mock_r:
+        mock.return_value = conn
+        mock_r.return_value = conn
         id1 = open_position(code="300475", name="A", theme="芯片",
                             open_date="2026-04-07", open_price=100.0,
                             source="morning", reason="t")

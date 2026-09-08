@@ -192,6 +192,41 @@ def inject_recent_lessons(days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def inject_portfolio(days: int = 5) -> str:
+    """What the agent is currently holding, and how its last exits went.
+
+    The morning and intraday agents recommended stocks without ever being
+    shown their own book. That is not a cosmetic gap: an agent that cannot
+    see its positions cannot avoid recommending what it already owns,
+    cannot suggest adding to a thesis that is working, and — the reason
+    this matters most — cannot connect "I bought this for X" to "X did not
+    happen and I lost 4%". Recent closes are included for exactly that:
+    the losses are the part worth reading before picking again.
+    """
+    from alpha_agents.data.portfolio import (
+        get_closed_positions, get_open_positions_summary,
+    )
+
+    sections = [f"【我的持仓】\n{get_open_positions_summary()}"]
+
+    try:
+        closed = get_closed_positions(limit=8)
+    except Exception:
+        closed = []
+    if closed:
+        lines = [f"【最近 {min(len(closed), 8)} 笔平仓】"]
+        for c in closed:
+            ret = c.get("return_pct") or 0
+            lines.append(
+                f"• {c.get('code', '')} {c.get('name', '')} "
+                f"{ret:+.1f}% 持仓{c.get('holding_days', 0)}天 — "
+                f"{c.get('close_reason', '') or '原因未记录'}"
+            )
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
 _PLAYBOOKS_BUDGET = 400
 
 

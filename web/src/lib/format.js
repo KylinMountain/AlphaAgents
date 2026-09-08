@@ -114,29 +114,54 @@ export function stageOf(status) {
   return { label, cls }
 }
 
-/** Remove a ``` fence that wraps the entire body.
+/** Unwrap the fences the agents put around report prose.
  *
- * The agents hand back their report inside a code fence, so the renderer
- * showed the whole thing as literal text — every heading, table and bullet
- * verbatim. An inner fence (a real code sample) is left alone: only a
- * fence that opens on the first content line and closes on the last is
- * treated as wrapping.
+ * The agents return their report inside a bare ``` block, so the renderer
+ * showed the whole thing as literal text — headings, tables and bullets
+ * verbatim. Position alone cannot identify it: the block starts after a
+ * preamble sentence and ends before an appended 修订说明 section, so a
+ * "fence wraps the whole body" test never matched.
+ *
+ * Content identifies it instead. A fence with no language tag whose body
+ * carries report structure (a 【小节】 header, a markdown heading, or a
+ * table row) is prose the model wrapped by habit. A tagged fence, or one
+ * holding something that reads like code, is left alone.
  */
 export function stripWrappingFence(text) {
   const lines = String(text).split('\n')
-  const fences = []
-  lines.forEach((l, i) => { if (/^\s*```/.test(l)) fences.push(i) })
-  if (fences.length !== 2) return text
+  const out = []
+  let i = 0
 
-  let last = lines.length - 1
-  while (last > 0 && !lines[last].trim()) last -= 1
-  // Only unwrap when the fence closes the body. A fence that closes
-  // mid-report is a real code sample and has to stay a code sample.
-  if (fences[1] !== last) return text
+  while (i < lines.length) {
+    const open = /^\s*```(.*)$/.exec(lines[i])
+    if (!open) {
+      out.push(lines[i])
+      i += 1
+      continue
+    }
 
-  const preamble = lines.slice(0, fences[0])
-  const inner = lines.slice(fences[0] + 1, fences[1])
-  return [...preamble, ...inner].join('\n')
+    let close = i + 1
+    while (close < lines.length && !/^\s*```\s*$/.test(lines[close])) close += 1
+    if (close >= lines.length) {
+      // Unterminated: everything after it would render as one code block.
+      out.push(...lines.slice(i + 1))
+      break
+    }
+
+    const body = lines.slice(i + 1, close)
+    const tagged = open[1].trim() !== ''
+    const looksLikeReport = body.some(
+      (l) => /^【.+?】/.test(l.trim()) || /^#{1,6}\s/.test(l.trim())
+        || /^\s*\|.+\|/.test(l),
+    )
+    if (!tagged && looksLikeReport) {
+      out.push(...body)
+    } else {
+      out.push(...lines.slice(i, close + 1))
+    }
+    i = close + 1
+  }
+  return out.join('\n')
 }
 
 /** Turn an agent report into markdown the renderer can give structure to.
@@ -205,13 +230,32 @@ export function reportHeadline(text) {
  *  with the fence, rules and preamble already gone. */
 export function reportSummary(text, limit = 240) {
   const headline = reportHeadline(text)
-  const body = stripWrappingFence(String(text || ''))
+  const lines = stripWrappingFence(String(text || ''))
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
-    // The title bar and the headline are already on the card above.
     .filter((l) => !/AlphaAgents\s*(分析|期货)?报告/.test(l))
-    .filter((l) => !headline.includes(l.replace(/^【.+?】\s*/, '')))
+
+  // Everything before the first section header is the agent talking about
+  // itself ("Now I have all the data needed. Let me compile the report.")
+  // plus the report's own title bar. Neither describes the market.
+  const firstSection = lines.findIndex((l) => /^【.+?】/.test(l))
+  const afterHeader = firstSection >= 0 ? lines.slice(firstSection) : lines
+
+  // The headline is truncated, so `includes` never matches the full line
+  // it came from — compare on a prefix instead, or the card repeats
+  // itself: the same sentence as title and as first line of the body.
+  const headlineBody = headline.replace(/^.+?：\s*/, '')
+  const isHeadlineSource = (l) => {
+    const clean = l.replace(/^【.+?】\s*/, '')
+    if (!clean) return false
+    const head = clean.slice(0, 20)
+    return head.length >= 6 && headlineBody.startsWith(head)
+  }
+
+  const body = afterHeader
+    .filter((l) => !isHeadlineSource(l))
+    .map((l) => l.replace(/^【(.+?)】\s*/, '$1: '))
     .join(' ')
   return body.length > limit ? `${body.slice(0, limit)}…` : body
 }

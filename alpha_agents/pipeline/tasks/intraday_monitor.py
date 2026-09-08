@@ -68,7 +68,7 @@ def _refresh_theme_strengths() -> None:
     Also discovers new themes from top gainers.
     """
     try:
-        ranking = json.loads(get_concept_ranking_fn(top_n=10))
+        ranking = json.loads(get_concept_ranking_fn(top_n=20))
         all_concepts = ranking.get("gainers", []) + ranking.get("losers", [])
         concept_lookup = {c.get("concept", ""): c for c in all_concepts}
 
@@ -84,8 +84,10 @@ def _refresh_theme_strengths() -> None:
                 )
                 update_theme_strength(theme["name"], signals)
 
-        # Try to discover new themes from top gainers
-        for gainer in ranking.get("gainers", [])[:5]:
+        # Top 10, not top 5: the cut sat above 天然气 (8th by inflow) on a
+        # day the digest called the energy shock the most important event
+        # of the session.
+        for gainer in ranking.get("gainers", [])[:10]:
             concept_name = gainer.get("concept", "")
             if not concept_name:
                 continue

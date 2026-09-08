@@ -158,3 +158,76 @@ def search_concepts_semantic(
         }
         for hit in store.query(query_embedding, top_k=top_k)
     ]
+
+
+# ── Ad-hoc semantic matching over a small label set ───────────
+
+_BOARD_CACHE: dict[tuple, dict] = {}
+_BOARD_CACHE_LIMIT = 4
+
+
+# Measured on BGE-M3 against the live board list: true pairings scored
+# 石油石化→石油加工贸易 0.655, 航运→航运港口 0.816, 半导体设备→半导体
+# 0.896; the best false pairings were 白酒→银行 0.560 and 航空→天然气
+# 0.514. Short Chinese labels carry a high baseline similarity, so a
+# threshold below ~0.6 pairs almost anything.
+LABEL_MATCH_THRESHOLD = 0.62
+
+
+def match_label_semantic(query: str, labels: list[str],
+                         threshold: float = LABEL_MATCH_THRESHOLD) -> str | None:
+    """Closest label to ``query`` by embedding cosine, or None.
+
+    For pairing vocabularies that describe the same thing in different
+    words: the news digest writes 石油石化 and 航运, the exchange's boards
+    carry 油气开采及服务 and 航运港口. Character overlap pairs the first
+    (石油) and misses the second entirely, and a hand-written synonym
+    table would need editing every time a board is renamed.
+
+    Board names change rarely, so their vectors are cached by the exact
+    label set — a cycle costs one embedding call for the query, not one
+    per board.
+
+    Returns None when nothing clears ``threshold``: a wrong pairing puts a
+    theme behind news that has nothing to do with it, which is worse than
+    no theme.
+    """
+    if not query or not labels:
+        return None
+
+    key = tuple(sorted(labels))
+    cached = _BOARD_CACHE.get(key)
+    if cached is None:
+        try:
+            vectors = embed_texts(list(key))
+        except Exception as e:
+            logger.warning("Label embedding failed, no semantic match: %s", e)
+            return None
+        if len(vectors) != len(key):
+            logger.warning("Label embedding returned %d vectors for %d labels",
+                           len(vectors), len(key))
+            return None
+        cached = {"labels": list(key), "vectors": vectors}
+        if len(_BOARD_CACHE) >= _BOARD_CACHE_LIMIT:
+            _BOARD_CACHE.pop(next(iter(_BOARD_CACHE)))
+        _BOARD_CACHE[key] = cached
+
+    try:
+        q = _call_embedding_api([query])[0]
+    except Exception as e:
+        logger.warning("Query embedding failed for %r: %s", query, e)
+        return None
+
+    import math
+    qn = math.sqrt(sum(x * x for x in q)) or 1.0
+    best, best_score = None, 0.0
+    for label, vec in zip(cached["labels"], cached["vectors"]):
+        vn = math.sqrt(sum(x * x for x in vec)) or 1.0
+        score = sum(a * b for a, b in zip(q, vec)) / (qn * vn)
+        if score > best_score:
+            best, best_score = label, score
+    if best_score < threshold:
+        logger.debug("No board matched %r (best %r at %.2f)",
+                     query, best, best_score)
+        return None
+    return best

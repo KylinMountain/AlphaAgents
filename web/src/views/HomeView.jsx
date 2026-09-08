@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import {
-  DASH, bodyOf, fmtAge, fmtClock, fmtPct, fmtYi, sourceClass, stageOf, trendClass,
+  DASH, bodyOf, fmtAge, fmtClock, fmtPct, fmtYi, reportHeadline,
+  reportSummary, sourceClass, stageOf, trendClass,
 } from '../lib/format'
 
 /* The prototype's home screen, on real data.
@@ -114,9 +115,8 @@ export default function HomeView({ themes, stats, news, signals, market, reports
             <>
               <div className="brief-top">
                 <div className="brief-main">
-                  <h2>{(latestReport.report_text || '').split('\n')
-                    .find((l) => l.trim() && !l.startsWith('=')) || '报告已生成'}</h2>
-                  <p>{(latestReport.report_text || '').slice(0, 260)}…</p>
+                  <h2>{reportHeadline(latestReport.report_text)}</h2>
+                  <p>{reportSummary(latestReport.report_text)}</p>
                 </div>
                 <div className="confidence">
                   <span>覆盖事件</span>

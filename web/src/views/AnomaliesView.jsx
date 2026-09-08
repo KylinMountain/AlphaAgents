@@ -12,7 +12,7 @@ import {
  * reason — so those are what this shows. Inventing the percentage would be
  * the one thing a validation-focused dashboard must not do. */
 
-export default function AnomaliesView({ signals, reports }) {
+export default function AnomaliesView({ signals, reports, portfolio }) {
   // The picks were the only thing this page could show, so it answered
   // "which stocks" without ever answering "why" — the agent's actual
   // attribution (fund flow, limit-up structure, style rotation) is a
@@ -84,6 +84,37 @@ export default function AnomaliesView({ signals, reports }) {
         </article>
       )}
 
+      {(portfolio?.pending || []).length > 0 && (
+        <article className="card table-wrap" style={{ marginBottom: 14 }}>
+          <div className="card-title" style={{ padding: '14px 14px 0' }}>
+            <h3>虚拟挂单</h3>
+            <span>
+              {portfolio.pending.length} 笔待成交
+              {portfolio.positions?.length ? ` · ${portfolio.positions.length} 笔持仓` : ''}
+            </span>
+          </div>
+          <table className="table">
+            <thead>
+              <tr><th>标的</th><th>主线</th><th>入场区间</th><th>止损</th><th>下单日</th></tr>
+            </thead>
+            <tbody>
+              {portfolio.pending.map((o) => (
+                <tr key={o.id}>
+                  <td><b>{o.name}</b> · {o.code}</td>
+                  <td>{o.theme || DASH}</td>
+                  <td className="tabular">
+                    {o.entry_low != null && o.entry_high != null
+                      ? `${o.entry_low} – ${o.entry_high}` : DASH}
+                  </td>
+                  <td className="down">{o.stop_loss ?? DASH}</td>
+                  <td>{o.order_date || DASH}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </article>
+      )}
+
       <div className="card timeline-card">
         <div className="timeline-head">
           <span>时间</span><span>类型</span><span>标的 / 追因</span><span>记录</span>
@@ -96,9 +127,11 @@ export default function AnomaliesView({ signals, reports }) {
           <div className="timeline-row" key={s.id ?? `${s.code}-${s.created_at}`}>
             <div className="timeline-time">
               {/* Rows saved before predictions gained created_at have only
-                  the date; showing a dash there implied missing data when
-                  the time simply was never recorded. */}
-              {s.created_at ? fmtClock(s.created_at) : (s.date || DASH)}
+                  the date. Rendered as MM-DD it fits the column; the full
+                  ISO date wrapped onto two lines. */}
+              {s.created_at
+                ? fmtClock(s.created_at)
+                : (s.date ? String(s.date).slice(5) : DASH)}
             </div>
             <div>
               <span className={`severity ${s.confidence === 'signal' ? 'high' : 'mid'}`}>

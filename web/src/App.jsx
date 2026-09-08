@@ -29,6 +29,11 @@ const NAV = [
   ] },
 ]
 
+// AGPL-3.0 §13 requires a network-interactive program to offer its users
+// the corresponding source. Override at build time when running a fork.
+const SOURCE_URL = import.meta.env.VITE_SOURCE_URL
+  || 'https://github.com/KylinMountain/AlphaAgents'
+
 const TITLES = Object.fromEntries(
   NAV.flatMap((g) => g.items).map((i) => [i.id, i.label]),
 )
@@ -202,6 +207,14 @@ export default function App() {
           )}
           <div className="footer-note">
             AlphaAgents · 数据来自实际抓取与调度产出，缺失一律显示 {DASH}
+            {' · '}
+            {/* AGPL-3.0 §13: a network-interactive program must offer its
+                users a way to get the source. Point this at your own fork
+                if you deploy a modified build. */}
+            <a href={SOURCE_URL} target="_blank" rel="noreferrer"
+               style={{ color: 'var(--muted)' }}>
+              源码 (AGPL-3.0)
+            </a>
           </div>
         </main>
       </section>

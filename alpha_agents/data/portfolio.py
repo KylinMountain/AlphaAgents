@@ -119,6 +119,44 @@ def get_theme_exposure(theme: str) -> float:
 # ── Pending Orders (挂单) ───────────────────────────────────
 
 
+def resolve_theme(theme: str) -> str | None:
+    """Canonical theme name for an order, or None when there is no thesis.
+
+    ``check_pending_orders`` already refuses to hold a position whose theme
+    is not in theme_lines — "no theme, no logical basis". That rule ran a
+    cycle too late: an order was created from whatever concept string the
+    agent wrote in its 关联概念 column, then cancelled the next cycle with
+    "关联主线'磷化工'不存在". A capital slot spent on an idea the system had
+    already decided it would not hold.
+
+    Agents also write compound labels ("化肥/磷化工") for a theme tracked
+    under one of its parts, so an exact match alone would reject ideas the
+    system does hold.
+    """
+    if not theme:
+        return None
+    from alpha_agents.data.memory_store import get_active_themes
+    try:
+        known = [t["name"] for t in get_active_themes()]
+    except Exception as e:
+        # Without the theme list there is nothing to check against; let the
+        # order through rather than dropping ideas on an unrelated failure.
+        logger.warning("Theme lookup failed, accepting order theme %r: %s",
+                       theme, e)
+        return theme
+
+    if theme in known:
+        return theme
+    parts = [p.strip() for p in re.split(r"[/、,，|]", theme) if p.strip()]
+    for part in parts:
+        if part in known:
+            return part
+    for name in known:
+        if name and (name in theme or theme in name):
+            return name
+    return None
+
+
 def create_pending_order(
     *,
     code: str,
@@ -146,6 +184,15 @@ def create_pending_order(
         if existing:
             logger.info("Order/position already exists for %s %s, skipping", code, name)
             return None
+
+        resolved = resolve_theme(theme)
+        if resolved is None:
+            logger.warning(
+                "Rejected order %s %s: theme %r is not a tracked theme line. "
+                "check_pending_orders would cancel it next cycle anyway.",
+                code, name, theme)
+            return None
+        theme = resolved
 
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "

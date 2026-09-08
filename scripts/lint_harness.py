@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -129,6 +130,50 @@ def check_file_size(path: Path, source: str) -> list[Violation]:
         f"按职责拆分：找出文件里彼此不共享状态的函数组，各自成模块。"
         f"不要为了过线而机械对半切——那只会制造两个都难懂的文件。",
     )]
+
+
+def check_undefined_names(path: Path, tree: ast.AST) -> list[Violation]:
+    """A name used but never imported or defined in the module.
+
+    Python only raises NameError when the line actually executes, so a call
+    site added without its import survives every test that does not reach
+    that branch. This shipped: ``intraday_monitor`` called
+    ``build_decision_context`` inside the anomaly path and crashed the 盘中
+    追因 task every five minutes in production, silently, for a day.
+    """
+    # Injected by the import machinery, so absent from both the module's
+    # own bindings and the builtins list.
+    bound: set[str] = {"__file__", "__name__", "__doc__", "__package__",
+                       "__spec__", "__loader__", "__builtins__", "__debug__"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+
+    out, reported = [], set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)):
+            continue
+        name = node.id
+        if name in bound or name in dir(builtins) or name in reported:
+            continue
+        reported.add(name)
+        out.append(Violation(
+            path, node.lineno, "undefined-name",
+            f"用到了 {name}，但模块里既没 import 也没定义",
+            f"补上 import，或确认拼写。测试跑不到这一行时，NameError 只会在"
+            f"生产环境的那条分支上炸，且日志里只有一行 NameError。",
+        ))
+    return out
 
 
 def check_logging(path: Path, tree: ast.AST) -> list[Violation]:
@@ -333,6 +378,7 @@ def main() -> int:
         violations += check_file_size(path, source)
         violations += check_layering(path, tree)
         violations += check_logging(path, tree)
+        violations += check_undefined_names(path, tree)
         violations += check_exceptions(path, tree)
         violations += check_self_grading(path, tree)
 

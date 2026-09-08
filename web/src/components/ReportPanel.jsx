@@ -3,20 +3,29 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Clock, FileText } from 'lucide-react'
 
-function fmtTime(r) {
+/** created_at is written by a container pinned to Asia/Shanghai, so it is
+ *  already local wall-clock time. Appending 'Z' told the browser it was
+ *  UTC and shifted every report eight hours: a 23:05 夜报 rendered as
+ *  07:05 the next morning and got labelled 晨报. Parsed without the
+ *  suffix, JS reads "YYYY-MM-DDTHH:MM:SS" as local time, which it is. */
+function parseTime(r) {
   const raw = r.created_at || (r.timestamp ? r.timestamp * 1000 : null)
-  if (!raw) return ''
-  const d = new Date(typeof raw === 'number' ? raw : raw.replace(' ', 'T') + 'Z')
-  if (Number.isNaN(d.getTime())) return String(raw)
+  if (!raw) return null
+  const d = new Date(typeof raw === 'number' ? raw : raw.replace(' ', 'T'))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function fmtTime(r) {
+  const d = parseTime(r)
+  if (!d) return r.created_at ? String(r.created_at) : ''
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 /** Reports carry no explicit kind, so label them by the hour they landed —
- *  the schedule is fixed (06:30 晨扫 / 盘中 / 15:30 复盘 / 20:00 夜扫). */
+ *  the schedule is fixed (09:00 晨扫 / 盘中 / 15:30 复盘 / 20:00 夜扫). */
 function kindOf(r) {
-  const raw = r.created_at || (r.timestamp ? r.timestamp * 1000 : null)
-  if (!raw) return { label: '报告', cls: 'badge-slate' }
-  const d = new Date(typeof raw === 'number' ? raw : raw.replace(' ', 'T') + 'Z')
+  const d = parseTime(r)
+  if (!d) return { label: '报告', cls: 'badge-slate' }
   const h = d.getHours()
   if (h < 9) return { label: '晨报', cls: 'badge-blue' }
   if (h < 15) return { label: '盘中', cls: 'badge-orange' }
@@ -39,7 +48,7 @@ export default function ReportPanel({ reports }) {
         <FileText className="w-8 h-8 mx-auto mb-3 text-slate-300 dark:text-slate-600" />
         <p className="text-sm text-slate-500 dark:text-slate-400">暂无报告</p>
         <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-          调度器会在 06:30 晨扫、15:30 复盘后写入
+          调度器会在 09:00 晨扫、盘中追因、15:30 复盘、20:00 夜扫后写入
         </p>
       </div>
     )

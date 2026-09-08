@@ -35,7 +35,13 @@ services:
     # this process runs its own monitor loop, so both containers digest
     # the same news with the same LLM, doubling the token bill for output
     # that lands in one shared DB.
-    command: python main.py web --host 0.0.0.0 --port 8000 --no-monitor
+    #
+    # --no-ingest: --no-monitor alone leaves the web process sweeping every
+    # source on its own timer as a fallback for running without a
+    # scheduler. Here the scheduler already runs news_ingest every 5
+    # minutes, so that fallback only fetches the same feeds twice — free in
+    # tokens, not free in rate limits: twitter starts answering 429 to both.
+    command: python main.py web --host 0.0.0.0 --port 8000 --no-monitor --no-ingest
     ports:
       - "8002:8000"
     volumes:

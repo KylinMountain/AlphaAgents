@@ -1154,6 +1154,31 @@ def read_news(sources: list[str] | None, as_of: str,
     } for r in rows]
 
 
+def read_latest_news(limit: int = 100,
+                     sources: list[str] | None = None) -> list[dict]:
+    """Newest flashes across all sources — the live 7x24 feed.
+
+    Deliberately not ``read_news(as_of=now)``: an as_of cut compares the
+    source's own published_at against this box's clock, so a flash stamped
+    a minute ahead of us would vanish from a feed whose whole job is to
+    show what just arrived. The dashboard is live, never replayed, so
+    there is nothing to cut against.
+    """
+    q = ["SELECT source, published_at, title, summary, url FROM news_items"]
+    params: list = []
+    if sources:
+        q.append("WHERE source IN (%s)" % ",".join("?" * len(sources)))
+        params.extend(sources)
+    q.append("ORDER BY published_at DESC LIMIT ?")
+    params.append(limit)
+    rows = _get_conn().execute(" ".join(q), params).fetchall()
+    return [{
+        "source": r["source"], "time": r["published_at"],
+        "title": r["title"], "summary": r["summary"] or "",
+        "url": r["url"] or "",
+    } for r in rows]
+
+
 def replay_news_response(sources: list[str] | None, limit: int,
                           keyword: str | None = None,
                           source_prefix: str | None = None) -> str | None:

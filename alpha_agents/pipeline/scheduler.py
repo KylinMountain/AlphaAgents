@@ -21,6 +21,18 @@ from alpha_agents.data.activity_log import log_activity
 logger = logging.getLogger(__name__)
 
 
+# A task repeating this often is plumbing, not news: its start/finish
+# rows are noise in a feed a person reads. 15 min keeps news_ingest (5)
+# and intraday_monitor (5) quiet while leaving every scheduled report —
+# all of which run once or twice a day — fully logged.
+HIGH_FREQUENCY_MINUTES = 15
+
+
+def _is_high_frequency(task) -> bool:
+    interval = getattr(task, "interval_minutes", None)
+    return bool(interval and interval <= HIGH_FREQUENCY_MINUTES)
+
+
 def _is_trading_day(date: datetime | None = None) -> bool:
     """Check if a date is a trading day using akshare calendar."""
     try:
@@ -203,8 +215,10 @@ class TradingDayScheduler:
             for task in self._tasks:
                 if task.should_run(now, is_trading):
                     logger.info("Running task: %s (timeout=%ds)", task.name, task.timeout_seconds)
-                    log_activity("task_start", task=task.name, status="running",
-                                 message=f"开始 {task.name}")
+                    chatty = _is_high_frequency(task)
+                    if not chatty:
+                        log_activity("task_start", task=task.name, status="running",
+                                     message=f"开始 {task.name}")
                     started = datetime.now()
                     try:
                         result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
@@ -212,12 +226,17 @@ class TradingDayScheduler:
                         logger.info("Task %s completed", task.name)
                         took = (task._last_run - started).total_seconds()
                         preview = result if isinstance(result, str) else ""
-                        log_activity(
-                            "task_done", task=task.name, status="ok",
-                            message=preview[:2000] or f"{task.name} 完成",
-                            detail={"seconds": round(took, 1),
-                                    "has_output": bool(preview)},
-                        )
+                        # A silent high-frequency task logs nothing: 288
+                        # "完成" rows a day from news_ingest alone told the
+                        # reader nothing they could act on. It still logs
+                        # when it produced output, and failures always log.
+                        if preview or not chatty:
+                            log_activity(
+                                "task_done", task=task.name, status="ok",
+                                message=preview[:2000] or f"{task.name} 完成",
+                                detail={"seconds": round(took, 1),
+                                        "has_output": bool(preview)},
+                            )
                         # Notify chat terminal if callback is set
                         if self._on_task_output and result and isinstance(result, str):
                             self._on_task_output(task.name, result)

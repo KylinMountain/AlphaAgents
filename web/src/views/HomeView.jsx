@@ -51,7 +51,32 @@ export default function HomeView({ themes, stats, news, signals, market, reports
     return rows.reduce((a, r) => a + (Number(r.net_flow_yi) || 0), 0)
   }, [market])
 
-  const latestReport = useMemo(() => {
+  // The report's own events, when it has them. Task reports (morning,
+  // review) carry none; monitor cycles do.
+  const events = useMemo(() => {
+    if (!latestReport?.events_json) return []
+    try {
+      const raw = JSON.parse(latestReport.events_json)
+      if (!Array.isArray(raw)) return []
+      return raw
+        .map((e) => {
+          const a = (e.market_impact || {}).a_share || {}
+          return {
+            event: e.event || '',
+            category: e.category || '',
+            importance: Number(e.importance) || 0,
+            bullish: (a.sectors_bullish || []).slice(0, 4),
+            bearish: (a.sectors_bearish || []).slice(0, 3),
+          }
+        })
+        .filter((e) => e.event)
+        .sort((a, b) => b.importance - a.importance)
+    } catch {
+      return []
+    }
+  }, [latestReport])
+
+  const latestReportUnused = useMemo(() => {
     const sorted = [...reports].sort(
       (a, b) => (b.timestamp || 0) - (a.timestamp || 0) || (b.id || 0) - (a.id || 0),
     )
@@ -119,7 +144,6 @@ export default function HomeView({ themes, stats, news, signals, market, reports
               <div className="brief-top">
                 <div className="brief-main">
                   <h2>{reportHeadline(latestReport.report_text)}</h2>
-                  <p>{reportSummary(latestReport.report_text)}</p>
                 </div>
                 <div className="confidence">
                   <span>覆盖事件</span>
@@ -127,6 +151,44 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                   <em>{fmtAge(reportStamp(latestReport))}</em>
                 </div>
               </div>
+
+              {/* The digest already produced structured events — category,
+                  importance, and the sectors it read as helped or hurt.
+                  Rendering the report as one paragraph threw all of that
+                  away and left a wall of text with no scannable structure. */}
+              {events.length > 0 ? (
+                <div className="event-list">
+                  {events.slice(0, 4).map((e, i) => (
+                    <div className="event-row" key={i}>
+                      <span className={`severity ${
+                        e.importance >= 5 ? 'high' : e.importance >= 4 ? 'mid' : 'low'}`}>
+                        {e.importance}/5
+                      </span>
+                      <div className="event-body">
+                        <div className="event-title">
+                          <span className="stage-chip stage-active">
+                            {e.category || '未分类'}
+                          </span>
+                          {e.event}
+                        </div>
+                        {(e.bullish.length > 0 || e.bearish.length > 0) && (
+                          <div className="event-sectors">
+                            {e.bullish.map((x) => (
+                              <span className="sector-chip rise" key={`+${x}`}>{x}</span>
+                            ))}
+                            {e.bearish.map((x) => (
+                              <span className="sector-chip fall" key={`-${x}`}>{x}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="brief-summary">{reportSummary(latestReport.report_text)}</p>
+              )}
+
               <div className="evidence">
                 <div><span>主线数量</span><b>{themes.length || DASH}</b></div>
                 <div><span>今日盘中信号</span><b>{signals.length || DASH}</b></div>

@@ -65,9 +65,24 @@ async def get_predictions(date: str):
     return JSONResponse({"date": date, "predictions": preds})
 
 
+@app.get("/api/news")
+async def get_news_api(limit: int = 100, source: str | None = None):
+    """The 7x24 flash feed — what the dashboard's message stream shows.
+
+    The stream used to render scheduler task events instead. Three rows
+    every five minutes ("开始 news_ingest" / "完成" / "失败") pushed the
+    news itself off the panel entirely, which is the one thing a reader
+    opens it for. Task health moved to a summary card; this is the feed.
+    """
+    from alpha_agents.data.snapshot_store import read_latest_news
+    sources = [source] if source else None
+    rows = await asyncio.to_thread(read_latest_news, limit, sources)
+    return JSONResponse({"news": rows, "count": len(rows)})
+
+
 @app.get("/api/activity")
 async def get_activity_api(limit: int = 100, since_id: int | None = None):
-    """Live scheduler activity — the message stream the dashboard renders.
+    """Scheduler task activity — feeds the system-status card.
 
     Read from SQLite rather than the in-process event bus so it works when
     the scheduler and the web UI are separate containers.

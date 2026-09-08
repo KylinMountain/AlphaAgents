@@ -110,9 +110,11 @@ async def run_news_ingest() -> str | None:
     logger.info("News ingest: %s | ok=%s | failed=%s",
                 summary, ",".join(ok), ",".join(failed))
 
-    # Only surface failures in the activity feed — a healthy ingest every
-    # few minutes would drown the stream the user actually reads.
+    # Not "task_failed": the sweep returned news, some sources just did
+    # not answer. Logging it as a failure put a red 失败 row next to the
+    # scheduler's own green 完成 row for the same run, at the same second.
     if failed:
-        log_activity("task_failed", task="news_ingest", status="failed",
-                     message=f"{summary}: {', '.join(failed)}"[:500])
+        log_activity("source_degraded", task="news_ingest", status="degraded",
+                     message=f"{summary}: {', '.join(failed)}"[:500],
+                     detail={"failed_count": len(failed), "items": total})
     return None

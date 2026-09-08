@@ -25,13 +25,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "qwen-plus"
 
 # Tried in order when the primary is overloaded. OpenRouter-specific:
-# other providers ignore the extra body field. All verified to answer and
-# to support tool calls, which the agents need.
+# other providers ignore the extra body field.
+#
+# Ordered by measured latency on one tool-calling round trip, because the
+# agents run a tool loop up to max_turns=100 under a 600s ceiling — a slow
+# model does not degrade the run, it kills it. Measured on the box:
+# ling 1.6s, dots 2.2s, nemotron-3-super 6.1s. Two were dropped rather
+# than demoted: nemotron-3.5-lightning at 57s exhausts the timeout in ten
+# turns, and thinkingmachines/inkling:free returns 403 ("only available on
+# agentic harnesses" — a whitelist we are not on).
 _OPENROUTER_FALLBACKS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "nvidia/nemotron-3.5-lightning:free",
     "inclusionai/ling-3.0-flash-fin:free",
     "dots-studio/dots-3-note-preview:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 

@@ -4,18 +4,19 @@ import StatCards from './components/StatCards'
 import ReportPanel from './components/ReportPanel'
 import ReviewPanel from './components/ReviewPanel'
 import SourceGrid from './components/SourceGrid'
-import ActivityStream from './components/ActivityStream'
+import NewsStream from './components/NewsStream'
+import SystemStatus from './components/SystemStatus'
 import { useDashboard, summarizeReviews } from './hooks/useDashboard'
 import { useWebSocket } from './hooks/useWebSocket'
 
 const TABS = [
-  { id: 'stream', label: '消息流' },
+  { id: 'stream', label: '实时快讯' },
   { id: 'reports', label: '分析报告' },
   { id: 'reviews', label: '复盘验证' },
 ]
 
 export default function App() {
-  const { reports, reviews, sources, activity, loading, reload } = useDashboard()
+  const { reports, reviews, sources, activity, news, loading, reload } = useDashboard()
   const { connected } = useWebSocket()
   const [tab, setTab] = useState('stream')
   const [dark, setDark] = useState(
@@ -74,7 +75,7 @@ export default function App() {
                 >
                   {t.label}
                   <span className="ml-1.5 text-xs opacity-70">
-                    {{ stream: activity.length, reports: reports.length,
+                    {{ stream: news.length, reports: reports.length,
                        reviews: reviews.length }[t.id]}
                   </span>
                 </button>
@@ -86,7 +87,7 @@ export default function App() {
                 加载中…
               </div>
             ) : tab === 'stream' ? (
-              <ActivityStream activity={activity} />
+              <NewsStream news={news} />
             ) : tab === 'reports' ? (
               <ReportPanel reports={reports} />
             ) : (
@@ -95,6 +96,7 @@ export default function App() {
           </div>
 
           <aside className="space-y-4">
+            <SystemStatus activity={activity} />
             <SourceGrid sources={sources} />
           </aside>
         </div>

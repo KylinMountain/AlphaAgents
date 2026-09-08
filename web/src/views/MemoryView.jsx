@@ -1,0 +1,87 @@
+import { DASH, fmtPct, trendClass } from '../lib/format'
+
+/* Prediction validation.
+ *
+ * The ring shows the hit rate only when there are scored predictions. With
+ * none, it shows a dash — a 0% ring reads as "the system is wrong about
+ * everything" when it actually means "nothing has been graded yet". */
+
+export default function MemoryView({ stats, reviews }) {
+  const has = Boolean(stats?.total)
+  const pct = has ? stats.hit_rate : null
+  const byConf = Object.entries(stats?.by_confidence || {})
+
+  return (
+    <section className="view active">
+      <div className="page-head">
+        <div>
+          <h1>记忆与验证</h1>
+          <p>保存判断、证据、结果和错误归因。命中率只统计已评分的预测。</p>
+        </div>
+        <div className="date-note">
+          <b>{has ? `${stats.hits} / ${stats.total} 命中` : '尚无评分'}</b>
+          复盘任务负责评分
+        </div>
+      </div>
+
+      <div className="memory-grid">
+        <div className="card hit-card">
+          <div className="section-kicker">近 7 日验证</div>
+          <div className="ring" style={{
+            background: has
+              ? `conic-gradient(var(--blue) 0 ${pct}%, var(--surface-3) ${pct}%)`
+              : 'var(--surface-3)',
+          }}>
+            <div>
+              <b>{has ? `${pct}%` : DASH}</b>
+              <span>{has ? `${stats.hits} / ${stats.total} 命中` : '暂无已评分预测'}</span>
+            </div>
+          </div>
+          {byConf.length > 0 && (
+            <div className="health-group" style={{ textAlign: 'left' }}>
+              <h4>按信心分层</h4>
+              {byConf.map(([conf, v]) => (
+                <div className="health-source" key={conf}>
+                  <span className="name">{conf}</span>
+                  <span>{v.hits} / {v.total} · {v.hit_rate}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="card table-wrap">
+          {reviews.length === 0 ? (
+            <p className="empty-note" style={{ padding: 16 }}>
+              尚无复盘记录。15:30 复盘会验证当日预测并写入这里。
+            </p>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr><th>日期</th><th>预测数</th><th>命中</th><th>命中率</th><th>摘要</th></tr>
+              </thead>
+              <tbody>
+                {reviews.map((r) => {
+                  const rate = r.predictions_count
+                    ? (r.correct_count / r.predictions_count) * 100
+                    : null
+                  return (
+                    <tr key={r.id ?? r.date}>
+                      <td><b>{r.date}</b></td>
+                      <td>{r.predictions_count ?? DASH}</td>
+                      <td>{r.correct_count ?? DASH}</td>
+                      <td className={trendClass(rate == null ? null : rate - 50)}>
+                        {rate == null ? DASH : fmtPct(rate, 0).replace('+', '')}
+                      </td>
+                      <td>{(r.summary || r.review_text || '').slice(0, 60) || DASH}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}

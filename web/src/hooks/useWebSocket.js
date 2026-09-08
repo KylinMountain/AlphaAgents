@@ -8,6 +8,11 @@ export function useWebSocket() {
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
 
+  // onclose reconnects by calling connect again. Referencing the const
+  // from inside its own initialiser is a TDZ read, so the live function is
+  // reached through a ref that is filled in once it exists.
+  const connectRef = useRef(null)
+
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
@@ -16,7 +21,7 @@ export function useWebSocket() {
     ws.onopen = () => setConnected(true)
     ws.onclose = () => {
       setConnected(false)
-      reconnectTimer.current = setTimeout(connect, 3000)
+      reconnectTimer.current = setTimeout(() => connectRef.current?.(), 3000)
     }
     ws.onerror = () => ws.close()
 
@@ -52,6 +57,7 @@ export function useWebSocket() {
   }, [])
 
   useEffect(() => {
+    connectRef.current = connect
     connect()
     return () => {
       clearTimeout(reconnectTimer.current)

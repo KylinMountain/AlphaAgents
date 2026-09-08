@@ -3,14 +3,20 @@
 import concurrent.futures as _cf
 import json
 import logging
+import os
 
 from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
-# DDGS().__init__ can hang indefinitely on DNS/TLS failures (no internal timeout).
-# We isolate it in a single-shot executor so the caller is bounded.
-_SEARCH_TIMEOUT_SECONDS = 12
+# DDGS().__init__ can hang indefinitely on DNS/TLS failures (no internal
+# timeout). We isolate it in a single-shot executor so the caller is bounded.
+#
+# 12s was tuned against a direct connection. Behind a proxy — which is the
+# only way this reaches DuckDuckGo from a mainland host — the same query
+# measured 12.7s to 16.3s, so the old budget cut off every successful
+# search and reported it as a timeout.
+_SEARCH_TIMEOUT_SECONDS = int(os.environ.get("WEB_SEARCH_TIMEOUT", "30"))
 
 
 def _ddgs_search(query: str, max_results: int):

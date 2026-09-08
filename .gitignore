@@ -15,8 +15,12 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root: these are setuptools build products, but a
+# bare `lib/` also matches web/src/lib/, which silently kept the whole
+# frontend helper module out of git. CI then failed on
+# "Could not resolve './lib/format'" while the local build was fine.
+/lib/
+/lib64/
 parts/
 sdist/
 var/

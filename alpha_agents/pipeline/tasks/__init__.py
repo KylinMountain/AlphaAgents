@@ -36,4 +36,20 @@ def safe_sentiment_phase() -> str | None:
         return None
 
 
+def safe_active_themes() -> list[dict] | None:
+    """Active themes for the decision context; never raises.
+
+    Here rather than local to a task because both the morning and intraday
+    paths need it: morning_scan reached for a ``themes`` local belonging to
+    a different function and raised NameError at the point it saved its
+    recommendations — after the agent had already done all its work.
+    """
+    try:
+        from alpha_agents.data.memory_store import get_active_themes
+        return get_active_themes()
+    except Exception as e:
+        logger.debug("Decision context: themes unavailable: %s", e)
+        return None
+
+
 """Scheduled analysis tasks for the trading day."""

@@ -134,9 +134,12 @@ async def get_market_overview_api():
     from alpha_agents.data.snapshot_store import (
         read_latest_breadth, read_latest_sector_flow,
     )
+    # Scope values are the writer's: market_data saves "industry"/"concept".
+    # Asking for "行业"/"概念" matched nothing and the panel showed an empty
+    # state that looked exactly like "no capture yet".
     breadth = await asyncio.to_thread(read_latest_breadth)
-    sectors = await asyncio.to_thread(read_latest_sector_flow, "行业", 8)
-    concepts = await asyncio.to_thread(read_latest_sector_flow, "概念", 8)
+    sectors = await asyncio.to_thread(read_latest_sector_flow, "industry", 8)
+    concepts = await asyncio.to_thread(read_latest_sector_flow, "concept", 8)
     return JSONResponse({
         "breadth": breadth,
         "sectors": sectors,

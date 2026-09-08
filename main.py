@@ -162,17 +162,38 @@ def cmd_web(args: argparse.Namespace) -> None:
     # doing — two processes digesting the same news into the same DB.
     run_monitor = not getattr(args, "no_monitor", False)
 
+    # Ingestion is not part of that bill: news_ingest only fetches and
+    # stores. Turning the monitor off used to stop it too, which left the
+    # flash feed frozen at whatever was in the DB — a live-looking page
+    # showing four-hour-old news. This keeps the feed moving for free.
+    ingest_only = not run_monitor and not getattr(args, "no_ingest", False)
+
+    async def ingest_loop():
+        from alpha_agents.pipeline.tasks.news_ingest import run_news_ingest
+        while True:
+            try:
+                await run_news_ingest()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("News ingest sweep failed")
+            await asyncio.sleep(interval)
+
     async def run_all():
         config = uvicorn.Config(
             app, host=args.host, port=args.port,
             log_level="info", access_log=False,
         )
         server = uvicorn.Server(config)
-        logging.info("Starting web UI at http://%s:%d (monitor=%s)",
-                     args.host, args.port, "on" if run_monitor else "off")
+        logging.info("Starting web UI at http://%s:%d (monitor=%s, ingest=%s)",
+                     args.host, args.port,
+                     "on" if run_monitor else "off",
+                     "on" if (run_monitor or ingest_only) else "off")
         tasks = [server.serve()]
         if run_monitor:
             tasks.append(monitor.run())
+        elif ingest_only:
+            tasks.append(ingest_loop())
         await asyncio.gather(*tasks)
 
     try:
@@ -497,7 +518,9 @@ def main() -> None:
     p_web.add_argument("--port", type=int, default=8000, help="监听端口")
     p_web.add_argument("--interval", type=int, help="监控间隔（秒）")
     p_web.add_argument("--no-monitor", action="store_true",
-                       help="只提供界面，不在本进程跑监控循环（调度器已在跑时用这个）")
+                       help="不跑分析管线（digest/agent，会花 token）；新闻摄取仍继续")
+    p_web.add_argument("--no-ingest", action="store_true",
+                       help="连新闻摄取也不跑，纯只读界面（调度器已在另一进程摄取时用）")
     p_web.set_defaults(func=cmd_web)
 
     # review — daily prediction review

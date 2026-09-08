@@ -27,19 +27,14 @@ from alpha_agents.data.portfolio import (
 from alpha_agents.data.market_data import get_realtime_quotes
 from alpha_agents.data.decision_context import build_decision_context, merge_features
 from alpha_agents.data.scoring import confidence_to_prob
-from alpha_agents.pipeline.tasks import safe_market_regime, safe_sentiment_phase
+from alpha_agents.pipeline.tasks import (
+    safe_active_themes, safe_market_regime, safe_sentiment_phase,
+)
 
 logger = logging.getLogger(__name__)
 
 
 
-
-def _safe_active_themes() -> list[dict] | None:
-    try:
-        return get_active_themes()
-    except Exception as e:
-        logger.debug("Decision context: themes unavailable: %s", e)
-        return None
 
 # Scheduler reference for boost — set by main.py before scheduler starts
 _scheduler = None
@@ -1104,7 +1099,7 @@ def _save_intraday_recommendations(report: str) -> None:
     # G6: one context per cycle, shared by the picks it produced.
     _intraday_ctx = build_decision_context(
         task="intraday_monitor",
-        themes=_safe_active_themes(),
+        themes=safe_active_themes(),
         market_regime=safe_market_regime(),
         sentiment_phase=safe_sentiment_phase(),
         extra={"has_anomaly": True},

@@ -58,7 +58,7 @@ def _format_themes_for_monitoring(themes: list[dict]) -> str:
         stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
         stock_list = ", ".join(f"{s['code']} {s['name']}" for s in stocks[:10])
         lines.append(
-            f"主线: {t['name']}（强度 {t['strength']}/10, {t['status']}）\n"
+            f"主线: {t['name']}（累计强度 {t['strength']}/10, 今日 {t.get('daily_score', 0):+d}, {t['status']}）\n"
             f"  龙头: {t.get('leader_code', '无')}\n"
             f"  监控标的: {stock_list}"
         )
@@ -465,7 +465,7 @@ async def run_intraday_monitor() -> str | None:
     theme_changes = []
     for t in themes:
         # Strength already updated by _refresh_theme_strengths
-        theme_changes.append(f"• {t['name']}: 强度 {t['strength']}/10 ({t['status']})")
+        theme_changes.append(f"• {t['name']}: 累计强度 {t['strength']}/10, 今日 {t.get('daily_score', 0):+d} ({t['status']})")
 
     # ── Step 4: LLM only writes cause analysis (50-100 words) ──
     cause_text = ""

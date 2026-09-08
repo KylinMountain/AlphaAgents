@@ -141,17 +141,46 @@ def evaluate_theme_signals(
     return {"bullish_signals": bullish, "bearish_signals": bearish, "details": details}
 
 
-def update_theme_strength(name: str, signals: dict) -> None:
-    """Update a theme's strength based on today's signals."""
+def update_theme_strength(name: str, signals: dict, today: str | None = None) -> None:
+    """Record today's score for a theme, and age its strength once per day.
+
+    Two numbers come out of one evaluation:
+
+    ``daily_score`` is ``bullish − bearish`` as measured right now, and it
+    is rewritten on every call. It is the only one of the two that ranks
+    lines against each other today.
+
+    ``strength`` accumulates that score, but **at most once per calendar
+    day**. It is a lifecycle position — roughly how many sessions this
+    line has been confirmed — and it drives the status machine and the
+    ≥4 gate on pending orders.
+
+    The day guard is the whole point. ``_refresh_theme_strengths`` calls
+    this every intraday cycle, 48 times between 09:30 and 15:00; without
+    it a line with steady inflow hit the ceiling of 10 within half an hour
+    and a weak one floored at 0, so the number tracked how many cycles had
+    elapsed rather than how strong anything was. 锡业股份's order was
+    cancelled for 金属铜 强度3 on a session that line ran +2.0% against
+    the market on 55億 of net inflow.
+    """
     theme = get_theme_by_name(name)
     if not theme or theme["status"] == "archived":
         return
 
+    today = today or datetime.now().strftime("%Y-%m-%d")
     current = theme["strength"] or 0
     bull = signals["bullish_signals"]
     bear = signals["bearish_signals"]
-
     delta = bull - bear
+
+    already_scored_today = (theme["last_scored_date"] or "") == today
+    if already_scored_today:
+        # Today's contribution is already in `strength`; only refresh the
+        # live read. Status cannot change without a strength change, so
+        # there is nothing else to recompute.
+        upsert_theme(name, daily_score=delta)
+        return
+
     new_strength = max(0, min(10, current + delta))
 
     status = theme["status"]
@@ -167,9 +196,11 @@ def update_theme_strength(name: str, signals: dict) -> None:
         # supplying picks with no thesis behind them.
         status = "archived"
 
-    upsert_theme(name, status=status, strength=new_strength)
-    logger.info("Theme '%s': strength %d→%d, status=%s (%s)",
-                name, current, new_strength, status, "; ".join(signals["details"]))
+    upsert_theme(name, status=status, strength=new_strength,
+                 daily_score=delta, last_scored_date=today)
+    logger.info("Theme '%s': strength %d→%d (今日 %+d), status=%s (%s)",
+                name, current, new_strength, delta, status,
+                "; ".join(signals["details"]))
 
 
 def sectors_from_events(events: list[dict], min_importance: int = 4) -> dict[str, dict]:

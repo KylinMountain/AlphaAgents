@@ -50,7 +50,7 @@ async def run_weekly_report() -> str | None:
     for t in themes:
         stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
         themes_text += (
-            f"- {t['name']}（强度 {t['strength']}/10, {t['status']}）\n"
+            f"- {t['name']}（累计强度 {t['strength']}/10, {t['status']}）\n"
             f"  创建: {t.get('created_at', '?')[:10]} | 催化: {t.get('catalyst', '无')}\n"
         )
 

@@ -237,6 +237,23 @@ class TradingDayScheduler:
                                 detail={"seconds": round(took, 1),
                                         "has_output": bool(preview)},
                             )
+                        # Persist the report itself. Without this the
+                        # morning scan, review, night scan and weekly
+                        # report existed only as a push notification and
+                        # a 2000-char activity row — the dashboard's
+                        # report page could never show any of them.
+                        if preview.strip():
+                            try:
+                                from alpha_agents.data.report_store import (
+                                    save_task_report,
+                                )
+                                save_task_report(task.name, preview)
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to persist %s report: %s",
+                                    task.name, e,
+                                )
+
                         # Notify chat terminal if callback is set
                         if self._on_task_output and result and isinstance(result, str):
                             self._on_task_output(task.name, result)

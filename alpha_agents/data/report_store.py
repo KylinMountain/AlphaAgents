@@ -9,12 +9,15 @@ Schema:
 """
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
 from alpha_agents.config import DATA_DIR
+
+logger = logging.getLogger(__name__)
 
 REPORTS_DB_PATH = DATA_DIR / "reports.db"
 
@@ -30,6 +33,7 @@ CREATE TABLE IF NOT EXISTS reports (
     categories TEXT,          -- JSON: {"政策": 2, "地缘": 1}
     events_json TEXT,         -- JSON array of digested events
     report_text TEXT,         -- full agent output
+    report_type TEXT,         -- 'monitor' | scheduled task name
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -103,8 +107,23 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
     conn.executescript(_REPORTS_SCHEMA)
+    _migrate(conn)
     _local.conn = conn
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns the schema gained after a DB was first created.
+
+    CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so a new
+    column in the schema string never reaches a deployed database — the
+    reads just fail on a column that the code believes exists.
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(reports)")}
+    if "report_type" not in have:
+        conn.execute("ALTER TABLE reports ADD COLUMN report_type TEXT")
+        conn.commit()
+        logger.info("reports: added report_type column")
 
 
 def save_report(
@@ -126,6 +145,29 @@ def save_report(
         report_id = cur.lastrowid
         conn.commit()
         return report_id
+
+
+def save_task_report(task: str, report_text: str,
+                     timestamp: float | None = None) -> int:
+    """Persist a scheduled task's report.
+
+    Only the monitor loop used to write here, so the dashboard's report
+    page could never show the four reports of the day that matter most —
+    morning scan, review, night scan, weekly. Their text existed only in
+    a push notification and a truncated activity row.
+
+    ``cycle`` stays NULL: these are not monitor cycles, and inventing a
+    number would collide with the ones that are.
+    """
+    with _lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO reports (cycle, timestamp, event_count, categories, "
+            " events_json, report_text, report_type) VALUES (?,?,?,?,?,?,?)",
+            (None, timestamp or time.time(), 0, None, None, report_text, task),
+        )
+        conn.commit()
+        return cur.lastrowid
 
 
 def save_predictions(report_id: int, date: str, predictions: list[dict]) -> None:
@@ -172,7 +214,8 @@ def get_recent_reports(limit: int = 20) -> list[dict]:
     """Get most recent reports."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, cycle, timestamp, event_count, categories, report_text, created_at "
+        "SELECT id, cycle, timestamp, event_count, categories, report_text, "
+        "report_type, created_at "
         "FROM reports ORDER BY timestamp DESC LIMIT ?",
         (limit,),
     ).fetchall()

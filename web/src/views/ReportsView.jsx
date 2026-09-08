@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { DASH, fmtDateTime, parseStamp, reportToMarkdown } from '../lib/format'
+import {
+  DASH, fmtDateTime, parseStamp, reportStamp, reportToMarkdown,
+} from '../lib/format'
 
 /* Reports list + reader.
  *
@@ -25,20 +27,13 @@ function kindOf(r) {
   if (r.report_type && TASK_LABEL[r.report_type]) return TASK_LABEL[r.report_type]
   if (r.cycle != null) return { label: '追因', cls: 'stage-sprout' }
 
-  const d = parseStamp(stampOf(r))
+  const d = parseStamp(reportStamp(r))
   if (!d) return { label: '报告', cls: 'stage-active' }
   const h = d.getHours()
   if (h < 9) return { label: '晨报', cls: 'stage-active' }
   if (h < 15) return { label: '盘中', cls: 'stage-sprout' }
   if (h < 19) return { label: '复盘', cls: 'stage-main' }
   return { label: '夜报', cls: 'stage-fade' }
-}
-
-/** Prefer the epoch column: created_at came from SQLite's datetime('now'),
- *  which is UTC, and rendered eight hours before the timestamp printed in
- *  the report's own body. New rows are written local, old ones are not. */
-function stampOf(r) {
-  return r.timestamp ? r.timestamp * 1000 : r.created_at
 }
 
 function isFailed(text) {
@@ -89,7 +84,7 @@ export default function ReportsView({ reports }) {
       <div className="report-grid">
         <article className="card report-body">
           <div className="section-kicker">
-            {kindOf(active).label} · {fmtDateTime(stampOf(active))}
+            {kindOf(active).label} · {fmtDateTime(reportStamp(active))}
             {active.event_count ? ` · ${active.event_count} 个事件` : ''}
           </div>
           {failed ? (
@@ -129,7 +124,7 @@ export default function ReportsView({ reports }) {
                   <span className={`stage-chip ${k.cls}`} style={{ marginRight: 6 }}>
                     {k.label}
                   </span>
-                  {fmtDateTime(stampOf(r))}
+                  {fmtDateTime(reportStamp(r))}
                 </span>
                 <span style={bad ? { color: 'var(--red)' } : undefined}>
                   {bad ? '失败' : (r.event_count ? `${r.event_count} 事件` : DASH)}

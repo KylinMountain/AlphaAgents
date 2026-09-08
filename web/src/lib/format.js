@@ -185,23 +185,63 @@ export function reportHeadline(text) {
     .map((l) => l.trim())
     .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
 
-  const section = clean.find((l) => /^【(.+?)】\s*(.+)$/.test(l))
-  if (section) {
-    const m = /^【(.+?)】\s*(.+)$/.exec(section)
-    return `${m[1]}：${m[2]}`.slice(0, 60)
+  // The report opens with its own title bar ("AlphaAgents 分析报告 | …"),
+  // which names the document rather than the market. Skip it.
+  const body = clean.filter((l) => !/AlphaAgents\s*(分析|期货)?报告/.test(l))
+
+  for (let i = 0; i < body.length; i += 1) {
+    const m = /^【(.+?)】\s*(.*)$/.exec(body[i])
+    if (!m) continue
+    // A header alone on its line takes the line under it as its content.
+    const content = m[2] || body[i + 1] || ''
+    if (content) return `${m[1]}：${content}`.slice(0, 64)
   }
-  const fact = clean.find((l) => /[0-9%]/.test(l) && l.length > 8)
-  if (fact) return fact.slice(0, 60)
-  return clean[0] ? clean[0].slice(0, 60) : '报告已生成'
+  const fact = body.find((l) => /[0-9%]/.test(l) && l.length > 8)
+  if (fact) return fact.slice(0, 64)
+  return body[0] ? body[0].slice(0, 64) : '报告已生成'
 }
 
 /** A short body for a report card: the first few lines that carry content,
  *  with the fence, rules and preamble already gone. */
 export function reportSummary(text, limit = 240) {
+  const headline = reportHeadline(text)
   const body = stripWrappingFence(String(text || ''))
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
+    // The title bar and the headline are already on the card above.
+    .filter((l) => !/AlphaAgents\s*(分析|期货)?报告/.test(l))
+    .filter((l) => !headline.includes(l.replace(/^【.+?】\s*/, '')))
     .join(' ')
   return body.length > limit ? `${body.slice(0, limit)}…` : body
+}
+
+const CONFIDENCE_LABEL = {
+  high: '高信心', medium: '中等信心', low: '低信心',
+  signal: '涨停确认',
+}
+
+const DIRECTION_LABEL = {
+  bullish: '看多', bearish: '看空', neutral: '中性',
+}
+
+/** Confidence tier as Chinese. Stored in English by the pipeline; an
+ *  unknown tier is passed through rather than hidden. */
+export function confidenceLabel(v) {
+  return CONFIDENCE_LABEL[v] || v || '未标注'
+}
+
+export function directionLabel(v) {
+  return DIRECTION_LABEL[v] || v || ''
+}
+
+/** Display stamp for a report row.
+ *
+ * Prefer the epoch column: created_at came from SQLite's datetime('now'),
+ * which is UTC, so rows written before that was fixed render eight hours
+ * early. Shared so the home card and the reports page cannot disagree.
+ */
+export function reportStamp(r) {
+  if (!r) return null
+  return r.timestamp ? r.timestamp * 1000 : r.created_at
 }

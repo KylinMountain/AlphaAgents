@@ -158,12 +158,22 @@ async def get_portfolio_api():
     dashboard showed the recommendation and nothing about what happened to
     it next, which is the half that decides whether any of this works.
     """
-    from alpha_agents.data.portfolio import get_open_positions, get_pending_orders
+    from alpha_agents.data.portfolio import (
+        TOTAL_CAPITAL, get_available_capital, get_closed_positions,
+        get_open_positions, get_pending_orders, get_portfolio_stats,
+    )
     pending = await asyncio.to_thread(get_pending_orders)
     positions = await asyncio.to_thread(get_open_positions)
+    closed = await asyncio.to_thread(get_closed_positions, 50)
+    stats = await asyncio.to_thread(get_portfolio_stats, 30)
+    available = await asyncio.to_thread(get_available_capital)
     return JSONResponse({
-        "pending": pending, "positions": positions,
-        "pending_count": len(pending), "position_count": len(positions),
+        "pending": pending,
+        "positions": positions,
+        "closed": closed,
+        "stats": stats,
+        "capital": {"total": TOTAL_CAPITAL, "available": available,
+                    "invested": TOTAL_CAPITAL - available},
     })
 
 

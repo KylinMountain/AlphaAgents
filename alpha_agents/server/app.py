@@ -97,6 +97,55 @@ async def get_activity_api(limit: int = 100, since_id: int | None = None):
     return JSONResponse({"activity": rows, "count": len(rows)})
 
 
+@app.get("/api/themes")
+async def get_themes_api():
+    """Investment themes with their lifecycle stage and strength."""
+    from alpha_agents.data.memory_store import get_active_themes
+    themes = await asyncio.to_thread(get_active_themes)
+    return JSONResponse({"themes": themes, "count": len(themes)})
+
+
+@app.get("/api/prediction-stats")
+async def get_prediction_stats_api(days: int = 7):
+    """Hit rate over recently scored predictions."""
+    from alpha_agents.data.memory_store import get_prediction_stats
+    stats = await asyncio.to_thread(get_prediction_stats, days)
+    return JSONResponse(stats)
+
+
+@app.get("/api/intraday-signals")
+async def get_intraday_signals_api():
+    """Today's intraday picks — what the 盘中追因 task actually flagged."""
+    from alpha_agents.data.memory_store import get_today_intraday_predictions
+    rows = await asyncio.to_thread(get_today_intraday_predictions)
+    return JSONResponse({"signals": rows, "count": len(rows)})
+
+
+@app.get("/api/market-overview")
+async def get_market_overview_api():
+    """Breadth and sector flow from the most recent capture.
+
+    Served from snapshots rather than a live fetch: the intraday monitor
+    already captures both every cycle, and a dashboard poll should not
+    trigger its own market-wide request. ``captured_at`` travels with the
+    payload so the UI shows how old the numbers are instead of implying
+    they are live.
+    """
+    from alpha_agents.data.snapshot_store import (
+        read_latest_breadth, read_latest_sector_flow,
+    )
+    breadth = await asyncio.to_thread(read_latest_breadth)
+    sectors = await asyncio.to_thread(read_latest_sector_flow, "行业", 8)
+    concepts = await asyncio.to_thread(read_latest_sector_flow, "概念", 8)
+    return JSONResponse({
+        "breadth": breadth,
+        "sectors": sectors,
+        "concepts": concepts,
+        "captured_at": (breadth or {}).get("captured_at")
+                       or (sectors[0]["captured_at"] if sectors else None),
+    })
+
+
 @app.get("/api/event-graph")
 async def get_event_graph_api():
     """Get event relationship graph for visualization."""

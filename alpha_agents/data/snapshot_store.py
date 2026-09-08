@@ -1056,6 +1056,24 @@ def normalise_published_at(raw: str) -> str:
         return ""
 
     from datetime import datetime as _dt
+
+    # RFC 2822 first, via the email parser rather than strptime: %z matches
+    # numeric offsets ('+0000') and 'Z', but not the alphabetic zone names
+    # RSS actually sends. Every feed ending in ' GMT' — BBC, CNBC,
+    # Bloomberg, France24, Google News, Politico — failed to parse here,
+    # and save_news drops a row whose timestamp will not parse. Those six
+    # sources were being fetched successfully and thrown away on write.
+    if "," in raw[:5]:
+        from email.utils import parsedate_to_datetime
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
     for fmt in _TS_FORMATS:
         try:
             parsed = _dt.strptime(raw, fmt)
@@ -1154,6 +1172,71 @@ def read_news(sources: list[str] | None, as_of: str,
     } for r in rows]
 
 
+def migrate_news_timestamps() -> int:
+    """Rewrite legacy published_at values into the canonical shape.
+
+    Rows written before ``save_news`` normalised keep their source's own
+    format, which cannot be string-ordered against the normalised ones.
+    Idempotent: rows already canonical are not matched, and a row whose
+    value still does not parse is left alone rather than deleted — losing
+    news to a migration is worse than mis-ordering it.
+
+    Returns the number of rows rewritten.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, published_at FROM news_items "
+        "WHERE published_at NOT LIKE '____-__-__ __:__:__'"
+    ).fetchall()
+
+    updates = []
+    for r in rows:
+        fixed = normalise_published_at(r["published_at"])
+        if fixed:
+            updates.append((fixed, r["id"]))
+    if not updates:
+        return 0
+
+    with _write_lock:
+        conn.executemany(
+            "UPDATE OR IGNORE news_items SET published_at = ? WHERE id = ?",
+            updates,
+        )
+        conn.commit()
+    logger.info("Normalised %d legacy news timestamps", len(updates))
+    return len(updates)
+
+
+def read_latest_breadth() -> dict | None:
+    """Most recent market breadth capture, or None if nothing captured yet.
+
+    The dashboard needs "what does the market look like right now" without
+    a live fetch on every page load; the intraday monitor already captures
+    this every cycle. Returns the capture time so the UI can say how stale
+    it is instead of implying it is live.
+    """
+    row = _get_conn().execute(
+        "SELECT * FROM market_breadth_snapshots ORDER BY captured_at DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def read_latest_sector_flow(scope: str = "行业", limit: int = 10) -> list[dict]:
+    """Top sectors by net inflow from the most recent capture."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT captured_at FROM sector_flow_snapshots WHERE scope = ? "
+        "ORDER BY captured_at DESC LIMIT 1", (scope,),
+    ).fetchone()
+    if not row:
+        return []
+    rows = conn.execute(
+        "SELECT * FROM sector_flow_snapshots WHERE scope = ? AND captured_at = ? "
+        "ORDER BY net_flow_yi DESC LIMIT ?", (scope, row["captured_at"], limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def read_latest_news(limit: int = 100,
                      sources: list[str] | None = None) -> list[dict]:
     """Newest flashes across all sources — the live 7x24 feed.
@@ -1164,10 +1247,17 @@ def read_latest_news(limit: int = 100,
     show what just arrived. The dashboard is live, never replayed, so
     there is nothing to cut against.
     """
-    q = ["SELECT source, published_at, title, summary, url FROM news_items"]
+    # published_at is compared as a string, so a row still holding a source's
+    # raw format cannot be ordered against a normalised one — 'Wed, 26 Aug'
+    # sorts above '2026-09-08' on the first character and takes over the top
+    # of the feed. save_news normalises on write; this guards the read
+    # against rows written before it did, in any DB that predates the
+    # migration.
+    q = ["SELECT source, published_at, title, summary, url FROM news_items",
+         "WHERE published_at LIKE '____-__-__ __:__:__'"]
     params: list = []
     if sources:
-        q.append("WHERE source IN (%s)" % ",".join("?" * len(sources)))
+        q.append("AND source IN (%s)" % ",".join("?" * len(sources)))
         params.extend(sources)
     q.append("ORDER BY published_at DESC LIMIT ?")
     params.append(limit)

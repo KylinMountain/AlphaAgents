@@ -151,3 +151,45 @@ class TestRetention:
         gone = store.prune_before("2026-06-01 00:00:00")
         assert gone == 1
         assert store.count() == 1
+
+
+class TestAttributionEvidence:
+    """The intraday task looks the news up itself rather than hoping the
+    model reaches for its search_news tool."""
+
+    def test_sectors_with_news_are_quoted(self):
+        from alpha_agents.pipeline.tasks.intraday_monitor import _news_for_sectors
+
+        hits = [{"title": "沙特能源设施遇袭 布伦特原油逼近100美元",
+                 "source": "新浪7x24", "time": "2026-09-08 16:27:00",
+                 "score": 0.65, "text": "", "url": ""}]
+        with patch("alpha_agents.data.news_index.search_news",
+                   return_value=hits):
+            out = _news_for_sectors(["石油加工贸易"])
+
+        assert "石油加工贸易" in out
+        assert "16:27" in out
+        assert "布伦特原油" in out
+
+    def test_a_sector_with_no_news_says_so(self):
+        """Silence is a finding: flow can lead the news, or be pure flow."""
+        from alpha_agents.pipeline.tasks.intraday_monitor import _news_for_sectors
+
+        with patch("alpha_agents.data.news_index.search_news", return_value=[]):
+            out = _news_for_sectors(["小金属概念"])
+
+        assert "无相关快讯" in out
+        assert "资金异动可能先于新闻" in out
+
+    def test_no_sectors_returns_nothing(self):
+        from alpha_agents.pipeline.tasks.intraday_monitor import _news_for_sectors
+
+        assert _news_for_sectors([]) == ""
+
+    def test_lookup_failure_degrades_quietly(self):
+        """A dead index must not take the whole attribution down."""
+        from alpha_agents.pipeline.tasks.intraday_monitor import _news_for_sectors
+
+        with patch("alpha_agents.data.news_index.search_news",
+                   side_effect=RuntimeError("index gone")):
+            assert _news_for_sectors(["石油加工贸易"]) == ""

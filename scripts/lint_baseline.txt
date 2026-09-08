@@ -16,7 +16,6 @@ alpha_agents/evolution/playbook.py::silent-except
 alpha_agents/pipeline/monitor.py::layering
 alpha_agents/pipeline/monitor.py::silent-except
 alpha_agents/pipeline/scheduler.py::layering
-alpha_agents/pipeline/tasks/intraday_monitor.py::file-size
 alpha_agents/pipeline/tasks/intraday_monitor.py::silent-except
 alpha_agents/pipeline/tasks/morning_scan.py::layering
 alpha_agents/pipeline/tasks/morning_scan.py::silent-except

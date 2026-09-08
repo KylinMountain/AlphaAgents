@@ -110,6 +110,21 @@ async def run_news_ingest() -> str | None:
     logger.info("News ingest: %s | ok=%s | failed=%s",
                 summary, ",".join(ok), ",".join(failed))
 
+    # Index what just arrived. Embedding only — no LLM — so this runs on
+    # every sweep including outside market hours, which is exactly when
+    # the corpus the morning scan will read is being built.
+    if total:
+        try:
+            from alpha_agents.data.news_index import index_recent_news
+            stats = await asyncio.to_thread(index_recent_news, 6, 600)
+            if stats["indexed"]:
+                logger.info("News index: +%d vectors (pruned %d)",
+                            stats["indexed"], stats["pruned"])
+        except Exception as e:
+            # The feed is the product; the index is an accelerator for
+            # attribution. A failure here must not fail the sweep.
+            logger.warning("News indexing failed: %s", e)
+
     # Not "task_failed": the sweep returned news, some sources just did
     # not answer. Logging it as a failure put a red 失败 row next to the
     # scheduler's own green 完成 row for the same run, at the same second.

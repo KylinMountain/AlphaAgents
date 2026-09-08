@@ -20,6 +20,12 @@ services:
 
   # Optional pipeline UI. Host port 8002 — 8000/8001 belong to TradingAgents.
   # Start with: docker compose --profile web up -d
+  #
+  # --profile web is required on EVERY deploy, not just the first. A plain
+  # `docker compose pull && up -d` skips profiled services without saying
+  # so: the scheduler moves to the new image, the UI silently keeps
+  # serving the old bundle, and the frontend fix you just shipped is
+  # nowhere to be seen.
   web:
     image: ghcr.io/kylinmountain/alphaagents:${IMAGE_TAG:-main}
     container_name: alphaagents-web

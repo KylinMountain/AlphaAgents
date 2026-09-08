@@ -51,6 +51,13 @@ export default function HomeView({ themes, stats, news, signals, market, reports
     return rows.reduce((a, r) => a + (Number(r.net_flow_yi) || 0), 0)
   }, [market])
 
+  const latestReport = useMemo(() => {
+    const sorted = [...reports].sort(
+      (a, b) => (b.timestamp || 0) - (a.timestamp || 0) || (b.id || 0) - (a.id || 0),
+    )
+    return sorted[0] || null
+  }, [reports])
+
   // The report's own events, when it has them. Task reports (morning,
   // review) carry none; monitor cycles do.
   const events = useMemo(() => {
@@ -75,13 +82,6 @@ export default function HomeView({ themes, stats, news, signals, market, reports
       return []
     }
   }, [latestReport])
-
-  const latestReportUnused = useMemo(() => {
-    const sorted = [...reports].sort(
-      (a, b) => (b.timestamp || 0) - (a.timestamp || 0) || (b.id || 0) - (a.id || 0),
-    )
-    return sorted[0] || null
-  }, [reports])
 
   // News only. Interleaving the intraday picks here put an input (a flash
   // someone published) and a conclusion (a stock this system chose) in one

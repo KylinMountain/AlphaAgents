@@ -147,8 +147,36 @@ def search_stocks(keyword: str) -> str:
 
 
 @function_tool
+def search_news(query: str, hours: int = 24, top_k: int = 8) -> str:
+    """在本地实时快讯库里做语义检索——追因的**首选**工具。
+
+    系统每 5 分钟从财联社电报、金十数据、新浪7x24、东方财富7x24 等源
+    摄取快讯并建立向量索引。要回答"某板块为什么异动"，答案通常就在这
+    几小时的快讯里，比搜索引擎更及时、信息密度更高。
+
+    先用这个；只有需要海外背景、政策原文、历史事件等本地快讯没有覆盖
+    的内容时，才退到 web_search。
+
+    Args:
+        query: 检索词，用板块名或事件描述，如"原油 中东 地缘"、"光刻机"。
+        hours: 时间窗，默认 24 小时。盘中追因用 6 或更小。
+        top_k: 返回条数上限。
+    """
+    import json as _json
+    from alpha_agents.data.news_index import search_news as _search
+    hits = _search(query=query, hours=hours, top_k=top_k)
+    return _json.dumps({"query": query, "hours": hours,
+                        "count": len(hits), "news": hits},
+                       ensure_ascii=False)
+
+
+@function_tool
 def web_search(query: str, max_results: int = 10) -> str:
-    """通用网页搜索（DuckDuckGo）。用于搜索最新新闻、验证信息、获取其他工具未覆盖的数据。
+    """通用网页搜索（DuckDuckGo）。**兜底**工具，先试 search_news。
+
+    用于本地快讯库没有覆盖的内容：海外背景、政策原文、历史事件、公司
+    基本面资料。本地快讯是实时的、中文的、A股相关的；搜索引擎返回的
+    往往是二手整理稿，时效性差。
 
     支持中英文搜索。英文搜索效果更好，建议对国际事件使用英文查询。
     例如："Trump tariff China 2026" 或 "特朗普关税最新消息"
@@ -440,7 +468,7 @@ STOCK_TOOLS = [
     get_market_snapshot, get_institutional_position, get_sina_7x24,
     get_sector_best_stocks,
     get_us_market, get_bond_yields, get_global_overview,
-    web_search, web_fetch, get_pizzint,
+    search_news, web_search, web_fetch, get_pizzint,
     get_sentiment_phase,
 ]
 
@@ -492,7 +520,7 @@ def get_futures_basis(date: str = "") -> str:
 # Futures analysis tools — for the futures strategist agent
 FUTURES_TOOLS = [
     get_futures_quotes, get_futures_inventory, get_futures_basis,
-    get_cftc_positions, web_search, web_fetch, get_pizzint,
+    get_cftc_positions, search_news, web_search, web_fetch, get_pizzint,
 ]
 
 # ALL_TOOLS: full set including news (for backward compatibility / one-shot mode)

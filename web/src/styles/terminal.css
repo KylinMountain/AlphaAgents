@@ -60,3 +60,22 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .empty-note{font-size:12.5px;color:var(--muted);padding-top:12px}.footer-note{text-align:center;color:var(--muted);font-size:11.5px;padding:20px 0 4px}
 @media (max-width:1200px){.app{grid-template-columns:74px 1fr}.brand>div:last-child,.nav-label,.nav-item span:not(.ico),.nav-item .badge,.sidebar-foot{display:none}.brand{justify-content:center;padding-left:0;padding-right:0}.nav-item{justify-content:center}.alpha-brief{grid-column:span 12}.intel-rail{grid-column:span 12;max-height:430px}.theme-card,.anomaly-card{grid-column:span 12}.realtime-layout{grid-template-columns:1fr}.realtime-side{position:static;grid-template-columns:1fr 1fr;display:grid}.search{width:190px}}
 @media (max-width:760px){.app{display:block}.sidebar{display:none}.ticker{display:none}.topbar{top:0;padding:0 12px}.search{display:none}.content{padding:14px}.kpi-strip,.anomaly-hero{grid-template-columns:1fr 1fr}.evidence{grid-template-columns:1fr 1fr}.brief-top{display:block}.confidence{width:100%;margin-top:12px}.brief-bottom{grid-template-columns:1fr}.realtime-side{display:flex}.timeline-head{display:none}.timeline-row{grid-template-columns:55px 1fr}.timeline-row>div:nth-child(2){display:none}.timeline-result{grid-column:2;text-align:left;margin-top:7px}.report-grid,.memory-grid{grid-template-columns:1fr}}
+
+/* Structured event rows on the home report card.
+ *
+ * The digest produces category, importance and the sectors it read as
+ * helped or hurt; rendering the report as one paragraph threw all of it
+ * away. Sector chips use the A-share rise/fall tokens — a sector the
+ * news helps is red here, same as a price that rose. */
+.event-list{display:flex;flex-direction:column;margin-top:14px;border-top:1px solid var(--border)}
+.event-row{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:11px 0;border-bottom:1px solid var(--border)}
+.event-row:last-child{border-bottom:0}
+.event-row .severity{margin:2px 0 0;justify-content:center}
+.event-body{min-width:0}
+.event-title{font-size:13px;line-height:1.5;color:var(--text)}
+.event-title .stage-chip{margin-right:7px;vertical-align:1px}
+.event-sectors{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.sector-chip{font-size:11px;padding:2px 7px;border-radius:7px;background:var(--surface-2);color:var(--text-2)}
+.sector-chip.rise{background:var(--rise-soft);color:var(--rise)}
+.sector-chip.fall{background:var(--fall-soft);color:var(--fall)}
+.brief-summary{margin:12px 0 0;color:var(--text-2);line-height:1.7;font-size:12.5px}

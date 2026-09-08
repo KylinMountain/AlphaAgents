@@ -229,7 +229,7 @@ def get_recent_reports(limit: int = 20) -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
         "SELECT id, cycle, timestamp, event_count, categories, report_text, "
-        "report_type, created_at "
+        "report_type, events_json, created_at "
         "FROM reports ORDER BY timestamp DESC LIMIT ?",
         (limit,),
     ).fetchall()

@@ -22,6 +22,7 @@ from alpha_agents.pipeline.digest import digest_news
 from alpha_agents.agents.strategist import run_analysis
 from alpha_agents.agents.futures import run_futures_analysis
 from alpha_agents.data.activity_log import log_activity
+from alpha_agents.pipeline.market_session import analysis_targets, describe
 from alpha_agents.data.report_store import save_report, save_predictions, save_event, link_events
 from alpha_agents.pipeline.event_linker import analyze_event_links
 from alpha_agents.notify import notify_all, format_report_notification
@@ -49,19 +50,51 @@ NEWS_SOURCES = [
 ]
 
 
-async def route_and_analyze(events: list[dict], event_bus=None) -> dict[str, str]:
+def _store_only(items: list[dict]) -> int:
+    """Persist flashes without digesting them.
+
+    digest_news is where capture normally happens, so a cycle that skips
+    the digest would also skip the store — and the morning scan would
+    find nothing accumulated.
+    """
+    from alpha_agents.data.snapshot_store import save_news
+    by_source: dict[str, list[dict]] = {}
+    for item in items:
+        by_source.setdefault(item.get("source", "unknown"), []).append(item)
+    total = 0
+    for source, rows in by_source.items():
+        try:
+            total += save_news(source, rows)
+        except Exception as e:
+            logger.warning("Store-only capture failed for %s: %s", source, e)
+    return total
+
+
+async def route_and_analyze(events: list[dict], event_bus=None,
+                            markets: set[str] | None = None) -> dict[str, str]:
     """Route events by target_market and run stock/futures agents in parallel.
+
+    ``markets`` limits which agents run — the caller decides from the
+    session clock. None means both, which is what the manual trigger and
+    the tests want: an explicit request is not bound by market hours.
 
     Returns dict with "stock" and "futures" report strings (may be empty).
     If event_bus is provided, tool call events are broadcast in real-time.
     """
     from alpha_agents.agents.hooks import ToolEventHooks
 
-    stock_events = [e for e in events if e.get("target_market", "both") in ("stock", "both")]
-    futures_events = [e for e in events if e.get("target_market", "both") in ("futures", "both")]
+    allowed = markets if markets is not None else {"stock", "futures"}
 
-    logger.info("Routing: %d stock events, %d futures events",
-                len(stock_events), len(futures_events))
+    stock_events = ([e for e in events
+                     if e.get("target_market", "both") in ("stock", "both")]
+                    if "stock" in allowed else [])
+    futures_events = ([e for e in events
+                       if e.get("target_market", "both") in ("futures", "both")]
+                      if "futures" in allowed else [])
+
+    logger.info("Routing: %d stock events, %d futures events (markets=%s)",
+                len(stock_events), len(futures_events),
+                ",".join(sorted(allowed)) or "none")
 
     # Build hooks that emit tool call and reasoning events to the event bus
     def _make_emitter(agent_label):
@@ -267,7 +300,25 @@ class NewsMonitor:
                     await asyncio.sleep(self.interval)
                     continue
 
-                logger.info("Found %d new news items, running digest...", len(new_items))
+                # Outside a session the flashes are still worth having —
+                # the morning scan digests the accumulated window — but not
+                # worth analysing. Storing without digesting is the whole
+                # saving: digest is an LLM call per batch, and the two
+                # agents after it are the expensive part.
+                targets = analysis_targets()
+                if not targets:
+                    stored = await asyncio.to_thread(_store_only, new_items)
+                    logger.info(
+                        "%s: stored %d flashes, no analysis (%s)",
+                        f"Cycle {cycle}", stored, describe(targets))
+                    await self._emit("pipeline", "idle",
+                                     f"非交易时段，已收 {len(new_items)} 条，"
+                                     f"{self.interval}秒后重试")
+                    await asyncio.sleep(self.interval)
+                    continue
+
+                logger.info("Found %d new news items, running digest (%s)...",
+                            len(new_items), describe(targets))
                 # The activity feed is written by the scheduler for its own
                 # tasks; the monitor wrote nothing, so a dashboard watching
                 # a live pipeline showed the last scheduler row from hours
@@ -342,7 +393,8 @@ class NewsMonitor:
 
                 # 3. Route events and run agents in parallel
                 await self._emit("agent", "running", "Agent正在深度分析...")
-                results = await route_and_analyze(events, event_bus=self._bus)
+                results = await route_and_analyze(events, event_bus=self._bus,
+                                                  markets=targets)
                 stock_events = results["stock_events"]
                 futures_events = results["futures_events"]
                 stock_result = results["stock"]

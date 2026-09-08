@@ -258,14 +258,41 @@ def apply(decisions: list[dict], positions: list[dict],
     return alerts
 
 
-async def run(price_map: dict[str, float], signals: list[dict]) -> list[dict]:
-    """One exit-decision pass over the open positions.
+async def run(price_map: dict[str, float], signals: list[dict],
+              narrative_due: list | None = None) -> list[dict]:
+    """Call a model only where one is actually needed.
 
-    Every failure path holds rather than sells: no positions, no prices, a
+    Two situations qualify. A thesis carrying a ``narrative`` condition has
+    reached its review slot — the agent wrote something no rule can check
+    and has to re-read it itself. Or a rule signal fired on a position that
+    has no thesis at all, which is every position opened before this design
+    existed and any pick whose recommendation omitted its invalidations.
+
+    Everything else was already settled in code by ``thesis_monitor``, for
+    free and identically every cycle. A quiet market now costs zero model
+    calls instead of 48.
+
+    Every failure path holds rather than sells: no candidates, no prices, a
     timeout, a bad response. The hard stop runs regardless, so holding on
     error cannot run the account down.
     """
-    positions = [p for p in get_open_positions() if price_map.get(p["code"])]
+    from alpha_agents.data.thesis import get_active
+
+    signal_codes = {s["code"] for s in signals if s.get("type") == "signal"}
+    narrative_codes = {th.code for th, _ in (narrative_due or [])}
+
+    candidates = []
+    for pos in get_open_positions():
+        code = pos["code"]
+        if not price_map.get(code):
+            continue
+        if code in narrative_codes:
+            candidates.append(pos)
+        elif code in signal_codes and not get_active(code=code):
+            # A rule wanted out and there is no plan on file to consult.
+            candidates.append(pos)
+
+    positions = candidates
     if not positions:
         return []
 

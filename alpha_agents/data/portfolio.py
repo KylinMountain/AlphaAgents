@@ -110,6 +110,31 @@ def _calc_shares(price: float, max_amount: float) -> int:
     return lots * LOT_SIZE
 
 
+# Conviction maps onto [floor, 1.0] of the per-stock cap. The floor is not
+# zero: an idea the agent thought worth opening at all still deserves
+# enough size to produce a readable outcome, and a 2% position teaches the
+# learning layer nothing when it works.
+MIN_CONVICTION_FACTOR = 0.45
+
+
+def _conviction_factor(code: str) -> float:
+    """How much of the per-stock cap this idea has earned, from its thesis.
+
+    Returns 1.0 when there is no thesis — every caller predates them, and
+    a missing thesis must not silently shrink a position.
+    """
+    try:
+        from alpha_agents.data.thesis import get_active
+        theses = get_active(code=code)
+    except Exception as e:
+        logger.debug("Conviction lookup failed for %s: %s", code, e)
+        return 1.0
+    if not theses:
+        return 1.0
+    conviction = max(0.0, min(1.0, theses[-1].conviction or 0.0))
+    return MIN_CONVICTION_FACTOR + (1.0 - MIN_CONVICTION_FACTOR) * conviction
+
+
 def get_available_capital() -> float:
     """Get remaining cash = total capital - sum of open position costs."""
     conn = _get_conn()
@@ -344,7 +369,13 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         invested = TOTAL_CAPITAL - available
         sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
 
-        max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT
+        # Size by conviction rather than filling every position to the cap.
+        # A flat 15% everywhere throws away half of what a trader is for:
+        # being right more often is worth less than being bigger when
+        # right. The thesis carries a conviction the agent stated when it
+        # opened the idea; with no thesis this falls back to the cap and
+        # behaves exactly as before.
+        max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT * _conviction_factor(code)
         max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
         max_amount = min(available, max_per_stock, max(0, max_for_theme), sentiment_room)
 
@@ -368,6 +399,19 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             (fill_date, fill_price, shares, order["id"]),
         )
         conn.commit()
+
+    # Bind the thesis to the position it just became. Until the fill the
+    # thesis is an idea; from here the monitor evaluates it against a real
+    # cost basis every cycle, and an unbound thesis would be checked
+    # against nothing.
+    try:
+        from alpha_agents.data.thesis import attach_position, get_active
+        for th in get_active(code=code):
+            if th.position_id is None:
+                attach_position(th.id, order["id"])
+                break
+    except Exception as e:
+        logger.warning("Could not bind thesis to position %s: %s", code, e)
 
     remaining = available - cost
     logger.info("Order filled: %s %s %d股 @ %.2f = %.0f元 (止损%s) | 剩余%.0f",

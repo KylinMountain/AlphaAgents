@@ -36,6 +36,33 @@ CREATE TABLE IF NOT EXISTS theme_lines (
     notes TEXT
 );
 
+-- A position is held because of a thesis, and the thesis — not the fill —
+-- is what gets graded. See alpha_agents/data/thesis.py and
+-- docs/thesis_design.md for why the invalidation conditions are a closed
+-- vocabulary rather than free text.
+CREATE TABLE IF NOT EXISTS theses (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT,
+    theme TEXT,
+    claim TEXT,                 -- what the agent believes will happen
+    horizon_days INTEGER,       -- how long it gave itself to be right
+    prob REAL,                  -- its own 0-1, not derived by code
+    conviction REAL,            -- drives position size
+    conditions TEXT,            -- JSON: the invalidation vocabulary
+    status TEXT DEFAULT 'active',
+    position_id INTEGER,        -- virtual_portfolio row, once filled
+    created_by TEXT,
+    created_at TEXT,
+    closed_at TEXT,
+    close_kind TEXT,            -- which condition fired, empty on blind_spot
+    close_note TEXT,
+    checkpoints TEXT            -- JSON: each re-read of a live thesis
+);
+
+CREATE INDEX IF NOT EXISTS idx_theses_status ON theses(status);
+CREATE INDEX IF NOT EXISTS idx_theses_position ON theses(position_id);
+
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY,
     date TEXT NOT NULL,

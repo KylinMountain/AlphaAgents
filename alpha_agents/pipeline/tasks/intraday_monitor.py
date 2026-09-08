@@ -30,7 +30,7 @@ from alpha_agents.data.scoring import confidence_to_prob
 from alpha_agents.pipeline.tasks import (
     safe_active_themes, safe_market_regime, safe_sentiment_phase,
 )
-from alpha_agents.pipeline.tasks import exit_decision
+from alpha_agents.pipeline.tasks import exit_decision, thesis_monitor
 from alpha_agents.pipeline.tasks.anomaly_scan import (
     _detect_anomalies, _detect_style_rotation, _news_for_sectors,
     _refresh_theme_strengths,
@@ -145,7 +145,21 @@ async def run_intraday_monitor() -> str | None:
                                              today=today_str,
                                              hard_only=agent_exits)
                 if agent_exits:
-                    pos_alerts += await exit_decision.run(price_map, pos_alerts)
+                    # Theses first: they are the agent's own stated plan,
+                    # evaluated in code, so they cost nothing and they run
+                    # before the hard floor gets a chance to close a
+                    # position the agent had already accounted for.
+                    result = await asyncio.to_thread(
+                        thesis_monitor.check_all, price_map)
+                    pos_alerts += result["closed"]
+                    # A position the floor already took, with nothing the
+                    # agent listed having fired — the blind spots.
+                    await asyncio.to_thread(thesis_monitor.settle_orphans,
+                                            price_map)
+                    # Only what genuinely needs judgement reaches a model.
+                    pos_alerts += await exit_decision.run(
+                        price_map, pos_alerts,
+                        narrative_due=result["narrative_due"])
                 # Split by notification importance:
                 #   - stop_tightened: bearish pre-alert, log only (avoids spam;
                 #     user sees it in the daily review / logs)

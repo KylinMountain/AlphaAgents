@@ -75,8 +75,13 @@ async def get_news_api(limit: int = 100, source: str | None = None):
     opens it for. Task health moved to a summary card; this is the feed.
     """
     from alpha_agents.data.snapshot_store import read_latest_news
+    from alpha_agents.sources.flash_text import drop_translation_twins
     sources = [source] if source else None
-    rows = await asyncio.to_thread(read_latest_news, limit, sources)
+    # Over-fetch: the twin filter drops roughly the Jin10 half of what it
+    # sees, and the ingest side only started filtering today — rows
+    # captured before that are still paired in the table.
+    rows = await asyncio.to_thread(read_latest_news, limit * 2, sources)
+    rows = drop_translation_twins(rows)[:limit]
     return JSONResponse({"news": rows, "count": len(rows)})
 
 

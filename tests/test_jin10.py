@@ -36,8 +36,9 @@ def test_parse_item():
     raw = SAMPLE_ITEMS[0]
     item = _parse_item(raw)
     content = SAMPLE_ITEMS[0]["data"]["content"]
-    assert item["title"] == content[:50]
-    assert len(item["title"]) == 50
+    # Headline is cut at a clause boundary now, not at a fixed 50 chars.
+    assert content.startswith(item["title"].rstrip("…"))
+    assert not item["title"].endswith("，")
     assert item["source"] == "金十数据"
     assert item["time"] == "2026-04-02 10:30:00"
     assert "降准" in item["summary"]

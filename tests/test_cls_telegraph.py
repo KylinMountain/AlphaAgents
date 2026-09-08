@@ -71,8 +71,14 @@ class TestParseItem:
         assert got["title"] == "正式标题"
 
     def test_untitled_content_falls_back_to_a_prefix(self):
+        """Prefix length is the headline helper's call, not a fixed 50.
+
+        It cuts at a clause boundary where one exists, so asserting an
+        exact length here would just re-pin the old mid-word slice.
+        """
         got = cls._parse_item({"content": "没有方括号的一段正文" * 10})
-        assert len(got["title"]) == 50
+        assert 40 < len(got["title"]) < 70
+        assert got["title"].startswith("没有方括号的一段正文")
 
     def test_level_a_is_marked_important(self):
         assert cls._parse_item({"content": "x", "level": "A"})["important"]

@@ -13,6 +13,7 @@ import json
 import logging
 
 from alpha_agents.http_client import fetch
+from alpha_agents.sources.flash_text import drop_translation_twins, headline
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +56,8 @@ def _parse_item(item: dict) -> dict:
     content = (inner.get("content") or inner.get("vip_title") or "").strip()
     time_str = (item.get("time") or "").strip()
 
-    # Headlines are wrapped in 【】 when present.
-    if content.startswith("【") and "】" in content:
-        title = content[1:content.index("】")]
-    else:
-        title = content[:50]
-
     return {
-        "title": title,
+        "title": headline(content),
         "summary": content[:300],
         "time": time_str,
         "source": "金十数据",
@@ -93,6 +88,8 @@ def get_jin10_fn(limit: int = 30, keyword: str | None = None,
     try:
         raw_items = _fetch_flash_list(limit)
         news = [_parse_item(item) for item in raw_items]
+        # Jin10 re-posts every flash in English a few seconds later.
+        news = drop_translation_twins(news)
 
         try:
             save_news("金十数据", news)

@@ -21,6 +21,7 @@ import time
 from urllib.parse import urlencode
 
 from alpha_agents.http_client import fetch
+from alpha_agents.sources.flash_text import headline
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +67,7 @@ def _parse_item(item: dict) -> dict | None:
     content = (item.get("content") or item.get("brief") or "").strip()
     title = (item.get("title") or "").strip()
     if not title and content:
-        # Headlines are wrapped in 【】 when present.
-        title = (content[1:content.index("】")]
-                 if content.startswith("【") and "】" in content
-                 else content[:50])
+        title = headline(content)
     if not title:
         return None
 

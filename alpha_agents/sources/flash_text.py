@@ -50,7 +50,8 @@ def has_chinese(text: str) -> bool:
     return bool(_CJK.search(text or ""))
 
 
-def drop_translation_twins(items: list[dict], window_seconds: int = 120) -> list[dict]:
+def drop_translation_twins(items: list[dict], window_seconds: int = 120,
+                           source: str = "金十数据") -> list[dict]:
     """Remove Jin10's English re-posts of a Chinese flash.
 
     Jin10 publishes each flash twice: the Chinese original, then an English
@@ -60,6 +61,11 @@ def drop_translation_twins(items: list[dict], window_seconds: int = 120) -> list
     An English item is dropped only when a Chinese item sits within
     ``window_seconds`` of it — an English-only flash, which the feed does
     occasionally carry, has no twin and survives.
+
+    Scoped to one source, because the mixed feed also carries BBC, CNBC and
+    the rest of the international RSS in English. Chinese flashes arrive
+    every few seconds, so an unscoped filter would find a "twin" for every
+    foreign headline and delete the entire international feed.
     """
     from datetime import datetime
 
@@ -69,8 +75,13 @@ def drop_translation_twins(items: list[dict], window_seconds: int = 120) -> list
         except (ValueError, TypeError):
             return None
 
+    def in_scope(item: dict) -> bool:
+        return source is None or item.get("source") == source
+
+    scoped = [i for i in items if in_scope(i)]
     chinese_times = [
-        t for t in (stamp(i) for i in items if has_chinese(i.get("summary") or i.get("title", "")))
+        t for t in (stamp(i) for i in scoped
+                    if has_chinese(i.get("summary") or i.get("title", "")))
         if t is not None
     ]
     if not chinese_times:
@@ -79,7 +90,7 @@ def drop_translation_twins(items: list[dict], window_seconds: int = 120) -> list
     kept = []
     for item in items:
         text = item.get("summary") or item.get("title", "")
-        if has_chinese(text):
+        if not in_scope(item) or has_chinese(text):
             kept.append(item)
             continue
         ts = stamp(item)

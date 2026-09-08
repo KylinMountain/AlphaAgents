@@ -73,6 +73,24 @@ class TestDropTranslationTwins:
         items = [self._flash("2026-09-08 08:2%d:00" % i, f"快讯{i}") for i in range(5)]
         assert drop_translation_twins(items) == items
 
+    def test_international_feed_is_not_collateral(self):
+        """The filter is scoped to Jin10 for this reason.
+
+        The dashboard's feed is mixed. Chinese flashes arrive every few
+        seconds, so an unscoped window match would find a "twin" for every
+        BBC headline and wipe the international feed off the panel.
+        """
+        items = [
+            {"title": "China stocks slip", "summary": "China stocks slip",
+             "time": "2026-09-08 08:21:29", "source": "BBC Business"},
+            self._flash("2026-09-08 08:21:27", "现货黄金站上4430美元/盎司。"),
+        ]
+
+        kept = drop_translation_twins(items)
+
+        assert len(kept) == 2
+        assert any(k["source"] == "BBC Business" for k in kept)
+
     def test_unparseable_timestamp_is_kept(self):
         items = [
             self._flash("", "Some English headline with no usable stamp"),

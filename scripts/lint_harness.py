@@ -132,47 +132,156 @@ def check_file_size(path: Path, source: str) -> list[Violation]:
     )]
 
 
-def check_undefined_names(path: Path, tree: ast.AST) -> list[Violation]:
-    """A name used but never imported or defined in the module.
+# Injected by the import machinery, so absent from both a module's own
+# bindings and the builtins list.
+_MODULE_DUNDERS = frozenset({
+    "__file__", "__name__", "__doc__", "__package__", "__spec__",
+    "__loader__", "__builtins__", "__debug__",
+})
 
-    Python only raises NameError when the line actually executes, so a call
-    site added without its import survives every test that does not reach
-    that branch. This shipped: ``intraday_monitor`` called
-    ``build_decision_context`` inside the anomaly path and crashed the 盘中
-    追因 task every five minutes in production, silently, for a day.
+
+def _collect_bindings(body, *, include_nested: bool) -> set[str]:
+    """Names bound by a block.
+
+    ``include_nested`` distinguishes the two questions this needs to
+    answer: module scope must see names bound anywhere at its own level
+    (including inside ``if`` and ``try``), while a function's local scope
+    must NOT absorb names bound inside functions defined beside it.
     """
-    # Injected by the import machinery, so absent from both the module's
-    # own bindings and the builtins list.
-    bound: set[str] = {"__file__", "__name__", "__doc__", "__package__",
-                       "__spec__", "__loader__", "__builtins__", "__debug__"}
-    for node in ast.walk(tree):
+    bound: set[str] = set()
+
+    def visit(node):
+        """Bindings contributed by this node, not descending into a def.
+
+        A def contributes only its own name here. Descending would pull in
+        its parameters and locals, and a parameter of a sibling function
+        leaking into this scope is precisely the miss that let a stray
+        ``themes`` reference through.
+        """
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            bound.add(node.name)
+            if include_nested:
+                for stmt in node.body:
+                    visit(stmt)
+            return
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             bound.update((a.asname or a.name).split(".")[0] for a in node.names)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             bound.add(node.id)
-        elif isinstance(node, ast.arg):
-            bound.add(node.arg)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             bound.update(node.names)
         elif isinstance(node, ast.ExceptHandler) and node.name:
             bound.add(node.name)
+        for child in ast.iter_child_nodes(node):
+            visit(child)
 
-    out, reported = [], set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)):
-            continue
-        name = node.id
-        if name in bound or name in dir(builtins) or name in reported:
-            continue
-        reported.add(name)
+    for stmt in body:
+        visit(stmt)
+    return bound
+
+
+def check_undefined_names(path: Path, tree: ast.AST) -> list[Violation]:
+    """A name used but never bound in any enclosing scope.
+
+    Python only raises NameError when the line actually executes, so a call
+    site added without its import survives every test that does not reach
+    that branch. Two of these shipped: ``intraday_monitor`` called
+    ``build_decision_context`` with no import and crashed the 盘中追因 task
+    every five minutes for a day, and ``morning_scan`` reached for a
+    ``themes`` local belonging to a different function, failing only after
+    the agent had done all its work.
+
+    The second one is why this walks scopes instead of flattening the file:
+    a first version collected every ``arg`` in the module into one set, so
+    a parameter of any function made that name look bound everywhere —
+    which is exactly the ``themes`` case, and it passed clean.
+    """
+    out: list[Violation] = []
+    reported: set[str] = set()
+
+    def report(node: ast.Name) -> None:
+        if node.id in reported:
+            return
+        reported.add(node.id)
         out.append(Violation(
             path, node.lineno, "undefined-name",
-            f"用到了 {name}，但模块里既没 import 也没定义",
-            f"补上 import，或确认拼写。测试跑不到这一行时，NameError 只会在"
-            f"生产环境的那条分支上炸，且日志里只有一行 NameError。",
+            f"用到了 {node.id}，但当前作用域和模块里都没有绑定它",
+            "补上 import，或把它作为参数传进来，或确认拼写。测试跑不到"
+            "这一行时，NameError 只会在生产环境的那条分支上炸，且日志里"
+            "只有一行 NameError。",
         ))
+
+    def visit_scope(nodes, enclosing: set[str], own: set[str]) -> None:
+        """Check the loads directly in this scope, then recurse into nested ones.
+
+        Nested defs and lambdas are not descended into here — their bodies
+        belong to their own scope and are checked with their own parameters
+        in scope. Walking them from the outside was the first version's
+        mistake: every local of a nested helper looked undefined.
+        """
+        scope = enclosing | own
+        pending: list = []
+
+        def scan_node(node) -> None:
+            # The check has to happen on the node itself, not only on its
+            # children: a top-level ``def`` reached as a statement would
+            # otherwise have its body scanned in the enclosing scope, and
+            # every local in it read as undefined.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.Lambda, ast.ClassDef)):
+                pending.append(node)
+                # Decorators, defaults and bases evaluate in THIS scope.
+                for extra in _outer_evaluated(node):
+                    scan_node(extra)
+                return
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in scope and node.id not in dir(builtins):
+                    report(node)
+            for child in ast.iter_child_nodes(node):
+                scan_node(child)
+
+        for n in nodes:
+            scan_node(n)
+
+        for child in pending:
+            if isinstance(child, ast.ClassDef):
+                visit_scope(child.body, scope,
+                            _collect_bindings(child.body, include_nested=False))
+                continue
+            params = {a.arg for a in _all_args(child.args)}
+            body = child.body if isinstance(child.body, list) else [child.body]
+            visit_scope(
+                body, scope,
+                params | _collect_bindings(body, include_nested=False),
+            )
+
+    module_scope = _MODULE_DUNDERS | _collect_bindings(
+        getattr(tree, "body", []), include_nested=False,
+    )
+    visit_scope(getattr(tree, "body", []), module_scope, set())
+    return out
+
+
+def _all_args(args: ast.arguments) -> list[ast.arg]:
+    out = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+    if args.vararg:
+        out.append(args.vararg)
+    if args.kwarg:
+        out.append(args.kwarg)
+    return out
+
+
+def _outer_evaluated(node) -> list:
+    """Parts of a def that are evaluated in the *enclosing* scope."""
+    out = list(getattr(node, "decorator_list", []) or [])
+    args = getattr(node, "args", None)
+    if args is not None:
+        out += [d for d in list(args.defaults) + list(args.kw_defaults) if d]
+    out += list(getattr(node, "bases", []) or [])
+    returns = getattr(node, "returns", None)
+    if returns is not None:
+        out.append(returns)
     return out
 
 

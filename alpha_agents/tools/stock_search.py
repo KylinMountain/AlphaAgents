@@ -57,7 +57,12 @@ def _search_like(conn, keyword: str) -> list[dict]:
 
 
 def _search_semantic(conn, keyword: str, top_k: int = 10) -> list[dict]:
-    """Semantic search using ChromaDB embeddings (if available)."""
+    """Semantic search over concept embeddings, when they are built.
+
+    Vectors come from BGE-M3 and live in data/vector_store.py (SQLite +
+    numpy). ChromaDB used to back this and is long gone — 134MB of
+    transitive dependencies for a few thousand vectors.
+    """
     try:
         from alpha_agents.data.embeddings import search_concepts_semantic
         concept_matches = search_concepts_semantic(conn, keyword, top_k=top_k)

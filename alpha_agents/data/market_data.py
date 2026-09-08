@@ -562,6 +562,14 @@ def get_market_activity() -> Optional[pd.DataFrame]:
 
     import akshare as ak
     df = _ak_call(ak.stock_market_activity_legu)
+    if df is None or df.empty:
+        # legu started raising AttributeError('NoneType' has no 'text') —
+        # the upstream page stopped answering. Breadth is derivable from
+        # quotes we already fetch for every A-share, so a dead third party
+        # costs us nothing but a slower path.
+        logger.warning("stock_market_activity_legu returned nothing — "
+                       "computing breadth from the whole-market quote sweep")
+        df = compute_breadth_from_quotes()
     if df is not None and not df.empty:
         try:
             from alpha_agents.data.snapshot_store import save_market_breadth
@@ -569,6 +577,111 @@ def get_market_activity() -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.debug("breadth capture failed: %s", e)
     return df
+
+
+# A-share daily limits by board. ST names cap at ±5% but are not
+# distinguishable from the code alone, so they are counted with their
+# board — the error is one-directional and small (ST is ~2% of names).
+_LIMIT_PCT = (
+    (("688", "300", "301"), 19.8),   # 科创板 / 创业板 ±20%
+    (("8", "4"), 29.8),              # 北交所 ±30%
+)
+_DEFAULT_LIMIT_PCT = 9.8
+
+
+def _limit_threshold(code: str) -> float:
+    for prefixes, pct in _LIMIT_PCT:
+        if code.startswith(prefixes):
+            return pct
+    return _DEFAULT_LIMIT_PCT
+
+
+def compute_breadth_from_quotes() -> Optional[pd.DataFrame]:
+    """Advance/decline and limit counts from a whole-market quote sweep.
+
+    Returns akshare's 2-column item/value shape so every caller and
+    ``save_market_breadth`` stay unchanged.
+
+    涨停 counts names *currently* at the cap, so "真实涨停" computed as
+    "at the cap and trading at its high" would equal it by construction and
+    carry no information. The useful figure from the same data is 炸板:
+    a high that reached the cap while the last price sits below it.
+    """
+    try:
+        import sqlite3
+        from alpha_agents.config import DATA_DIR
+        from alpha_agents.data.snapshot_store import fetch_all_quotes_tencent
+
+        conn = sqlite3.connect(DATA_DIR / "stocks.db")
+        codes = [r[0] for r in conn.execute("SELECT code FROM stocks")]
+        conn.close()
+        if not codes:
+            logger.warning("breadth fallback: stocks.db has no codes — "
+                           "run `python main.py build-index` first")
+            return None
+
+        quotes = fetch_all_quotes_tencent(codes)
+        if quotes is None or quotes.empty:
+            return None
+
+        # Tencent columns come back in Chinese. Reading English names off
+        # the row gave None for every field and produced a breadth of all
+        # zeros — which the dashboard would have rendered as a real,
+        # catastrophic market rather than as a bug.
+        required = {"代码", "涨跌幅", "最新价", "最高", "最低"}
+        missing = required - set(quotes.columns)
+        if missing:
+            logger.warning("breadth fallback: quote frame missing %s — "
+                           "columns are %s", missing, list(quotes.columns))
+            return None
+
+        advances = declines = flat = 0
+        limit_up = limit_down = broken = 0
+        counted = 0
+        for row in quotes.itertuples(index=False):
+            values = dict(zip(quotes.columns, row))
+            pct = values.get("涨跌幅")
+            if pct is None or pd.isna(pct):
+                continue
+            counted += 1
+            if pct > 0:
+                advances += 1
+            elif pct < 0:
+                declines += 1
+            else:
+                flat += 1
+
+            cap = _limit_threshold(str(values.get("代码", "")))
+            price = values.get("最新价")
+            high = values.get("最高")
+            prev = values.get("昨收")
+            if pct >= cap:
+                limit_up += 1
+            elif pct <= -cap:
+                limit_down += 1
+            elif price and high and prev and prev > 0:
+                # 炸板: touched the cap intraday, no longer there.
+                if (high - prev) / prev * 100 >= cap:
+                    broken += 1
+
+        if not counted:
+            logger.warning("breadth fallback: %d quotes but none had a "
+                           "usable 涨跌幅 — reporting nothing rather than zeros",
+                           len(quotes))
+            return None
+
+        return pd.DataFrame([
+            {"item": "上涨", "value": advances},
+            {"item": "下跌", "value": declines},
+            {"item": "平盘", "value": flat},
+            {"item": "涨停", "value": limit_up},
+            {"item": "跌停", "value": limit_down},
+            {"item": "真实涨停", "value": limit_up},
+            {"item": "炸板", "value": broken},
+        ])
+    except Exception as e:
+        logger.warning("breadth fallback failed: %s", e)
+        return None
 
 
 # ── Financial Data (akshare THS) ────────────────────────────

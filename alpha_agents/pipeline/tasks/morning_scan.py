@@ -19,7 +19,9 @@ from alpha_agents.data.scoring import confidence_to_prob
 from alpha_agents.data.decision_context import (
     build_decision_context, merge_features,
 )
-from alpha_agents.pipeline.tasks import safe_market_regime, safe_sentiment_phase
+from alpha_agents.pipeline.tasks import (
+    safe_active_themes, safe_market_regime, safe_sentiment_phase,
+)
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
@@ -505,7 +507,7 @@ def _save_recommendations_list(recs: list[dict]) -> None:
         task="morning_scan",
         news_window_hours=_WINDOW_STATE.get("hours"),
         news_count=_WINDOW_STATE.get("count"),
-        themes=themes,
+        themes=safe_active_themes(),
         market_regime=safe_market_regime(),
         sentiment_phase=safe_sentiment_phase(),
     )

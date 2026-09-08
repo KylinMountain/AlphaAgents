@@ -312,6 +312,34 @@ class NewsMonitor:
                     events[0].get("importance", 0),
                 )
 
+                # The events the digest just produced name the sectors the
+                # news moved. Feeding them into the theme lifecycle is the
+                # 新闻 half of 资金 + 新闻归因 — until now themes came only
+                # from the flow ranking, so a 5/5 energy shock moved
+                # nothing while 天然气 sat 8th by inflow and out of reach.
+                try:
+                    from alpha_agents.pipeline.theme_manager import (
+                        discover_themes_from_events,
+                    )
+                    from alpha_agents.tools.sector_ranking import (
+                        get_concept_ranking_fn, get_sector_ranking_fn,
+                    )
+                    concept_rank = json.loads(
+                        await asyncio.to_thread(get_concept_ranking_fn, 30))
+                    sector_rank = json.loads(
+                        await asyncio.to_thread(get_sector_ranking_fn, 30))
+                    touched = await asyncio.to_thread(
+                        discover_themes_from_events, events,
+                        concept_rank, sector_rank)
+                    if touched:
+                        log_activity(
+                            "task_done", task="theme_from_news", status="ok",
+                            message="新闻驱动的主线更新: " + ", ".join(touched),
+                            detail={"themes": touched},
+                        )
+                except Exception as e:
+                    logger.warning("News-driven theme update failed: %s", e)
+
                 # 3. Route events and run agents in parallel
                 await self._emit("agent", "running", "Agent正在深度分析...")
                 results = await route_and_analyze(events, event_bus=self._bus)

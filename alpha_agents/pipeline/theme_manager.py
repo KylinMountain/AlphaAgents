@@ -161,12 +161,123 @@ def update_theme_strength(name: str, signals: dict) -> None:
         status = "active"
     elif new_strength < 4 and status in ("active", "peak"):
         status = "declining"
-    elif new_strength <= 1 and status == "declining":
+    elif new_strength <= 1 and status in ("declining", "watching"):
+        # 'watching' had no exit: a theme discovered weak and never
+        # confirmed decayed to strength 0 and stayed forever, still
+        # supplying picks with no thesis behind them.
         status = "archived"
 
     upsert_theme(name, status=status, strength=new_strength)
     logger.info("Theme '%s': strength %d→%d, status=%s (%s)",
                 name, current, new_strength, status, "; ".join(signals["details"]))
+
+
+def sectors_from_events(events: list[dict], min_importance: int = 4) -> dict[str, dict]:
+    """Sectors the digest named as bullish, keyed by sector name.
+
+    ``evaluate_theme_signals`` has always accepted ``has_news_catalyst``
+    and nothing ever passed it True: every discovery path fed the concept
+    ranking alone. So a system whose whole premise is 资金 + 新闻归因 ran
+    its theme lifecycle on price and flow only — the digest could rate
+    "沙特能源设施遭袭" importance 5/5 and name 石油石化 / 天然气, and no
+    theme moved.
+
+    Returns {sector: {"importance": int, "event": str}} keeping the
+    highest-importance event per sector.
+    """
+    out: dict[str, dict] = {}
+    for e in events or []:
+        importance = e.get("importance", 0) or 0
+        if importance < min_importance:
+            continue
+        impact = (e.get("market_impact") or {}).get("a_share") or {}
+        if impact.get("direction") == "bearish":
+            continue
+        for sector in impact.get("sectors_bullish") or []:
+            sector = (sector or "").strip()
+            if not sector:
+                continue
+            if sector not in out or importance > out[sector]["importance"]:
+                out[sector] = {"importance": importance,
+                               "event": e.get("event", "")}
+    return out
+
+
+def _match_board(sector: str, boards: dict[str, dict]) -> str | None:
+    """Board matching a sector the news named.
+
+    The digest writes its own vocabulary (石油石化, 航运) while the
+    exchange's boards carry theirs (油气开采及服务, 航运港口). Exact and
+    containment matching pair neither, and a hand-written synonym table
+    would need editing every time a board is renamed — so the embeddings
+    that already back concept search do the pairing.
+
+    Exact and containment run first: they are free and cover most calls,
+    leaving the embedding API for the pairs that actually need it.
+    """
+    if sector in boards:
+        return sector
+    for name in boards:
+        if sector in name or name in sector:
+            return name
+    try:
+        from alpha_agents.data.embeddings import match_label_semantic
+        return match_label_semantic(sector, list(boards))
+    except Exception as e:
+        logger.debug("Semantic board match unavailable for %r: %s", sector, e)
+        return None
+
+
+def discover_themes_from_events(events: list[dict], *rankings: dict) -> list[str]:
+    """Create or strengthen themes the news named AND the money confirms.
+
+    Both halves are required. News alone would let the model invent a
+    theme out of a headline; flow alone is what the system already did,
+    and it misses the sector that just moved because of an event. A
+    sector is only promoted when it appears in the live concept ranking.
+
+    Returns the theme names touched.
+    """
+    named = sectors_from_events(events)
+    if not named:
+        return []
+
+    # Concept and industry boards both: the digest's labels sit closer to
+    # industry names, but the tradable theme is usually a concept.
+    concepts: dict[str, dict] = {}
+    for ranking in rankings:
+        for row in (ranking.get("gainers") or []) + (ranking.get("losers") or []):
+            name = row.get("concept") or row.get("sector") or ""
+            if name:
+                concepts.setdefault(name, row)
+    touched = []
+    for sector, info in named.items():
+        concept_name = _match_board(sector, concepts)
+        if concept_name is None:
+            logger.debug("News named '%s' but no concept board matched it",
+                         sector)
+            continue
+        board = concepts[concept_name]
+        signals = evaluate_theme_signals(
+            sector_name=concept_name,
+            sector_change_pct=board.get("change_pct", 0),
+            sector_fund_flow=board.get("net_flow_yi", 0) * 1e8,
+            market_change_pct=0,
+            has_news_catalyst=True,
+        )
+        catalyst = (f"新闻催化(重要性{info['importance']}/5): {info['event'][:60]}"
+                    f" | 概念涨{board.get('change_pct', 0):.1f}%,"
+                    f" 净流入{board.get('net_flow_yi', 0):.1f}亿")
+        existing = get_theme_by_name(concept_name)
+        if existing and existing["status"] != "archived":
+            update_theme_strength(concept_name, signals)
+            upsert_theme(concept_name, catalyst=catalyst)
+            touched.append(concept_name)
+        elif maybe_discover_theme(concept_name, signals, catalyst=catalyst):
+            touched.append(concept_name)
+    if touched:
+        logger.info("News-driven themes touched: %s", ", ".join(touched))
+    return touched
 
 
 def maybe_discover_theme(

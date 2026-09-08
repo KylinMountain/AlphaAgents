@@ -152,20 +152,28 @@ def cmd_web(args: argparse.Namespace) -> None:
 
     interval = args.interval or MONITOR_INTERVAL_SECONDS
     monitor = NewsMonitor(interval=interval, event_bus=event_bus)
+    # Still registered even when the loop is off: /api/trigger runs one
+    # cycle on demand, which is the deliberate, user-initiated case.
     set_monitor(monitor)
 
+    # The monitor loop calls digest_news, which is an LLM call per batch.
+    # Left on, the UI container quietly bills a full pipeline around the
+    # clock and duplicates whatever the scheduler container is already
+    # doing — two processes digesting the same news into the same DB.
+    run_monitor = not getattr(args, "no_monitor", False)
+
     async def run_all():
-        # Run monitor and uvicorn server concurrently
         config = uvicorn.Config(
             app, host=args.host, port=args.port,
             log_level="info", access_log=False,
         )
         server = uvicorn.Server(config)
-        logging.info("Starting web UI at http://%s:%d", args.host, args.port)
-        await asyncio.gather(
-            server.serve(),
-            monitor.run(),
-        )
+        logging.info("Starting web UI at http://%s:%d (monitor=%s)",
+                     args.host, args.port, "on" if run_monitor else "off")
+        tasks = [server.serve()]
+        if run_monitor:
+            tasks.append(monitor.run())
+        await asyncio.gather(*tasks)
 
     try:
         asyncio.run(run_all())
@@ -488,6 +496,8 @@ def main() -> None:
     p_web.add_argument("--host", default="0.0.0.0", help="监听地址")
     p_web.add_argument("--port", type=int, default=8000, help="监听端口")
     p_web.add_argument("--interval", type=int, help="监控间隔（秒）")
+    p_web.add_argument("--no-monitor", action="store_true",
+                       help="只提供界面，不在本进程跑监控循环（调度器已在跑时用这个）")
     p_web.set_defaults(func=cmd_web)
 
     # review — daily prediction review

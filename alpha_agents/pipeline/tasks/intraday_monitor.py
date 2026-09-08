@@ -30,6 +30,7 @@ from alpha_agents.data.scoring import confidence_to_prob
 from alpha_agents.pipeline.tasks import (
     safe_active_themes, safe_market_regime, safe_sentiment_phase,
 )
+from alpha_agents.pipeline.tasks import exit_decision
 from alpha_agents.pipeline.tasks.anomaly_scan import (
     _detect_anomalies, _detect_style_rotation, _news_for_sectors,
     _refresh_theme_strengths,
@@ -135,7 +136,16 @@ async def run_intraday_monitor() -> str | None:
 
             # Check open positions — stop loss / take profit / expiry
             if open_pos:
-                pos_alerts = check_positions(realtime_prices=price_map, today=today_str)
+                # With the trading agent on, the rules run as a floor
+                # only: they close what would breach the hard stop and
+                # hand everything else to the agent as evidence. Off, they
+                # close on every trigger as they always did.
+                agent_exits = exit_decision.enabled()
+                pos_alerts = check_positions(realtime_prices=price_map,
+                                             today=today_str,
+                                             hard_only=agent_exits)
+                if agent_exits:
+                    pos_alerts += await exit_decision.run(price_map, pos_alerts)
                 # Split by notification importance:
                 #   - stop_tightened: bearish pre-alert, log only (avoids spam;
                 #     user sees it in the daily review / logs)
@@ -144,7 +154,7 @@ async def run_intraday_monitor() -> str | None:
                 for alert in pos_alerts:
                     msg = _format_portfolio_alert(alert)
                     logger.info("Portfolio alert: %s", msg)
-                    if alert.get("type") == "stop_tightened":
+                    if alert.get("type") in ("stop_tightened", "signal"):
                         continue  # log only, don't spam push channels
                     try:
                         await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
@@ -890,6 +900,12 @@ def _format_portfolio_alert(alert: dict) -> str:
         reason = alert.get("reason", "")
         return (f"{reason} | {code} {name} 现价{price:.2f} ({cur_ret:+.1f}%) "
                 f"止损 {old_stop:.2f}→{new_stop:.2f}")
+
+    if alert_type == "signal":
+        # A rule wanted out and the agent was given the call instead.
+        # Logged, never pushed: nothing happened to the position.
+        return (f"规则信号(未执行) | {code} {name} "
+                f"{alert.get('current_return', 0):+.1f}% — {alert.get('reason', '')}")
 
     ret = alert.get("return_pct", 0)
     reason = alert.get("reason", "")

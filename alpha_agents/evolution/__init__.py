@@ -19,6 +19,7 @@ Public API:
 
 from alpha_agents.evolution.feedback import (
     inject_cognition,
+    inject_portfolio,
     inject_sentiment,
     inject_vpa_signal_history,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "build_morning_context",
     "build_vpa_context",
     "inject_cognition",
+    "inject_portfolio",
     "inject_sentiment",
     "inject_vpa_signal_history",
     "extract_daily_lessons",

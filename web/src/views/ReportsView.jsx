@@ -9,7 +9,22 @@ import { DASH, fmtDateTime, parseStamp } from '../lib/format'
  * as failed rather than rendered as analysis — that state was invisible for
  * a full day of dead-model output, which is exactly when it mattered most. */
 
+/* report_type records which task produced the report. Rows written before
+   that column existed have none, so the hour is the fallback — a guess,
+   and one that was wrong for anything that ran late. */
+const TASK_LABEL = {
+  morning_scan: { label: '晨报', cls: 'stage-active' },
+  opening_reminder: { label: '开盘', cls: 'stage-sprout' },
+  intraday_monitor: { label: '盘中', cls: 'stage-sprout' },
+  review: { label: '复盘', cls: 'stage-main' },
+  night_scan: { label: '夜报', cls: 'stage-fade' },
+  weekly_report: { label: '周报', cls: 'stage-main' },
+}
+
 function kindOf(r) {
+  if (r.report_type && TASK_LABEL[r.report_type]) return TASK_LABEL[r.report_type]
+  if (r.cycle != null) return { label: '追因', cls: 'stage-sprout' }
+
   const d = parseStamp(r.created_at ?? (r.timestamp ? r.timestamp * 1000 : null))
   if (!d) return { label: '报告', cls: 'stage-active' }
   const h = d.getHours()

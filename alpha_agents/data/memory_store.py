@@ -17,7 +17,17 @@ CREATE TABLE IF NOT EXISTS theme_lines (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     status TEXT DEFAULT 'watching',
+    -- Two numbers, two questions. `strength` accumulates one delta per
+    -- day and answers "how long has this line been confirmed" — it drives
+    -- the lifecycle (watching→active→peak→declining) and the ≥4 gate that
+    -- keeps a pending order alive. `daily_score` is today's raw
+    -- bullish−bearish, rewritten every cycle, and answers "how strong is
+    -- this line today" — the only one of the two that can rank lines
+    -- against each other, since a two-week-old line always out-accumulates
+    -- one that broke out this morning.
     strength INTEGER DEFAULT 0,
+    daily_score INTEGER DEFAULT 0,
+    last_scored_date TEXT,
     created_at TEXT,
     updated_at TEXT,
     catalyst TEXT,
@@ -359,6 +369,26 @@ def _get_conn() -> sqlite3.Connection:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+        # Split theme strength into lifecycle vs today. The old single
+        # `strength` was incremented on every intraday cycle — 48 times a
+        # session — so a line with steady inflow saturated at 10 within
+        # half an hour and a weak one floored at 0, and the number meant
+        # "how many cycles in a row did the signal fire", not strength.
+        # A pending order was cancelled on 金属铜 强度3 on a day that line
+        # ran +2.0% vs the market on 55億 of inflow.
+        for migration in (
+            "ALTER TABLE theme_lines ADD COLUMN daily_score INTEGER DEFAULT 0",
+            "ALTER TABLE theme_lines ADD COLUMN last_scored_date TEXT",
+        ):
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError as e:
+                # Only the re-run case is expected. A bare `pass` here
+                # would also swallow a locked or corrupt database and
+                # leave the gate reading a column that does not exist.
+                if "duplicate column name" not in str(e).lower():
+                    raise
         conn.commit()
 
         _local.conn = conn
@@ -483,11 +513,21 @@ def get_recent_chat_memories(days: int = 7) -> list[str]:
 
 # ── Theme Lines ──────────────────────────────────────────────
 
-def get_active_themes(min_status: str = "watching") -> list[dict]:
-    """Get all non-archived theme lines, ordered by strength desc."""
+def get_active_themes(min_status: str = "watching",
+                      order_by: str = "strength") -> list[dict]:
+    """Get all non-archived theme lines.
+
+    ``order_by="strength"`` (the default) ranks by lifecycle position —
+    how long the line has been confirmed. ``order_by="daily_score"`` ranks
+    by today's raw signal, which is what "哪条主线今天最强" asks: a line
+    running two weeks always out-accumulates one that broke out this
+    morning, so strength cannot answer that question.
+    """
     conn = _get_conn()
+    order = ("daily_score DESC, strength DESC" if order_by == "daily_score"
+             else "strength DESC, daily_score DESC")
     rows = conn.execute(
-        "SELECT * FROM theme_lines WHERE status != 'archived' ORDER BY strength DESC"
+        f"SELECT * FROM theme_lines WHERE status != 'archived' ORDER BY {order}"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -504,6 +544,8 @@ def upsert_theme(
     *,
     status: str | None = None,
     strength: int | None = None,
+    daily_score: int | None = None,
+    last_scored_date: str | None = None,
     catalyst: str | None = None,
     core_stocks: list[dict] | None = None,
     leader_code: str | None = None,
@@ -523,6 +565,10 @@ def upsert_theme(
                 sets.append("status = ?"); vals.append(status)
             if strength is not None:
                 sets.append("strength = ?"); vals.append(strength)
+            if daily_score is not None:
+                sets.append("daily_score = ?"); vals.append(daily_score)
+            if last_scored_date is not None:
+                sets.append("last_scored_date = ?"); vals.append(last_scored_date)
             if catalyst is not None:
                 sets.append("catalyst = ?"); vals.append(catalyst)
             if core_stocks is not None:
@@ -538,9 +584,11 @@ def upsert_theme(
             return existing["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO theme_lines (name, status, strength, catalyst, core_stocks, leader_code, notes, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, status or "watching", strength or 0, catalyst,
+                "INSERT INTO theme_lines (name, status, strength, daily_score, last_scored_date, "
+                "catalyst, core_stocks, leader_code, notes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, status or "watching", strength or 0, daily_score or 0,
+                 last_scored_date, catalyst,
                  json.dumps(core_stocks or [], ensure_ascii=False), leader_code, notes, now, now),
             )
             conn.commit()

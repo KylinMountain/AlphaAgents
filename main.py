@@ -382,7 +382,30 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             logging.error("Unknown task: %s (available: %s)", task_name, ", ".join(task_map))
             return
         logging.info("Running single task: %s", task_name)
-        asyncio.run(fn())
+        # Persist the report the same way the scheduler does. Running a
+        # task by hand is how a missed window gets caught up — the 15:30
+        # review skipped because the box was down, say — and dropping the
+        # return value meant every side effect landed (theme strengths,
+        # archives, tomorrow's sentiment) while the report text itself
+        # went nowhere. The task looked like it worked, and the dashboard
+        # showed no review for that day.
+        result = asyncio.run(fn())
+        if isinstance(result, str) and result.strip():
+            print(result)
+            scheduler_task_name = {
+                "morning": "morning_scan", "opening": "opening_reminder",
+                "intraday": "intraday_monitor", "review": "review",
+                "night": "night_scan", "weekly": "weekly_report",
+            }[task_name]
+            try:
+                from alpha_agents.data.activity_log import log_activity
+                from alpha_agents.data.report_store import save_task_report
+                save_task_report(scheduler_task_name, result)
+                log_activity("task_done", task=scheduler_task_name, status="ok",
+                             message=result[:2000],
+                             detail={"manual": True, "has_output": True})
+            except Exception as e:
+                logging.warning("Failed to persist %s report: %s", task_name, e)
         return
 
     logging.info("Starting AlphaAgents 2.0 scheduler...")

@@ -42,7 +42,7 @@ def _format_themes(themes: list[dict]) -> str:
     for t in themes:
         stocks = json.loads(t["core_stocks"]) if t["core_stocks"] else []
         leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
-        lines.append(f"- {t['name']}（强度 {t['strength']}/10, {t['status']}）龙头: {leader}")
+        lines.append(f"- {t['name']}（累计强度 {t['strength']}/10, 今日 {t.get('daily_score', 0):+d}, {t['status']}）龙头: {leader}")
     return "\n".join(lines)
 
 

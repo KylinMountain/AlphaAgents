@@ -106,7 +106,7 @@ def _format_themes(themes: list[dict]) -> str:
         leader = next((s["name"] for s in stocks if s.get("role") == "龙头"), "无")
         stock_names = ", ".join(s["name"] for s in stocks[:5])
         lines.append(
-            f"- {t['name']}（强度 {t['strength']}/10, {t['status']}）\n"
+            f"- {t['name']}（累计强度 {t['strength']}/10, 今日 {t.get('daily_score', 0):+d}, {t['status']}）\n"
             f"  龙头: {leader} | 标的: {stock_names}\n"
             f"  催化: {t.get('catalyst', '无')}"
         )

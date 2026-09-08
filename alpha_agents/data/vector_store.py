@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS concept_vectors (
     document TEXT NOT NULL,
     dim INTEGER NOT NULL,
     vector BLOB NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now','localtime'))
 );
 """
 
@@ -90,7 +90,7 @@ class VectorStore:
             "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET document=excluded.document, "
             "dim=excluded.dim, vector=excluded.vector, "
-            "updated_at=datetime('now')",
+            "updated_at=datetime('now','localtime')",
             rows,
         )
         conn.commit()

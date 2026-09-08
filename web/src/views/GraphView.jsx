@@ -13,15 +13,40 @@ const CATEGORY_CLASS = {
   资本市场: 'green', 公司: 'green',
 }
 
+/* An ellipse, not a circle: the canvas is far wider than it is tall, so a
+   circle inscribed in its short side crowded fourteen labels into the
+   middle third and stacked them on top of each other. Labels also flip to
+   sit below the node on the lower half, where "above" would collide with
+   the node opposite. */
 function layout(events, w, h) {
-  const n = events.length
+  const n = Math.max(1, events.length)
   const cx = w / 2
   const cy = h / 2
-  const r = Math.min(w, h) * 0.36
+  const rx = w * 0.40
+  const ry = h * 0.34
   return events.map((e, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(1, n) - Math.PI / 2
-    return { ...e, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) }
+    const angle = (2 * Math.PI * i) / n - Math.PI / 2
+    const y = cy + ry * Math.sin(angle)
+    return {
+      ...e,
+      x: cx + rx * Math.cos(angle),
+      y,
+      below: y > cy,
+      anchor: Math.abs(Math.cos(angle)) < 0.3
+        ? 'middle' : (Math.cos(angle) > 0 ? 'start' : 'end'),
+    }
   })
+}
+
+/** Enough to recognise the event, short enough not to overlap its
+ *  neighbours. Cut on a punctuation boundary when there is one. */
+function label(title) {
+  const t = String(title || '')
+  if (t.length <= 18) return t
+  const cut = t.slice(0, 18)
+  const stop = Math.max(cut.lastIndexOf('，'), cut.lastIndexOf('、'),
+                        cut.lastIndexOf(' '))
+  return (stop > 8 ? cut.slice(0, stop) : cut) + '…'
 }
 
 export default function GraphView({ graph }) {
@@ -29,7 +54,7 @@ export default function GraphView({ graph }) {
   const links = graph?.links || []
 
   const W = 1000
-  const H = 440
+  const H = 520
   const nodes = useMemo(() => layout(events, W, H), [events])
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
@@ -67,9 +92,12 @@ export default function GraphView({ graph }) {
               <g key={n.id}>
                 <circle cx={n.x} cy={n.y} r="7"
                         fill="var(--surface)" stroke="var(--blue)" strokeWidth="2" />
-                <text x={n.x} y={n.y - 13} textAnchor="middle"
-                      fontSize="10" fill="var(--text-2)">
-                  {String(n.title || '').slice(0, 16)}
+                <text x={n.x + (n.anchor === 'start' ? 11
+                                : n.anchor === 'end' ? -11 : 0)}
+                      y={n.below ? n.y + 24 : n.y - 15}
+                      textAnchor={n.anchor}
+                      fontSize="12.5" fill="var(--text-2)">
+                  {label(n.title)}
                 </text>
               </g>
             ))}
@@ -94,7 +122,8 @@ export default function GraphView({ graph }) {
                     </span>
                   </td>
                   <td>{e.importance ?? DASH}</td>
-                  <td>{fmtDateTime(e.timestamp)}</td>
+                  {/* epoch seconds; the formatter reads a bare number as ms */}
+                  <td>{fmtDateTime(e.timestamp ? e.timestamp * 1000 : null)}</td>
                 </tr>
               ))}
             </tbody>

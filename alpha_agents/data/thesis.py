@@ -186,7 +186,12 @@ VALID_KINDS = tuple(_CONDITIONS)
 # strength drops below 11 has written a condition that is always true).
 _SANITY = {
     "theme_strength_below": (0, 10),
-    "theme_daily_score_below": (-4, 5),
+    # Upper bound 1, not 5. The daily score runs -4..+5 and a healthy
+    # active line scores +1..+3, so "exit if today's score is below 3"
+    # fires on the first ordinary day — it reads like caution and behaves
+    # like an immediate exit. Anything above 1 is asking to be stopped out
+    # by a normal session.
+    "theme_daily_score_below": (-4, 1),
     "drawdown_from_peak": (0.5, 50),
     "loss_exceeds": (0.5, 50),
     "theme_rank_worse_than": (1, 100),

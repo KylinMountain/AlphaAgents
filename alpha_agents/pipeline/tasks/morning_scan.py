@@ -340,6 +340,10 @@ async def run_morning_scan() -> str | None:
             recs = await _cross_validate_recommendations(recs)
             _save_recommendations_list(recs)
 
+        # 7. The morning's verdict on yesterday's book. Stored rather than
+        # executed: at 09:00 there is no live price and a sell needs one.
+        _save_position_calls(report, time.strftime("%Y-%m-%d"))
+
     return report
 
 
@@ -482,6 +486,74 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
         logger.info("Cross-validation: %d/%d passed", len(validated), len(recs))
     return validated
 
+
+
+_POSITIONS_BLOCK = re.compile(r"<!--\s*POSITIONS\s*(\[.*?\])\s*POSITIONS-->",
+                              re.DOTALL)
+
+
+def _save_position_calls(report: str, today: str) -> int:
+    """Store the morning's verdict on yesterday's book, for the open.
+
+    The agent can see its positions and forms a view on them — that is
+    what the pre-open hour is for. It had nowhere to put that view:
+    RECOMMENDATIONS only speaks "buy a new name", so a decision to trim
+    arrived as a recommendation with theme "持仓管理" and was dropped by
+    resolve_theme. The judgement was produced and thrown away.
+
+    Not executed here: at 09:00 there is no live price, and a sell needs
+    one. The first intraday cycle applies these against real quotes.
+    """
+    from alpha_agents.pipeline.tasks.exit_decision import VALID_ACTIONS
+
+    match = _POSITIONS_BLOCK.search(report)
+    if not match:
+        return 0
+    try:
+        items = json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        logger.warning("POSITIONS block malformed (%s) — no calls stored", e)
+        return 0
+    if not isinstance(items, list):
+        return 0
+
+    calls = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().lower()
+        reason = str(item.get("reason", "")).strip()
+        code = str(item.get("code", "")).strip()
+        if not code or action not in VALID_ACTIONS:
+            continue
+        if action != "hold" and not reason:
+            logger.warning("Morning call on %s has no reason — ignored", code)
+            continue
+        calls.append({"code": code, "action": action, "reason": reason,
+                      "fraction": item.get("fraction"),
+                      "size_pct": item.get("size_pct"),
+                      "confidence": str(item.get("confidence", "")).strip()})
+
+    if not calls:
+        return 0
+    try:
+        from alpha_agents.data.memory_store import _get_conn, _write_lock
+        with _write_lock:
+            conn = _get_conn()
+            conn.execute("DELETE FROM daily_snapshots WHERE date = ? AND "
+                         "data_type = 'morning_position_calls'", (today,))
+            conn.execute(
+                "INSERT INTO daily_snapshots (date, data_type, data) "
+                "VALUES (?, 'morning_position_calls', ?)",
+                (today, json.dumps(calls, ensure_ascii=False)))
+            conn.commit()
+    except Exception as e:
+        logger.warning("Could not store morning position calls: %s", e)
+        return 0
+
+    logger.info("Morning position calls: %s",
+                ", ".join(f"{c['code']}={c['action']}" for c in calls))
+    return len(calls)
 
 
 def _save_recommendations_list(recs: list[dict]) -> None:

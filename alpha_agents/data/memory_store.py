@@ -405,7 +405,11 @@ def _get_conn() -> sqlite3.Connection:
         # "how many cycles in a row did the signal fire", not strength.
         # A pending order was cancelled on 金属铜 强度3 on a day that line
         # ran +2.0% vs the market on 55億 of inflow.
+        # Sizing became a decision the agent makes, so the thesis carries
+        # the share of the book it asked for. Declared in _SCHEMA too; this
+        # is for databases created before that.
         for migration in (
+            "ALTER TABLE theses ADD COLUMN entry_fraction REAL DEFAULT 0",
             "ALTER TABLE theme_lines ADD COLUMN daily_score INTEGER DEFAULT 0",
             "ALTER TABLE theme_lines ADD COLUMN last_scored_date TEXT",
         ):

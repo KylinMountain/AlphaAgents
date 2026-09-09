@@ -121,3 +121,13 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .calib-note.soft{color:var(--muted)}
 
 @media (max-width:900px){.pos-facts{grid-template-columns:repeat(3,1fr)}}
+
+/* Running code vs code on disk.
+ *
+ * Prompt files reload from disk on every agent creation; Python does not.
+ * A scheduler left running across an edit therefore executes stale code
+ * against fresh prompts, which is how a morning's invalidation conditions
+ * came back invented against an unfilled {VOCAB} placeholder. It is
+ * invisible from the outside — everything keeps working, just not the
+ * part you changed — so the page says it rather than waiting to be asked. */
+.stale-badge{font-size:11.5px;padding:4px 9px;border-radius:999px;background:var(--amber-soft);color:var(--amber);font-weight:650;white-space:nowrap}

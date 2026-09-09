@@ -521,6 +521,24 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
 
         shares = _calc_shares(fill_price, max_amount)
         if shares == 0:
+            # The size the agent asked for is a target, not a ceiling —
+            # the ceiling is MAX_POSITION_PCT. At the default 3% of 50万,
+            # one lot of anything above ~150元 costs more than the target
+            # and the order was cancelled for 资金不足: 太辰光 needed
+            # 20278元 against a 15000元 target while the backstop sat at
+            # 50000元. That silently excluded every expensive stock from
+            # the book, which is a selection bias in the learning data
+            # with nothing to do with the agent's judgement.
+            one_lot = fill_price * LOT_SIZE
+            ceiling = min(available, TOTAL_CAPITAL * MAX_POSITION_PCT,
+                          max(0, max_for_theme), sentiment_room, cluster_cap)
+            if one_lot <= ceiling:
+                shares = LOT_SIZE
+                logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"
+                            "之内 — 按一手成交", code, one_lot, max_amount,
+                            ceiling)
+
+        if shares == 0:
             _cancel_order_unlocked(order["id"], f"资金不足(需{fill_price * LOT_SIZE:.0f}元/手, 可用{max_amount:.0f}元)")
             return {
                 "type": "cancelled",

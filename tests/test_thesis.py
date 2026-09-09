@@ -274,3 +274,25 @@ class TestFromRecommendation:
         the range instead of the floor."""
         T.from_recommendation({"prob": 0.4, "name": "X"}, "000001", "morning")
         assert T.get_active()[0].conviction == 0.0
+
+    def test_the_same_pick_twice_does_not_duplicate(self, store):
+        """The intraday task re-recommends a name every cycle it still
+        likes it. Each pass writing a new thesis produced 43 for one stock
+        in a session — one idea counted 43 times, which would bury the
+        calibration curve under whichever name the scorer kept liking."""
+        rec = {"name": "太辰光", "theme": "芯片概念", "stop_loss": 10.0}
+        first = T.from_recommendation(rec, "300570", created_by="intraday")
+        second = T.from_recommendation(rec, "300570", created_by="intraday")
+        assert first == second
+        assert len(T.get_active()) == 1
+
+    def test_a_filled_thesis_does_not_block_a_new_one(self, store):
+        """Once a thesis owns a position it is no longer the open idea —
+        buying the name again is a genuinely new bet."""
+        tid = T.from_recommendation({"name": "X", "stop_loss": 10.0},
+                                    "300570", created_by="intraday")
+        T.attach_position(tid, 42)
+        second = T.from_recommendation({"name": "X", "stop_loss": 11.0},
+                                       "300570", created_by="intraday")
+        assert second != tid
+        assert len(T.get_active()) == 2

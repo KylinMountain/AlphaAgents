@@ -37,9 +37,13 @@ def build_morning_context(themes: list[dict], stats: str,
     # this the agent writes a prob every morning and never learns anything
     # from having written it.
     from alpha_agents.evolution.calibration import inject_calibration
-    cal = inject_calibration()
-    if cal:
-        sections.append(cal)
+    from alpha_agents.evolution.process_quality import inject_process_quality
+    # Calibration says how wrong its confidence is; process quality says
+    # whether the thesis it is about to write will be gradeable at all.
+    # Both go to the agent that writes them.
+    for part in (inject_calibration(), inject_process_quality()):
+        if part:
+            sections.append(part)
     if mode != "baseline":
         for part in (inject_principles(), inject_recent_lessons(),
                      inject_playbooks()):
@@ -81,10 +85,13 @@ def build_review_context(portfolio_summary: str = "") -> str:
     just narrating the day.
     """
     from alpha_agents.evolution.calibration import inject_calibration
+    from alpha_agents.evolution.consistency import inject_consistency
+    from alpha_agents.evolution.process_quality import inject_process_quality
 
     sections = []
     for part in (portfolio_summary, inject_principles(),
-                 inject_recent_lessons(days=30), inject_calibration()):
+                 inject_recent_lessons(days=30), inject_calibration(),
+                 inject_consistency(), inject_process_quality()):
         if part:
             sections.append(part)
     return "\n\n".join(sections)

@@ -19,6 +19,8 @@ Public API:
 """
 
 from alpha_agents.evolution.calibration import inject_calibration
+from alpha_agents.evolution.consistency import inject_consistency
+from alpha_agents.evolution.process_quality import inject_process_quality
 from alpha_agents.evolution.feedback import (
     inject_cognition,
     inject_portfolio,
@@ -49,6 +51,8 @@ __all__ = [
     "build_review_context",
     "build_vpa_context",
     "inject_calibration",
+    "inject_consistency",
+    "inject_process_quality",
     "inject_cognition",
     "inject_portfolio",
     "inject_sentiment",

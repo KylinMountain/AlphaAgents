@@ -165,6 +165,12 @@ async def run_intraday_monitor() -> str | None:
                     # agent listed having fired — the blind spots.
                     await asyncio.to_thread(thesis_monitor.settle_orphans,
                                             price_map)
+                    # Discipline check, right where it can still be
+                    # acted on. A condition that is true now and a
+                    # position still open is a divergence between the
+                    # plan and the behaviour — worth catching at 10:35
+                    # rather than reading about it at the review.
+                    await asyncio.to_thread(_log_broken_promises, price_map)
                     # Only what genuinely needs judgement reaches a model.
                     pos_alerts += await exit_decision.run(
                         price_map, pos_alerts,
@@ -884,6 +890,24 @@ def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
         logger.debug("Auto-fill actionable failed: %s", e)
 
     return report
+
+
+def _log_broken_promises(price_map: dict) -> None:
+    """Say it out loud when the plan and the behaviour disagree.
+
+    thesis_monitor should have closed anything whose condition fired, so
+    a hit here means something upstream did not run — a failed close, a
+    thesis unbound from its position, a condition the evaluator could not
+    read. Silence would let the system look disciplined while it is not.
+    """
+    try:
+        from alpha_agents.evolution.consistency import broken_promises
+        for b in broken_promises(price_map):
+            logger.warning("说了没做: %s %s — %s（现价 %.2f，浮动 %+.1f%%）",
+                           b["code"], b["name"], b["condition"],
+                           b["price"], b["return_pct"])
+    except Exception as e:
+        logger.debug("Consistency check unavailable: %s", e)
 
 
 def _format_order_alert(alert: dict) -> str:

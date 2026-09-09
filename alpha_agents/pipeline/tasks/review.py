@@ -462,6 +462,41 @@ def _score_due_predictions() -> str:
     return "\n".join(x for x in lines if x)
 
 
+def _exposure_note(today: str) -> str:
+    """State how much of the day's risk was actually taken.
+
+    A day with no fills exercised no stop, no target and no theme exit, so
+    nothing about the exit logic was tested. Left unsaid, the agent reads
+    a quiet P&L as evidence its risk management works.
+    """
+    from alpha_agents.data.portfolio import get_open_positions
+    from alpha_agents.data.memory_store import _get_conn
+
+    try:
+        conn = _get_conn()
+        filled = conn.execute(
+            "SELECT COUNT(*) FROM virtual_portfolio WHERE open_date = ? "
+            "AND status IN ('open', 'stopped', 'target_hit', 'expired')",
+            (today,)).fetchone()[0]
+        closed = conn.execute(
+            "SELECT COUNT(*) FROM virtual_portfolio WHERE close_date = ?",
+            (today,)).fetchone()[0]
+        held = len(get_open_positions())
+    except Exception as e:
+        logger.debug("Exposure note unavailable: %s", e)
+        return ""
+
+    if filled == 0 and held == 0:
+        return ("【今日风险敞口】0 笔成交、0 笔持仓。\n"
+                "→ 因此今天**没有任何退出规则被检验过**：没有止损可触发，"
+                "没有止盈可触发，没有主线退出可触发。\n"
+                "→ 不要把「没有亏损」写成风控有效或挂单价格合理——"
+                "什么都没发生和风控起作用是两回事。今日的经验只能来自"
+                "选股与主线判断，不能来自持仓管理。")
+    return (f"【今日风险敞口】成交 {filled} 笔、平仓 {closed} 笔、"
+            f"当前持仓 {held} 笔。持仓管理相关的结论只对这些仓位成立。")
+
+
 async def run_review() -> str | None:
     """Execute the post-market review task.
 
@@ -547,10 +582,28 @@ async def run_review() -> str | None:
             parts.append(f"【近7天策略表现】\n{perf_stats}")
         portfolio_ctx = "\n\n".join(parts)
 
-    # 4. Run review agent (append portfolio context to stats)
+    # Say plainly when nothing was tested. The agent read "今日无持仓变动"
+    # and wrote the lesson "挂单价格设置合理，所有5笔挂单均未触发止损，
+    # 有效控制了下行风险" — on a day when nothing filled, so no stop could
+    # have triggered and no exit rule was ever exercised. It scored the
+    # absence of events as a risk-management success and wrote that into
+    # long-term memory. Absence of evidence has to arrive labelled.
+    portfolio_ctx = (portfolio_ctx + "\n\n" + _exposure_note(today)).strip()
+
+    # 4. Run review agent. The learning context goes in too: post_review
+    # runs after this call, so without it the agent writing the report
+    # cannot see the principles and lessons it has already produced, and
+    # re-derives them every session.
     full_stats_ctx = stats_ctx
     if portfolio_ctx:
         full_stats_ctx = stats_ctx + "\n\n" + portfolio_ctx
+    try:
+        from alpha_agents.evolution import build_review_context
+        learned = build_review_context()
+        if learned:
+            full_stats_ctx += "\n\n" + learned
+    except Exception as e:
+        logger.warning("Review learning context unavailable: %s", e)
     report = await run_review_analysis(pred_ctx, themes_ctx, full_stats_ctx)
 
     # Prepend the market-scored quality block. It goes above the LLM's own

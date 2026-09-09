@@ -66,6 +66,30 @@ def build_chat_context(portfolio_summary: str, themes_summary: str,
     return "\n\n".join(sections)
 
 
+def build_review_context(portfolio_summary: str = "") -> str:
+    """What the review agent needs to avoid re-learning what it knows.
+
+    It had none of this. post_review runs *after* the report is written —
+    it extracts lessons — so the agent doing the writing could not see the
+    principles and lessons it had already produced. Every session started
+    from zero, which means it re-derives the same lesson and can never
+    write the sentence that is actually worth reading: "I knew this and
+    did it anyway."
+
+    Calibration is here for the same reason. The review is where the agent
+    grades itself, and grading without seeing your own track record is
+    just narrating the day.
+    """
+    from alpha_agents.evolution.calibration import inject_calibration
+
+    sections = []
+    for part in (portfolio_summary, inject_principles(),
+                 inject_recent_lessons(days=30), inject_calibration()):
+        if part:
+            sections.append(part)
+    return "\n\n".join(sections)
+
+
 def build_vpa_context(code: str, as_of: str | None = None) -> str:
     """Build the context block injected before VPA LLM analysis.
 

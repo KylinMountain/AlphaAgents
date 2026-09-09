@@ -11,7 +11,8 @@ regime-aware matching and daily stat tracking.
 See docs/superpowers/specs/2026-04-16-agent-evolution-design.md.
 
 Public API:
-    build_morning_context, build_chat_context, build_vpa_context  — compose
+    build_morning_context,
+    build_review_context, build_chat_context, build_vpa_context  — compose
     inject_sentiment, inject_cognition, inject_vpa_signal_history  — atoms
     extract_daily_lessons, consolidate_principles, post_review  — L2 lessons
     match_playbook, update_playbook_stats  — L3 playbooks
@@ -27,6 +28,7 @@ from alpha_agents.evolution.feedback import (
 from alpha_agents.evolution.context_builder import (
     build_chat_context,
     build_morning_context,
+    build_review_context,
     build_vpa_context,
 )
 from alpha_agents.evolution.lessons import (
@@ -44,6 +46,7 @@ from alpha_agents.evolution.metrics import (
 __all__ = [
     "build_chat_context",
     "build_morning_context",
+    "build_review_context",
     "build_vpa_context",
     "inject_calibration",
     "inject_cognition",

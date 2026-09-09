@@ -27,6 +27,7 @@ from alpha_agents.data.portfolio import (
 from alpha_agents.data.market_data import get_realtime_quotes
 from alpha_agents.data.decision_context import build_decision_context, merge_features
 from alpha_agents.data.scoring import confidence_to_prob
+from alpha_agents.data.thesis import from_recommendation
 from alpha_agents.pipeline.tasks import (
     safe_active_themes, safe_market_regime, safe_sentiment_phase,
 )
@@ -1033,6 +1034,15 @@ def _save_intraday_recommendations(report: str) -> None:
                         entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                     if stop_loss_val is None:
                         stop_loss_val = parse_stop_loss(r.get("action", ""))
+                    # Thesis before order, same as the morning path. These
+                    # picks are code-generated rather than written by a
+                    # model, so from_recommendation derives the exit
+                    # conditions from the signals that selected the stock
+                    # — the entry reasons inverted, which is stricter than
+                    # thresholds a model would guess at.
+                    from_recommendation(
+                        {**r, "stop_loss": stop_loss_val, "horizon_days": 3},
+                        code, created_by="intraday")
                     create_pending_order(
                         code=code,
                         name=r.get("name", ""),

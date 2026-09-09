@@ -2,352 +2,258 @@
 
 # AlphaAgents
 
-**大多数 AI 选股工具在给出建议的那一刻就结束了。这个不是。**
+### 会因为亏过钱，而改变下一次判断的 AI 交易员
 
-它自己写下论点、自己挂单、自己判定什么时候错了，然后用真实的盈亏修正下一次判断。<br>
-目标不是更聪明的推荐器，是一个**会因为亏过钱而改变行为的交易员**。
+**Trade · Learn · Evolve**
 
 [![Harness](https://github.com/KylinMountain/AlphaAgents/actions/workflows/harness.yml/badge.svg)](https://github.com/KylinMountain/AlphaAgents/actions/workflows/harness.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
-A 股短线 · 虚拟盘 100 万本金 · 不接券商接口、不下真实委托
-
-<img src="docs/images/hero.png" alt="AlphaAgents" width="820">
+A 股短线 · 虚拟盘 · 不接券商接口
 
 </div>
 
 ---
 
-## 它长什么样
+<img src="docs/images/hero.png" alt="AlphaAgents" width="820">
 
-一个仓位，和它存在的理由——以及**什么会终结它**。这三条不是描述，是**每 5 分钟
-被代码逐条判定**的退出条件：
+大多数 AI 交易系统在给出 **Buy / Sell** 的那一刻就结束了。
 
-<img src="docs/images/thesis-card.png" alt="持仓与它的论点" width="880">
+AlphaAgents 不一样。
+
+它会：
+
+**观察市场 → 写下论点 → 交易 → 判断自己哪里错了 → 形成记忆 → 改变下一次判断**
+
+目标不是做一个更聪明的选股器。
+
+> **而是养出一个会从真实交易中持续进化的 AI 交易员。**
+
+---
+
+## How it works
+
+![AlphaAgents Trading Loop](docs/images/alpha_agents_loop.png)
+
+核心闭环只有六步：
+
+**市场扫描 → 写下论点 → 挂单 / 成交 → 代码监控 → 复盘学习 → 记忆进化**
+
+每一次交易都会留下经验，并重新进入下一次判断。
+
+---
+
+## What makes it different?
+
+|                  | AlphaAgents                   |
+| ---------------- | ----------------------------- |
+| 🔍 **先看资金，再找原因** | 先发现真正发生资金异动的板块，再从快讯中寻找催化      |
+| 📝 **持仓的单位是论点**  | 每次买入都必须声明概率、期限，以及「什么发生就说明我错了」 |
+| ⚙️ **代码负责盯盘**    | 失效条件每 5 分钟由代码检查，平静时无需反复调用 LLM |
+| 🧠 **交易会形成记忆**   | 校准、盲点、教训、Playbook 会重新注入下一次决策  |
+
+---
+
+## Memory → Evolution
+
+AlphaAgents 不只记录盈亏。
+
+它试图区分：
+
+* **判断没错，只是没赌赢**
+* **论点确实失效了**
+* **时间到了，但行情没发生**
+* **被风控平仓，但自己根本没想到这种失败方式**
+
+最后一种叫：
+
+### `blind_spot`
+
+它代表的不是一次亏损，而是：
+
+> **AI 的认知里缺了一块。**
+
+这些结果会逐渐形成：
+
+**交易记录 → 校准 / 盲点 → 教训 → Playbook → 原则 → 新策略**
+
+最终重新反馈给下一次决策。
+
+---
+
+## Thesis, not ticker
+
+AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点**。
+
+```json
+{
+  "claim": "小金属主线持续走强，个股存在补涨机会",
+  "prob": 0.60,
+  "horizon_days": 5,
+  "size_pct": 0.03,
+  "invalidations": [
+    {"kind": "price_below",             "value": 49.5, "note": "跌破止损位"},
+    {"kind": "theme_daily_score_below", "value": 0,    "note": "主线当天转弱"},
+    {"kind": "no_progress_by_day",      "value": 5,    "note": "短线逻辑，不动就是错了"}
+  ]
+}
+```
+
+`kind` 只能取自封闭词汇表，所以每一条都能被代码零成本判定。
+写表外的名字会被丢弃并告警——**一条读不懂的条件，比没有条件更糟。**
+
+> **LLM 负责思考，代码负责守纪律。**
+
+这不是示意图——下面是真实持仓页上的一条，三个失效条件由服务端从判定引擎
+读的同一张表渲染，**页面不可能把一个条件描述成跟触发它的代码不一样**：
+
+<img src="docs/images/thesis-card.png" alt="真实持仓与它的论点" width="760">
 
 <details>
-<summary>完整界面（今日总览 / 虚拟持仓 / 实时资讯）</summary>
+<summary>完整界面</summary>
 
-<img src="docs/images/dashboard.png" alt="今日总览" width="880">
-<img src="docs/images/portfolio.png" alt="虚拟持仓" width="880">
-<img src="docs/images/realtime.png" alt="实时资讯" width="880">
+| 今日总览 | 虚拟持仓 |
+|:--:|:--:|
+| <img src="docs/images/dashboard.png" width="420"> | <img src="docs/images/portfolio.png" width="420"> |
 
 </details>
 
 ---
 
-## 它是怎么转起来的
+## Current status
 
-```mermaid
-flowchart TD
-    A["晨扫 / 盘中<br/>选出标的"] --> B["<b>写下论点</b><br/>声称 · 概率 · 期限<br/>什么情况下我就是错的"]
-    B --> C["挂单<br/>介入区间 + 止损"]
-    C --> D["成交<br/>仓位大小由 conviction 决定"]
-    D --> E{"每 5 分钟<br/><b>代码</b>判定失效条件<br/>零 LLM"}
-    E -->|条件触发| F["invalidated<br/>推理正确，只是没赌赢"]
-    E -->|到期兑现| G["validated"]
-    E -->|到期没走出方向| H["expired"]
-    E -->|叙事条件到点| I["模型复核"]
-    I --> E
-    D -.->|风控硬线<br/>−8% 或主线归档| J["<b>blind_spot</b><br/>一条列出的条件都没响<br/>← 它没想到的失效路径"]
-    F --> K["复盘"]
-    G --> K
-    H --> K
-    J --> K
-    K --> L["校准曲线 · 盲点率<br/>条件有效性 · 真实净收益"]
-    L -->|注回下一次的 prompt| A
+| 能力                    |  状态 |
+| --------------------- | :-: |
+| Agent 自动选股            |  ✅  |
+| 论点 / 概率 / 期限 / 失效条件   |  ✅  |
+| 挂单 / 成交 / 持仓 / 平仓     |  ✅  |
+| 盘中自动监控                |  ✅  |
+| 资金异动 → 快讯追因           |  ✅  |
+| 校准曲线 / 盲点率            |  🧪 |
+| Playbook / 教训 / 原则    |  🧪 |
+| Champion / Challenger |  🧪 |
 
-    style B fill:#fff4e5,stroke:#dc6803,color:#000
-    style E fill:#eaf2ff,stroke:#2563eb,color:#000
-    style J fill:#fff0ee,stroke:#d92d20,color:#000
-    style L fill:#e8f7ef,stroke:#079455,color:#000
-```
-
-**橙色那一步是全部的关键。** 买入时必须写下什么会证明自己错——而且只能从一个
-**封闭词汇表**里选，因为每一条都要能被代码零成本判定。如果是自由文本，就还得
-每轮问模型，只是多了一层自欺：风险看起来被考虑过，实际没有任何东西会检查它。
-
-**红色那一步是产出物。** 按自己列出的条件失效不算失败——推理是对的，只是没赌赢。
-只有「被硬线平掉而一条列出的条件都没响」才说明**思考**不完整，而这是唯一能泛化
-的失败统计。按盈亏强化学不到东西：市场里「决策对但亏钱」太常见，20 个样本上按
-P&L 学，学到的必定是噪声。
-
-## 现在到哪一步了
-
-```
-架子搭完 ████████████████████ 100%
-闭环转过 ███░░░░░░░░░░░░░░░░░  15%   ← 有成交了，还没有平仓样本
-```
-
-诚实版本。骨架基本完成，**但闭环一次都还没转完整**：
-
-| 环节 | 状态 |
-|---|---|
-| 选股由 agent 决定（含介入区间、止损、理由） | ✅ |
-| 买入写下可验证的论点（概率 / 期限 / 失效条件） | ✅ |
-| 盘中由代码判定失效条件，模型只在必要时介入 | ✅ 需 `AGENT_EXIT_DECISIONS=1` |
-| 仓位大小由 conviction 决定 | ✅ |
-| agent 能看见自己的持仓与最近平仓 | ✅ |
-| 资金异动 → 本地快讯语义检索 → 追因 | ✅ |
-| 交易日调度（晨扫/盘中/复盘/夜扫/周报） | ✅ |
-| 校准曲线 / 盲点率 注回 prompt | 代码就绪，**样本 0** |
-| 平仓回填 → playbook → 教训 → 原则 | 代码就绪，**样本 0** |
-| 冠军/挑战者自动迭代 | 代码就绪，**需 ≥20 笔平仓** |
-
-数据库现状（2026-09-09）：**持仓 4 笔、挂单 5 笔、已结束 41 笔、活跃论点 16 条**，
-但**带真实平仓结果的预测 0 条**、已结论点 0 条、交易原则 0 条、playbook 0 条。
-
-第一笔成交发生在 2026-09-09——在那之前一笔都没有过，所以 `_feed_close_to_learning`
-从未触发。经验来自平仓，平仓来自成交，成交来自调度器连续跑盘中。按每天 1–2 笔
-成交、持仓 3–10 天估算，**大约两周**能攒够冠军/挑战者机制肯评估的最低样本
-（`MIN_VALIDATION_SAMPLES = 20`）。
-
-这不是一个跑完就能用的产品，是一个需要被养的东西。
+> 系统骨架已经完成，但进化能力需要真实交易样本逐渐“养”出来。
 
 ---
 
-## 四个不一样的地方
+## Architecture
 
-### 1. 先看资金异动，再去找新闻——而不是反过来
-
-绝大多数「新闻驱动」的系统是：读新闻 → 猜哪个板块受益 → 推荐。问题是新闻里的板块名和真正在动的钱经常对不上。
-
-这里是反的：先用资金流和相对强度找出**今天真的在动的板块**，再去本地快讯库里检索这个板块的消息。答案通常就在这几小时的 2500 条快讯里，比搜索引擎及时得多——而且盘中调 DuckDuckGo 会超时。
-
-真实产出（盘中追因，本地快讯库语义检索）：
-
-```
-【异动板块的近期快讯】（6小时内）
-  石油加工贸易:
-    [16:25 新浪7x24] 卡塔尔能源已发布招标，出售9月装船的卡塔尔阿尔沙赫恩原油。
-    [16:51 新浪7x24] 伊拉克石油部长：伊拉克即将公布炼油厂开发与建设投资机遇。
-  小金属概念: 近6小时无相关快讯（资金异动可能先于新闻，或属于纯资金行为）
-```
-
-最后那行是刻意的。**沉默是一种发现**——资金先于新闻动，和纯资金行为，是两种不同的情况，不应该被省略成"无数据"。
-
-### 2. 持仓的单位是「论点」，不是股票
-
-买入时 agent 不只是给一个代码，而是写下一个可被验证的**论点**：我认为会发生
-什么、多久内、我给这件事多大概率、**以及什么情况下我就是错的**。
-
-```json
-{"claim": "小金属主线资金持续流入，东方钽业在板块内补涨，5日内修复至54元上方",
- "prob": 0.6, "horizon_days": 5,
- "invalidations": [
-   {"kind": "price_below",              "value": 49.5, "note": "跌破止损位，趋势走坏"},
-   {"kind": "theme_daily_score_below",  "value": -1,   "note": "主线当日资金转为净流出"},
-   {"kind": "no_progress_by_day",       "value": 5,    "note": "5天仍在原地，未走出方向"}]}
+```text
+Market Data
+    ↓
+Pipeline
+    ↓
+Agents
+    ↓
+Thesis + Portfolio
+    ↓
+Memory Store
+    ↓
+Evolution
+    └────────────→ Agents
 ```
 
-条件只能选自封闭词汇表（价格、主线强度、板块排名、资金流、时间…），
-写别的会被丢弃并告警——**一条读不懂的条件比没有条件更糟**，它让风险看起来
-被考虑过。于是盘中每 5 分钟是代码在判定，平静的周期**一次模型调用都不需要**，
-LLM 从 48 次/天降到 3–5 次/天。规则没消失，降级成了两条不可否决的风控硬线。
+主要目录：
 
-> 上一版是「每 5 分钟问 agent 要不要卖」，同一天就被推翻了——它说不出那句最
-> 要紧的话：「我说过 X 发生就走，X 刚刚发生了」。推导见
-> [docs/thesis_design.md](docs/thesis_design.md)。
-
-### 3. 它会看到自己有多不准
-
-agent 每条论点自报概率。复盘按概率分桶统计实际兑现率，把校准曲线**注回它自己
-的 prompt**：
-
-```
-【你的概率校准】(近60天已结论点)
-• 你说 >70% 的 11 条，实际兑现 45%
-→ 你在系统性高估自己。同样的证据，把概率往下调。
-
-【盲点率】3/8 笔亏损是「没有任何你列出的条件触发就被风控平掉」(38%)
-【从未触发的条件】breadth_below —— 写了很多次但一次没响，阈值可能设在了
-价格根本不会去的地方，等于没设防。
+```text
+alpha_agents/
+├── agents/       # 晨扫 / 分析 / 复盘
+├── pipeline/     # 调度与盘中循环
+├── data/         # thesis / portfolio / memory
+├── evolution/    # 校准 / 盲点 / playbook / 原则
+├── tools/        # 市场分析工具
+└── prompts/
 ```
 
-这是系统里**样本效率最高**的学习信号，原因值得说清楚：每一条论点都贡献一个
-样本，不只是赚钱平仓的那些。P&L 学习要几百笔才能磨掉噪声；校准曲线在 20 条
-上就可读，因为「你说 70% 的那 11 条里中了 5 条」是关于这 11 条的事实。
+更完整的设计推导见：
 
-> 这套 Brier 机制其实早就建好了，但它在**给错误的对象打分**：概率由代码从
-> 「交叉验证通过了几维」算出来，agent 从没说过一个概率，也从没看过结果。
-
-### 3.5 开盘前，它决定昨天的仓位今天怎么办
-
-2026-09-09 的真实产出。这一轮它**一只新股都没推**，全部判断都在管理已有仓位：
-
-| 标的 | 决策 | 理由（原文） |
-|---|---|---|
-| 600637 东方明珠 | **减半仓** | 机构评分 −8 强烈看空，不在任何活跃主线上，融资融券显示去杠杆，价格高位回调风险大 |
-| 300811 铂科新材 | **减半仓** | 机构评分 −6，虽属 CPO 概念但今日跌 3.65% 且价格高位 |
-| 000510 新金路 | 持有 | 小金属概念（强度 5/10，资金流入 57.1 亿），今日持平，缩量上涨但仍在成本附近 |
-| 000962 东方钽业 | 持有 | 价格中低位安全边际较大，今日跌 1.5% 但仍在止损位上方 |
-
-四条理由都引用了具体证据——机构评分、融资融券去杠杆、板块资金流 57.1 亿、
-相对止损位的位置。**「今天不出手」是一个合法答案**，硬凑推荐不是。
-
-开盘前拿不到实时价，所以这些判断存下来，由**开盘后第一轮盘中**按真实报价执行，
-走的是和盘中卖出**同一个执行路径**——两条路迟早会漂移。
-
-### 4. 主线有生命周期，而且是两个数
-
-「这条主线多强」和「这条主线今天多强」是两个问题，一个数答不了——一条走了两周的老主线永远比今早刚爆发的新主线累计得多。
-
-| | 含义 | 更新节奏 | 用途 |
-|---|---|---|---|
-| **累计强度** 0–10 | 被确认了多久（生命周期位置） | 每日一次 | 状态机、挂单存活门禁 ≥4 |
-| **今日分** −4…+5 | 今天有多强 | 每轮覆盖 | 横向排序 |
-
-```
-信号出现 → [萌芽] → 资金确认 → [活跃] → 持续强化 → [主升] → 资金撤退 → [衰退] → 归档
-```
-
-发现条件：板块连续资金流入 + 跑赢大盘 + 新闻催化 + 龙头涨停（满足 2 条以上）。同时最多跟踪 8 条。
-
-> 这条设计是被一次真实故障逼出来的：早期只有一个累加的 strength，而盘中每 5 分钟就累加一次、一天叠 48 次，于是它记录的其实是「信号连续命中了几轮」。一张锡业股份的挂单因此被「主线走弱(金属铜强度3)」撤掉——而那天金属铜跑赢大盘 2.0%、净流入 55.4 亿，收盘复盘后强度是 7。
+[`docs/thesis_design.md`](docs/thesis_design.md)
 
 ---
 
 <details>
-<summary><b>快速开始 —— 安装、两个 key、跑起来</b></summary>
+<summary><b>Quick Start</b></summary>
+
+### 1. 安装
 
 ```bash
 git clone git@github.com:KylinMountain/AlphaAgents.git
 cd AlphaAgents
+
 uv sync
-cp .env.example .env      # 填 key
-uv run python main.py build-index   # 首次，约 5 分钟
+cp .env.example .env
 ```
 
-**最小配置**——两个 key：
+### 2. 配置模型
 
 ```env
-SILICONFLOW_API_KEY=sk-xxx    # 免费，用于 embedding
+SILICONFLOW_API_KEY=sk-xxx
+
 AGENT_API_KEY=sk-xxx
 AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 AGENT_MODEL=qwen-plus
 ```
 
-| Provider | BASE_URL | 推荐模型 |
-|----------|----------|---------|
-| 阿里 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-max` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+兼容 OpenAI API 风格的模型服务。
 
-> `DIGEST_*` 是**独立于 `AGENT_*` 的一套配置**。只配 `AGENT_*` 的话，新闻摘要会静默落到免费档并超时，整条链一个事件都产不出——日志里却只说「无重要事件」。建议指向同一个 provider。
-
-**运行**（部署形态是两个进程，各司其职）：
+### 3. 构建新闻索引
 
 ```bash
-uv run python main.py run-v2                          # 调度器：所有定时任务
-uv run python main.py web --no-monitor --no-ingest    # Web UI，默认 :8000
-
-uv run python main.py run-v2 --task review            # 手工补跑某个任务
+uv run python main.py build-index
 ```
 
-或者 `docker compose --profile web up -d`。
+然后启动系统即可。
 
-**打开自主交易：**
+</details>
 
-```env
-AGENT_EXIT_DECISIONS=1     # 卖出交给 agent，规则降为风控硬线
-HARD_STOP_PCT=8.0          # agent 不能否决的最大亏损
-FUTURES_NIGHT_SESSION=1    # 期货夜盘（默认关）
+---
+
+## Philosophy
+
+传统量化在优化规则。
+
+LLM Agent 在生成判断。
+
+AlphaAgents 想做的是第三种东西：
+
+> **让 Agent 的判断经过市场验证，再把经验变成下一次判断的一部分。**
+
+不是：
+
+```text
+Model → Recommendation
+```
+
+而是：
+
+```text
+Trade → Learn → Remember → Evolve
 ```
 
 ---
 
-</details>
+## Disclaimer
 
-<details>
-<summary><b>一天的节奏 —— 各任务时间表与真实夜报</b></summary>
+本项目仅用于研究与虚拟盘实验，不构成任何投资建议。
 
-| 时间 | 任务 | 产出 |
-|---|---|---|
-| 全天每 5 分钟 | 新闻摄取 + 增量 embedding | 13 个源写入本地快讯库并建索引 |
-| 09:00 | 晨扫 | 隔夜外盘 + 主线预判 + **挂单**（带介入区间、止损、理由） |
-| 09:25 | 开盘提醒 | 集合竞价末端的价格确认 |
-| 09:30–15:00 每 5 分钟 | 盘中 | 异动检测 → 快讯追因 → 撞挂单成交 → **卖出决策** |
-| 15:30 | 复盘 | 验证预测、更新主线、**产出教训** |
-| 20:00 | 夜扫 | 美股/美债/地缘 → 次日预判 |
-| 周六 10:00 | 周报 | 一周主线与命中率 |
-
-非交易时段只摄取不分析——这条是 token 开销的大头。
-
-真实夜报节选：
-
-```
-=== AlphaAgents 夜报 | 2026-09-08 ===
-
-【美股动态】道指 -0.51% | 标普 -0.38% | 纳指 -0.29% | 美债10Y 4.78%
-【对明日A股影响预判】整体: 中性偏空 — 美股小幅回调，美债收益率维持高位压制估值
-【主线影响】
-  西部大开发: 不变 — 国内政策驱动，外盘影响有限
-  锂电池: 削弱 — 美债10Y 4.78% 高位压制成长股估值
-  港口航运: 削弱 — 美股下跌可能暗示全球贸易情绪转弱
-【反向风险】若夜盘大宗商品（金属、原油）大幅上涨，则相关主线可能加强
-```
+所有判断均可能出错。
 
 ---
-
-</details>
-
-<details>
-<summary><b>代码结构 —— 目录与工程约束</b></summary>
-
-```
-alpha_agents/
-├── agents/         Agent 层（晨扫 / 复盘 / 交叉验证 / 反思校验）
-├── pipeline/
-│   ├── scheduler.py            交易日调度，节假日感知
-│   ├── market_session.py       时段门禁：非交易时段只摄取
-│   ├── theme_manager.py        主线生命周期与两个强度
-│   └── tasks/
-│       ├── morning_scan.py     晨扫 → 挂单
-│       ├── intraday_monitor.py 盘中主循环
-│       ├── anomaly_scan.py     异动检测 + 板块快讯取证
-│       ├── thesis_monitor.py   ★ 每轮判定论点，零 LLM
-│       ├── exit_decision.py    只处理需要判断的两类
-│       └── review.py           复盘 → 教训
-├── evolution/      学习层：★校准曲线 / 盲点率 / playbook / 教训 / 原则
-├── tools/          32 个分析工具（晨扫可用 24 个），资金行为为主
-├── data/
-│   ├── thesis.py           ★ 论点模型、失效条件词汇表、判定引擎
-│   ├── portfolio.py        挂单→成交→持仓→平仓，含成本模型
-│   ├── news_index.py       本地快讯语义索引（30 天窗口）
-│   └── memory_store.py     主线池 / 预测 / 认知
-└── prompts/        各 agent 提示词
-```
-
-设计推导见 [docs/thesis_design.md](docs/thesis_design.md)。工程约束由 `scripts/lint_harness.py` 强制：单文件 ≤1200 行、禁止静默吞异常、分层只能向前依赖、禁止未定义名。存量欠账在 `lint_baseline.txt` 里逐条记着。
-
-</details>
-
-<details>
-<summary><b>HTTP 接口</b></summary>
-
-| 接口 | 说明 |
-|------|------|
-| `GET /api/snapshot` | 管线当前状态 |
-| `GET /api/reports` | 历史分析报告 |
-| `GET /api/source-health` | 数据源健康指标 |
-| `GET /api/event-graph` | 事件因果关系图 |
-| `POST /api/trigger` | 手动触发一轮分析 |
-| `WS /ws` | 实时事件推送 |
-
-</details>
-
-## 免责
-
-虚拟盘，不构成投资建议。里面所有判断都由语言模型生成，会出错。
 
 ## License
 
-[AGPL-3.0](LICENSE)
+AGPL-3.0
 
-- 自己用、内部部署、改完自用：没有任何义务
-- **改完对外提供服务**（SaaS、嵌入其他产品、跨组织提供）：须以 AGPL-3.0 公开修改后的完整源码，并向使用者提供获取入口
-- 引入本项目代码的衍生作品：整体须以 AGPL-3.0 发布
+详见 [LICENSE](LICENSE)。
 
-界面页脚的源码链接就是上述"获取入口"，自建部署时用 `VITE_SOURCE_URL` 指向你自己的仓库。
+---
+
+<div align="center">
+
+### Trade · Learn · Evolve
+
+**让每一次交易，都成为下一次判断的一部分。**
+
+</div>

@@ -30,6 +30,8 @@ dependencies = [
     "pandas>=2.0.0",
     "mini-racer>=0.14.0",
     "schedule>=1.2.2",
+    # traders/*.yaml — a trading strategy is a config file, see traders/README.md
+    "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
 ]
 

@@ -79,3 +79,45 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .sector-chip.rise{background:var(--rise-soft);color:var(--rise)}
 .sector-chip.fall{background:var(--fall-soft);color:var(--fall)}
 .brief-summary{margin:12px 0 0;color:var(--text-2);line-height:1.7;font-size:12.5px}
+
+/* Position cards, and the thesis each one exists to test.
+ *
+ * A wide table was right when a position was just a fill. It is not any
+ * more: the position is held *because of* a claim, and the claim names
+ * what would end it. The exit conditions are the only part of the row
+ * that is a decision — everything else is arithmetic — so they get the
+ * space and the table goes away. */
+.pos-list{display:flex;flex-direction:column;gap:1px;background:var(--border);border-top:1px solid var(--border)}
+.pos-card{background:var(--surface);padding:14px}
+.pos-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.pos-head b{font-size:14.5px}
+.pos-head .stage-chip{margin-left:8px;display:inline-block;vertical-align:1px}
+.pos-facts{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-top:11px}
+.pos-facts div{display:flex;flex-direction:column;gap:2px}
+.pos-facts span{font-size:11.5px;color:var(--muted)}
+.pos-facts b{font-size:13px;font-variant-numeric:tabular-nums}
+
+.thesis{margin-top:12px;padding-top:11px;border-top:1px solid var(--border)}
+.thesis-claim{font-size:13px;line-height:1.6;color:var(--text)}
+.thesis-meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:7px;font-size:11.5px;color:var(--muted)}
+.thesis-meta b{color:var(--text-2);font-variant-numeric:tabular-nums}
+.thesis-conds{list-style:none;margin:9px 0 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.thesis-conds li{font-size:12px;line-height:1.5;color:var(--text-2);padding-left:13px;position:relative}
+.thesis-conds li:before{content:"";position:absolute;left:0;top:7px;width:5px;height:5px;border-radius:50%;background:var(--amber)}
+.thesis-conds code{font-size:11px;background:var(--surface-3);padding:1px 5px;border-radius:3px;margin-right:5px;color:var(--muted)}
+/* Amber, not the rise/fall pair: an exit condition is neither a gain nor
+   a loss, it is a tripwire. Painting it A-share red would read as profit. */
+.thesis-warn{margin:10px 0 0;font-size:12px;line-height:1.55;color:var(--amber);background:var(--amber-soft);padding:8px 10px;border-radius:8px}
+
+/* Calibration: stated probability against what actually happened. */
+.calib{display:flex;flex-direction:column;gap:9px;margin-bottom:12px}
+.calib-row{display:grid;grid-template-columns:76px 1fr 76px 44px;gap:10px;align-items:center;font-size:12.5px}
+.calib-label{color:var(--text-2)}
+.calib-bar{height:11px;background:var(--surface-3);border-radius:3px;overflow:hidden}
+.calib-bar i{display:block;height:100%;background:var(--blue)}
+.calib-val{font-variant-numeric:tabular-nums;color:var(--text)}
+.calib-n{font-size:11.5px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.calib-note{margin:8px 0 0;font-size:12.5px;line-height:1.6;color:var(--text-2)}
+.calib-note.soft{color:var(--muted)}
+
+@media (max-width:900px){.pos-facts{grid-template-columns:repeat(3,1fr)}}

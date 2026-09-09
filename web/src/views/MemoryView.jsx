@@ -6,7 +6,70 @@ import { DASH, fmtPct } from '../lib/format'
  * none, it shows a dash — a 0% ring reads as "the system is wrong about
  * everything" when it actually means "nothing has been graded yet". */
 
-export default function MemoryView({ stats, reviews }) {
+/* The agent's own calibration, which is a different question from its hit
+ * rate. Hit rate asks "is it right"; this asks "does it know how likely it
+ * is to be right" — and that is learnable from far fewer samples, because
+ * every closed thesis contributes a row, not only the profitable ones. */
+function CalibrationCard({ calibration }) {
+  const curve = calibration?.curve || []
+  const blind = calibration?.blind_spots || {}
+  const never = (calibration?.conditions || [])
+    .filter((c) => c.written >= 5 && c.fired === 0)
+
+  const empty = curve.length === 0 && !blind.n
+
+  return (
+    <article className="card pad" style={{ marginTop: 14 }}>
+      <div className="card-title">
+        <h3>自我校准</h3><span>近 60 日已结论点</span>
+      </div>
+      {empty ? (
+        <p className="empty-note">
+          还没有已结论点。每笔建仓会写下一个论点（声称、概率、期限、失效条件），
+          平仓时判定它是按自己列出的条件失效、到期兑现，还是
+          <b> 盲点</b>——被风控硬线平掉而一条列出的条件都没响。
+          这里统计的就是那些判定。
+        </p>
+      ) : (
+        <>
+          {curve.length > 0 && (
+            <div className="calib">
+              {curve.map((row) => {
+                const stated = row.bucket
+                const actual = Math.round(row.hit_rate * 100)
+                return (
+                  <div className="calib-row" key={stated}>
+                    <span className="calib-label">说 {stated}</span>
+                    <span className="calib-bar">
+                      <i style={{ width: `${Math.min(100, actual)}%` }} />
+                    </span>
+                    <span className="calib-val">实际 {actual}%</span>
+                    <span className="calib-n">n={row.n}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {blind.n > 0 && (
+            <p className="calib-note">
+              <b>盲点率 {Math.round((blind.rate || 0) * 100)}%</b>
+              （{blind.blind}/{blind.n} 笔亏损没有任何列出的条件触发就被平掉）
+              {blind.unguarded ? `，另有 ${blind.unguarded} 条论点从头没写失效条件` : ''}
+            </p>
+          )}
+          {never.length > 0 && (
+            <p className="calib-note soft">
+              从未触发的条件：{never.map((c) => c.kind).join('、')}
+              —— 写了多次一次没响，阈值可能设在了价格不会去的地方。
+            </p>
+          )}
+        </>
+      )}
+    </article>
+  )
+}
+
+export default function MemoryView({ stats, reviews, calibration }) {
   const has = Boolean(stats?.total)
   const pct = has ? stats.hit_rate : null
   const byConf = Object.entries(stats?.by_confidence || {})
@@ -88,6 +151,8 @@ export default function MemoryView({ stats, reviews }) {
           )}
         </div>
       </div>
+
+      <CalibrationCard calibration={calibration} />
     </section>
   )
 }

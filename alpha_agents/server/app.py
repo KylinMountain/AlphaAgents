@@ -23,7 +23,8 @@ from alpha_agents.data.report_store import (
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
+_REPO_ROOT = Path(__file__).parent.parent.parent
+FRONTEND_DIR = _REPO_ROOT / "web" / "dist"
 
 app = FastAPI(title="AlphaAgents", docs_url=None, redoc_url=None)
 
@@ -224,6 +225,47 @@ def _closed_theses(days: int = 30) -> list[dict]:
     except Exception as e:
         logger.debug("Closed thesis read failed: %s", e)
         return []
+
+
+# Recorded once, at import. A long-running process keeps the code it
+# started with while prompt files reload from disk on every agent
+# creation, so an edited prompt can meet stale Python — that is how a
+# morning's invalidation conditions were invented against a {VOCAB}
+# placeholder the running code had no line to fill. Three times in one
+# day the answer to "why did that not take effect" was "the scheduler was
+# never restarted", so the page says it instead of waiting to be asked.
+_BOOTED_COMMIT = None
+
+
+def _git_head() -> str | None:
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(_REPO_ROOT))
+        return out.stdout.strip() or None
+    except Exception as e:
+        logger.debug("git version unavailable: %s", e)
+        return None
+
+
+@app.get("/api/version")
+async def get_version_api():
+    """What the running processes are executing, versus what is on disk."""
+    global _BOOTED_COMMIT
+    if _BOOTED_COMMIT is None:
+        _BOOTED_COMMIT = _git_head() or "unknown"
+    disk = await asyncio.to_thread(_git_head) or "unknown"
+    stale = (_BOOTED_COMMIT != "unknown" and disk != "unknown"
+             and _BOOTED_COMMIT != disk)
+    return JSONResponse({
+        "running": _BOOTED_COMMIT,
+        "disk": disk,
+        "stale": stale,
+        "note": ("磁盘上的代码比运行中的新——重启调度器与 Web 才会生效。"
+                 "prompt 文件是热加载的，Python 不是。" if stale else ""),
+    })
 
 
 @app.get("/api/calibration")

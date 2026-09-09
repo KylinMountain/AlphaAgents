@@ -185,6 +185,11 @@ export default function App() {
           <div className="actions">
             <button className="icon-btn" onClick={() => setDark((v) => !v)}
                     title="切换明暗模式">{dark ? '☀' : '☾'}</button>
+              {d.version?.stale && (
+                <span className="stale-badge" title={d.version.note}>
+                  代码已更新，需重启 · {d.version.running} → {d.version.disk}
+                </span>
+              )}
             <button className="btn" onClick={d.reload}>刷新</button>
           </div>
         </header>

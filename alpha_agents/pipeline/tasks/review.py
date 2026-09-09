@@ -497,6 +497,39 @@ def _exposure_note(today: str) -> str:
             f"当前持仓 {held} 笔。持仓管理相关的结论只对这些仓位成立。")
 
 
+def _risk_note(today: str) -> str:
+    """Portfolio-level risk: the account curve, the drawdown, correlation.
+
+    Recorded here rather than intraday because the mark that matters is
+    the close. Without a daily mark there is no curve at all, so drawdown
+    and any time-weighted comparison to the market stay uncomputable no
+    matter how long the system runs.
+    """
+    parts = []
+    try:
+        from alpha_agents.data.portfolio_risk import (
+            current_drawdown, describe_clusters, record_equity_mark,
+        )
+        mark = record_equity_mark(today)
+        parts.append(f"【账户】{mark['equity']:,.0f}元 "
+                     f"（现金 {mark['cash']:,.0f} + 持仓市值 {mark['market_value']:,.0f}），"
+                     f"累计 {mark['return_pct']:+.2f}%")
+
+        dd = current_drawdown()
+        if dd:
+            line = f"【组合回撤】距高点 {dd['drawdown_pct']:.2f}%（{dd['marks']} 个记录点）"
+            if dd["blocked"]:
+                line += "，**已触及上限，暂停开新仓**"
+            parts.append(line)
+
+        clusters = describe_clusters()
+        if clusters:
+            parts.append(clusters)
+    except Exception as e:
+        logger.warning("Risk note unavailable: %s", e)
+    return "\n".join(parts)
+
+
 async def run_review() -> str | None:
     """Execute the post-market review task.
 
@@ -588,7 +621,8 @@ async def run_review() -> str | None:
     # have triggered and no exit rule was ever exercised. It scored the
     # absence of events as a risk-management success and wrote that into
     # long-term memory. Absence of evidence has to arrive labelled.
-    portfolio_ctx = (portfolio_ctx + "\n\n" + _exposure_note(today)).strip()
+    portfolio_ctx = (portfolio_ctx + "\n\n" + _exposure_note(today)
+                     + "\n\n" + _risk_note(today)).strip()
 
     # 4. Run review agent. The learning context goes in too: post_review
     # runs after this call, so without it the agent writing the report

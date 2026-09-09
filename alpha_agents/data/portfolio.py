@@ -135,6 +135,36 @@ def _conviction_factor(code: str) -> float:
     return MIN_CONVICTION_FACTOR + (1.0 - MIN_CONVICTION_FACTOR) * conviction
 
 
+def _cluster_room(theme: str) -> float:
+    """Headroom for this theme's correlated cluster, or unlimited on error.
+
+    Falling open rather than closed: a failure in the correlation lookup
+    must not silently stop the portfolio from trading. The per-theme and
+    per-stock caps still apply underneath.
+    """
+    try:
+        from alpha_agents.data.portfolio_risk import cluster_room
+        return cluster_room(theme)
+    except Exception as e:
+        logger.warning("Cluster check unavailable for %r: %s", theme, e)
+        return float("inf")
+
+
+def _drawdown_blocks_new_risk() -> bool:
+    """True only when the account is measurably deep in a drawdown.
+
+    Falls open on any failure: a broken risk lookup must not quietly stop
+    the portfolio from trading, which would look exactly like a market
+    with no opportunities.
+    """
+    try:
+        from alpha_agents.data.portfolio_risk import current_drawdown
+        return bool(current_drawdown().get("blocked"))
+    except Exception as e:
+        logger.warning("Drawdown check unavailable: %s", e)
+        return False
+
+
 def get_available_capital() -> float:
     """Get remaining cash = total capital - sum of open position costs."""
     conn = _get_conn()
@@ -377,7 +407,21 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # behaves exactly as before.
         max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT * _conviction_factor(code)
         max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
-        max_amount = min(available, max_per_stock, max(0, max_for_theme), sentiment_room)
+        # Themes that share most of their constituents are one bet. The
+        # per-theme cap counted 金属铜 and 小金属概念 as two and would let
+        # them take 60% between them while sharing 6 of 10 names.
+        cluster_cap = _cluster_room(theme)
+        max_amount = min(available, max_per_stock, max(0, max_for_theme),
+                         sentiment_room, cluster_cap)
+
+        # Portfolio drawdown gates *new* risk and never forces an exit.
+        # Liquidating at a drawdown level sells the bottom, and in a system
+        # built to learn from resolved theses it would destroy the samples
+        # before they resolve. Positions already open keep their own stops.
+        if _drawdown_blocks_new_risk():
+            _cancel_order_unlocked(order["id"], "组合回撤触及上限，暂停开新仓")
+            return {"type": "cancelled", "code": code, "name": name,
+                    "reason": "组合回撤触及上限"}
 
         shares = _calc_shares(fill_price, max_amount)
         if shares == 0:

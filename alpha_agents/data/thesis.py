@@ -442,6 +442,18 @@ def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
     """
     from alpha_agents.data.scoring import confidence_to_prob
 
+    # One live idea per stock. The intraday task re-recommends the same
+    # name every cycle it still likes it, and each pass was writing a new
+    # thesis: 43 of them for 300570 in one session. That is not 43 ideas,
+    # it is one idea observed 43 times — and counting it 43 times would
+    # have buried the calibration curve under whichever stock the scorer
+    # happened to keep liking.
+    existing = [t for t in get_active(code=code) if t.position_id is None]
+    if existing:
+        logger.debug("Thesis for %s already open and unfilled — not "
+                     "duplicating (%d on file)", code, len(existing))
+        return existing[-1].id
+
     conditions = []
     raw = rec.get("invalidations")
     if isinstance(raw, list):

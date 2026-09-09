@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 PENDING_EXPIRE_DAYS = 2  # 挂单有效期（仅用于无主线的挂单，有主线的跟随主线生命周期）
 
 # ── Capital Management ──────────────────────────────────────
-# 50万，然后基本让开。
+# 100万，然后基本让开。
 #
 # The agent sizes its own positions: how much to open with, when to add,
 # how much to take off. Those are half of what separates a trader who
@@ -34,7 +34,7 @@ PENDING_EXPIRE_DAYS = 2  # 挂单有效期（仅用于无主线的挂单，有�
 # idea would be refused for 资金不足, which is how 上海机电 died with 232元
 # left. Sample count is the scarce resource here, and a runaway position
 # spends it. 10% is wide enough that a sane decision never touches it.
-TOTAL_CAPITAL = int(os.environ.get("TOTAL_CAPITAL", "500000"))
+TOTAL_CAPITAL = int(os.environ.get("TOTAL_CAPITAL", "1000000"))
 
 # Default when a pick says nothing about size. Not a cap.
 DEFAULT_POSITION_PCT = float(os.environ.get("DEFAULT_POSITION_PCT", "0.03"))

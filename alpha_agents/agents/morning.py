@@ -14,22 +14,41 @@ from alpha_agents.config import (
     PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
 )
 from alpha_agents.tools.registry import (
-    search_stocks, get_sector_data, filter_stocks,
-    get_stock_quotes, get_market_breadth,
-    get_sector_ranking, get_concept_ranking,
-    get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    get_institutional_position, get_sector_best_stocks, web_search, get_pizzint,
+    filter_stocks, get_anomaly_stocks, get_block_trade, get_bond_yields,
+    get_concept_ranking, get_earnings_calendar, get_financial_data,
+    get_global_overview, get_institutional_position, get_lhb_detail,
+    get_margin_data, get_market_breadth, get_north_flow, get_pizzint,
+    get_sector_best_stocks, get_sector_data, get_sector_ranking,
+    get_sentiment_phase, get_stock_fund_flow, get_stock_quotes,
+    get_us_market, search_news, search_stocks, web_search,
 )
 
 logger = logging.getLogger(__name__)
 
 # Morning agent gets analysis tools but NOT news tools (news is pre-fetched)
+# Grouped by the question each one answers, because a flat list of 24
+# names is what makes an agent pick by the shape of the word rather than
+# by what it needs to know.
+#
+# The fund-behaviour block is the one that was missing. The premise of
+# this whole system is 资金行为优先于新闻叙事, and the agent that picks
+# the stocks had no stock-level flow tool at all — only sector rankings.
+# It was being asked to follow the money with no way to see it.
 MORNING_TOOLS = [
-    search_stocks, get_sector_data, filter_stocks,
-    get_stock_quotes, get_market_breadth,
-    get_sector_ranking, get_concept_ranking,
-    get_anomaly_stocks, get_us_market, get_bond_yields, get_global_overview,
-    get_institutional_position, get_sector_best_stocks, web_search, get_pizzint,
+    # 选标的
+    search_stocks, filter_stocks, get_sector_best_stocks, get_stock_quotes,
+    # 板块与主线
+    get_sector_data, get_sector_ranking, get_concept_ranking,
+    # 资金行为 — 谁在买卖，机构还是游资
+    get_lhb_detail, get_north_flow, get_margin_data, get_stock_fund_flow,
+    get_institutional_position, get_block_trade,
+    # 市场状态 — 今天该不该出手，仓位给多大
+    get_market_breadth, get_sentiment_phase, get_anomaly_stocks,
+    # 排雷 — 5 天持仓期内的可预防损失
+    get_earnings_calendar, get_financial_data,
+    # 外盘与消息
+    get_us_market, get_bond_yields, get_global_overview, get_pizzint,
+    search_news, web_search,
 ]
 
 

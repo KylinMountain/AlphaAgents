@@ -381,3 +381,33 @@ async def run(price_map: dict[str, float], signals: list[dict],
     logger.info("Exit decisions: %s",
                 ", ".join(f"{d['code']}={d['action']}" for d in decisions))
     return apply(decisions, positions, price_map)
+
+
+def pending_morning_calls(today: str) -> list[dict]:
+    """The morning scan's decisions on open positions, once and once only.
+
+    Consumed on read: the first intraday cycle after the open applies them
+    against real prices, and later cycles must not re-run a trim the
+    market has already moved past.
+    """
+    from alpha_agents.data.memory_store import _get_conn, _write_lock
+
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT data FROM daily_snapshots WHERE date = ? AND "
+            "data_type = 'morning_position_calls'", (today,)).fetchone()
+        if not row:
+            return []
+        calls = json.loads(row["data"])
+        with _write_lock:
+            conn.execute("DELETE FROM daily_snapshots WHERE date = ? AND "
+                         "data_type = 'morning_position_calls'", (today,))
+            conn.commit()
+    except Exception as e:
+        logger.warning("Morning position calls unreadable: %s", e)
+        return []
+
+    if calls:
+        logger.info("Applying %d morning position calls at the open", len(calls))
+    return calls

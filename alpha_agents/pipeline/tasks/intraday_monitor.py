@@ -146,6 +146,14 @@ async def run_intraday_monitor() -> str | None:
                                              today=today_str,
                                              hard_only=agent_exits)
                 if agent_exits:
+                    # The morning's calls on this book, applied at the
+                    # first cycle after the open — that is when a real
+                    # price exists for them.
+                    morning_calls = exit_decision.pending_morning_calls(
+                        today_str)
+                    if morning_calls:
+                        pos_alerts += exit_decision.apply(
+                            morning_calls, open_pos, price_map)
                     # Theses first: they are the agent's own stated plan,
                     # evaluated in code, so they cost nothing and they run
                     # before the hard floor gets a chance to close a

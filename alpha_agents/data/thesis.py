@@ -280,6 +280,12 @@ class Thesis:
     horizon_days: int = 5
     prob: float = 0.5
     conviction: float = 0.5
+    # Share of the whole book to open with, e.g. 0.03 for 3%. The agent's
+    # own number, not a fraction of something the code decided. A probe
+    # that should have been a real position shows up later as a validated
+    # thesis that earned a fraction of what it could have — which is how
+    # sizing becomes learnable instead of being a constant in a file.
+    size_pct: float = 0.0
     conditions: list[Condition] = field(default_factory=list)
     id: int | None = None
     status: str = ACTIVE
@@ -310,7 +316,8 @@ def _row_to_thesis(row) -> Thesis:
         theme=row["theme"] or "", claim=row["claim"] or "",
         horizon_days=_num(row["horizon_days"], 5),
         prob=_num(row["prob"], 0.5),
-        conviction=_num(row["conviction"], 0.5), conditions=conds,
+        conviction=_num(row["conviction"], 0.5),
+        size_pct=_num(row["entry_fraction"], 0.0), conditions=conds,
         status=row["status"], position_id=row["position_id"],
         created_by=row["created_by"] or "", created_at=row["created_at"] or "",
         closed_at=row["closed_at"], close_kind=row["close_kind"] or "",
@@ -326,11 +333,12 @@ def create(thesis: Thesis) -> int:
         conn = _get_conn()
         cur = conn.execute(
             "INSERT INTO theses (code, name, theme, claim, horizon_days, prob, "
-            " conviction, conditions, status, position_id, created_by, "
-            " created_at, checkpoints) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'[]')",
+            " conviction, entry_fraction, conditions, status, position_id, "
+            " created_by, created_at, checkpoints) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'[]')",
             (thesis.code, thesis.name, thesis.theme, thesis.claim,
              thesis.horizon_days, thesis.prob, thesis.conviction,
+             thesis.size_pct,
              json.dumps([c.as_dict() for c in thesis.conditions],
                         ensure_ascii=False),
              thesis.status, thesis.position_id, thesis.created_by, now),
@@ -467,6 +475,7 @@ def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
             # Conviction tracks the stated probability rather than a second
             # number that would have to be kept consistent by hand.
             conviction=round((prob - 0.5) * 2, 3) if prob > 0.5 else 0.0,
+            size_pct=_size_pct(rec),
             conditions=conditions,
             created_by=created_by,
         ))
@@ -476,6 +485,19 @@ def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
 
 
 _DEFAULT_HORIZON = 5
+
+
+def _size_pct(rec: dict) -> float:
+    """Share of the book this pick asked for, or 0 to take the default.
+
+    Floored at 0.5% when stated: a position too small to matter produces
+    an outcome too small to read, and the learning layer cannot tell a
+    good idea sized badly from a bad idea.
+    """
+    try:
+        return min(1.0, max(0.005, float(rec.get("size_pct"))))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _derive_conditions(rec: dict) -> list[Condition]:

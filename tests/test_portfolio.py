@@ -124,11 +124,14 @@ def test_close_position():
 
 
 def test_check_positions_stop_loss():
+    """check_positions moved to position_monitor; both names need the conn."""
     from alpha_agents.data.portfolio import open_position, check_positions
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
-        conn = _make_test_conn()
+    conn = _make_test_conn()
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.position_monitor._get_conn") as mock_m:
         mock.return_value = conn
+        mock_m.return_value = conn
         open_position(code="300475", name="香农芯创", theme="芯片",
                       open_date="2026-04-08", open_price=147.0,
                       stop_loss=135.0, source="morning", reason="test")
@@ -146,8 +149,12 @@ def test_check_positions_t1_skip():
     """T+1: positions opened today should NOT be checked."""
     from alpha_agents.data.portfolio import open_position, check_positions
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
-        mock.return_value = _make_test_conn()
+    conn = _make_test_conn()
+
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.position_monitor._get_conn") as mock_m:
+        mock.return_value = conn
+        mock_m.return_value = conn
         open_position(code="300475", name="香农芯创", theme="芯片",
                       open_date="2026-04-09", open_price=147.0,
                       stop_loss=135.0, source="morning", reason="test")

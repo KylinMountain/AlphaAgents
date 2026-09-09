@@ -48,7 +48,7 @@ CLUSTER_OVERLAP = 0.35
 # A cluster may hold more than one theme's worth, but not two. Setting it
 # at MAX_THEME_PCT would punish the system for correctly noticing the
 # themes are related; setting it at 2x would mean the check does nothing.
-MAX_CLUSTER_PCT = 0.45
+MAX_CLUSTER_PCT = 0.30
 
 # New risk stops here. Deliberately a gate on opening, not a forced
 # liquidation: selling everything at a drawdown level sells the bottom,
@@ -283,3 +283,89 @@ def describe_clusters() -> str:
     if not lines:
         return ""
     return "【相关主线】\n" + "\n".join(lines)
+
+
+# ── Entry quality ───────────────────────────────────────────
+#
+# A cancelled order is not a non-event. "价格已涨走" means the pick was
+# right and the entry price was too greedy — the system waited for a
+# pullback that a strengthening theme was never going to give it. That is
+# a lesson about *where to buy*, and it is completely separate from
+# whether the stock was worth buying.
+#
+# It was being thrown away. The learning layer only ever saw filled
+# orders, so no amount of history could teach it that its entry zones sit
+# below where price actually trades. Worse, the bias is systematic:
+# a pullback entry only fills when the theme is weakening, so the book
+# fills up with the picks that went wrong and misses the ones that went
+# right. Today, three fills were all pullbacks and both run-aways were
+# themes that strengthened.
+
+_ENTRY_OUTCOMES = {
+    "涨走": "介入价太低",
+    "资金不足": "资金分配",
+    "当日未成交": "价格未到",
+    "论点已失效": "论点先于价格失效",
+    "主线走弱": "主线先于价格失效",
+    "主线衰退": "主线先于价格失效",
+    "主线不存在": "主线不存在",
+}
+
+
+def classify_cancellation(reason: str) -> str:
+    for key, label in _ENTRY_OUTCOMES.items():
+        if key in (reason or ""):
+            return label
+    return "其他"
+
+
+def entry_quality(days: int = 30) -> dict:
+    """How the orders that never became positions failed.
+
+    The headline is ``missed_right``: how often the pick was right and the
+    entry price was wrong. A system that keeps being right and keeps not
+    getting filled has an entry problem, not a selection problem, and
+    nothing else in the stats will ever say so.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT close_reason FROM virtual_portfolio WHERE status = 'cancelled' "
+        "AND order_date >= date('now', ?)", (f"-{days} days",)).fetchall()
+    if not rows:
+        return {"n": 0}
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        label = classify_cancellation(r["close_reason"])
+        counts[label] = counts.get(label, 0) + 1
+
+    filled = conn.execute(
+        "SELECT COUNT(*) FROM virtual_portfolio WHERE open_date >= date('now', ?) "
+        "AND status != 'pending' AND open_price > 0", (f"-{days} days",)
+    ).fetchone()[0]
+
+    missed = counts.get("介入价太低", 0)
+    attempts = filled + len(rows)
+    return {
+        "n": len(rows), "filled": filled, "by_reason": counts,
+        "missed_right": missed,
+        "missed_rate": round(missed / attempts * 100, 1) if attempts else 0.0,
+    }
+
+
+def inject_entry_quality(days: int = 30) -> str:
+    """The entry-price lesson, for the review and the morning prompt."""
+    q = entry_quality(days=days)
+    if not q.get("n"):
+        return ""
+    lines = [f"【介入质量】近{days}天 成交 {q['filled']} 笔、撤单 {q['n']} 笔"]
+    for label, n in sorted(q["by_reason"].items(), key=lambda kv: -kv[1]):
+        lines.append(f"• {label}: {n} 笔")
+    if q["missed_rate"] >= 25:
+        lines.append(f"→ **{q['missed_rate']:.0f}% 的介入意图是「选对了但没买到」**（价格涨走）。"
+                     "介入区间系统性偏低——你在等一个走强的主线不会给的回调。"
+                     "把区间上移，或对高信心的标的直接用市价。")
+    elif q["missed_right"]:
+        lines.append(f"→ 其中 {q['missed_right']} 笔是选对了但价格涨走，"
+                     "属于介入价位问题，不是选股问题。")
+    return "\n".join(lines)

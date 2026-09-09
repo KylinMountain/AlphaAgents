@@ -21,10 +21,28 @@ logger = logging.getLogger(__name__)
 PENDING_EXPIRE_DAYS = 2  # 挂单有效期（仅用于无主线的挂单，有主线的跟随主线生命周期）
 
 # ── Capital Management ──────────────────────────────────────
-TOTAL_CAPITAL = 100_000          # 总资金 10万
-MAX_POSITION_PCT = 0.15          # 单票初始建仓最多占总资金 15%
-MAX_POSITION_WITH_ADD = 0.30     # 补仓后单票最多占总资金 30%
-MAX_THEME_PCT = 0.30             # 同主线最多占总资金 30%
+# 50万，然后基本让开。
+#
+# The agent sizes its own positions: how much to open with, when to add,
+# how much to take off. Those are half of what separates a trader who
+# knows what they are doing from one who does not, and every one of them
+# used to be a constant in this file — so they were unlearnable, exactly
+# the way selling was before the agent was given that too.
+#
+# What stays is a ceiling per stock, and it is a backstop rather than a
+# control: at 100% one position could take the whole book and every later
+# idea would be refused for 资金不足, which is how 上海机电 died with 232元
+# left. Sample count is the scarce resource here, and a runaway position
+# spends it. 10% is wide enough that a sane decision never touches it.
+TOTAL_CAPITAL = int(os.environ.get("TOTAL_CAPITAL", "500000"))
+
+# Default when a pick says nothing about size. Not a cap.
+DEFAULT_POSITION_PCT = float(os.environ.get("DEFAULT_POSITION_PCT", "0.03"))
+
+# The backstop. Not a target, and not a budget the agent should aim at.
+MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.10"))
+MAX_POSITION_WITH_ADD = MAX_POSITION_PCT
+MAX_THEME_PCT = 0.30             # 单主线上限
 LOT_SIZE = 100                   # A股一手 = 100股
 ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 
@@ -110,29 +128,21 @@ def _calc_shares(price: float, max_amount: float) -> int:
     return lots * LOT_SIZE
 
 
-# Conviction maps onto [floor, 1.0] of the per-stock cap. The floor is not
-# zero: an idea the agent thought worth opening at all still deserves
-# enough size to produce a readable outcome, and a 2% position teaches the
-# learning layer nothing when it works.
-MIN_CONVICTION_FACTOR = 0.45
+def _wanted_pct(code: str) -> float:
+    """How much of the book this idea asked for, as a fraction.
 
-
-def _conviction_factor(code: str) -> float:
-    """How much of the per-stock cap this idea has earned, from its thesis.
-
-    Returns 1.0 when there is no thesis — every caller predates them, and
-    a missing thesis must not silently shrink a position.
+    The thesis states it. A pick that says nothing gets
+    DEFAULT_POSITION_PCT, which keeps behaviour unchanged for anything
+    written before sizing was a decision.
     """
     try:
         from alpha_agents.data.thesis import get_active
-        theses = get_active(code=code)
+        theses = [t for t in get_active(code=code) if t.position_id is None]
+        if theses and theses[-1].size_pct:
+            return max(0.005, min(1.0, theses[-1].size_pct))
     except Exception as e:
-        logger.debug("Conviction lookup failed for %s: %s", code, e)
-        return 1.0
-    if not theses:
-        return 1.0
-    conviction = max(0.0, min(1.0, theses[-1].conviction or 0.0))
-    return MIN_CONVICTION_FACTOR + (1.0 - MIN_CONVICTION_FACTOR) * conviction
+        logger.debug("Size lookup fallback for %s: %s", code, e)
+    return DEFAULT_POSITION_PCT
 
 
 def _cluster_room(theme: str) -> float:
@@ -291,6 +301,13 @@ def check_pending_orders(
     orders = conn.execute(
         "SELECT * FROM virtual_portfolio WHERE status = 'pending'"
     ).fetchall()
+    # Highest conviction first. Capital is finite and this loop spends it
+    # in order, so whatever ran first used to win — by row id, which is
+    # arrival order and carries no information. 上海机电 was refused with
+    # 232元 left not because it was the weakest idea but because it was
+    # inserted last. When the book is full, it should be full of the ideas
+    # the agent believed in.
+    orders = sorted(orders, key=lambda o: -_order_conviction(o["code"]))
 
     alerts = []
     for order in orders:
@@ -378,11 +395,87 @@ def check_pending_orders(
             triggered = True
 
         if triggered:
+            # The thesis has to still be alive at the moment of the fill.
+            # An order can sit for days while the reason for it decays, and
+            # filling into a dead thesis costs a full round trip — buy and
+            # sell commission, stamp duty, slippage, ~0.15% — for a
+            # position the monitor closes on its next pass. Seen on the
+            # first day of real fills: 东方明珠 filled while 国企改革 was
+            # already scoring −1 for the day.
+            dead = _thesis_already_broken(code, price, order)
+            if dead:
+                _cancel_order(order["id"], f"论点在成交前已失效: {dead}")
+                alerts.append({"type": "cancelled", "code": code,
+                               "name": order.get("name", ""),
+                               "reason": f"论点已失效({dead})"})
+                continue
             fill_alert = _fill_order(order, fill_price=price, fill_date=today)
             if fill_alert:
                 alerts.append(fill_alert)
 
     return alerts
+
+
+def _order_conviction(code: str) -> float:
+    """The stated conviction behind an order, or a neutral 0.5.
+
+    Neutral rather than zero for an order with no thesis: those predate
+    theses entirely, and sorting them to the back would starve them of
+    capital for a reason that is about the code's history, not the idea.
+    """
+    try:
+        from alpha_agents.data.thesis import get_active
+        theses = get_active(code=code)
+        return theses[-1].conviction if theses else 0.5
+    except Exception as e:
+        logger.debug("Conviction sort fallback for %s: %s", code, e)
+        return 0.5
+
+
+def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
+    """Would this order's thesis have been invalidated the moment it filled?
+
+    Evaluated against the fill price with no position history — there is
+    no peak and no holding period yet, so drawdown and time conditions
+    cannot fire and are not meant to. What can fire is everything about
+    the world: the price level, the theme's strength and today's score,
+    its rank and flow. Those are exactly the conditions that decay while
+    an order waits.
+
+    Returns the condition's description, or None to fill.
+    """
+    try:
+        from alpha_agents.data import thesis as T
+    except Exception as e:
+        logger.debug("Thesis pre-check unavailable for %s: %s", code, e)
+        return None
+
+    try:
+        theses = [t for t in T.get_active(code=code) if t.position_id is None]
+        if not theses:
+            return None
+        th = theses[-1]
+        open_price = order.get("entry_high") or order.get("entry_low") or price
+        mv = T.MarketView(
+            price=price,
+            current_return_pct=round((price - open_price) / open_price * 100, 2)
+            if open_price else 0.0,
+        )
+        theme = order.get("theme")
+        if theme:
+            row = get_theme_by_name(theme)
+            if row:
+                mv.theme_strength = row.get("strength")
+                mv.theme_daily_score = row.get("daily_score")
+                mv.theme_status = row.get("status")
+        fired = T.evaluate(th.conditions, mv)
+        if fired:
+            T.close(th.id, T.INVALIDATED, close_kind=fired.kind,
+                    close_note=f"成交前失效：{T.describe(fired)}")
+            return T.describe(fired)
+    except Exception as e:
+        logger.warning("Thesis pre-check failed for %s: %s", code, e)
+    return None
 
 
 def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
@@ -405,7 +498,10 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # right. The thesis carries a conviction the agent stated when it
         # opened the idea; with no thesis this falls back to the cap and
         # behaves exactly as before.
-        max_per_stock = TOTAL_CAPITAL * MAX_POSITION_PCT * _conviction_factor(code)
+        # What the agent asked for, capped by the backstop. Conviction no
+        # longer scales this behind its back — it says the number itself.
+        max_per_stock = min(TOTAL_CAPITAL * _wanted_pct(code),
+                            TOTAL_CAPITAL * MAX_POSITION_PCT)
         max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
         # Themes that share most of their constituents are one bet. The
         # per-theme cap counted 金属铜 and 小金属概念 as two and would let
@@ -568,25 +664,137 @@ def open_position(
         return cur.lastrowid
 
 
+def _round_lot(shares: int) -> int:
+    """Down to a whole 手. A-shares sell in multiples of 100."""
+    return (int(shares) // LOT_SIZE) * LOT_SIZE
+
+
+def _partial_close(conn, position_id: int, open_price: float,
+                   close_price: float, sell: int, held: int,
+                   booked: float, close_reason: str) -> bool:
+    """Book a trim: realise part, keep the rest open at the same cost.
+
+    The realised amount accumulates in return_amount so a position trimmed
+    twice and then closed still totals what it actually earned. return_pct
+    stays the per-share figure on this sale, which is what the review
+    reads when it asks whether the trim was a good call.
+    """
+    net = _estimate_net_close_result(open_price, close_price, sell)
+    remaining = held - sell
+    conn.execute(
+        "UPDATE virtual_portfolio SET shares = ?, return_amount = ?, "
+        "close_reason = ? WHERE id = ?",
+        (remaining, round(booked + net["return_amount"], 2),
+         close_reason[:200], position_id))
+    conn.commit()
+    logger.info("Trimmed #%d: 卖出 %d股 @ %.2f (净 %+.2f%%, %+.0f元)，"
+                "剩余 %d股 — %s",
+                position_id, sell, close_price, net["return_pct"],
+                net["return_amount"], remaining, close_reason)
+    # No learning feedback here on purpose: the thesis is still live and
+    # its outcome is not decided. The full close writes the label.
+    return True
+
+
+def add_to_position(position_id: int, *, price: float, reason: str,
+                    size_pct: float | None = None) -> dict | None:
+    """Buy the second tranche of a position the agent wants more of.
+
+    How many times to add, and how much each time, is the agent's call —
+    the only bound is the per-stock backstop. Returns None when the room
+    is gone, which is a legitimate answer and not a failure.
+
+    ``size_pct`` is the share of the book to add; without one it adds the
+    default position size again.
+    """
+    with _write_lock:
+        conn = _get_conn()
+        pos = conn.execute(
+            "SELECT code, name, theme, open_price, shares, reason "
+            "FROM virtual_portfolio WHERE id = ? AND status = 'open'",
+            (position_id,)).fetchone()
+        if not pos or price <= 0:
+            return None
+
+        held = pos["shares"] or 0
+        cost = (pos["open_price"] or 0) * held
+        wanted = TOTAL_CAPITAL * max(0.005, min(1.0, size_pct
+                                                or DEFAULT_POSITION_PCT))
+
+        room = min(
+            wanted,
+            get_available_capital(),
+            TOTAL_CAPITAL * MAX_POSITION_WITH_ADD - cost,
+            TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(pos["theme"] or ""),
+            max(0.0, get_sentiment_exposure_limit()
+                - (TOTAL_CAPITAL - get_available_capital())),
+        )
+        add_shares = _calc_shares(price, max(0.0, room))
+        if add_shares <= 0:
+            logger.info("Add refused for %s: no room (%.0f元)", pos["code"], room)
+            return None
+
+        total = held + add_shares
+        # Weighted average: the position's cost basis is now both buys, and
+        # every return the monitor computes has to be against that or the
+        # add would flatter the numbers for free.
+        avg = round((cost + add_shares * price) / total, 3)
+        conn.execute(
+            "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
+            "reason = ? WHERE id = ?",
+            (total, avg, f"{pos['reason'] or ''} | {reason}"[:300], position_id))
+        conn.commit()
+
+    logger.info("Added to #%d %s: +%d股 @ %.2f → %d股 均价%.2f — %s",
+                position_id, pos["code"], add_shares, price, total, avg, reason)
+    return {"shares": add_shares, "avg_price": avg, "total_shares": total}
+
+
 def close_position(
     position_id: int,
     *,
     close_price: float,
     close_reason: str,
+    shares: int | None = None,
 ) -> bool:
-    """Close an open position. Returns True on success, False if not found."""
+    """Close a position, or part of one. Returns True on success.
+
+    ``shares`` makes 减仓 a real action. Without it the agent could say
+    "trim" and the system recorded a full exit, so every partial-exit
+    decision it ever made was executed as something else and graded as
+    something else — the one sizing skill it was allowed to express was
+    quietly discarded.
+
+    A partial close books the realised P&L on the shares sold and leaves
+    the rest open at the same cost basis. Cost basis does not move on a
+    sale: the remaining shares were bought at the original price, and
+    re-averaging it would flatter the survivors and hide the trim in the
+    numbers.
+    """
     with _write_lock:
         conn = _get_conn()
         row = conn.execute(
-            "SELECT open_price, shares FROM virtual_portfolio WHERE id = ?",
-            (position_id,),
+            "SELECT open_price, shares, return_amount FROM virtual_portfolio "
+            "WHERE id = ?", (position_id,),
         ).fetchone()
         if not row:
             logger.warning("close_position: position #%d not found", position_id)
             return False
 
         open_price = row["open_price"] or 0
-        shares = row["shares"] or 0
+        held = row["shares"] or 0
+        sell = held if shares is None else min(max(0, _round_lot(shares)), held)
+        if sell <= 0:
+            logger.warning("close_position #%d: nothing to sell (asked %s of %d)",
+                           position_id, shares, held)
+            return False
+
+        if sell < held:
+            return _partial_close(conn, position_id, open_price, close_price,
+                                  sell, held, row["return_amount"] or 0,
+                                  close_reason)
+
+        shares = held
         net_result = _estimate_net_close_result(open_price, close_price, shares)
         return_pct = net_result["return_pct"]
         return_amount = net_result["return_amount"]
@@ -684,428 +892,6 @@ def _status_from_reason(reason: str) -> str:
     return "expired"
 
 
-def _is_phase_bearish() -> tuple[bool, str]:
-    """Check if current sentiment phase demands aggressive stop-tightening.
-
-    V2 design: 分歧/退潮 phases have tighter trailing_stop_pct and higher
-    theme_exit_threshold. In these phases, we also tighten stops on all
-    positions — even unprofitable ones — to cut losses faster.
-
-    Returns (is_bearish, phase_name).
-    """
-    try:
-        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-        phase = get_sentiment_cycle().get("phase", "")
-        return phase in ("分歧", "退潮"), phase
-    except Exception:
-        return False, ""
-
-
-
-def _check_bearish_signals(
-    pos: dict, price: float, phase_bearish: bool, phase_name: str
-) -> tuple[float, list[str]]:
-    """Detect bearish signals on a position and compute a tightened stop.
-
-    Implements V2 principle #2 (资金行为优先) on the sell side. Four signals,
-    in priority order:
-      1. **量价派发** (alpha_agents.tools.exit_signals): 顶背离 95%/97%,
-         放量滞涨 96%, 放量下跌 97%, 高位缩量 98%. Deterministic, computed
-         from the local K-line — no LLM, so it is backtestable.
-      2. P0 资金流：主力连续净流出 ≥3天 (3-day: 97%, 5+ day: 98%)
-      3. P1 情绪周期：分歧/退潮 phase → 97% of current price
-      4. P2 主线速率：2日内强度下降≥3 → 98% of current price
-
-    Returns (tightest_stop, reasons). tightest_stop is 0 if no signal.
-    The caller integrates this with trailing stop logic (take the max).
-
-    "Tighten stop" beats "partial close" for MVP: less new infrastructure,
-    same effective outcome — if price keeps falling, existing stop-loss
-    machinery triggers the close; if price recovers, we never forced a sale.
-    """
-    import json as _json
-    code = pos.get("code", "")
-    name = pos.get("name", "")
-    reasons: list[str] = []
-    tightest_stop = 0.0
-
-    def _apply(factor: float, label: str) -> None:
-        """Raise tightest_stop to price*factor if it beats prior candidates."""
-        nonlocal tightest_stop
-        candidate = round(price * factor, 2)
-        if candidate > tightest_stop:
-            tightest_stop = candidate
-        reasons.append(label)
-
-    # ── Signal 1 (highest priority): 大盘弱势 ──
-    # Forward-testing showed the exit question is answered by market
-    # regime, not by per-stock distribution patterns: for positions
-    # already up ≥15%, a weak market costs -1.73% of median excess return
-    # by day 3 and -6.48% by day 20. Tighten hard when the market turns.
-    # (See alpha_agents/tools/exit_signals for the numbers.)
-    try:
-        from alpha_agents.tools.exit_signals import get_market_regime
-        regime, regime_pct = get_market_regime()
-        if regime == "weak":
-            _apply(0.96, f"大盘弱势({regime_pct:+.1f}%)")
-    except Exception as e:
-        logger.debug("Regime check failed for %s: %s", code, e)
-
-    # ── Signal 2: 资金流 ──
-    try:
-        from alpha_agents.tools.fund_flow import get_stock_fund_flow_fn
-        ff = _json.loads(get_stock_fund_flow_fn(code))
-        out_days = ff.get("consecutive_outflow_days", 0) or 0
-        if out_days >= 5:
-            _apply(0.98, f"主力{out_days}日净流出")
-        elif out_days >= 3:
-            _apply(0.97, f"主力{out_days}日净流出")
-    except Exception as e:
-        logger.debug("Fund flow check failed for %s: %s", code, e)
-
-    # ── Signal 3: 情绪周期 分歧/退潮 ──
-    if phase_bearish:
-        _apply(0.97, f"情绪{phase_name}")
-
-    # ── Signal 4: 主线强度速率 ──
-    try:
-        from alpha_agents.data.memory_store import get_theme_strength_history
-        theme = pos.get("theme", "")
-        if theme:
-            history = get_theme_strength_history(theme, days=3)
-            if len(history) >= 2:
-                newest = history[0]["strength"]
-                oldest = history[-1]["strength"]
-                drop = oldest - newest
-                if drop >= 3:
-                    _apply(0.98, f"主线{drop}日跌{drop}点")
-    except Exception as e:
-        logger.debug("Theme velocity check failed for %s: %s", code, e)
-
-    return tightest_stop, reasons
-
-
-def _is_hard_exit(pos: dict, current_return: float) -> bool:
-    """Would this position close even if the trading agent said hold?
-
-    Two lines only: the maximum loss from cost basis, and a theme that has
-    been archived — at which point the reason the position was opened no
-    longer exists in the system at all.
-    """
-    if current_return <= -HARD_STOP_PCT:
-        return True
-    if pos.get("theme"):
-        theme = get_theme_by_name(pos["theme"])
-        if theme and theme.get("status") == "archived":
-            return True
-    return False
-
-
-def check_positions(
-    realtime_prices: dict[str, float],
-    today: str,
-    hard_only: bool = False,
-) -> list[dict]:
-    """Check open positions for stop-loss/take-profit/expiry.
-
-    ``hard_only`` is what makes room for a trading agent. Left False, every
-    trigger below closes the position, which is the behaviour that leaves
-    the agent nothing to learn about selling — it picks the stock and the
-    rules dispose of it. Set True, only ``_is_hard_exit`` closes anything;
-    every other trigger comes back as ``type="signal"`` for the agent to
-    weigh, alongside the news and the theme state it already sees.
-
-    Respects T+1: skips positions where open_date == today.
-
-    Sell triggers (priority order):
-      1. Hard stop / trailing stop triggered → close
-      2. Target price hit → close
-      3. Theme declining/weakening → close
-      4. Bearish signals (量价派发 / fund flow / sentiment / theme) → tighten
-         stop (may trigger #1 on next tick)
-
-    The bearish-signal mechanism implements V2 principle #2 (资金行为优先) on
-    the sell side: we no longer wait for the price to touch the original
-    stop — we proactively raise it whenever the 量价 / fund-flow / sentiment
-    / theme signals say the position is at risk.
-    """
-    conn = _get_conn()
-    positions = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'open' AND open_date < ?",
-        (today,),
-    ).fetchall()
-
-    # ── Compute shared sentiment context (once per cycle, not per-position) ──
-    phase_bearish, phase_name = _is_phase_bearish()
-
-    alerts = []
-    for pos in positions:
-        pos = dict(pos)
-        code = pos["code"]
-        price = realtime_prices.get(code)
-        if price is None or price <= 0:
-            continue
-
-        open_price = pos["open_price"] or 0
-        current_return = round((price - open_price) / open_price * 100, 2) if open_price else 0
-
-        # Update peak and drawdown
-        peak = max(pos.get("peak_return_pct", 0) or 0, current_return)
-        drawdown = round(peak - current_return, 2) if peak > 0 else 0
-
-        try:
-            open_dt = datetime.strptime(pos["open_date"], "%Y-%m-%d")
-            today_dt = datetime.strptime(today, "%Y-%m-%d")
-            holding_days = max(0, (today_dt - open_dt).days)
-        except ValueError:
-            holding_days = pos.get("holding_days", 0)
-
-        # ── Trailing stop (移动止损) ──
-        # When stock hits new highs, raise stop_loss to protect profits
-        stop_loss = pos.get("stop_loss") or 0
-        peak_price = open_price * (1 + peak / 100) if open_price else 0
-
-        if peak_price > open_price and stop_loss > 0:
-            # Trailing stop = peak price * (1 - trailing_pct)
-            # trailing_pct starts at original stop distance, tightens as profit grows
-            original_stop_pct = (open_price - stop_loss) / open_price if open_price else 0.05
-            # Get dynamic trailing stop from sentiment cycle
-            try:
-                from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-                _cycle = get_sentiment_cycle()
-                _trailing_pct_from_cycle = _cycle["strategy"]["trailing_stop_pct"] / 100
-            except Exception:
-                _trailing_pct_from_cycle = 0.05
-            trailing_pct = min(original_stop_pct, _trailing_pct_from_cycle)
-
-            if current_return >= 5:
-                # Once up 5%+, trail at 5% from peak (lock in most of the gain)
-                new_stop = round(peak_price * (1 - trailing_pct), 2)
-            elif current_return >= 3:
-                # Up 3-5%, trail at original stop distance from peak
-                new_stop = round(peak_price * (1 - original_stop_pct), 2)
-            else:
-                new_stop = stop_loss  # Keep original stop
-
-            if new_stop > stop_loss:
-                logger.info("Trailing stop: %s %s 止损 %.2f → %.2f (峰值%.2f, 当前%.2f)",
-                            code, pos.get("name", ""), stop_loss, new_stop, peak_price, price)
-                stop_loss = new_stop
-
-        # ── Bearish-signal tightening (V2 原则#2 资金行为优先的卖出侧落地) ──
-        # Unlike trailing stop (only profits-based), this applies regardless of
-        # P/L. Take the MAX of trailing-stop and bearish-signal-stop — we never
-        # loosen a stop that was previously tightened.
-        stop_before_bearish = stop_loss
-        bearish_stop, bearish_reasons = _check_bearish_signals(
-            pos, price, phase_bearish, phase_name,
-        )
-        if bearish_stop > stop_loss:
-            logger.info(
-                "Bearish stop: %s %s 止损 %.2f → %.2f [%s]",
-                code, pos.get("name", ""), stop_loss, bearish_stop,
-                "+".join(bearish_reasons),
-            )
-            stop_loss = bearish_stop
-
-        with _write_lock:
-            conn.execute(
-                "UPDATE virtual_portfolio SET peak_return_pct = ?, "
-                "max_drawdown_pct = ?, holding_days = ?, stop_loss = ? WHERE id = ?",
-                (peak, drawdown, holding_days, stop_loss, pos["id"]),
-            )
-            conn.commit()
-
-        # Emit a non-closing alert when bearish signals materially tightened
-        # the stop. The alert surfaces WHY the stop moved, so the user sees
-        # the signals — not just the eventual close. Threshold 0.5% above
-        # the pre-bearish stop filters out no-op / sub-cent adjustments.
-        if (bearish_reasons and stop_loss > stop_before_bearish * 1.005
-                and stop_loss > price * 0.5):  # sanity guard vs zero/garbage prices
-            alerts.append({
-                "type": "stop_tightened",
-                "code": code,
-                "name": pos.get("name", ""),
-                "price": price,
-                "old_stop": stop_before_bearish,
-                "new_stop": stop_loss,
-                "reason": "预警-" + "+".join(bearish_reasons),
-                "current_return": current_return,
-            })
-
-        # Check triggers (priority order)
-        alert = None
-        target_price = pos.get("target_price")
-
-        if stop_loss and price <= stop_loss:
-            alert = {"type": "stopped", "reason": f"{'移动' if stop_loss > (pos.get('stop_loss') or 0) else ''}止损触发"}
-        elif target_price and price >= target_price:
-            alert = {"type": "target_hit", "reason": "止盈触发"}
-
-        # Theme-driven exit — no fixed holding days, ride the theme lifecycle
-        if not alert and pos.get("theme"):
-            theme = get_theme_by_name(pos["theme"])
-            if theme:
-                theme_status = theme.get("status", "watching")
-                theme_strength = theme.get("strength", 0)
-
-                # Dynamic exit threshold from sentiment cycle
-                try:
-                    from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-                    _cycle = get_sentiment_cycle()
-                    _exit_threshold = _cycle["strategy"]["theme_exit_threshold"]
-                except Exception:
-                    _exit_threshold = 3
-
-                if theme_status in ("declining", "archived"):
-                    # 主线衰退 → 清仓
-                    alert = {"type": "expired", "reason": f"主线衰退({pos['theme']}已{theme_status})，持仓{holding_days}天"}
-                elif theme_strength <= _exit_threshold:
-                    # 主线走弱 → 清仓（不等到 declining，提前走）
-                    alert = {"type": "expired", "reason": f"主线走弱({pos['theme']}强度{theme_strength}，阈值{_exit_threshold})，持仓{holding_days}天"}
-                # peak/active + strength >= 4 → 继续持有，不设天数上限
-                # 靠移动止损保护利润
-
-        # Regime-conditional holding cap — the one exit rule that survived
-        # forward testing. A position already up ≥15% bleeds median excess
-        # return the longer it is held, and faster the weaker the market:
-        # 强势 is flat only through day 3, 震荡 is already negative by day 3,
-        # 弱势 loses 1.7% by day 3 and 6.5% by day 20. Riding the theme past
-        # that point gives back the catalyst move.
-        if not alert:
-            try:
-                from alpha_agents.tools.exit_signals import check_holding_period
-                should_close, hp_reason = check_holding_period(code, holding_days)
-                if should_close:
-                    alert = {"type": "expired", "reason": hp_reason}
-            except Exception as e:
-                logger.debug("Holding period check failed for %s: %s", code, e)
-
-        # No theme → fallback to moving stop only (no fixed day limit)
-        # The trailing stop + theme lifecycle is the exit mechanism, not calendar days
-
-        # Demote a discretionary trigger to evidence. The position stays
-        # open and the agent is told why the rules wanted it closed — a
-        # trailing stop that fired on an intraday wick reads very
-        # differently next to a theme that is still taking inflow.
-        if alert and hard_only and not _is_hard_exit(pos, current_return):
-            alerts.append({
-                "type": "signal", "code": code, "name": pos.get("name", ""),
-                "reason": alert["reason"], "would_have": alert["type"],
-                "current_return": current_return, "price": price,
-                "holding_days": holding_days,
-            })
-            alert = None
-
-        if alert:
-            success = close_position(pos["id"], close_price=price, close_reason=alert["reason"])
-            if not success:
-                continue
-            shares = pos.get("shares", 0)
-            net_result = _estimate_net_close_result(open_price, price, shares)
-            alert.update({
-                "code": code,
-                "name": pos.get("name", ""),
-                "shares": shares,
-                "open_price": open_price,
-                "close_price": price,
-                "return_pct": net_result["return_pct"],
-                "return_amount": net_result["return_amount"],
-                "gross_return_pct": current_return,
-                "estimated_costs": net_result["costs"],
-                "holding_days": holding_days,
-            })
-            alerts.append(alert)
-        else:
-            # ── Check for add-position opportunity (补仓) ──
-            add_alert = _check_add_position(pos, price, current_return)
-            if add_alert:
-                alerts.append(add_alert)
-
-    return alerts
-
-
-def _check_add_position(pos: dict, price: float, current_return: float) -> dict | None:
-    """Check if we should add to an existing position (补仓).
-
-    Conditions:
-    - Price dropped >= ADD_POSITION_DROP_PCT from entry
-    - Theme still healthy (strength >= 4)
-    - Current position < MAX_POSITION_WITH_ADD (30%)
-    - Have available capital
-    """
-    if current_return > -ADD_POSITION_DROP_PCT:
-        return None  # Not down enough
-
-    code = pos["code"]
-    name = pos.get("name", "")
-    theme_name = pos.get("theme", "")
-
-    # Check theme health (read-only, safe outside lock)
-    if theme_name:
-        theme = get_theme_by_name(theme_name)
-        if theme and theme.get("strength", 0) < 4:
-            return None  # Theme too weak, don't throw good money after bad
-
-    with _write_lock:
-        open_price = pos.get("open_price", 0)
-        existing_shares = pos.get("shares", 0)
-        existing_cost = open_price * existing_shares
-
-        # Check position limit (30% with add)
-        max_total_cost = TOTAL_CAPITAL * MAX_POSITION_WITH_ADD
-        room = max_total_cost - existing_cost
-        if room <= 0:
-            return None  # Already at max
-
-        # Check available capital (sentiment limit does NOT apply to add-positions —
-        # bearish markets are exactly when you want to average down)
-        available = get_available_capital()
-        room = min(room, available)
-
-        add_shares = _calc_shares(price, room)
-        if add_shares == 0:
-            return None
-
-        add_cost = add_shares * price
-
-        # Execute add: update shares and recalculate avg open_price
-        new_total_shares = existing_shares + add_shares
-        new_avg_price = round((existing_cost + add_cost) / new_total_shares, 2)
-
-        # Recalculate stop_loss to maintain original percentage distance from new avg price
-        old_stop = pos.get("stop_loss") or 0
-        if open_price > 0 and old_stop > 0:
-            original_stop_pct = (open_price - old_stop) / open_price  # e.g. 0.10 for 10% distance
-            new_stop_loss = round(new_avg_price * (1 - original_stop_pct), 2)
-        else:
-            new_stop_loss = old_stop
-
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE virtual_portfolio SET open_price = ?, shares = ?, stop_loss = ? WHERE id = ?",
-            (new_avg_price, new_total_shares, new_stop_loss, pos["id"]),
-        )
-        conn.commit()
-
-    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f→%.2f, 止损 %.2f→%.2f, 总%d股, 总成本%.0f元)",
-                code, name, add_shares, price,
-                open_price, new_avg_price, old_stop, new_stop_loss,
-                new_total_shares, new_avg_price * new_total_shares)
-
-    return {
-        "type": "add_position",
-        "code": code,
-        "name": name,
-        "add_shares": add_shares,
-        "add_price": price,
-        "new_avg_price": new_avg_price,
-        "new_stop_loss": new_stop_loss,
-        "total_shares": new_total_shares,
-        "total_cost": round(new_avg_price * new_total_shares),
-    }
-
-
 # ── Summaries ───────────────────────────────────────────────
 
 
@@ -1122,3 +908,11 @@ __all__ = [
     "get_portfolio_stats", "get_today_changes_summary",
     "parse_entry_zone", "parse_stop_loss",
 ]
+
+
+# Re-exported so callers keep importing check_positions from portfolio.
+# The split is about file size, not about the API.
+from alpha_agents.data.position_monitor import (  # noqa: E402
+    _check_add_position, _check_bearish_signals, _is_hard_exit,
+    _is_phase_bearish, check_positions,
+)

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime
 
@@ -123,12 +124,17 @@ async def run_morning_analysis(
     try:
         result = await asyncio.wait_for(
             Runner.run(agent, user_message, hooks=hooks, max_turns=40),
-            timeout=300,
+            # 24 tools and a per-call ceiling of TOOL_TIMEOUT means the
+            # worst case is bounded now, but the scan legitimately needs
+            # more wall time than it did with 15 tools — it reads the
+            # money before it picks, which is more calls by design.
+            timeout=int(os.environ.get("MORNING_TIMEOUT", "420")),
         )
         logger.info("Morning agent finished, length=%d", len(result.final_output))
         return result.final_output
     except asyncio.TimeoutError:
-        logger.error("Morning agent timed out after 300s")
+        logger.error("Morning agent timed out after %ss",
+                     os.environ.get("MORNING_TIMEOUT", "420"))
         return "[晨扫超时，未生成报告]"
     except Exception as e:
         logger.error("Morning agent failed: %s", e)

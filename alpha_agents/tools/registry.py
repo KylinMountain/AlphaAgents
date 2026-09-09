@@ -2,6 +2,8 @@
 
 from agents import function_tool
 
+from alpha_agents.tools.budget import with_timeout
+
 from alpha_agents.sources.eastmoney import get_news_fn
 from alpha_agents.sources.world_news import get_world_news_fn
 from alpha_agents.sources.cls_telegraph import get_cls_telegraph_fn
@@ -46,48 +48,56 @@ from alpha_agents.data.sentiment_cycle import get_sentiment_cycle as _get_sentim
 
 
 @function_tool
+@with_timeout
 def get_news(limit: int = 50, keyword: str = "") -> str:
     """获取最新财经新闻。可按关键词过滤。"""
     return get_news_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_world_news(limit: int = 30, keyword: str = "") -> str:
     """获取国际新闻（路透社、AP、BBC、CNBC等）。用于获取地缘政治、国际时事等信息。"""
     return get_world_news_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_cls_telegraph(limit: int = 30, keyword: str = "") -> str:
     """获取财联社电报快讯。A股最快的实时新闻源。"""
     return get_cls_telegraph_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_wallstreetcn(limit: int = 30, keyword: str = "") -> str:
     """获取华尔街见闻快讯。国际财经新闻中文解读。"""
     return get_wallstreetcn_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_whitehouse(limit: int = 20, keyword: str = "") -> str:
     """获取白宫官方声明和行政令。追踪美国政策动态。"""
     return get_whitehouse_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_pboc_news(limit: int = 20, keyword: str = "") -> str:
     """获取中国人民银行公告。追踪货币政策动态。"""
     return get_pboc_news_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_jin10(limit: int = 30, keyword: str = "") -> str:
     """获取金十数据实时快讯。覆盖全球宏观、外汇、商品。"""
     return get_jin10_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_sina_7x24(limit: int = 30, keyword: str = "", stocks_only: bool = False) -> str:
     """获取新浪财经7x24快讯。
 
@@ -106,36 +116,42 @@ def get_sina_7x24(limit: int = 30, keyword: str = "", stocks_only: bool = False)
 
 
 @function_tool
+@with_timeout
 def get_xinhua(limit: int = 20, keyword: str = "") -> str:
     """获取新华社财经新闻。国内官方政策信号。"""
     return get_xinhua_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_fed_news(limit: int = 20, keyword: str = "") -> str:
     """获取美联储新闻发布。追踪美国货币政策。"""
     return get_fed_news_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_sec_news(limit: int = 20, keyword: str = "") -> str:
     """获取SEC新闻发布。追踪美国证券监管动态。"""
     return get_sec_news_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_social_media(limit: int = 20, keyword: str = "") -> str:
     """获取特朗普(Truth Social)和马斯克(X)的最新动态。"""
     return get_social_media_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def get_eastmoney_live(limit: int = 30, keyword: str = "") -> str:
     """获取东方财富7x24小时实时快讯。全天候财经快讯流。"""
     return get_eastmoney_live_fn(limit=limit, keyword=keyword or None)
 
 
 @function_tool
+@with_timeout
 def search_stocks(keyword: str) -> str:
     """根据概念/板块描述检索相关A股个股。支持语义搜索。
 
@@ -147,6 +163,7 @@ def search_stocks(keyword: str) -> str:
 
 
 @function_tool
+@with_timeout
 def search_news(query: str, hours: int = 24, top_k: int = 8) -> str:
     """在本地实时快讯库里做语义检索——追因的**首选**工具。
 
@@ -171,6 +188,7 @@ def search_news(query: str, hours: int = 24, top_k: int = 8) -> str:
 
 
 @function_tool
+@with_timeout
 def web_search(query: str, max_results: int = 10) -> str:
     """通用网页搜索（DuckDuckGo）。**兜底**工具，先试 search_news。
 
@@ -185,6 +203,7 @@ def web_search(query: str, max_results: int = 10) -> str:
 
 
 @function_tool
+@with_timeout
 def web_fetch(url: str) -> str:
     """获取网页内容。输入URL，返回页面的文本内容（自动去除HTML标签）。
 
@@ -194,6 +213,7 @@ def web_fetch(url: str) -> str:
 
 
 @function_tool
+@with_timeout
 def get_pizzint() -> str:
     """获取五角大楼披萨指数（Pentagon Pizza Index）— 地缘政治紧张度的OSINT早期预警。
 
@@ -209,6 +229,7 @@ def get_pizzint() -> str:
 
 
 @function_tool
+@with_timeout
 def get_sector_data(sector_name: str) -> str:
     """获取板块行情数据，包括涨跌幅和资金流向。
 
@@ -220,18 +241,21 @@ def get_sector_data(sector_name: str) -> str:
 
 
 @function_tool
+@with_timeout
 def filter_stocks(stock_codes: list[str]) -> str:
     """过滤不适合的个股（剔除ST、停牌、市值过小）。"""
     return filter_stocks_fn(stock_codes=stock_codes)
 
 
 @function_tool
+@with_timeout
 def get_watchlist() -> str:
     """读取用户自选股列表。"""
     return get_watchlist_fn()
 
 
 @function_tool
+@with_timeout
 def get_stock_quotes(codes: str) -> str:
     """获取个股实时行情数据（价格、市值、涨跌幅）。
 
@@ -243,6 +267,7 @@ def get_stock_quotes(codes: str) -> str:
 
 
 @function_tool
+@with_timeout
 def get_financial_data(code: str) -> str:
     """获取个股基本面财务数据（ROE、EPS、负债率、毛利率等）。
 
@@ -256,6 +281,7 @@ def get_financial_data(code: str) -> str:
 
 
 @function_tool
+@with_timeout
 def get_market_breadth() -> str:
     """获取A股市场整体情绪指标（涨跌比、涨停跌停数、市场活跃度）。
 
@@ -268,6 +294,7 @@ def get_market_breadth() -> str:
 
 
 @function_tool
+@with_timeout
 def get_earnings_calendar(codes: str = "") -> str:
     """获取业绩预告数据 — 检查推荐股票是否有业绩地雷风险。
 
@@ -280,6 +307,7 @@ def get_earnings_calendar(codes: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_lhb_detail(date: str = "") -> str:
     """获取龙虎榜数据 — 机构/游资席位买卖明细。
 
@@ -291,6 +319,7 @@ def get_lhb_detail(date: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_block_trade(date: str = "") -> str:
     """获取大宗交易数据 — 折溢价率判断买卖意愿。
 
@@ -301,6 +330,7 @@ def get_block_trade(date: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_north_flow(indicator: str = "today") -> str:
     """获取北向资金持股数据 — 外资方向是重要信号。
 
@@ -311,6 +341,7 @@ def get_north_flow(indicator: str = "today") -> str:
 
 
 @function_tool
+@with_timeout
 def get_margin_data(code: str = "") -> str:
     """获取融资融券数据 — 杠杆资金方向。
 
@@ -321,6 +352,7 @@ def get_margin_data(code: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_stock_fund_flow(code: str, market: str = "") -> str:
     """获取个股资金流向 — 主力vs散户资金方向。
 
@@ -332,6 +364,7 @@ def get_stock_fund_flow(code: str, market: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_sector_ranking(top_n: int = 20) -> str:
     """获取行业板块资金流排名 — 检测板块轮动方向。
 
@@ -342,6 +375,7 @@ def get_sector_ranking(top_n: int = 20) -> str:
 
 
 @function_tool
+@with_timeout
 def get_concept_ranking(top_n: int = 20) -> str:
     """获取概念板块资金流排名 — 发现热门投资主线。
 
@@ -353,6 +387,7 @@ def get_concept_ranking(top_n: int = 20) -> str:
 
 
 @function_tool
+@with_timeout
 def get_anomaly_stocks(date: str = "") -> str:
     """获取涨停/跌停/炸板数据 — 检测市场异动和主线方向。
 
@@ -365,6 +400,7 @@ def get_anomaly_stocks(date: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_market_snapshot(min_volume_ratio: float = 3.0, min_turnover: float = 15.0) -> str:
     """获取量比/换手率异常个股 — 发现盘中异动股。
 
@@ -376,6 +412,7 @@ def get_market_snapshot(min_volume_ratio: float = 3.0, min_turnover: float = 15.
 
 
 @function_tool
+@with_timeout
 def get_institutional_position(code: str, market: str = "") -> str:
     """分析个股的机构持仓行为，输出量化买卖信号。
 
@@ -392,6 +429,7 @@ def get_institutional_position(code: str, market: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_sector_best_stocks(concept_name: str, top_n: int = 10) -> str:
     """获取板块内综合评分最高的标的（基于历史beta跟涨弹性+实时多因子打分）。
 
@@ -407,6 +445,7 @@ def get_sector_best_stocks(concept_name: str, top_n: int = 10) -> str:
 
 
 @function_tool
+@with_timeout
 def get_sentiment_phase() -> str:
     """获取当前市场情绪周期阶段（冰点/修复/升温/狂热/分歧/退潮）。
 
@@ -419,6 +458,7 @@ def get_sentiment_phase() -> str:
 
 
 @function_tool
+@with_timeout
 def get_us_market() -> str:
     """获取美股三大指数最新行情（道琼斯、标普500、纳斯达克）。
 
@@ -428,6 +468,7 @@ def get_us_market() -> str:
 
 
 @function_tool
+@with_timeout
 def get_bond_yields() -> str:
     """获取中美国债收益率（2Y/5Y/10Y/30Y）及利差信号。
 
@@ -440,6 +481,7 @@ def get_bond_yields() -> str:
 
 
 @function_tool
+@with_timeout
 def get_global_overview() -> str:
     """获取全球市场综合概览 — 美股指数 + 国债收益率 + 关键信号。
 
@@ -473,6 +515,7 @@ STOCK_TOOLS = [
 ]
 
 @function_tool
+@with_timeout
 def get_futures_quotes(symbols: str = "", days: int = 5) -> str:
     """获取期货主力合约行情数据（OHLCV）。
 
@@ -486,6 +529,7 @@ def get_futures_quotes(symbols: str = "", days: int = 5) -> str:
 
 
 @function_tool
+@with_timeout
 def get_futures_inventory(symbol: str) -> str:
     """获取期货品种交割仓库库存数据（仓单/库存）。
 
@@ -496,6 +540,7 @@ def get_futures_inventory(symbol: str) -> str:
 
 
 @function_tool
+@with_timeout
 def get_cftc_positions(commodity: str = "") -> str:
     """获取CFTC持仓报告（Commitment of Traders）— 国际期货大户持仓动向。
 
@@ -508,6 +553,7 @@ def get_cftc_positions(commodity: str = "") -> str:
 
 
 @function_tool
+@with_timeout
 def get_futures_basis(date: str = "") -> str:
     """获取期现基差数据（现货价 vs 期货价）。
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 
 from agents import Agent, Runner
@@ -45,6 +46,20 @@ def _create_morning_agent() -> Agent:
     # would drop, and a kind added to the checker is offered immediately.
     from alpha_agents.data.thesis import prompt_vocabulary
     prompt = prompt.replace("{VOCAB}", prompt_vocabulary())
+
+    # Prompt files are read from disk on every agent creation; Python is
+    # not. A long-running scheduler therefore picks up an edited prompt
+    # while still executing the code it started with — which is worse than
+    # either being stale on its own. It happened: the prompt gained a
+    # {VOCAB} placeholder before the process had the line that fills it,
+    # so the agent was shown the literal braces, invented three condition
+    # kinds that do not exist, and every one of them was silently dropped
+    # by the validator. Fail loudly instead of shipping a prompt with a
+    # hole in it.
+    if "{VOCAB}" in prompt or re.search(r"\{[A-Z_]{3,}\}", prompt):
+        raise RuntimeError(
+            "morning_scan.md 有未替换的占位符——本进程的代码比 prompt 旧。"
+            "重启调度器：prompt 从磁盘热加载，Python 不会。")
     return Agent(
         name="morning_analyst",
         instructions=prompt,

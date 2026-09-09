@@ -175,9 +175,33 @@ export function stripWrappingFence(text) {
  * entirely a 【…】 header becomes a heading, so an inline 【…】 inside a
  * sentence is left alone.
  */
+/** Strip the machine-readable blocks out of a report before display.
+ *
+ * The agents end their reports with HTML comment blocks the pipeline
+ * parses — <!--RECOMMENDATIONS [...]--> and <!-- LESSONS: [...] -->.
+ * Markdown renderers do not hide HTML comments that are inside a text
+ * node, so the whole JSON payload was printing at the bottom of every
+ * morning report: a wall of {"kind": "...", "value": ...} under the risk
+ * notes. It got worse when theses were added, because the payload grew
+ * to carry claims and invalidation conditions.
+ *
+ * Removed rather than hidden with CSS: this is data for the parser, and
+ * a reader scrolling the report should not have to scroll past it.
+ */
+export function stripMachineBlocks(text) {
+  return String(text || '')
+    // Both spellings the prompts use: <!--TAG ... TAG--> and <!-- TAG: ... -->
+    .replace(/<!--\s*RECOMMENDATIONS[\s\S]*?RECOMMENDATIONS\s*-->/g, '')
+    .replace(/<!--\s*[A-Z_]{3,}:[\s\S]*?-->/g, '')
+    // Any leftover comment block, so a malformed tag cannot leak either.
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 export function reportToMarkdown(text) {
   if (!text) return ''
-  return stripWrappingFence(String(text))
+  return stripMachineBlocks(stripWrappingFence(String(text)))
     .split('\n')
     .map((line) => {
       const t = line.trim()
@@ -205,7 +229,7 @@ export function reportToMarkdown(text) {
  * carries a fact.
  */
 export function reportHeadline(text) {
-  const lines = stripWrappingFence(String(text || '')).split('\n')
+  const lines = stripMachineBlocks(stripWrappingFence(String(text || ''))).split('\n')
   const clean = lines
     .map((l) => l.trim())
     .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
@@ -230,7 +254,7 @@ export function reportHeadline(text) {
  *  with the fence, rules and preamble already gone. */
 export function reportSummary(text, limit = 240) {
   const headline = reportHeadline(text)
-  const lines = stripWrappingFence(String(text || ''))
+  const lines = stripMachineBlocks(stripWrappingFence(String(text || '')))
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))

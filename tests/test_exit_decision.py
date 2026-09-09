@@ -50,7 +50,8 @@ class TestParsing:
             '[{"code":"600835","action":"sell","reason":"主线归档，逻辑已破",'
             '"confidence":"high"}]'))
         assert out == [{"code": "600835", "action": "sell",
-                        "reason": "主线归档，逻辑已破", "confidence": "high"}]
+                        "reason": "主线归档，逻辑已破", "confidence": "high",
+                        "fraction": None, "size_pct": None}]
 
     def test_no_block_holds_everything(self, caplog):
         with caplog.at_level("WARNING"):
@@ -170,8 +171,13 @@ class TestHardFloor:
         assert not portfolio._is_hard_exit({"theme": "国企改革"}, -3.0)
 
     def test_threshold_is_configurable(self, monkeypatch):
-        """A tighter account wants a tighter floor without a code change."""
-        monkeypatch.setattr(portfolio, "HARD_STOP_PCT", 5.0)
+        """A tighter account wants a tighter floor without a code change.
+
+        Patched on position_monitor: _is_hard_exit lives there since the
+        split and binds HARD_STOP_PCT at import, so patching the name on
+        portfolio no longer reaches it."""
+        from alpha_agents.data import position_monitor
+        monkeypatch.setattr(position_monitor, "HARD_STOP_PCT", 5.0)
         assert portfolio._is_hard_exit({"theme": ""}, -5.1)
         assert not portfolio._is_hard_exit({"theme": ""}, -4.9)
 
@@ -243,3 +249,64 @@ class TestRunDegradesToHold:
             assert await exit_decision.run({"600835": 18.5}, SIGNAL) == []
         close.assert_not_called()
         assert any("holding all" in r.getMessage() for r in caplog.records)
+
+
+class TestSizingIsTheAgentsCall:
+    """加仓多少、减仓多少、什么时候加——这些以前是文件里的常数，所以
+    学不到。现在是决策，会连同结果一起被复盘。"""
+
+    POS = [{"id": 7, "code": "600835", "name": "上海机电", "shares": 1000,
+            "open_price": 18.40}]
+
+    def test_trim_uses_the_stated_fraction(self):
+        with patch.object(exit_decision, "close_position",
+                          return_value=True) as close:
+            exit_decision.apply(
+                [{"code": "600835", "action": "trim", "reason": "回吐一半",
+                  "fraction": 0.3}], self.POS, {"600835": 18.56})
+        assert close.call_args.kwargs["shares"] == 300
+
+    def test_trim_without_a_fraction_takes_half(self):
+        with patch.object(exit_decision, "close_position",
+                          return_value=True) as close:
+            exit_decision.apply(
+                [{"code": "600835", "action": "trim", "reason": "x"}],
+                self.POS, {"600835": 18.56})
+        assert close.call_args.kwargs["shares"] == 500
+
+    def test_an_absurd_fraction_is_clamped(self):
+        """Trimming 99% is a close wearing a trim's label."""
+        with patch.object(exit_decision, "close_position",
+                          return_value=True) as close:
+            exit_decision.apply(
+                [{"code": "600835", "action": "trim", "reason": "x",
+                  "fraction": 5}], self.POS, {"600835": 18.56})
+        assert close.call_args.kwargs["shares"] == 900
+
+    def test_add_passes_the_stated_size(self):
+        with patch("alpha_agents.data.portfolio.add_to_position",
+                   return_value={"shares": 500, "avg_price": 18.5,
+                                 "total_shares": 1500}) as add:
+            alerts = exit_decision.apply(
+                [{"code": "600835", "action": "add", "reason": "主线加速",
+                  "size_pct": 0.02}], self.POS, {"600835": 18.56})
+        assert add.call_args.kwargs["size_pct"] == 0.02
+        assert alerts[0]["type"] == "agent_add"
+
+    def test_an_add_with_no_room_is_not_an_alert(self):
+        """Refusing an add is a legitimate answer, not a failure."""
+        with patch("alpha_agents.data.portfolio.add_to_position",
+                   return_value=None):
+            assert exit_decision.apply(
+                [{"code": "600835", "action": "add", "reason": "x"}],
+                self.POS, {"600835": 18.56}) == []
+
+    def test_a_trim_too_small_to_execute_holds(self):
+        """Below one lot the honest outcome is holding, not a silent exit."""
+        with patch.object(exit_decision, "close_position",
+                          return_value=False) as close:
+            assert exit_decision.apply(
+                [{"code": "600835", "action": "trim", "reason": "x"}],
+                [{"id": 7, "code": "600835", "name": "X", "shares": 100,
+                  "open_price": 18.4}], {"600835": 18.56}) == []
+        assert close.called

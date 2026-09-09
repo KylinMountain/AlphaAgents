@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS theses (
     horizon_days INTEGER,       -- how long it gave itself to be right
     prob REAL,                  -- its own 0-1, not derived by code
     conviction REAL,            -- drives position size
+    entry_fraction REAL DEFAULT 1.0,  -- 首笔建多少，其余留给加仓
     conditions TEXT,            -- JSON: the invalidation vocabulary
     status TEXT DEFAULT 'active',
     position_id INTEGER,        -- virtual_portfolio row, once filled

@@ -48,7 +48,16 @@ _DECISION_TIMEOUT = int(os.environ.get("EXIT_DECISION_TIMEOUT", "120"))
 
 _JSON_BLOCK = re.compile(r"<!--\s*DECISIONS:\s*(\[.*?\])\s*-->", re.DOTALL)
 
-VALID_ACTIONS = ("sell", "trim", "hold")
+# The five things a trader can do with a live position. Previously three,
+# and one of those was a lie: "trim" had no partial-close path so it was
+# booked as a full exit. A system that can only hold or close cannot learn
+# 加仓 or 减仓, which is where a good trader and an adequate one differ.
+VALID_ACTIONS = ("sell", "trim", "add", "hold")
+
+# Used only when a trim says nothing about how much. The agent may state
+# `fraction` (of the position, for a trim) or `size_pct` (of the book, for
+# an add) and both are its call — sizing is the decision, not a constant.
+DEFAULT_TRIM_FRACTION = 0.5
 
 
 def enabled() -> bool:
@@ -147,7 +156,20 @@ _INSTRUCTIONS = """你是这个虚拟组合的交易员，负责卖出决策。�
 <!-- DECISIONS: [{{"code":"600835","action":"hold","reason":"主线今日+2仍在流入，\
 浮盈3%未见回撤，买入逻辑未破","confidence":"high"}}] -->
 
-action 只能是 sell / trim / hold。trim 表示减半仓。
+action 与配套字段：
+- **sell** 清仓
+- **trim** 减仓，可带 `"fraction": 0.5` 表示卖掉一半（0.1–0.9，不写默认一半）
+- **add** 加仓，可带 `"size_pct": 0.02` 表示再买入总资金的 2%
+- **hold** 什么都不做
+
+**仓位大小是你的判断，不是系统算好的。** 加多少、减多少、什么时候加，
+这些是这套系统里最难也最值钱的决策：
+- 涨了加仓是顺势而为，跌了加仓是摊薄成本还是**加倍下注一个已经错了的判断**？
+- 浮盈回吐一半才减，和冲高就减一半，是两种完全不同的性格
+- 全清和留底仓，对一个还没走完的主线是两种不同的表达
+
+复盘会把这些决策连同结果一起回看。写理由时要让未来的自己看得懂**当时为什么
+选这个比例**，而不只是选了什么。
 reason 必须具体：说出是哪条逻辑成立或破坏，带上数据。写"技术面走弱"这种\
 没有信息量的理由等于没写——它会被存进交易记录，复盘时要用它来判断你当时想对了没有。
 confidence 是 high / medium / low。"""
@@ -221,13 +243,15 @@ def parse_decisions(output: str) -> list[dict]:
             logger.warning("Exit decision for %s has no reason — ignoring", code)
             continue
         out.append({"code": code, "action": action, "reason": reason,
-                    "confidence": str(item.get("confidence", "")).strip()})
+                    "confidence": str(item.get("confidence", "")).strip(),
+                    "fraction": item.get("fraction"),
+                    "size_pct": item.get("size_pct")})
     return out
 
 
 def apply(decisions: list[dict], positions: list[dict],
           price_map: dict[str, float]) -> list[dict]:
-    """Execute the sells. Returns alerts in check_positions' shape."""
+    """Execute the decisions. Returns alerts in check_positions' shape."""
     by_code = {p["code"]: p for p in positions}
     alerts = []
 
@@ -241,21 +265,66 @@ def apply(decisions: list[dict], positions: list[dict],
                            d["code"])
             continue
 
-        # 'trim' has no partial-close path in the portfolio yet, so it is
-        # recorded as a full exit with its reason intact rather than
-        # silently dropped. Halving a position needs a shares split in
-        # close_position; until then the agent's intent to reduce is
-        # honoured as an exit, which is the conservative reading.
-        reason = f"agent{'减仓' if d['action'] == 'trim' else '卖出'}: {d['reason']}"[:200]
-        if close_position(pos["id"], close_price=price, close_reason=reason):
-            logger.info("Agent exit: %s %s @ %.2f — %s",
-                        d["code"], pos.get("name", ""), price, d["reason"])
-            alerts.append({
-                "type": "agent_exit", "code": d["code"],
-                "name": pos.get("name", ""), "reason": reason,
-                "close_price": price, "confidence": d.get("confidence", ""),
-            })
+        if d["action"] == "add":
+            alert = _apply_add(pos, price, d)
+        elif d["action"] == "trim":
+            alert = _apply_trim(pos, price, d)
+        else:
+            alert = _apply_sell(pos, price, d)
+        if alert:
+            alerts.append(alert)
     return alerts
+
+
+def _apply_sell(pos: dict, price: float, d: dict) -> dict | None:
+    reason = f"agent卖出: {d['reason']}"[:200]
+    if not close_position(pos["id"], close_price=price, close_reason=reason):
+        return None
+    logger.info("Agent exit: %s %s @ %.2f — %s",
+                d["code"], pos.get("name", ""), price, d["reason"])
+    return {"type": "agent_exit", "code": d["code"], "name": pos.get("name", ""),
+            "reason": reason, "close_price": price,
+            "confidence": d.get("confidence", "")}
+
+
+def _apply_trim(pos: dict, price: float, d: dict) -> dict | None:
+    """Sell part and keep the rest. A real partial exit, not a relabelled one."""
+    held = pos.get("shares") or 0
+    try:
+        frac = min(0.9, max(0.1, float(d.get("fraction"))))
+    except (TypeError, ValueError):
+        frac = DEFAULT_TRIM_FRACTION
+    sell = int(held * frac)
+    reason = f"agent减仓: {d['reason']}"[:200]
+    if not close_position(pos["id"], close_price=price,
+                          close_reason=reason, shares=sell):
+        # Below one lot to sell — holding is the honest outcome, not a
+        # silent full exit, which is what the old code did.
+        logger.info("Trim of %s too small to execute (%d股) — holding",
+                    d["code"], held)
+        return None
+    return {"type": "agent_trim", "code": d["code"], "name": pos.get("name", ""),
+            "reason": reason, "close_price": price,
+            "confidence": d.get("confidence", "")}
+
+
+def _apply_add(pos: dict, price: float, d: dict) -> dict | None:
+    """Buy the second tranche, if the thesis left one unspent."""
+    from alpha_agents.data.portfolio import add_to_position
+
+    try:
+        size = float(d.get("size_pct")) or None
+    except (TypeError, ValueError):
+        size = None
+    result = add_to_position(pos["id"], price=price, size_pct=size,
+                             reason=f"agent加仓: {d['reason']}"[:200])
+    if not result:
+        return None
+    return {"type": "agent_add", "code": d["code"], "name": pos.get("name", ""),
+            "reason": d["reason"], "add_shares": result["shares"],
+            "add_price": price, "new_avg_price": result["avg_price"],
+            "total_shares": result["total_shares"],
+            "confidence": d.get("confidence", "")}
 
 
 async def run(price_map: dict[str, float], signals: list[dict],

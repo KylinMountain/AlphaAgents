@@ -154,7 +154,7 @@ def get_portfolio_stats(days: int = 7) -> dict:
             "avg_return": round(sum(rets) / len(rets), 2),
         }
 
-    return {
+    return _add_benchmark({
         "total_closed": total,
         "wins": wins,
         "losses": losses,
@@ -166,7 +166,33 @@ def get_portfolio_stats(days: int = 7) -> dict:
         "avg_holding_days": round(sum(r["holding_days"] or 0 for r in rows) / total, 1) if total else 0,
         "by_theme": theme_stats,
         "by_source": source_stats,
+    }, rows)
+
+
+def _add_benchmark(stats: dict, rows: list) -> dict:
+    """Attach what the market did while these trades were open.
+
+    Win rate and average return answer "did it make money". Neither
+    answers "was holding the market better", which is the only question
+    that decides whether any of this is worth running.
+    """
+    try:
+        from alpha_agents.data.portfolio_risk import trade_excess
+    except Exception as e:
+        logger.debug("Benchmark comparison unavailable: %s", e)
+        return stats
+
+    excesses = [x for x in (trade_excess(dict(r)) for r in rows) if x is not None]
+    if not excesses:
+        return stats
+    beat = sum(1 for x in excesses if x > 0)
+    stats["benchmark"] = {
+        "n": len(excesses),
+        "avg_excess": round(sum(excesses) / len(excesses), 2),
+        "median_excess": round(sorted(excesses)[len(excesses) // 2], 2),
+        "beat_rate": round(beat / len(excesses) * 100, 1),
     }
+    return stats
 
 
 def format_portfolio_stats(stats: dict) -> str:

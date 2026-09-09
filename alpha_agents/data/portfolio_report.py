@@ -16,21 +16,32 @@ import re
 
 from alpha_agents.data.memory_store import _get_conn
 from alpha_agents.data.portfolio import (
-    TOTAL_CAPITAL, get_available_capital, get_open_positions,
-    get_pending_orders,
+    account_capital, get_available_capital, get_open_positions,
+    get_pending_orders, trader_capital,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def get_open_positions_summary() -> str:
-    """Format open positions + pending orders for agent context."""
-    positions = get_open_positions()
-    pending = get_pending_orders()
-    available = get_available_capital()
-    invested = TOTAL_CAPITAL - available
+def get_open_positions_summary(trader_id: str | None = None) -> str:
+    """Format open positions + pending orders for agent context.
 
-    lines = [f"总资金 {TOTAL_CAPITAL:,.0f}元 | 已投 {invested:,.0f}元 | 可用 {available:,.0f}元"]
+    ``trader_id=None`` shows the whole account, for the dashboard. An agent
+    always passes its own id: the capital line is what it sizes against,
+    and quoting the pooled number would have it bet money it has not got.
+    """
+    positions = get_open_positions(trader_id)
+    pending = get_pending_orders(trader_id)
+    if trader_id:
+        capital = trader_capital(trader_id)
+        available = get_available_capital(trader_id)
+    else:
+        capital = account_capital()
+        available = capital - sum((p["open_price"] or 0) * (p["shares"] or 0)
+                                 for p in positions)
+    invested = capital - available
+
+    lines = [f"总资金 {capital:,.0f}元 | 已投 {invested:,.0f}元 | 可用 {available:,.0f}元"]
 
     if pending:
         lines.append(f"挂单中 {len(pending)} 笔:")

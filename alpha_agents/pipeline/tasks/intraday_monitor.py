@@ -22,12 +22,12 @@ from alpha_agents.notify import notify_all
 from alpha_agents.data.portfolio import (
     create_pending_order, check_pending_orders, check_positions,
     get_open_positions, get_pending_orders,
-    parse_entry_zone, parse_stop_loss,
 )
 from alpha_agents.data.market_data import get_realtime_quotes
 from alpha_agents.data.decision_context import build_decision_context, merge_features
 from alpha_agents.data.scoring import confidence_to_prob
 from alpha_agents.data.thesis import from_recommendation
+from alpha_agents.data.trader import load_traders
 from alpha_agents.pipeline.tasks import (
     safe_active_themes, safe_market_regime, safe_sentiment_phase,
 )
@@ -77,6 +77,101 @@ def _format_themes_for_monitoring(themes: list[dict]) -> str:
 
 
 
+async def _manage_book(trader, price_map: dict, today_str: str) -> None:
+    """One trader's book: fills, exits, and the discipline check.
+
+    Runs once per trader against the same quotes. The market half of the
+    cycle — anomaly detection, sector ranking, theme scoring — happens
+    once and is shared, because it is fact rather than strategy;
+    duplicating it would multiply cost for nothing. Everything here is
+    the part that differs.
+
+    Failures are contained to one trader: a broken config or a wedged
+    model call must not stop the other books from being managed.
+    """
+    import asyncio
+
+    pending = get_pending_orders(trader.id)
+    open_pos = get_open_positions(trader.id)
+    if not pending and not open_pos:
+        return
+
+    try:
+        if pending:
+            fill_alerts = check_pending_orders(realtime_prices=price_map,
+                                               today=today_str,
+                                               trader_id=trader.id)
+            for alert in fill_alerts:
+                msg = f"[{trader.name}] " + _format_order_alert(alert)
+                logger.info("Order alert: %s", msg)
+                try:
+                    await asyncio.to_thread(notify_all, "AlphaAgents 订单提醒", msg)
+                except Exception as e:
+                    logger.warning("Notification failed: %s", e)
+
+        if open_pos:
+            # With the trading agent on, the rules run as a floor
+            # only: they close what would breach the hard stop and
+            # hand everything else to the agent as evidence. Off, they
+            # close on every trigger as they always did.
+            agent_exits = exit_decision.enabled()
+            pos_alerts = check_positions(realtime_prices=price_map,
+                                         today=today_str,
+                                         hard_only=agent_exits,
+                                         trader_id=trader.id)
+            if agent_exits:
+                # The morning's calls on this book, applied at the
+                # first cycle after the open — that is when a real
+                # price exists for them.
+                morning_calls = exit_decision.pending_morning_calls(
+                    today_str, trader.id)
+                if morning_calls:
+                    pos_alerts += exit_decision.apply(
+                        morning_calls, open_pos, price_map)
+                # Theses first: they are the agent's own stated plan,
+                # evaluated in code, so they cost nothing and they run
+                # before the hard floor gets a chance to close a
+                # position the agent had already accounted for.
+                result = await asyncio.to_thread(
+                    thesis_monitor.check_all, price_map,
+                    trader_id=trader.id)
+                pos_alerts += result["closed"]
+                # A position the floor already took, with nothing the
+                # agent listed having fired — the blind spots.
+                await asyncio.to_thread(thesis_monitor.settle_orphans,
+                                        price_map, trader.id)
+                # Discipline check, right where it can still be
+                # acted on. A condition that is true now and a
+                # position still open is a divergence between the
+                # plan and the behaviour — worth catching at 10:35
+                # rather than reading about it at the review.
+                await asyncio.to_thread(_log_broken_promises, price_map,
+                                        trader.id)
+                # Only what genuinely needs judgement reaches a model.
+                pos_alerts += await exit_decision.run(
+                    price_map, pos_alerts,
+                    narrative_due=result["narrative_due"],
+                    trader_id=trader.id)
+            # Split by notification importance:
+            #   - stop_tightened: bearish pre-alert, log only (avoids spam;
+            #     user sees it in the daily review / logs)
+            #   - stopped/target_hit/expired/add_position: actual P/L event,
+            #     push to notify channels
+            for alert in pos_alerts:
+                msg = f"[{trader.name}] " + _format_portfolio_alert(alert)
+                logger.info("Portfolio alert: %s", msg)
+                if alert.get("type") in ("stop_tightened", "signal"):
+                    continue  # log only, don't spam push channels
+                try:
+                    await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
+                except Exception as e:
+                    logger.warning("Notification failed: %s", e)
+                    pass
+    except Exception as e:
+        logger.exception("交易员 %s 的组合管理失败，其余交易员不受影响: %s",
+                         trader.id, e)
+
+
 async def run_intraday_monitor() -> str | None:
     """Execute one intraday monitoring cycle.
 
@@ -113,6 +208,8 @@ async def run_intraday_monitor() -> str | None:
     today_str = now.strftime("%Y-%m-%d")
     from alpha_agents.data.memory_store import get_active_price_alerts, trigger_price_alert
 
+    # Quotes are fetched once for every trader's book: the market is
+    # shared, only the decisions are not.
     pending = get_pending_orders()
     open_pos = get_open_positions()
     price_alerts = get_active_price_alerts()
@@ -123,73 +220,8 @@ async def run_intraday_monitor() -> str | None:
         if rt_prices:
             price_map = {code: data["price"] for code, data in rt_prices.items()}
 
-            # Check pending orders — fill if price hits entry zone
-            if pending:
-                fill_alerts = check_pending_orders(realtime_prices=price_map, today=today_str)
-                for alert in fill_alerts:
-                    msg = _format_order_alert(alert)
-                    logger.info("Order alert: %s", msg)
-                    try:
-                        await asyncio.to_thread(notify_all, "AlphaAgents 订单提醒", msg)
-                    except Exception as e:
-                        logger.warning("Notification failed: %s", e)
-                        pass
-
-            # Check open positions — stop loss / take profit / expiry
-            if open_pos:
-                # With the trading agent on, the rules run as a floor
-                # only: they close what would breach the hard stop and
-                # hand everything else to the agent as evidence. Off, they
-                # close on every trigger as they always did.
-                agent_exits = exit_decision.enabled()
-                pos_alerts = check_positions(realtime_prices=price_map,
-                                             today=today_str,
-                                             hard_only=agent_exits)
-                if agent_exits:
-                    # The morning's calls on this book, applied at the
-                    # first cycle after the open — that is when a real
-                    # price exists for them.
-                    morning_calls = exit_decision.pending_morning_calls(
-                        today_str)
-                    if morning_calls:
-                        pos_alerts += exit_decision.apply(
-                            morning_calls, open_pos, price_map)
-                    # Theses first: they are the agent's own stated plan,
-                    # evaluated in code, so they cost nothing and they run
-                    # before the hard floor gets a chance to close a
-                    # position the agent had already accounted for.
-                    result = await asyncio.to_thread(
-                        thesis_monitor.check_all, price_map)
-                    pos_alerts += result["closed"]
-                    # A position the floor already took, with nothing the
-                    # agent listed having fired — the blind spots.
-                    await asyncio.to_thread(thesis_monitor.settle_orphans,
-                                            price_map)
-                    # Discipline check, right where it can still be
-                    # acted on. A condition that is true now and a
-                    # position still open is a divergence between the
-                    # plan and the behaviour — worth catching at 10:35
-                    # rather than reading about it at the review.
-                    await asyncio.to_thread(_log_broken_promises, price_map)
-                    # Only what genuinely needs judgement reaches a model.
-                    pos_alerts += await exit_decision.run(
-                        price_map, pos_alerts,
-                        narrative_due=result["narrative_due"])
-                # Split by notification importance:
-                #   - stop_tightened: bearish pre-alert, log only (avoids spam;
-                #     user sees it in the daily review / logs)
-                #   - stopped/target_hit/expired/add_position: actual P/L event,
-                #     push to notify channels
-                for alert in pos_alerts:
-                    msg = _format_portfolio_alert(alert)
-                    logger.info("Portfolio alert: %s", msg)
-                    if alert.get("type") in ("stop_tightened", "signal"):
-                        continue  # log only, don't spam push channels
-                    try:
-                        await asyncio.to_thread(notify_all, "AlphaAgents 持仓提醒", msg)
-                    except Exception as e:
-                        logger.warning("Notification failed: %s", e)
-                        pass
+            for _trader in load_traders():
+                await _manage_book(_trader, price_map, today_str)
 
             # Check price alerts
             if price_alerts:
@@ -449,26 +481,26 @@ async def run_intraday_monitor() -> str | None:
             logger.debug("Sector best stocks failed for %s: %s", sector, e)
 
     # Phase B: build actionable entries from candidates
+    #
+    # No prices here. This loop selects — it says "the money is buying this
+    # name in this sector" — and selection is all a scoring function can
+    # honestly do. Where to buy and where to give up are judgements, and
+    # they are made in _price_entries below by a model that can look at
+    # the stock's actual levels. Filling them in here with price * 0.97 is
+    # what produced 109 identical 3% bands, on stocks whose average daily
+    # range was 6%.
     actionable = []
     for sector, s in raw_candidates:
-        price = s.get("price", 0)
-        entry_high = round(price, 2) if price else None
-        entry_low = round(price * 0.97, 2) if price else None
-        stop_loss_val = round(price * 0.93, 2) if price else None
-
         actionable.append({
             "code": s["code"],
             "name": s["name"],
-            "price": price,
+            "price": s.get("price", 0),
             "change_pct": s.get("today_change_pct", 0),
             "score": s.get("score", 0),
             "beta": s.get("beta_weighted", 0),
             "note": s.get("note", ""),
             "theme": sector,
             "institutional": s.get("institutional", ""),
-            "entry_low": entry_low,
-            "entry_high": entry_high,
-            "stop_loss": stop_loss_val,
         })
 
     # Phase 3: apply playbook weights (regime-aware — returns None if <2 active)
@@ -629,7 +661,7 @@ async def run_intraday_monitor() -> str | None:
     logger.info("Code-driven intraday report generated: %d signals, %d actionable", len(signals), len(actionable))
 
     # Save recommendations
-    _save_intraday_recommendations(output)
+    await _save_intraday_recommendations(output)
 
     try:
         await asyncio.to_thread(
@@ -892,7 +924,8 @@ def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
     return report
 
 
-def _log_broken_promises(price_map: dict) -> None:
+def _log_broken_promises(price_map: dict,
+                         trader_id: str | None = None) -> None:
     """Say it out loud when the plan and the behaviour disagree.
 
     thesis_monitor should have closed anything whose condition fired, so
@@ -902,8 +935,9 @@ def _log_broken_promises(price_map: dict) -> None:
     """
     try:
         from alpha_agents.evolution.consistency import broken_promises
-        for b in broken_promises(price_map):
-            logger.warning("说了没做: %s %s — %s（现价 %.2f，浮动 %+.1f%%）",
+        for b in broken_promises(price_map, trader_id=trader_id):
+            logger.warning("说了没做 [%s]: %s %s — %s（现价 %.2f，浮动 %+.1f%%）",
+                           trader_id or "default",
                            b["code"], b["name"], b["condition"],
                            b["price"], b["return_pct"])
     except Exception as e:
@@ -961,8 +995,10 @@ def _format_portfolio_alert(alert: dict) -> str:
     return f"{reason} | {code} {name} 平仓价{close_price:.2f}元（{sign}{abs(ret):.1f}%）"
 
 
-def _save_intraday_recommendations(report: str) -> None:
+async def _save_intraday_recommendations(report: str) -> None:
     """Extract recommendations from intraday report and save with real-time prices."""
+    import asyncio
+
     match = re.search(r"<!--RECOMMENDATIONS\s*(.*?)\s*RECOMMENDATIONS-->", report, re.DOTALL)
     if not match:
         return
@@ -1010,86 +1046,178 @@ def _save_intraday_recommendations(report: str) -> None:
         extra={"has_anomaly": True},
     )
 
+    # Only traders allowed to open new positions get an order here;
+    # the legacy default manages what it holds and buys nothing.
+    traders = load_traders(scanning=True)
     saved = 0
+
+    # A 'signal' row is an observation about the market — a stock hit its
+    # limit — not a call anyone made. Recorded once, with no trader and no
+    # order behind it: doing it per trader would multiply one fact by the
+    # number of books and inflate every per-trader count with rows nobody
+    # decided.
     for r in valid_recs:
-        code = r["code"]
-        entry_price = prices.get(code)
-        rec_type = r.get("type", "actionable")
-        # signal = 涨停确认股, actionable = 可操作标的
-        report_type = "intraday_signal" if rec_type == "signal" else "intraday"
-        confidence = r.get("confidence", "medium") if rec_type != "signal" else "signal"
-        try:
-            # Phase 1: capture decision-time features for Playbook clustering (Phase 3).
-            # Fields match the available_fields list in the evolution spec.
-            features = {
-                "theme": r.get("theme", ""),
-                "score": r.get("score", 0),
-                "change_pct": r.get("change_pct", 0),
-                "institutional": r.get("institutional", ""),
-                "playbook_id": r.get("playbook_id"),
-                "playbook_name": r.get("playbook_name", ""),
-                "playbook_matched": bool(r.get("playbook_id")),
-                "rec_type": rec_type,  # 'signal' vs 'actionable'
-            }
-            # G6: what was visible when this call was made.
-            features = merge_features(features, _intraday_ctx)
-            save_prediction(
-                date=today,
-                report_type=report_type,
-                code=code,
-                name=r.get("name", ""),
-                direction="bullish",
-                confidence=confidence,
-                theme_line=r.get("theme", ""),
-                entry_price=entry_price,
-                reason=r.get("reason", "")[:100],
-                features=features,
-                # G1: gradable on Brier. A limit-up 'signal' row is an
-                # observation, not a forecast, so only 'actionable' picks
-                # carry a probability.
-                prob=(confidence_to_prob(confidence)
-                      if rec_type == "actionable" else None),
-            )
-            saved += 1
-            tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
-            logger.info("  Saved intraday %s: %s %s @ %.2f",
-                        tag, code, r.get("name", ""), entry_price or 0)
-            # Create pending order for actionable recommendations (not signals, not at limit-up)
-            price_chg = prices.get(code + "_chg", 0)
-            if rec_type != "signal" and price_chg < 9.8:
-                try:
-                    # Prefer structured JSON fields, fallback to regex
-                    entry_low = r.get("entry_low")
-                    entry_high = r.get("entry_high")
-                    stop_loss_val = r.get("stop_loss")
-                    if entry_low is None and entry_high is None:
-                        entry_low, entry_high = parse_entry_zone(r.get("action", ""))
-                    if stop_loss_val is None:
-                        stop_loss_val = parse_stop_loss(r.get("action", ""))
-                    # Thesis before order, same as the morning path. These
-                    # picks are code-generated rather than written by a
-                    # model, so from_recommendation derives the exit
-                    # conditions from the signals that selected the stock
-                    # — the entry reasons inverted, which is stricter than
-                    # thresholds a model would guess at.
-                    from_recommendation(
-                        {**r, "stop_loss": stop_loss_val, "horizon_days": 3},
-                        code, created_by="intraday")
-                    create_pending_order(
-                        code=code,
-                        name=r.get("name", ""),
-                        theme=r.get("theme", ""),
-                        order_date=today,
-                        entry_low=entry_low,
-                        entry_high=entry_high,
-                        stop_loss=stop_loss_val,
-                        source="intraday",
-                        reason=r.get("reason", "")[:100],
-                    )
-                except Exception as e:
-                    logger.debug("Failed to create pending order for %s: %s", code, e)
-        except Exception as e:
-            logger.debug("Failed to save intraday prediction for %s: %s", code, e)
+        if r.get("type") == "actionable":
+            continue
+        _record_intraday_pick(None, r, r["code"], today, "intraday_signal",
+                              "signal", prices.get(r["code"]), prices,
+                              _intraday_ctx, "signal")
+        saved += 1
+
+    buys = [r for r in valid_recs if r.get("type", "actionable") == "actionable"
+            and prices.get(r["code"])]
+    if not buys:
+        if saved:
+            logger.info("Saved %d intraday predictions", saved)
+        return
+
+    # Concurrently: each trader's pass takes minutes against a slow
+    # endpoint, and the intraday cycle runs every five. Serial pricing
+    # would make the cycle time scale with the number of traders, so
+    # adding a third trader would start pushing cycles into each other.
+    results = await asyncio.gather(
+        *(_price_for(t, buys, prices) for t in traders))
+
+    for trader, decisions in zip(traders, results):
+        for r in buys:
+            code = r["code"]
+            decision = decisions.get(code)
+            if decision is None:
+                # Priced out, skipped, or the model never answered. All
+                # three mean no order — the fallback constant this
+                # replaced is exactly what must not come back.
+                continue
+            if _record_intraday_pick(trader, {**r, **_order_fields(decision)},
+                                     code, today, "intraday",
+                                     decision["confidence"],
+                                     prices.get(code), prices,
+                                     _intraday_ctx, "actionable"):
+                saved += 1
 
     if saved:
         logger.info("Saved %d intraday predictions (signal + actionable)", saved)
+
+
+def _order_fields(d: dict) -> dict:
+    """The trader's own numbers, in the shape the order path reads."""
+    return {"entry_low": d["entry_low"], "entry_high": d["entry_high"],
+            "stop_loss": d["stop_loss"], "size_pct": d.get("size_pct"),
+            "confidence": d["confidence"],
+            "reason": d["reason"]}
+
+
+async def _price_for(trader, candidates: list[dict],
+                     prices: dict) -> dict[str, dict]:
+    """One trader's entry decisions, or nothing at all.
+
+    Nothing at all is a real answer here. Before this, every candidate
+    became an order at a fixed 3% band whether or not anyone thought the
+    price was right; a cycle that places no order because the levels were
+    unattractive is the system working, not failing.
+    """
+    from alpha_agents.pipeline.tasks import entry_pricing
+
+    if not entry_pricing.enabled():
+        logger.info("AGENT_ENTRY_PRICING 已关闭 — 盘中不下单")
+        return {}
+    try:
+        return await entry_pricing.price(candidates, trader)
+    except Exception as e:
+        logger.warning("交易员 %s 定价异常（%s）— 本轮不下单", trader.id, e)
+        return {}
+
+
+def _record_intraday_pick(trader, r: dict, code: str, today: str,
+                          report_type: str, confidence: str,
+                          entry_price, prices: dict, ctx: dict,
+                          rec_type: str) -> bool:
+    """Save one code-generated pick as one trader's prediction and order.
+
+    The candidate list is shared — it comes from a scoring function, not a
+    model, so every trader sees the same names. What differs is where each
+    is willing to buy them, which is exactly the variable the cancellation
+    record says decides whether an order ever becomes a position.
+
+    ``trader=None`` records a market observation with no order behind it.
+    """
+    from alpha_agents.data.trader import DEFAULT_TRADER
+
+    trader_id = trader.id if trader else DEFAULT_TRADER
+    try:
+        # Phase 1: capture decision-time features for Playbook clustering
+        # (Phase 3). Fields match available_fields in the evolution spec.
+        features = merge_features({
+            "theme": r.get("theme", ""),
+            "score": r.get("score", 0),
+            "change_pct": r.get("change_pct", 0),
+            "institutional": r.get("institutional", ""),
+            "playbook_id": r.get("playbook_id"),
+            "playbook_name": r.get("playbook_name", ""),
+            "playbook_matched": bool(r.get("playbook_id")),
+            "rec_type": rec_type,  # 'signal' vs 'actionable'
+            "trader": trader_id,
+        }, ctx)
+        save_prediction(
+            date=today,
+            report_type=report_type,
+            code=code,
+            name=r.get("name", ""),
+            direction="bullish",
+            confidence=confidence,
+            theme_line=r.get("theme", ""),
+            entry_price=entry_price,
+            reason=r.get("reason", "")[:100],
+            features=features,
+            # G1: gradable on Brier. A limit-up 'signal' row is an
+            # observation, not a forecast, so only 'actionable' picks
+            # carry a probability.
+            prob=(confidence_to_prob(confidence)
+                  if rec_type == "actionable" else None),
+            trader_id=trader_id,
+        )
+        tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
+        logger.info("  Saved intraday %s [%s]: %s %s @ %.2f",
+                    tag, trader_id, code, r.get("name", ""), entry_price or 0)
+    except Exception as e:
+        logger.debug("Failed to save intraday prediction for %s: %s", code, e)
+        return False
+
+    # Create pending order for actionable recommendations (not signals,
+    # not at limit-up)
+    price_chg = prices.get(code + "_chg", 0)
+    if trader is None or rec_type == "signal" or price_chg >= 9.8:
+        return True
+    try:
+        # Prefer structured JSON fields, fallback to regex
+        entry_low = r.get("entry_low")
+        entry_high = r.get("entry_high")
+        stop_loss_val = r.get("stop_loss")
+        # These came from the trader's own pricing pass. No fallback:
+        # a missing level means the trader declined or never answered, and
+        # inventing one here would put the 3% constant back in through the
+        # side door — which is the entire thing this path replaced.
+        if entry_low is None or entry_high is None or stop_loss_val is None:
+            logger.debug("%s 缺少交易员定价 — 不下单", code)
+            return True
+        # Thesis before order, same as the morning path. The pick came from
+        # a scoring function but the *price* came from the trader, so its
+        # reason is on record and from_recommendation derives the exit
+        # conditions from the signals that selected the stock.
+        from_recommendation(
+            {**r, "stop_loss": stop_loss_val, "horizon_days": 3},
+            code, created_by="intraday", trader_id=trader.id)
+        create_pending_order(
+            code=code,
+            name=r.get("name", ""),
+            theme=r.get("theme", ""),
+            order_date=today,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop_loss=stop_loss_val,
+            source="intraday",
+            reason=r.get("reason", "")[:100],
+            trader_id=trader.id,
+        )
+    except Exception as e:
+        logger.debug("Failed to create pending order for %s: %s", code, e)
+    return True

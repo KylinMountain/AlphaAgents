@@ -83,17 +83,22 @@ def check_all(price_map: dict[str, float],
               sector_ranks: dict[str, int] | None = None,
               sector_flows: dict[str, float] | None = None,
               breadth_ratio: float | None = None,
-              now: datetime | None = None) -> dict:
+              now: datetime | None = None,
+              trader_id: str | None = None) -> dict:
     """Evaluate every live thesis. Closes what fired.
 
     Returns {"closed": [...], "narrative_due": [...]}. The caller pushes
     the closes and hands ``narrative_due`` to the LLM re-read.
+
+    ``trader_id`` scopes it to one book, so the narrative re-read that
+    follows goes to that trader's own prompt rather than to whichever
+    trader happened to run the cycle.
     """
     now = now or datetime.now()
-    positions = {p["id"]: p for p in get_open_positions()}
+    positions = {p["id"]: p for p in get_open_positions(trader_id)}
     closed, narrative_due = [], []
 
-    for th in T.get_active():
+    for th in T.get_active(trader_id=trader_id):
         pos = positions.get(th.position_id) if th.position_id else None
         if not pos:
             # Thesis without a live position: either the order never
@@ -155,7 +160,8 @@ def _narrative_due(now: datetime) -> bool:
     return 0 <= minutes_since < _NARRATIVE_WINDOW_MINUTES
 
 
-def settle_orphans(price_map: dict[str, float]) -> list[T.Thesis]:
+def settle_orphans(price_map: dict[str, float],
+                   trader_id: str | None = None) -> list[T.Thesis]:
     """Reconcile theses whose position is gone.
 
     A position closed by the hard floor — the 8% maximum loss, or an
@@ -167,9 +173,9 @@ def settle_orphans(price_map: dict[str, float]) -> list[T.Thesis]:
 
     Returns the theses just marked, for the review to ask about.
     """
-    live_ids = {p["id"] for p in get_open_positions()}
+    live_ids = {p["id"] for p in get_open_positions(trader_id)}
     orphaned = []
-    for th in T.get_active():
+    for th in T.get_active(trader_id=trader_id):
         if th.position_id and th.position_id not in live_ids:
             T.close(th.id, T.BLIND_SPOT,
                     close_note="仓位已被风控硬线平掉，但没有任何列出的失效条件触发")

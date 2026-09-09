@@ -14,12 +14,19 @@ from alpha_agents.evolution.feedback import (
 
 
 def build_morning_context(themes: list[dict], stats: str,
-                          mode: str = "full") -> str:
+                          mode: str = "full",
+                          trader_id: str | None = None) -> str:
     """Build the enriched context injected into the morning agent.
 
     mode: "full" (default) includes all Phase 1/2/3 sections.
           "baseline" includes only Phase 1 (sentiment + cognition + stats) —
           used by Phase 4 A/B validation to compare against pre-evolution prompts.
+
+    ``trader_id`` splits the context in two. The market half — sentiment,
+    cognition, principles, playbooks — is shared, because it is what the
+    system has learned about the world. The self half — the book, the
+    calibration curve, the process grades — belongs to one trader, and
+    pooling it would show every trader an average nobody traded.
 
     The ``themes`` list is currently not used here (morning_scan passes it
     in a separate ``themes_ctx`` argument to run_morning_analysis). Kept in
@@ -30,7 +37,8 @@ def build_morning_context(themes: list[dict], stats: str,
     # Portfolio first: what it already owns bounds what it should buy.
     # Recommending a stock already held, or adding risk to a theme that
     # just stopped it out, are the two mistakes an unseen book invites.
-    for part in (inject_portfolio(), inject_sentiment(), inject_cognition()):
+    for part in (inject_portfolio(trader_id), inject_sentiment(),
+                 inject_cognition()):
         if part:
             sections.append(part)
     # Calibration goes to the agent that states the probabilities. Without
@@ -41,7 +49,18 @@ def build_morning_context(themes: list[dict], stats: str,
     # Calibration says how wrong its confidence is; process quality says
     # whether the thesis it is about to write will be gradeable at all.
     # Both go to the agent that writes them.
-    for part in (inject_calibration(), inject_process_quality()):
+    from alpha_agents.data.portfolio_risk import (
+        inject_entry_quality, inject_entry_side,
+    )
+    # Entry quality is the one number that separates a pullback book from
+    # a breakout book: how often it was right and never got filled. Entry
+    # side is the check that the book is the style it claims to be — the
+    # prompt is the only thing enforcing that now, and a prompt can be
+    # ignored.
+    for part in (inject_calibration(trader_id=trader_id),
+                 inject_process_quality(trader_id=trader_id),
+                 inject_entry_quality(trader_id=trader_id),
+                 inject_entry_side(trader_id=trader_id)):
         if part:
             sections.append(part)
     if mode != "baseline":
@@ -70,7 +89,8 @@ def build_chat_context(portfolio_summary: str, themes_summary: str,
     return "\n\n".join(sections)
 
 
-def build_review_context(portfolio_summary: str = "") -> str:
+def build_review_context(portfolio_summary: str = "",
+                         trader_id: str | None = None) -> str:
     """What the review agent needs to avoid re-learning what it knows.
 
     It had none of this. post_review runs *after* the report is written —
@@ -89,9 +109,14 @@ def build_review_context(portfolio_summary: str = "") -> str:
     from alpha_agents.evolution.process_quality import inject_process_quality
 
     sections = []
+    from alpha_agents.data.portfolio_risk import inject_entry_side
+
     for part in (portfolio_summary, inject_principles(),
-                 inject_recent_lessons(days=30), inject_calibration(),
-                 inject_consistency(), inject_process_quality()):
+                 inject_recent_lessons(days=30),
+                 inject_calibration(trader_id=trader_id),
+                 inject_consistency(trader_id=trader_id),
+                 inject_process_quality(trader_id=trader_id),
+                 inject_entry_side(trader_id=trader_id)):
         if part:
             sections.append(part)
     return "\n\n".join(sections)

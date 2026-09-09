@@ -37,6 +37,7 @@ from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
 from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone, parse_stop_loss
 from alpha_agents.data.thesis import from_recommendation
+from alpha_agents.data.trader import load_traders
 
 logger = logging.getLogger(__name__)
 
@@ -313,37 +314,77 @@ async def run_morning_scan() -> str | None:
     if sentiment_ctx:
         events_ctx = sentiment_ctx + "\n\n" + events_ctx
 
-    # Phase 1: enrich stats_ctx with sentiment + cognition via evolution module.
-    # Previously `cognition` was fetched above but silently dropped.
-    from alpha_agents.evolution import build_morning_context
-    stats_ctx = build_morning_context(themes=themes, stats=stats_ctx)
-
-    report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx)
-
-    # 5. Push notification
-    if report and not report.startswith("["):
+    # Everything above is the market, and the market is shared: one news
+    # window, one theme discovery pass, one set of events. Everything below
+    # is judgement, and judgement is per trader — each one reads the same
+    # morning and writes its own book.
+    # scanning=True: only traders that may open new positions. A legacy
+    # default kept alive to wind down an old book manages its exits in
+    # the intraday cycle but does not get a morning scan.
+    traders = load_traders(scanning=True)
+    reports = []
+    for trader in traders:
         try:
-            await asyncio.to_thread(
-                notify_all,
-                f"AlphaAgents 晨报 | {time.strftime('%m-%d')}",
-                report[:500],
-            )
+            report = await _scan_for(trader, events_ctx, themes_ctx, stats_ctx,
+                                     themes=themes,
+                                     single=len(traders) == 1)
         except Exception as e:
-            logger.warning("Morning notification failed: %s", e)
+            logger.exception("交易员 %s 的晨扫失败，其余交易员继续: %s",
+                             trader.id, e)
+            continue
+        if report:
+            reports.append((trader, report))
 
-    # 6. Extract recommendations, cross-validate, and save as predictions
-    if report and not report.startswith("["):
-        recs = _extract_json_recommendations(report)
-        if not recs:
-            recs = _extract_table_recommendations(report)
-        if recs:
-            recs = await _cross_validate_recommendations(recs)
-            _save_recommendations_list(recs)
+    if not reports:
+        return None
+    if len(reports) == 1:
+        return reports[0][1]
+    # Several books, one report: whoever reads it needs to know which
+    # trader said what, or the two views merge into an average nobody held.
+    return "\n\n---\n\n".join(
+        f"# {t.name}\n\n{r}" for t, r in reports)
 
-        # 7. The morning's verdict on yesterday's book. Stored rather than
-        # executed: at 09:00 there is no live price and a sell needs one.
-        _save_position_calls(report, time.strftime("%Y-%m-%d"))
 
+async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
+                    themes: list[dict] | None = None,
+                    single: bool = True) -> str | None:
+    """One trader's morning: its prompt, its picks, its orders.
+
+    The context is rebuilt per trader rather than shared: the market half
+    is identical either way, and the self half — its book, its calibration
+    curve, its entry quality — has to be its own or the trader reasons
+    about positions it never took.
+    """
+    import asyncio
+
+    # Phase 1: enrich stats_ctx with sentiment + cognition via evolution
+    # module. Previously `cognition` was fetched but silently dropped.
+    from alpha_agents.evolution import build_morning_context
+    stats_ctx = build_morning_context(themes=themes or [], stats=stats_ctx,
+                                      trader_id=trader.id)
+
+    report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx,
+                                        trader=trader)
+    if not report or report.startswith("["):
+        return report or None
+
+    title = (f"AlphaAgents 晨报 | {time.strftime('%m-%d')}" if single
+             else f"晨报 {trader.name} | {time.strftime('%m-%d')}")
+    try:
+        await asyncio.to_thread(notify_all, title, report[:500])
+    except Exception as e:
+        logger.warning("Morning notification failed: %s", e)
+
+    recs = _extract_json_recommendations(report)
+    if not recs:
+        recs = _extract_table_recommendations(report)
+    if recs:
+        recs = await _cross_validate_recommendations(recs)
+        _save_recommendations_list(recs, trader)
+
+    # The morning's verdict on yesterday's book. Stored rather than
+    # executed: at 09:00 there is no live price and a sell needs one.
+    _save_position_calls(report, time.strftime("%Y-%m-%d"), trader.id)
     return report
 
 
@@ -492,7 +533,8 @@ _POSITIONS_BLOCK = re.compile(r"<!--\s*POSITIONS\s*(\[.*?\])\s*POSITIONS-->",
                               re.DOTALL)
 
 
-def _save_position_calls(report: str, today: str) -> int:
+def _save_position_calls(report: str, today: str,
+                         trader_id: str | None = None) -> int:
     """Store the morning's verdict on yesterday's book, for the open.
 
     The agent can see its positions and forms a view on them — that is
@@ -504,7 +546,9 @@ def _save_position_calls(report: str, today: str) -> int:
     Not executed here: at 09:00 there is no live price, and a sell needs
     one. The first intraday cycle applies these against real quotes.
     """
-    from alpha_agents.pipeline.tasks.exit_decision import VALID_ACTIONS
+    from alpha_agents.pipeline.tasks.exit_decision import (
+        VALID_ACTIONS, morning_calls_key,
+    )
 
     match = _POSITIONS_BLOCK.search(report)
     if not match:
@@ -538,26 +582,35 @@ def _save_position_calls(report: str, today: str) -> int:
         return 0
     try:
         from alpha_agents.data.memory_store import _get_conn, _write_lock
+        key = morning_calls_key(trader_id)
         with _write_lock:
             conn = _get_conn()
             conn.execute("DELETE FROM daily_snapshots WHERE date = ? AND "
-                         "data_type = 'morning_position_calls'", (today,))
+                         "data_type = ?", (today, key))
             conn.execute(
                 "INSERT INTO daily_snapshots (date, data_type, data) "
-                "VALUES (?, 'morning_position_calls', ?)",
-                (today, json.dumps(calls, ensure_ascii=False)))
+                "VALUES (?, ?, ?)",
+                (today, key, json.dumps(calls, ensure_ascii=False)))
             conn.commit()
     except Exception as e:
         logger.warning("Could not store morning position calls: %s", e)
         return 0
 
-    logger.info("Morning position calls: %s",
+    logger.info("Morning position calls [%s]: %s", trader_id or "default",
                 ", ".join(f"{c['code']}={c['action']}" for c in calls))
     return len(calls)
 
 
-def _save_recommendations_list(recs: list[dict]) -> None:
-    """Save pre-validated recommendations as predictions, fetching entry prices."""
+def _save_recommendations_list(recs: list[dict], trader=None) -> None:
+    """Save pre-validated recommendations as predictions, fetching entry prices.
+
+    ``trader`` owns the resulting predictions, theses and orders, and
+    supplies the entry zone when the pick did not state one — which is
+    where 回调 and 突破 stop being words in a prompt and become different
+    orders.
+    """
+    from alpha_agents.data.trader import DEFAULT_TRADER, get_trader
+    trader = trader or get_trader(DEFAULT_TRADER)
     today = time.strftime("%Y-%m-%d")
     if not recs:
         return
@@ -614,9 +667,11 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                         "dims_passed": r.get("dims_passed"),
                         "confidence": r.get("confidence", ""),
                         "rec_type": "morning",
+                        "trader": trader.id,
                     },
                     _decision_ctx,
                 ),
+                trader_id=trader.id,
             )
             saved += 1
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",
@@ -630,6 +685,16 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                 stop_loss_val = r.get("stop_loss")
                 if entry_low is None and entry_high is None:
                     entry_low, entry_high = parse_entry_zone(r.get("action", ""))
+                if entry_low is None and entry_high is None:
+                    # The agent has get_price_levels and the prompt tells
+                    # it to price its own entry. Saying nothing is not a
+                    # request for a default — it is an incomplete pick, and
+                    # filling in a constant here is what produced a book
+                    # priced entirely by code.
+                    logger.warning("%s %s 没有介入区间 — 不下单（提示词要求"
+                                   "调用 get_price_levels 自己定价）",
+                                   code, r.get("name", ""))
+                    continue
                 if stop_loss_val is None:
                     stop_loss_val = parse_stop_loss(r.get("action", ""))
                 # Thesis before order. The order is the mechanism; the
@@ -637,7 +702,8 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                 # evaluates it every cycle. Written first so the fill can
                 # bind to it, and so a recommendation that cannot state
                 # what would prove it wrong is visible as such.
-                from_recommendation(r, code, created_by="morning")
+                from_recommendation(r, code, created_by="morning",
+                                    trader_id=trader.id)
                 create_pending_order(
                     code=code,
                     name=r.get("name", ""),
@@ -648,6 +714,7 @@ def _save_recommendations_list(recs: list[dict]) -> None:
                     stop_loss=stop_loss_val,
                     source="morning",
                     reason=r.get("reason", "")[:100],
+                    trader_id=trader.id,
                 )
             except Exception as e:
                 logger.debug("Failed to create pending order for %s: %s", code, e)

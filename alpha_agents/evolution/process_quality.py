@@ -109,9 +109,10 @@ def grade_reason(reason: str) -> dict:
     }
 
 
-def summarise(days: int = 30) -> dict:
+def summarise(days: int = 30, trader_id: str | None = None) -> dict:
     """Process quality across recent theses, live and closed."""
-    theses = T.get_active() + T.get_closed(days=days)
+    theses = (T.get_active(trader_id=trader_id)
+              + T.get_closed(days=days, trader_id=trader_id))
     if not theses:
         return {"n": 0}
 
@@ -143,13 +144,14 @@ def summarise(days: int = 30) -> dict:
     }
 
 
-def inject_process_quality(days: int = 30) -> str:
+def inject_process_quality(days: int = 30,
+                           trader_id: str | None = None) -> str:
     """The process report, for the review and the morning prompt.
 
     Phrased as instructions rather than statistics because it is read by
     the agent that will write the next thesis, not by an analyst.
     """
-    s = summarise(days=days)
+    s = summarise(days=days, trader_id=trader_id)
     if not s.get("n"):
         return ""
 

@@ -510,17 +510,29 @@ def _risk_note(today: str) -> str:
         from alpha_agents.data.portfolio_risk import (
             current_drawdown, describe_clusters, record_equity_mark,
         )
-        mark = record_equity_mark(today)
-        parts.append(f"【账户】{mark['equity']:,.0f}元 "
-                     f"（现金 {mark['cash']:,.0f} + 持仓市值 {mark['market_value']:,.0f}），"
-                     f"累计 {mark['return_pct']:+.2f}%")
+        from alpha_agents.data.trader import load_traders
 
-        dd = current_drawdown()
-        if dd:
-            line = f"【组合回撤】距高点 {dd['drawdown_pct']:.2f}%（{dd['marks']} 个记录点）"
-            if dd["blocked"]:
-                line += "，**已触及上限，暂停开新仓**"
-            parts.append(line)
+        # One mark per trader. A single pooled mark would make the two
+        # books indistinguishable at exactly the point where the whole
+        # comparison lives — which one actually compounded.
+        traders = load_traders()
+        show_name = len(traders) > 1
+        for trader in traders:
+            mark = record_equity_mark(today, trader_id=trader.id)
+            label = f"【账户·{trader.name}】" if show_name else "【账户】"
+            parts.append(f"{label}{mark['equity']:,.0f}元 "
+                         f"（现金 {mark['cash']:,.0f} + "
+                         f"持仓市值 {mark['market_value']:,.0f}），"
+                         f"累计 {mark['return_pct']:+.2f}%")
+
+            dd = current_drawdown(trader.id)
+            if dd:
+                line = (f"【组合回撤{'·' + trader.name if show_name else ''}】"
+                        f"距高点 {dd['drawdown_pct']:.2f}%"
+                        f"（{dd['marks']} 个记录点）")
+                if dd["blocked"]:
+                    line += "，**已触及上限，暂停开新仓**"
+                parts.append(line)
 
         clusters = describe_clusters()
         if clusters:
@@ -632,9 +644,18 @@ async def run_review() -> str | None:
     if portfolio_ctx:
         full_stats_ctx = stats_ctx + "\n\n" + portfolio_ctx
     try:
+        from alpha_agents.data.trader import load_traders
         from alpha_agents.evolution import build_review_context
-        learned = build_review_context()
-        if learned:
+        # Per trader, and labelled. Calibration and discipline pooled
+        # across two strategies describe an average nobody traded, and
+        # the review would then hand that average back as a lesson.
+        traders = load_traders()
+        for trader in traders:
+            learned = build_review_context(trader_id=trader.id)
+            if not learned:
+                continue
+            if len(traders) > 1:
+                learned = f"### {trader.name}\n\n{learned}"
             full_stats_ctx += "\n\n" + learned
     except Exception as e:
         logger.warning("Review learning context unavailable: %s", e)

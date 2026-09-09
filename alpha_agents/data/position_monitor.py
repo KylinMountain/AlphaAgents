@@ -20,11 +20,12 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.data.portfolio import (
     ADD_POSITION_DROP_PCT, DEFAULT_POSITION_PCT, HARD_STOP_PCT, LOT_SIZE,
-    MAX_POSITION_WITH_ADD, MAX_THEME_PCT, TOTAL_CAPITAL,
+    MAX_POSITION_WITH_ADD, MAX_THEME_PCT,
     _calc_shares, _estimate_net_close_result, close_position,
     get_available_capital, get_open_positions, get_sentiment_exposure_limit,
-    get_theme_exposure,
+    get_theme_exposure, trader_capital,
 )
+from alpha_agents.data.trader import DEFAULT_TRADER
 
 logger = logging.getLogger(__name__)
 
@@ -150,8 +151,12 @@ def check_positions(
     realtime_prices: dict[str, float],
     today: str,
     hard_only: bool = False,
+    trader_id: str | None = None,
 ) -> list[dict]:
     """Check open positions for stop-loss/take-profit/expiry.
+
+    ``trader_id=None`` checks every book; the intraday cycle passes one id
+    so each trader's alerts reach its own exit decision.
 
     ``hard_only`` is what makes room for a trading agent. Left False, every
     trigger below closes the position, which is the behaviour that leaves
@@ -176,8 +181,9 @@ def check_positions(
     """
     conn = _get_conn()
     positions = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'open' AND open_date < ?",
-        (today,),
+        "SELECT * FROM virtual_portfolio WHERE status = 'open' AND open_date < ?"
+        + (" AND trader_id = ?" if trader_id else ""),
+        [today, *([trader_id] if trader_id else [])],
     ).fetchall()
 
     # ── Compute shared sentiment context (once per cycle, not per-position) ──
@@ -392,20 +398,22 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
         if theme and theme.get("strength", 0) < 4:
             return None  # Theme too weak, don't throw good money after bad
 
+    trader_id = pos.get("trader_id") or DEFAULT_TRADER
+
     with _write_lock:
         open_price = pos.get("open_price", 0)
         existing_shares = pos.get("shares", 0)
         existing_cost = open_price * existing_shares
 
-        # Check position limit (30% with add)
-        max_total_cost = TOTAL_CAPITAL * MAX_POSITION_WITH_ADD
+        # Check position limit (30% with add), against this trader's own pot
+        max_total_cost = trader_capital(trader_id) * MAX_POSITION_WITH_ADD
         room = max_total_cost - existing_cost
         if room <= 0:
             return None  # Already at max
 
         # Check available capital (sentiment limit does NOT apply to add-positions —
         # bearish markets are exactly when you want to average down)
-        available = get_available_capital()
+        available = get_available_capital(trader_id)
         room = min(room, available)
 
         add_shares = _calc_shares(price, room)

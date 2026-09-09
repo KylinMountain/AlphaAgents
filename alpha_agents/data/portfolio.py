@@ -15,6 +15,7 @@ import re
 from datetime import datetime
 
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
+from alpha_agents.data.trader import DEFAULT_TRADER
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,17 @@ ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 # ratchets upward with the trailing rule and no longer records where the
 # position started.
 HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT", "8.0"))
+
+# The strength a theme needs before a new order may be written against it.
+#
+# Read at creation *and* on every pending check, from this one constant so
+# the two cannot drift apart. They used to be enforced only on the check,
+# one cycle late: of 97 cancelled orders, ~80 died as 主线走弱 on themes
+# that were already at strength 0-2 when the order was written. The system
+# was creating orders it had already decided it would not hold, then
+# cancelling them, then counting those cancellations as evidence about
+# entry prices.
+MIN_THEME_STRENGTH = 4
 
 # Conservative A-share execution assumptions for virtual portfolio P&L.
 # Net return includes buy/sell slippage, commissions, transfer fees, and
@@ -103,19 +115,24 @@ def _estimate_net_close_result(open_price: float, close_price: float, shares: in
     }
 
 
-def get_sentiment_exposure_limit() -> float:
-    """Get max total exposure based on sentiment cycle phase."""
+def get_sentiment_exposure_limit(trader_id: str = DEFAULT_TRADER) -> float:
+    """Max total exposure for one trader, given the sentiment phase.
+
+    The phase is a fact about the market and is shared; the money it
+    applies to is the trader's own.
+    """
+    capital = trader_capital(trader_id)
     try:
         from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
         cycle = get_sentiment_cycle()
         phase = cycle.get("phase", "修复")
         pct = cycle["strategy"]["max_exposure_pct"]
-        max_invest = TOTAL_CAPITAL * pct / 100
+        max_invest = capital * pct / 100
         logger.debug("Sentiment cycle: %s → max %.0f元 (%.0f%%)", phase, max_invest, pct)
         return max_invest
     except Exception as e:
         logger.warning("Sentiment cycle failed, defaulting to 50%%: %s", e)
-        return TOTAL_CAPITAL * 0.50
+        return capital * 0.50
 
 
 def _calc_shares(price: float, max_amount: float) -> int:
@@ -128,24 +145,42 @@ def _calc_shares(price: float, max_amount: float) -> int:
     return lots * LOT_SIZE
 
 
-def _wanted_pct(code: str) -> float:
+def _wanted_pct(code: str, trader_id: str = DEFAULT_TRADER) -> float:
     """How much of the book this idea asked for, as a fraction.
 
-    The thesis states it. A pick that says nothing gets
-    DEFAULT_POSITION_PCT, which keeps behaviour unchanged for anything
+    The thesis states it. A pick that says nothing falls back to the
+    trader's own default, which keeps behaviour unchanged for anything
     written before sizing was a decision.
     """
     try:
         from alpha_agents.data.thesis import get_active
-        theses = [t for t in get_active(code=code) if t.position_id is None]
+        theses = [t for t in get_active(code=code, trader_id=trader_id)
+                  if t.position_id is None]
         if theses and theses[-1].size_pct:
             return max(0.005, min(1.0, theses[-1].size_pct))
     except Exception as e:
         logger.debug("Size lookup fallback for %s: %s", code, e)
-    return DEFAULT_POSITION_PCT
+    return _trader_pct(trader_id, "default_size_pct", DEFAULT_POSITION_PCT)
 
 
-def _cluster_room(theme: str) -> float:
+def _trader_pct(trader_id: str, field: str, fallback: float) -> float:
+    """One sizing parameter off the trader's config, or the global default.
+
+    Falls back rather than raising for the same reason ``get_trader``
+    does: a position whose config file was deleted still has to be
+    managed with *some* number.
+    """
+    if trader_id == DEFAULT_TRADER:
+        return fallback
+    try:
+        from alpha_agents.data.trader import get_trader
+        return float(getattr(get_trader(trader_id), field, fallback))
+    except Exception as e:
+        logger.debug("Trader %s %s fallback: %s", trader_id, field, e)
+        return fallback
+
+
+def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
     """Headroom for this theme's correlated cluster, or unlimited on error.
 
     Falling open rather than closed: a failure in the correlation lookup
@@ -154,14 +189,14 @@ def _cluster_room(theme: str) -> float:
     """
     try:
         from alpha_agents.data.portfolio_risk import cluster_room
-        return cluster_room(theme)
+        return cluster_room(theme, trader_id)
     except Exception as e:
         logger.warning("Cluster check unavailable for %r: %s", theme, e)
         return float("inf")
 
 
-def _drawdown_blocks_new_risk() -> bool:
-    """True only when the account is measurably deep in a drawdown.
+def _drawdown_blocks_new_risk(trader_id: str = DEFAULT_TRADER) -> bool:
+    """True only when this trader is measurably deep in a drawdown.
 
     Falls open on any failure: a broken risk lookup must not quietly stop
     the portfolio from trading, which would look exactly like a market
@@ -169,28 +204,68 @@ def _drawdown_blocks_new_risk() -> bool:
     """
     try:
         from alpha_agents.data.portfolio_risk import current_drawdown
-        return bool(current_drawdown().get("blocked"))
+        return bool(current_drawdown(trader_id).get("blocked"))
     except Exception as e:
         logger.warning("Drawdown check unavailable: %s", e)
         return False
 
 
-def get_available_capital() -> float:
-    """Get remaining cash = total capital - sum of open position costs."""
+def trader_capital(trader_id: str = DEFAULT_TRADER) -> float:
+    """How much this trader was given. Its own pot, not a share of one.
+
+    Two strategies drawing from a single pot would measure ordering
+    rather than skill: whichever filled first would starve the other and
+    the comparison the traders exist for would be meaningless.
+    """
+    if trader_id == DEFAULT_TRADER:
+        return float(TOTAL_CAPITAL)
+    from alpha_agents.data.trader import get_trader
+    return float(get_trader(trader_id).capital)
+
+
+def account_capital() -> float:
+    """Every trader's capital added up — the account, not a book.
+
+    A legacy trader counts only what it still has invested. Its remaining
+    cash will never be deployed — it is winding down and buys nothing — so
+    including the full pot would show an account with hundreds of
+    thousands "available" that no trader is allowed to spend.
+
+    Only the dashboard wants this. No trading decision may use it: a
+    trader that sized against the account total would be spending the
+    others' money.
+    """
+    from alpha_agents.data.trader import DEFAULT_TRADER as _D, load_traders
+    traders = load_traders()
+    if len(traders) == 1 and traders[0].id == _D:
+        return float(TOTAL_CAPITAL)
+    total = 0.0
+    for t in traders:
+        if t.legacy:
+            total += t.capital - get_available_capital(t.id)
+        else:
+            total += t.capital
+    return float(total)
+
+
+def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
+    """Remaining cash for one trader = its capital − its own positions."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT open_price, shares FROM virtual_portfolio WHERE status = 'open'"
+        "SELECT open_price, shares FROM virtual_portfolio "
+        "WHERE status = 'open' AND trader_id = ?", (trader_id,)
     ).fetchall()
     invested = sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
-    return TOTAL_CAPITAL - invested
+    return trader_capital(trader_id) - invested
 
 
-def get_theme_exposure(theme: str) -> float:
-    """Get total market value invested in a given theme."""
+def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
+    """Market value one trader has in a theme."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT open_price, shares FROM virtual_portfolio WHERE status = 'open' AND theme = ?",
-        (theme,),
+        "SELECT open_price, shares FROM virtual_portfolio "
+        "WHERE status = 'open' AND theme = ? AND trader_id = ?",
+        (theme, trader_id),
     ).fetchall()
     return sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
 
@@ -248,6 +323,7 @@ def create_pending_order(
     target_price: float | None = None,
     source: str = "morning",
     reason: str = "",
+    trader_id: str = DEFAULT_TRADER,
 ) -> int | None:
     """Create a pending order (挂单). Triggered when price enters entry zone.
 
@@ -256,12 +332,17 @@ def create_pending_order(
     with _write_lock:
         conn = _get_conn()
         # No duplicate: same stock pending or open
+        # Scoped to the trader: two traders holding the same stock is the
+        # comparison working, not a duplicate. Only one book may hold it
+        # twice.
         existing = conn.execute(
-            "SELECT id FROM virtual_portfolio WHERE code = ? AND status IN ('pending', 'open')",
-            (code,),
+            "SELECT id FROM virtual_portfolio WHERE code = ? AND trader_id = ? "
+            "AND status IN ('pending', 'open')",
+            (code, trader_id),
         ).fetchone()
         if existing:
-            logger.info("Order/position already exists for %s %s, skipping", code, name)
+            logger.info("Order/position already exists for %s %s (%s), skipping",
+                        code, name, trader_id)
             return None
 
         resolved = resolve_theme(theme)
@@ -273,13 +354,26 @@ def create_pending_order(
             return None
         theme = resolved
 
+        # The same strength bar check_pending_orders applies, applied at
+        # creation instead of one cycle later. Of 97 cancelled orders, ~80
+        # died as 主线走弱 — and the theme was already at strength 0-2 when
+        # the order was written. The system was creating orders it had
+        # already decided it would not hold, then cancelling them, then
+        # counting the cancellations as evidence about entry prices.
+        weak = _theme_too_weak(theme)
+        if weak:
+            logger.info("Rejected order %s %s: %s — 下一轮也会被撤，不如不建",
+                        code, name, weak)
+            return None
+
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "
             "(code, name, theme, order_date, open_date, open_price, entry_low, entry_high, "
-            " stop_loss, target_price, expire_days, status, source, reason) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            " stop_loss, target_price, expire_days, status, source, reason, trader_id) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
             (code, name, theme, order_date, order_date, entry_low, entry_high,
-             stop_loss, target_price, PENDING_EXPIRE_DAYS, source, reason),
+             stop_loss, target_price, PENDING_EXPIRE_DAYS, source, reason,
+             trader_id),
         )
         conn.commit()
 
@@ -289,17 +383,52 @@ def create_pending_order(
         return cursor.lastrowid
 
 
+def _theme_too_weak(theme: str) -> str | None:
+    """Why this theme cannot carry a new order, or None if it can.
+
+    Reads the same thresholds check_pending_orders enforces, so the two
+    cannot disagree — an order accepted here and cancelled there is a
+    wasted capital slot and a fake data point about entry pricing.
+
+    Falls open on a lookup failure: a broken theme read must not stop the
+    system from trading, and the cancel path still runs a cycle later.
+    """
+    if not theme:
+        return None
+    try:
+        row = get_theme_by_name(theme)
+    except Exception as e:
+        logger.debug("Theme strength check unavailable for %r: %s", theme, e)
+        return None
+    if not row:
+        return None
+    status = row.get("status")
+    if status in ("declining", "archived"):
+        return f"主线已{status}({theme})"
+    strength = row.get("strength") or 0
+    if strength < MIN_THEME_STRENGTH:
+        return f"主线太弱({theme}强度{strength}<{MIN_THEME_STRENGTH})"
+    return None
+
+
 def check_pending_orders(
     realtime_prices: dict[str, float],
     today: str,
+    trader_id: str | None = None,
 ) -> list[dict]:
     """Check pending orders against realtime prices. Fill if price in entry zone.
+
+    One trader at a time. The conviction sort below spends finite capital
+    in order, so running two books through one pass would let whichever
+    sorted first spend the other's money.
 
     Returns list of fill alerts.
     """
     conn = _get_conn()
     orders = conn.execute(
         "SELECT * FROM virtual_portfolio WHERE status = 'pending'"
+        + (" AND trader_id = ?" if trader_id else ""),
+        [trader_id] if trader_id else []
     ).fetchall()
     # Highest conviction first. Capital is finite and this loop spends it
     # in order, so whatever ran first used to win — by row id, which is
@@ -307,7 +436,8 @@ def check_pending_orders(
     # 232元 left not because it was the weakest idea but because it was
     # inserted last. When the book is full, it should be full of the ideas
     # the agent believed in.
-    orders = sorted(orders, key=lambda o: -_order_conviction(o["code"]))
+    orders = sorted(orders, key=lambda o: -_order_conviction(
+        o["code"], o["trader_id"] or DEFAULT_TRADER))
 
     alerts = []
     for order in orders:
@@ -327,7 +457,7 @@ def check_pending_orders(
 
         # Dynamic expiry based on theme health:
         # - Theme healthy (strength >= 4) → keep the order alive, no expiry
-        # - Theme weak (strength < 4) or declining/archived → cancel
+        # - Theme weak (strength < MIN_THEME_STRENGTH) or declining/archived → cancel
         # - No theme → fall back to fixed expiry
         theme_name = order.get("theme", "")
         if theme_name:
@@ -342,7 +472,7 @@ def check_pending_orders(
                         "reason": f"主线衰退({theme_name})",
                     })
                     continue
-                if theme.get("strength", 0) < 4:
+                if (theme.get("strength") or 0) < MIN_THEME_STRENGTH:
                     _cancel_order(order["id"], f"主线走弱({theme_name}强度{theme['strength']})")
                     alerts.append({
                         "type": "cancelled",
@@ -416,7 +546,7 @@ def check_pending_orders(
     return alerts
 
 
-def _order_conviction(code: str) -> float:
+def _order_conviction(code: str, trader_id: str = DEFAULT_TRADER) -> float:
     """The stated conviction behind an order, or a neutral 0.5.
 
     Neutral rather than zero for an order with no thesis: those predate
@@ -425,7 +555,7 @@ def _order_conviction(code: str) -> float:
     """
     try:
         from alpha_agents.data.thesis import get_active
-        theses = get_active(code=code)
+        theses = get_active(code=code, trader_id=trader_id)
         return theses[-1].conviction if theses else 0.5
     except Exception as e:
         logger.debug("Conviction sort fallback for %s: %s", code, e)
@@ -451,7 +581,9 @@ def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
         return None
 
     try:
-        theses = [t for t in T.get_active(code=code) if t.position_id is None]
+        theses = [t for t in T.get_active(
+            code=code, trader_id=order.get("trader_id") or DEFAULT_TRADER)
+            if t.position_id is None]
         if not theses:
             return None
         th = theses[-1]
@@ -479,17 +611,25 @@ def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
 
 
 def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
-    """Convert a pending order to an open position at fill_price."""
+    """Convert a pending order to an open position at fill_price.
+
+    Every limit below is measured against the order's own trader: its
+    capital, its exposure, its drawdown. A limit read off the pooled book
+    would let one strategy's positions decide whether another gets to
+    open one.
+    """
     code = order["code"]
     name = order.get("name", "")
     theme = order.get("theme", "")
+    trader_id = order.get("trader_id") or DEFAULT_TRADER
+    capital = trader_capital(trader_id)
 
     with _write_lock:
         # Capital checks (including sentiment-based total exposure limit)
         # Must be inside lock to prevent race conditions with concurrent fills
-        available = get_available_capital()
-        sentiment_cap = get_sentiment_exposure_limit()
-        invested = TOTAL_CAPITAL - available
+        available = get_available_capital(trader_id)
+        sentiment_cap = get_sentiment_exposure_limit(trader_id)
+        invested = capital - available
         sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
 
         # Size by conviction rather than filling every position to the cap.
@@ -500,13 +640,16 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # behaves exactly as before.
         # What the agent asked for, capped by the backstop. Conviction no
         # longer scales this behind its back — it says the number itself.
-        max_per_stock = min(TOTAL_CAPITAL * _wanted_pct(code),
-                            TOTAL_CAPITAL * MAX_POSITION_PCT)
-        max_for_theme = TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(theme)
+        max_pos_pct = _trader_pct(trader_id, "max_position_pct",
+                                  MAX_POSITION_PCT)
+        max_per_stock = min(capital * _wanted_pct(code, trader_id),
+                            capital * max_pos_pct)
+        max_for_theme = (capital * MAX_THEME_PCT
+                         - get_theme_exposure(theme, trader_id))
         # Themes that share most of their constituents are one bet. The
         # per-theme cap counted 金属铜 and 小金属概念 as two and would let
         # them take 60% between them while sharing 6 of 10 names.
-        cluster_cap = _cluster_room(theme)
+        cluster_cap = _cluster_room(theme, trader_id)
         max_amount = min(available, max_per_stock, max(0, max_for_theme),
                          sentiment_room, cluster_cap)
 
@@ -514,7 +657,7 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # Liquidating at a drawdown level sells the bottom, and in a system
         # built to learn from resolved theses it would destroy the samples
         # before they resolve. Positions already open keep their own stops.
-        if _drawdown_blocks_new_risk():
+        if _drawdown_blocks_new_risk(trader_id):
             _cancel_order_unlocked(order["id"], "组合回撤触及上限，暂停开新仓")
             return {"type": "cancelled", "code": code, "name": name,
                     "reason": "组合回撤触及上限"}
@@ -530,7 +673,7 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             # the book, which is a selection bias in the learning data
             # with nothing to do with the agent's judgement.
             one_lot = fill_price * LOT_SIZE
-            ceiling = min(available, TOTAL_CAPITAL * MAX_POSITION_PCT,
+            ceiling = min(available, capital * max_pos_pct,
                           max(0, max_for_theme), sentiment_room, cluster_cap)
             if one_lot <= ceiling:
                 shares = LOT_SIZE
@@ -604,27 +747,46 @@ def _cancel_order(order_id: int, reason: str) -> None:
         _cancel_order_unlocked(order_id, reason)
 
 
-def get_pending_orders() -> list[dict]:
+def _trader_filter(trader_id: str | None) -> str:
+    """SQL fragment scoping a query to one trader, or to all of them.
+
+    None means every trader on purpose: the dashboard, the drawdown gate
+    and the correlation check all reason about total exposure, and
+    scoping those to one book would understate the risk actually taken.
+    """
+    return " AND trader_id = ?" if trader_id else ""
+
+
+def _trader_args(trader_id: str | None) -> tuple:
+    return (trader_id,) if trader_id else ()
+
+
+def get_pending_orders(trader_id: str | None = None) -> list[dict]:
     """Get all pending orders."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'pending' ORDER BY order_date"
+        "SELECT * FROM virtual_portfolio WHERE status = 'pending'"
+        + _trader_filter(trader_id) + " ORDER BY order_date",
+        _trader_args(trader_id)
     ).fetchall()
     return [dict(r) for r in rows]
 
 
 # ── Open Positions ──────────────────────────────────────────
 
-def get_open_positions() -> list[dict]:
+def get_open_positions(trader_id: str | None = None) -> list[dict]:
     """Get all currently open (filled) positions."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'open' ORDER BY open_date"
+        "SELECT * FROM virtual_portfolio WHERE status = 'open'"
+        + _trader_filter(trader_id) + " ORDER BY open_date",
+        _trader_args(trader_id)
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_closed_positions(limit: int = 50) -> list[dict]:
+def get_closed_positions(limit: int = 50,
+                         trader_id: str | None = None) -> list[dict]:
     """Trades that finished, newest first.
 
     The dashboard could see what was bought and never what happened to
@@ -634,9 +796,10 @@ def get_closed_positions(limit: int = 50) -> list[dict]:
     """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status NOT IN ('pending', 'open') "
-        "ORDER BY COALESCE(close_date, order_date) DESC, id DESC LIMIT ?",
-        (limit,),
+        "SELECT * FROM virtual_portfolio WHERE status NOT IN ('pending', 'open')"
+        + _trader_filter(trader_id) +
+        " ORDER BY COALESCE(close_date, order_date) DESC, id DESC LIMIT ?",
+        _trader_args(trader_id) + (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -728,24 +891,29 @@ def add_to_position(position_id: int, *, price: float, reason: str,
     with _write_lock:
         conn = _get_conn()
         pos = conn.execute(
-            "SELECT code, name, theme, open_price, shares, reason "
+            "SELECT code, name, theme, open_price, shares, reason, trader_id "
             "FROM virtual_portfolio WHERE id = ? AND status = 'open'",
             (position_id,)).fetchone()
         if not pos or price <= 0:
             return None
 
+        trader_id = pos["trader_id"] or DEFAULT_TRADER
+        capital = trader_capital(trader_id)
         held = pos["shares"] or 0
         cost = (pos["open_price"] or 0) * held
-        wanted = TOTAL_CAPITAL * max(0.005, min(1.0, size_pct
-                                                or DEFAULT_POSITION_PCT))
+        default_pct = _trader_pct(trader_id, "default_size_pct",
+                                  DEFAULT_POSITION_PCT)
+        wanted = capital * max(0.005, min(1.0, size_pct or default_pct))
+        available = get_available_capital(trader_id)
 
         room = min(
             wanted,
-            get_available_capital(),
-            TOTAL_CAPITAL * MAX_POSITION_WITH_ADD - cost,
-            TOTAL_CAPITAL * MAX_THEME_PCT - get_theme_exposure(pos["theme"] or ""),
-            max(0.0, get_sentiment_exposure_limit()
-                - (TOTAL_CAPITAL - get_available_capital())),
+            available,
+            capital * MAX_POSITION_WITH_ADD - cost,
+            capital * MAX_THEME_PCT
+            - get_theme_exposure(pos["theme"] or "", trader_id),
+            max(0.0, get_sentiment_exposure_limit(trader_id)
+                - (capital - available)),
         )
         add_shares = _calc_shares(price, max(0.0, room))
         if add_shares <= 0:

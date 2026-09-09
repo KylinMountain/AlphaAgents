@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from alpha_agents.data.memory_store import _get_conn, _write_lock
+from alpha_agents.data.trader import DEFAULT_TRADER
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,11 @@ class Thesis:
     close_kind: str = ""          # which condition fired, if any
     close_note: str = ""
     checkpoints: list[dict] = field(default_factory=list)
+    # Whose claim this is. Every learning statistic — calibration,
+    # blind-spot rate, process quality — is grouped by it, because a
+    # pooled curve across two strategies measures their average and
+    # neither of them.
+    trader_id: str = DEFAULT_TRADER
 
 
 def _num(value, fallback):
@@ -328,6 +334,7 @@ def _row_to_thesis(row) -> Thesis:
         closed_at=row["closed_at"], close_kind=row["close_kind"] or "",
         close_note=row["close_note"] or "",
         checkpoints=json.loads(row["checkpoints"] or "[]"),
+        trader_id=row["trader_id"] or DEFAULT_TRADER,
     )
 
 
@@ -339,29 +346,37 @@ def create(thesis: Thesis) -> int:
         cur = conn.execute(
             "INSERT INTO theses (code, name, theme, claim, horizon_days, prob, "
             " conviction, entry_fraction, conditions, status, position_id, "
-            " created_by, created_at, checkpoints) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'[]')",
+            " created_by, created_at, trader_id, checkpoints) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'[]')",
             (thesis.code, thesis.name, thesis.theme, thesis.claim,
              thesis.horizon_days, thesis.prob, thesis.conviction,
              thesis.size_pct,
              json.dumps([c.as_dict() for c in thesis.conditions],
                         ensure_ascii=False),
-             thesis.status, thesis.position_id, thesis.created_by, now),
+             thesis.status, thesis.position_id, thesis.created_by, now,
+             thesis.trader_id or DEFAULT_TRADER),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def get_active(code: str | None = None) -> list[Thesis]:
-    conn = _get_conn()
+def get_active(code: str | None = None,
+               trader_id: str | None = None) -> list[Thesis]:
+    """Live theses. ``trader_id=None`` means every trader, deliberately.
+
+    The dashboard and the risk checks want the whole book; a learning
+    statistic wants one trader's. Making the filter explicit at the call
+    site keeps that distinction visible instead of hiding it in a default.
+    """
+    sql = "SELECT * FROM theses WHERE status = ?"
+    args: list = [ACTIVE]
     if code:
-        rows = conn.execute(
-            "SELECT * FROM theses WHERE status = ? AND code = ? ORDER BY id",
-            (ACTIVE, code)).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM theses WHERE status = ? ORDER BY id",
-            (ACTIVE,)).fetchall()
+        sql += " AND code = ?"
+        args.append(code)
+    if trader_id:
+        sql += " AND trader_id = ?"
+        args.append(trader_id)
+    rows = _get_conn().execute(sql + " ORDER BY id", args).fetchall()
     return [_row_to_thesis(r) for r in rows]
 
 
@@ -416,16 +431,22 @@ def close(thesis_id: int, status: str, close_kind: str = "",
         conn.commit()
 
 
-def get_closed(days: int = 30) -> list[Thesis]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM theses WHERE status != ? "
-        "AND closed_at >= date('now', ?) ORDER BY closed_at DESC",
-        (ACTIVE, f"-{days} days")).fetchall()
+def get_closed(days: int = 30,
+               trader_id: str | None = None) -> list[Thesis]:
+    """Resolved theses. ``trader_id=None`` means every trader."""
+    sql = ("SELECT * FROM theses WHERE status != ? "
+           "AND closed_at >= date('now', ?)")
+    args: list = [ACTIVE, f"-{days} days"]
+    if trader_id:
+        sql += " AND trader_id = ?"
+        args.append(trader_id)
+    rows = _get_conn().execute(
+        sql + " ORDER BY closed_at DESC", args).fetchall()
     return [_row_to_thesis(r) for r in rows]
 
 
-def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
+def from_recommendation(rec: dict, code: str, created_by: str,
+                        trader_id: str = DEFAULT_TRADER) -> int | None:
     """Turn one pick into a thesis, whoever made the pick.
 
     Two producers, deliberately handled by one function. The morning agent
@@ -453,10 +474,14 @@ def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
     # it is one idea observed 43 times — and counting it 43 times would
     # have buried the calibration curve under whichever stock the scorer
     # happened to keep liking.
-    existing = [t for t in get_active(code=code) if t.position_id is None]
+    # Scoped to the trader: two traders holding the same stock is the
+    # comparison working, not a duplicate.
+    existing = [t for t in get_active(code=code, trader_id=trader_id)
+                if t.position_id is None]
     if existing:
-        logger.debug("Thesis for %s already open and unfilled — not "
-                     "duplicating (%d on file)", code, len(existing))
+        logger.debug("Thesis for %s already open and unfilled for %s — not "
+                     "duplicating (%d on file)", code, trader_id,
+                     len(existing))
         return existing[-1].id
 
     conditions = []
@@ -495,6 +520,7 @@ def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
             size_pct=_size_pct(rec),
             conditions=conditions,
             created_by=created_by,
+            trader_id=trader_id,
         ))
     except Exception as e:
         logger.warning("Could not save thesis for %s: %s", code, e)

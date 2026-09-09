@@ -49,10 +49,16 @@ def _bucket(prob: float) -> str | None:
     return None
 
 
-def calibration(days: int = 60) -> list[dict]:
-    """Stated probability against realised validation rate, by bucket."""
+def calibration(days: int = 60,
+                trader_id: str | None = None) -> list[dict]:
+    """Stated probability against realised validation rate, by bucket.
+
+    Per trader when asked. A curve pooled across two strategies describes
+    their average, which is a trader nobody is running — and worse, it
+    would tell an accurate trader to adjust for a different one's bias.
+    """
     rows: dict[str, list[bool]] = {label: [] for _, _, label in _BUCKETS}
-    for th in get_closed(days=days):
+    for th in get_closed(days=days, trader_id=trader_id):
         if th.status not in (VALIDATED, INVALIDATED, EXPIRED, BLIND_SPOT):
             continue
         label = _bucket(th.prob or 0.5)
@@ -69,13 +75,14 @@ def calibration(days: int = 60) -> list[dict]:
     return out
 
 
-def blind_spot_rate(days: int = 60) -> dict:
+def blind_spot_rate(days: int = 60, trader_id: str | None = None) -> dict:
     """How often it lost money for a reason it never wrote down."""
-    closed = [t for t in get_closed(days=days) if t.status != VALIDATED]
+    every = get_closed(days=days, trader_id=trader_id)
+    closed = [t for t in every if t.status != VALIDATED]
     if not closed:
         return {"n": 0}
     blind = [t for t in closed if t.status == BLIND_SPOT]
-    no_conditions = [t for t in get_closed(days=days) if not t.conditions]
+    no_conditions = [t for t in every if not t.conditions]
     return {
         "n": len(closed),
         "blind": len(blind),
@@ -85,7 +92,8 @@ def blind_spot_rate(days: int = 60) -> dict:
     }
 
 
-def condition_usefulness(days: int = 60) -> list[dict]:
+def condition_usefulness(days: int = 60,
+                         trader_id: str | None = None) -> list[dict]:
     """Which invalidation kinds actually fire, and which never do.
 
     A condition that never fires across dozens of theses is not caution —
@@ -94,7 +102,7 @@ def condition_usefulness(days: int = 60) -> list[dict]:
     """
     written: dict[str, int] = {}
     fired: dict[str, int] = {}
-    for th in get_closed(days=days):
+    for th in get_closed(days=days, trader_id=trader_id):
         for c in th.conditions:
             written[c.kind] = written.get(c.kind, 0) + 1
         if th.close_kind:
@@ -106,7 +114,8 @@ def condition_usefulness(days: int = 60) -> list[dict]:
         key=lambda r: -r["written"])
 
 
-def inject_calibration(days: int = 60) -> str:
+def inject_calibration(days: int = 60,
+                       trader_id: str | None = None) -> str:
     """The block that goes back into the agent's own prompt.
 
     This is the whole point of the module: the agent has to *see* its
@@ -114,7 +123,7 @@ def inject_calibration(days: int = 60) -> str:
     """
     sections = []
 
-    curve = calibration(days=days)
+    curve = calibration(days=days, trader_id=trader_id)
     if curve:
         lines = ["【你的概率校准】(近60天已结论点)"]
         for row in curve:
@@ -128,7 +137,7 @@ def inject_calibration(days: int = 60) -> str:
             lines.append("→ 你在低估自己。信心足的时候可以给更高的概率和仓位。")
         sections.append("\n".join(lines))
 
-    blind = blind_spot_rate(days=days)
+    blind = blind_spot_rate(days=days, trader_id=trader_id)
     if blind.get("n"):
         lines = [f"【盲点率】{blind['blind']}/{blind['n']} 笔亏损是"
                  f"「没有任何你列出的条件触发就被风控平掉」({blind['rate']*100:.0f}%)"]
@@ -139,7 +148,7 @@ def inject_calibration(days: int = 60) -> str:
         lines.append("→ 这些是你没想到的失效路径，写 invalidations 时想想它们。")
         sections.append("\n".join(lines))
 
-    useless = [r for r in condition_usefulness(days=days)
+    useless = [r for r in condition_usefulness(days=days, trader_id=trader_id)
                if r["written"] >= 5 and r["fired"] == 0]
     if useless:
         kinds = "、".join(r["kind"] for r in useless[:3])

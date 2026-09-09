@@ -160,14 +160,22 @@ async def get_portfolio_api():
     it next, which is the half that decides whether any of this works.
     """
     from alpha_agents.data.portfolio import (
-        TOTAL_CAPITAL, get_available_capital, get_closed_positions,
-        get_open_positions, get_pending_orders, get_portfolio_stats,
+        account_capital, get_closed_positions, get_open_positions,
+        get_pending_orders, get_portfolio_stats,
     )
     pending = await asyncio.to_thread(get_pending_orders)
     positions = await asyncio.to_thread(get_open_positions)
     closed = await asyncio.to_thread(get_closed_positions, 50)
     stats = await asyncio.to_thread(get_portfolio_stats, 30)
-    available = await asyncio.to_thread(get_available_capital)
+    total = await asyncio.to_thread(account_capital)
+    invested = sum((p["open_price"] or 0) * (p["shares"] or 0)
+                   for p in positions)
+    available = total - invested
+
+    # Per trader, so the dashboard can show which book is which. The
+    # comparison is the entire reason several traders exist, and a
+    # single pooled line would hide it.
+    traders = await asyncio.to_thread(_trader_books)
 
     # A position without its thesis is a row of numbers. The thesis is why
     # it is held and what would end it, so it travels attached rather than
@@ -180,9 +188,45 @@ async def get_portfolio_api():
         "closed": closed,
         "stats": stats,
         "theses": await asyncio.to_thread(_closed_theses),
-        "capital": {"total": TOTAL_CAPITAL, "available": available,
-                    "invested": TOTAL_CAPITAL - available},
+        "capital": {"total": total, "available": available,
+                    "invested": invested},
+        "traders": traders,
     })
+
+
+def _trader_books() -> list[dict]:
+    """One row per trader: its money, its book, its curve.
+
+    Returned even in the single-trader case so the UI has one shape to
+    render; it can collapse the section when the list has one entry.
+    """
+    from alpha_agents.data.portfolio import (
+        get_available_capital, get_open_positions, get_pending_orders,
+        trader_capital,
+    )
+    from alpha_agents.data.portfolio_risk import current_drawdown
+    from alpha_agents.data.trader import load_traders
+
+    out = []
+    for t in load_traders():
+        try:
+            positions = get_open_positions(t.id)
+            capital = trader_capital(t.id)
+            dd = current_drawdown(t.id) or {}
+            out.append({
+                "id": t.id, "name": t.name,
+                "legacy": t.legacy,
+                "note": t.note,
+                "capital": capital,
+                "available": get_available_capital(t.id),
+                "positions": len(positions),
+                "pending": len(get_pending_orders(t.id)),
+                "drawdown_pct": dd.get("drawdown_pct"),
+                "blocked": bool(dd.get("blocked")),
+            })
+        except Exception as e:
+            logger.warning("Trader %s book unavailable: %s", t.id, e)
+    return out
 
 
 def _thesis_dict(th) -> dict:

@@ -29,6 +29,7 @@ from alpha_agents.tools.futures_quotes import (
     get_cftc_positions_fn,
 )
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
+from alpha_agents.tools.price_levels import get_price_levels_fn
 from alpha_agents.tools.financial_data import get_financial_data_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.earnings_calendar import get_earnings_calendar_fn
@@ -264,6 +265,25 @@ def get_stock_quotes(codes: str) -> str:
     用于验证推荐股票的当前价格位置和市值规模。
     """
     return get_stock_quotes_fn(codes=codes)
+
+
+@function_tool
+@with_timeout
+def get_price_levels(code: str) -> str:
+    """获取个股的历史价位结构，用于自己决定介入价和止损位。
+
+    输入单个股票代码，如"000858"。返回全部是收盘价口径的事实，
+    **不含任何建议**——买在哪里是你的判断：
+    - ma5/ma10/ma20/ma60、5日成交量加权均价（vwap_5d）
+    - 20日/60日区间高低点，以及当前价在20日区间的位置百分比
+    - atr_pct：日均真实波幅占价格的比例
+    - support_below / resistance_above：近期摆动低点与高点
+    - gap_to_support_pct / gap_to_resistance_pct：距最近支撑/阻力还有多远
+
+    **atr_pct 决定介入区间该有多宽。** 比日均波动还窄的区间基本不会成交：
+    一只 atr_pct=6 的票挂 3% 宽的区间，一天就能跳过去。
+    """
+    return get_price_levels_fn(code=code)
 
 
 @function_tool

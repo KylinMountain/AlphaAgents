@@ -30,6 +30,7 @@ from datetime import datetime
 
 from alpha_agents.config import DATA_DIR
 from alpha_agents.data.memory_store import _get_conn, _write_lock
+from alpha_agents.data.trader import DEFAULT_TRADER
 
 logger = logging.getLogger(__name__)
 
@@ -109,18 +110,34 @@ def trade_excess(position: dict) -> float | None:
 
 # ── Equity curve ────────────────────────────────────────────
 
-def record_equity_mark(date: str, price_map: dict[str, float] | None = None) -> dict:
-    """Store one day's account value. Called by the review.
+def _mark_type(trader_id: str) -> str:
+    """Where one trader's equity marks live.
+
+    The default trader keeps the original ``equity_mark`` key so every
+    mark recorded before traders existed stays part of its own curve —
+    renaming them would reset the drawdown history to zero.
+    """
+    return ("equity_mark" if trader_id == DEFAULT_TRADER
+            else f"equity_mark:{trader_id}")
+
+
+def record_equity_mark(date: str, price_map: dict[str, float] | None = None,
+                       trader_id: str = DEFAULT_TRADER) -> dict:
+    """Store one day's account value for one trader. Called by the review.
 
     Without a daily mark there is no curve, so there is no drawdown and no
     time-weighted comparison to the benchmark — only per-trade numbers,
     which say nothing about the days the account sat in cash.
+
+    One curve per trader, because a pooled curve would hide the very
+    thing the traders exist to show: which book actually compounded.
     """
     from alpha_agents.data.portfolio import (
-        TOTAL_CAPITAL, get_available_capital, get_open_positions,
+        get_available_capital, get_open_positions, trader_capital,
     )
 
-    positions = get_open_positions()
+    capital = trader_capital(trader_id)
+    positions = get_open_positions(trader_id)
     if positions and price_map is None:
         try:
             from alpha_agents.data.market_data import get_realtime_quotes
@@ -139,37 +156,42 @@ def record_equity_mark(date: str, price_map: dict[str, float] | None = None) -> 
             unpriced.append(pos["code"])
         market_value += price * (pos.get("shares") or 0)
 
-    cash = get_available_capital()
+    cash = get_available_capital(trader_id)
     equity = round(cash + market_value, 2)
     mark = {
-        "date": date, "equity": equity, "cash": round(cash, 2),
+        "date": date, "trader_id": trader_id,
+        "equity": equity, "cash": round(cash, 2),
         "market_value": round(market_value, 2), "positions": len(positions),
         # Recorded so a later reader knows which marks are soft. A day
         # marked at cost basis understates both gains and drawdown.
         "unpriced": unpriced,
-        "return_pct": round((equity - TOTAL_CAPITAL) / TOTAL_CAPITAL * 100, 2),
+        "return_pct": (round((equity - capital) / capital * 100, 2)
+                       if capital else 0.0),
     }
 
+    mark_type = _mark_type(trader_id)
     with _write_lock:
         conn = _get_conn()
         conn.execute("DELETE FROM daily_snapshots WHERE date = ? "
-                     "AND data_type = 'equity_mark'", (date,))
+                     "AND data_type = ?", (date, mark_type))
         conn.execute(
             "INSERT INTO daily_snapshots (date, data_type, data, created_at) "
-            "VALUES (?, 'equity_mark', ?, ?)",
-            (date, json.dumps(mark, ensure_ascii=False),
+            "VALUES (?, ?, ?, ?)",
+            (date, mark_type, json.dumps(mark, ensure_ascii=False),
              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
-    logger.info("Equity mark %s: %.0f元 (%+.2f%%, %d 持仓)",
-                date, equity, mark["return_pct"], len(positions))
+    logger.info("Equity mark %s [%s]: %.0f元 (%+.2f%%, %d 持仓)",
+                date, trader_id, equity, mark["return_pct"], len(positions))
     return mark
 
 
-def equity_curve(days: int = 90) -> list[dict]:
+def equity_curve(days: int = 90,
+                 trader_id: str = DEFAULT_TRADER) -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT data FROM daily_snapshots WHERE data_type = 'equity_mark' "
-        "AND date >= date('now', ?) ORDER BY date", (f"-{days} days",)
+        "SELECT data FROM daily_snapshots WHERE data_type = ? "
+        "AND date >= date('now', ?) ORDER BY date",
+        (_mark_type(trader_id), f"-{days} days")
     ).fetchall()
     out = []
     for r in rows:
@@ -180,14 +202,18 @@ def equity_curve(days: int = 90) -> list[dict]:
     return out
 
 
-def current_drawdown() -> dict:
-    """Distance from the account's high-water mark.
+def current_drawdown(trader_id: str = DEFAULT_TRADER) -> dict:
+    """Distance from this trader's high-water mark.
 
     Returns {} when there are not two marks to compare — a single day is
     a level, not a drawdown, and reporting 0% off one mark would read as
     "no drawdown" rather than "not enough history".
+
+    Per trader, not per account: halting a book that is up because a
+    different strategy drew down would make the comparison measure the
+    other trader's losses.
     """
-    curve = equity_curve(days=365)
+    curve = equity_curve(days=365, trader_id=trader_id)
     if len(curve) < 2:
         return {}
     peak = max(m["equity"] for m in curve)
@@ -252,17 +278,22 @@ def theme_cluster(theme: str, members: dict[str, set[str]] | None = None) -> set
     return cluster
 
 
-def cluster_room(theme: str) -> float:
-    """Money still available to this theme's correlated cluster, in yuan."""
-    from alpha_agents.data.portfolio import TOTAL_CAPITAL, get_theme_exposure
+def cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
+    """Money still available to this theme's correlated cluster, in yuan.
 
+    Concentration is a property of one book. Two traders both holding
+    金属铜 is the experiment; one trader holding it twice under two names
+    is the concentration this exists to catch.
+    """
+    from alpha_agents.data.portfolio import get_theme_exposure, trader_capital
+
+    cap = trader_capital(trader_id) * MAX_CLUSTER_PCT
     cluster = theme_cluster(theme)
-    used = sum(get_theme_exposure(name) for name in cluster)
-    room = TOTAL_CAPITAL * MAX_CLUSTER_PCT - used
+    used = sum(get_theme_exposure(name, trader_id) for name in cluster)
+    room = cap - used
     if len(cluster) > 1 and room <= 0:
         logger.info("Cluster %s is full (%.0f元 of %.0f元) — %r gets no more",
-                    "+".join(sorted(cluster)), used,
-                    TOTAL_CAPITAL * MAX_CLUSTER_PCT, theme)
+                    "+".join(sorted(cluster)), used, cap, theme)
     return max(0.0, room)
 
 
@@ -319,18 +350,25 @@ def classify_cancellation(reason: str) -> str:
     return "其他"
 
 
-def entry_quality(days: int = 30) -> dict:
+def entry_quality(days: int = 30, trader_id: str | None = None) -> dict:
     """How the orders that never became positions failed.
 
     The headline is ``missed_right``: how often the pick was right and the
     entry price was wrong. A system that keeps being right and keeps not
     getting filled has an entry problem, not a selection problem, and
     nothing else in the stats will ever say so.
+
+    This is *the* number that separates one entry style from another, so
+    a trader asking about its own entries must pass its id; ``None``
+    reports the whole book, for the dashboard.
     """
     conn = _get_conn()
+    scope = " AND trader_id = ?" if trader_id else ""
+    extra = [trader_id] if trader_id else []
     rows = conn.execute(
         "SELECT close_reason FROM virtual_portfolio WHERE status = 'cancelled' "
-        "AND order_date >= date('now', ?)", (f"-{days} days",)).fetchall()
+        "AND order_date >= date('now', ?)" + scope,
+        [f"-{days} days", *extra]).fetchall()
     if not rows:
         return {"n": 0}
 
@@ -341,7 +379,8 @@ def entry_quality(days: int = 30) -> dict:
 
     filled = conn.execute(
         "SELECT COUNT(*) FROM virtual_portfolio WHERE open_date >= date('now', ?) "
-        "AND status != 'pending' AND open_price > 0", (f"-{days} days",)
+        "AND status != 'pending' AND open_price > 0" + scope,
+        [f"-{days} days", *extra]
     ).fetchone()[0]
 
     missed = counts.get("介入价太低", 0)
@@ -353,9 +392,74 @@ def entry_quality(days: int = 30) -> dict:
     }
 
 
-def inject_entry_quality(days: int = 30) -> str:
+def entry_side(days: int = 30, trader_id: str | None = None) -> dict:
+    """Where this trader actually placed its orders relative to the market.
+
+    Descriptive, not a rule. Nothing in the code says a trader must enter
+    below or above the market — that was ``entry_style``, a three-value
+    enum that decided for the agent, and it is gone. What replaced it is a
+    prompt, and a prompt can be ignored: asked to price the same stock, a
+    trader instructed to buy strength wrote "等回调至20日低点33.42附近",
+    which is the other trader's reasoning wearing its name.
+
+    That failure is invisible unless someone counts, so this counts. A
+    trader whose orders sit on both sides of the market in equal measure
+    has no style, whatever its config says — and two traders with the same
+    distribution are one experiment run twice.
+
+    The reference price is the prediction's ``entry_price``, recorded when
+    the pick was made. Orders with no matching prediction are skipped
+    rather than compared against a later price, which would measure the
+    market's drift instead of the trader's intent.
+    """
+    conn = _get_conn()
+    scope = " AND v.trader_id = ?" if trader_id else ""
+    args = [f"-{days} days", *([trader_id] if trader_id else [])]
+    rows = conn.execute(
+        "SELECT v.entry_low, v.entry_high, v.trader_id, p.entry_price "
+        "FROM virtual_portfolio v JOIN predictions p "
+        "  ON p.code = v.code AND p.date = v.order_date "
+        " AND p.trader_id = v.trader_id "
+        "WHERE v.order_date >= date('now', ?)" + scope,
+        args).fetchall()
+
+    counts = {"below": 0, "above": 0, "straddle": 0}
+    for r in rows:
+        ref, lo, hi = r["entry_price"], r["entry_low"], r["entry_high"]
+        if not ref or lo is None or hi is None:
+            continue
+        if hi < ref:
+            counts["below"] += 1
+        elif lo > ref:
+            counts["above"] += 1
+        else:
+            counts["straddle"] += 1
+
+    n = sum(counts.values())
+    if not n:
+        return {"n": 0}
+    return {"n": n, **counts,
+            "below_pct": round(counts["below"] / n * 100, 1),
+            "above_pct": round(counts["above"] / n * 100, 1)}
+
+
+def inject_entry_side(days: int = 30, trader_id: str | None = None) -> str:
+    """The style check, phrased for the agent that is about to price again."""
+    s = entry_side(days=days, trader_id=trader_id)
+    if s.get("n", 0) < 4:
+        return ""
+    return (f"【你实际挂在哪一边】近{days}天 {s['n']} 笔挂单："
+            f"现价下方 {s['below_pct']:.0f}%、上方 {s['above_pct']:.0f}%、"
+            f"跨越现价 {s['straddle']} 笔。\n"
+            f"→ 对照你自己的定位看这个分布。说自己等回调却有一半挂在上方，"
+            f"或者说自己追突破却挂在下方，说明写下的风格没有被执行——"
+            f"那不是判断问题，是纪律问题。")
+
+
+def inject_entry_quality(days: int = 30,
+                         trader_id: str | None = None) -> str:
     """The entry-price lesson, for the review and the morning prompt."""
-    q = entry_quality(days=days)
+    q = entry_quality(days=days, trader_id=trader_id)
     if not q.get("n"):
         return ""
     lines = [f"【介入质量】近{days}天 成交 {q['filled']} 笔、撤单 {q['n']} 笔"]

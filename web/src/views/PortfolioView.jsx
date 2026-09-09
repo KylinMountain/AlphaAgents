@@ -39,6 +39,59 @@ function Empty({ children }) {
   return <p className="empty-note" style={{ padding: '14px' }}>{children}</p>
 }
 
+/* One row per trader.
+ *
+ * Several traders exist to be compared: same market, same tools, different
+ * instructions, each with its own money. A single pooled capital line would
+ * hide exactly the thing they were built to show, so the books are listed
+ * side by side.
+ *
+ * Hidden when there is only one, because then there is nothing to compare
+ * and the section would just be a second copy of the KPI strip.
+ */
+function TraderBooks({ traders }) {
+  if (!traders || traders.length < 2) return null
+  return (
+    <article className="card table-wrap" style={{ marginBottom: 14 }}>
+      <div className="card-title" style={{ padding: '14px 14px 0' }}>
+        <h3>交易员</h3><span>{traders.length} 个独立账本</span>
+      </div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>交易员</th>
+            <th className="num">本金</th><th className="num">可用</th>
+            <th className="num">持仓</th><th className="num">挂单</th>
+            <th className="num">回撤</th>
+          </tr>
+        </thead>
+        <tbody>
+          {traders.map((t) => (
+            <tr key={t.id}>
+              <td>
+                <b>{t.name}</b>
+                {t.legacy
+                  ? <span className="stage-chip stage-sprout">仅清理旧仓</span>
+                  : null}
+                {t.blocked
+                  ? <span className="stage-chip stage-fade">回撤停手</span>
+                  : null}
+              </td>
+              <td className="num">{money(t.capital)}</td>
+              <td className="num">{money(t.available)}</td>
+              <td className="num">{t.positions}</td>
+              <td className="num">{t.pending}</td>
+              <td className="num">
+                {t.drawdown_pct == null ? DASH : `${t.drawdown_pct}%`}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </article>
+  )
+}
+
 /* A position and the thesis it exists to test.
  *
  * These used to be a wide table of numbers, which was the right shape when
@@ -109,6 +162,7 @@ export default function PortfolioView({ portfolio }) {
   const closed = portfolio?.closed || []
   const stats = portfolio?.stats || null
   const capital = portfolio?.capital || null
+  const traders = portfolio?.traders || []
 
   const floating = positions.reduce(
     (a, p) => a + (Number(p.return_amount) || 0), 0,
@@ -147,6 +201,8 @@ export default function PortfolioView({ portfolio }) {
                ? `${stats.wins} 胜 / ${stats.losses} 负`
                : '尚无已平仓交易'} />
       </div>
+
+      <TraderBooks traders={traders} />
 
       <article className="card table-wrap" style={{ marginBottom: 14 }}>
         <div className="card-title" style={{ padding: '14px 14px 0' }}>

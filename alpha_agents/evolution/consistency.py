@@ -51,7 +51,8 @@ _FLAT_SIZING_SPREAD = 0.005
 
 
 def broken_promises(price_map: dict[str, float],
-                    now: datetime | None = None) -> list[dict]:
+                    now: datetime | None = None,
+                    trader_id: str | None = None) -> list[dict]:
     """Live positions whose own exit condition is currently true.
 
     Called with the same prices the monitor just used, so this asks the
@@ -59,9 +60,9 @@ def broken_promises(price_map: dict[str, float],
     non-empty result means the plan and the behaviour have diverged
     *right now*, which is worth surfacing before it becomes history.
     """
-    positions = {p["id"]: p for p in get_open_positions()}
+    positions = {p["id"]: p for p in get_open_positions(trader_id)}
     out = []
-    for th in T.get_active():
+    for th in T.get_active(trader_id=trader_id):
         pos = positions.get(th.position_id) if th.position_id else None
         price = price_map.get(th.code)
         if not pos or not price:
@@ -91,7 +92,8 @@ def broken_promises(price_map: dict[str, float],
     return out
 
 
-def unexplained_exits(days: int = 30) -> list[dict]:
+def unexplained_exits(days: int = 30,
+                      trader_id: str | None = None) -> list[dict]:
     """Closed theses where nothing recorded says why.
 
     A thesis that ends without a fired condition *and* without an agent
@@ -102,7 +104,7 @@ def unexplained_exits(days: int = 30) -> list[dict]:
     decisions it cannot see.
     """
     out = []
-    for th in T.get_closed(days=days):
+    for th in T.get_closed(days=days, trader_id=trader_id):
         if th.close_kind:
             continue                      # a condition fired: explained
         if th.status == T.BLIND_SPOT:
@@ -114,7 +116,8 @@ def unexplained_exits(days: int = 30) -> list[dict]:
     return out
 
 
-def sizing_follows_conviction(days: int = 60) -> dict:
+def sizing_follows_conviction(days: int = 60,
+                              trader_id: str | None = None) -> dict:
     """Does it bet more when it says it is more sure?
 
     Stating a probability and then sizing every position identically
@@ -123,7 +126,8 @@ def sizing_follows_conviction(days: int = 60) -> dict:
     asks only whether size varies at all, and whether the high-confidence
     half is larger on average than the low-confidence half.
     """
-    theses = [t for t in (T.get_active() + T.get_closed(days=days))
+    theses = [t for t in (T.get_active(trader_id=trader_id)
+                          + T.get_closed(days=days, trader_id=trader_id))
               if t.size_pct]
     if len(theses) < 4:
         return {"n": len(theses)}
@@ -146,12 +150,13 @@ def sizing_follows_conviction(days: int = 60) -> dict:
 
 
 def inject_consistency(price_map: dict[str, float] | None = None,
-                       days: int = 30) -> str:
+                       days: int = 30,
+                       trader_id: str | None = None) -> str:
     """The discipline report, for the review and the agent's own prompt."""
     sections = []
 
     if price_map:
-        broken = broken_promises(price_map)
+        broken = broken_promises(price_map, trader_id=trader_id)
         if broken:
             lines = [f"【说了没做】{len(broken)} 个持仓，它自己写的退出条件"
                      f"**现在就是成立的**，但仓位还在："]
@@ -162,13 +167,13 @@ def inject_consistency(price_map: dict[str, float] | None = None,
                          "想得再对也没用。")
             sections.append("\n".join(lines))
 
-    unexplained = unexplained_exits(days=days)
+    unexplained = unexplained_exits(days=days, trader_id=trader_id)
     if unexplained:
         sections.append(
             f"【无法解释的平仓】近{days}天 {len(unexplained)} 笔平仓，"
             f"既没有条件触发也没有理由记录 —— 复盘无法评价看不见的决策。")
 
-    sizing = sizing_follows_conviction(days=days)
+    sizing = sizing_follows_conviction(days=days, trader_id=trader_id)
     if sizing.get("backwards"):
         sections.append(
             f"【仓位与信心相反】把握大的那一半平均 {sizing['high_conf_avg']:.1%}，"

@@ -175,11 +175,17 @@ reason 必须具体：说出是哪条逻辑成立或破坏，带上数据。写"
 confidence 是 high / medium / low。"""
 
 
-async def decide(context: str) -> list[dict]:
+async def decide(context: str, trader=None) -> list[dict]:
     """Ask the agent what to do with each position.
 
     Returns the parsed decision list; an empty list means "no decision",
     which the caller must treat as hold rather than as sell.
+
+    ``trader`` appends that trader's own instructions. Selling is where a
+    style shows most — a breakout trader that cuts the moment momentum
+    stops and a pullback trader that gives a position room are two
+    different books, and giving them one exit prompt would erase the
+    difference the traders exist to measure.
     """
     from agents import Agent, Runner
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -193,9 +199,12 @@ async def decide(context: str) -> list[dict]:
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
     model = OpenAIChatCompletionsModel(
         model=AGENT_MODEL or "qwen-plus", openai_client=client)
+    instructions = _INSTRUCTIONS.format(hard=HARD_STOP_PCT)
+    if trader is not None and getattr(trader, "extra_prompt", ""):
+        instructions += f"\n\n## 你是谁\n\n{trader.extra_prompt.strip()}\n"
     agent = Agent(
-        name="exit_trader",
-        instructions=_INSTRUCTIONS.format(hard=HARD_STOP_PCT),
+        name=f"exit_trader:{getattr(trader, 'id', 'default')}",
+        instructions=instructions,
         model=model,
         tools=[search_news, get_stock_fund_flow, get_sector_data],
     )
@@ -328,7 +337,8 @@ def _apply_add(pos: dict, price: float, d: dict) -> dict | None:
 
 
 async def run(price_map: dict[str, float], signals: list[dict],
-              narrative_due: list | None = None) -> list[dict]:
+              narrative_due: list | None = None,
+              trader_id: str | None = None) -> list[dict]:
     """Call a model only where one is actually needed.
 
     Two situations qualify. A thesis carrying a ``narrative`` condition has
@@ -351,13 +361,14 @@ async def run(price_map: dict[str, float], signals: list[dict],
     narrative_codes = {th.code for th, _ in (narrative_due or [])}
 
     candidates = []
-    for pos in get_open_positions():
+    for pos in get_open_positions(trader_id):
         code = pos["code"]
         if not price_map.get(code):
             continue
         if code in narrative_codes:
             candidates.append(pos)
-        elif code in signal_codes and not get_active(code=code):
+        elif code in signal_codes and not get_active(code=code,
+                                                     trader_id=trader_id):
             # A rule wanted out and there is no plan on file to consult.
             candidates.append(pos)
 
@@ -366,8 +377,12 @@ async def run(price_map: dict[str, float], signals: list[dict],
         return []
 
     context = build_context(positions, price_map, signals)
+    trader = None
+    if trader_id:
+        from alpha_agents.data.trader import get_trader
+        trader = get_trader(trader_id)
     try:
-        decisions = await decide(context)
+        decisions = await decide(context, trader)
     except asyncio.TimeoutError:
         logger.warning("Exit decision timed out after %ds — holding all",
                        _DECISION_TIMEOUT)
@@ -383,26 +398,41 @@ async def run(price_map: dict[str, float], signals: list[dict],
     return apply(decisions, positions, price_map)
 
 
-def pending_morning_calls(today: str) -> list[dict]:
+def morning_calls_key(trader_id: str | None = None) -> str:
+    """Where one trader's morning position calls are parked.
+
+    The default trader keeps the original key so a call written before
+    traders existed is still found and applied.
+    """
+    from alpha_agents.data.trader import DEFAULT_TRADER
+    return ("morning_position_calls"
+            if not trader_id or trader_id == DEFAULT_TRADER
+            else f"morning_position_calls:{trader_id}")
+
+
+def pending_morning_calls(today: str,
+                          trader_id: str | None = None) -> list[dict]:
     """The morning scan's decisions on open positions, once and once only.
 
     Consumed on read: the first intraday cycle after the open applies them
     against real prices, and later cycles must not re-run a trim the
-    market has already moved past.
+    market has already moved past. Per trader, so one book consuming its
+    calls cannot swallow another's.
     """
     from alpha_agents.data.memory_store import _get_conn, _write_lock
 
+    key = morning_calls_key(trader_id)
     try:
         conn = _get_conn()
         row = conn.execute(
             "SELECT data FROM daily_snapshots WHERE date = ? AND "
-            "data_type = 'morning_position_calls'", (today,)).fetchone()
+            "data_type = ?", (today, key)).fetchone()
         if not row:
             return []
         calls = json.loads(row["data"])
         with _write_lock:
             conn.execute("DELETE FROM daily_snapshots WHERE date = ? AND "
-                         "data_type = 'morning_position_calls'", (today,))
+                         "data_type = ?", (today, key))
             conn.commit()
     except Exception as e:
         logger.warning("Morning position calls unreadable: %s", e)

@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS theses (
     closed_at TEXT,
     close_kind TEXT,            -- which condition fired, empty on blind_spot
     close_note TEXT,
-    checkpoints TEXT            -- JSON: each re-read of a live thesis
+    checkpoints TEXT,           -- JSON: each re-read of a live thesis
+    trader_id TEXT DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_theses_status ON theses(status);
@@ -92,7 +93,11 @@ CREATE TABLE IF NOT EXISTS predictions (
     log_score REAL,
     excess_return REAL,
     residual_alpha REAL,
-    scored_at TEXT
+    scored_at TEXT,
+    -- Whose call this was. Part of the uniqueness key, so two traders
+    -- recommending the same stock on the same day are two predictions to
+    -- be graded separately rather than one overwriting the other.
+    trader_id TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions(date);
 CREATE INDEX IF NOT EXISTS idx_pred_code ON predictions(code);
@@ -148,6 +153,11 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     source TEXT,
     reason TEXT,
     close_reason TEXT,
+    -- Whose book this is. Capital, positions and every learning
+    -- statistic are per-trader: sharing them would defeat the comparison
+    -- the traders exist for, since two strategies drawing from one pot
+    -- measure ordering rather than skill.
+    trader_id TEXT DEFAULT 'default',
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
@@ -410,8 +420,17 @@ def _get_conn() -> sqlite3.Connection:
         # is for databases created before that.
         for migration in (
             "ALTER TABLE theses ADD COLUMN entry_fraction REAL DEFAULT 0",
+            "ALTER TABLE theses ADD COLUMN trader_id TEXT DEFAULT 'default'",
+            "ALTER TABLE virtual_portfolio ADD COLUMN trader_id TEXT DEFAULT 'default'",
+            "ALTER TABLE predictions ADD COLUMN trader_id TEXT DEFAULT 'default'",
             "ALTER TABLE theme_lines ADD COLUMN daily_score INTEGER DEFAULT 0",
             "ALTER TABLE theme_lines ADD COLUMN last_scored_date TEXT",
+            # Indexes live here rather than in _SCHEMA: executescript runs
+            # before the ALTERs above, so indexing a column an older
+            # database has not gained yet fails the whole schema pass.
+            "CREATE INDEX IF NOT EXISTS idx_portfolio_trader "
+            "ON virtual_portfolio(trader_id)",
+            "CREATE INDEX IF NOT EXISTS idx_theses_trader ON theses(trader_id)",
         ):
             try:
                 conn.execute(migration)
@@ -652,12 +671,18 @@ def save_prediction(
     reason: str,
     features: dict | None = None,
     prob: float | None = None,
+    trader_id: str = "default",
 ) -> int:
     """Record a stock recommendation.
 
     ``features`` (Phase 1): optional dict of decision-time features used by the
     Playbook clustering in Phase 3. Serialized to ``features_json`` column.
     Pass None for legacy callers (stored as empty '{}').
+
+    ``trader_id``: whose call this was. The uniqueness key includes it, so
+    two traders recommending the same stock on the same day are two
+    predictions to be graded separately rather than one overwriting the
+    other.
 
     ``prob`` (G1): P(this beats the market over the scoring horizon). This
     is what makes a prediction gradable with a proper scoring rule —
@@ -676,8 +701,9 @@ def save_prediction(
         # refresh it in place.
         existing = conn.execute(
             "SELECT id FROM predictions "
-            "WHERE date = ? AND code = ? AND report_type = ?",
-            (date, code, report_type),
+            "WHERE date = ? AND code = ? AND report_type = ? "
+            "AND trader_id = ?",
+            (date, code, report_type, trader_id),
         ).fetchone()
         if existing:
             conn.execute(
@@ -696,10 +722,11 @@ def save_prediction(
         cur = conn.execute(
             "INSERT INTO predictions (date, report_type, code, name, direction, "
             "confidence, theme_line, entry_price, reason, features_json, prob, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, trader_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (date, report_type, code, name, direction, confidence, theme_line,
              entry_price, reason, features_json, prob,
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), trader_id),
         )
         conn.commit()
         return cur.lastrowid

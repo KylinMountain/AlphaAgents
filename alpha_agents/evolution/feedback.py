@@ -192,7 +192,7 @@ def inject_recent_lessons(days: int = 7) -> str:
     return "\n".join(lines)
 
 
-def inject_portfolio(days: int = 5) -> str:
+def inject_portfolio(trader_id: str | None = None, days: int = 5) -> str:
     """What the agent is currently holding, and how its last exits went.
 
     The morning and intraday agents recommended stocks without ever being
@@ -202,15 +202,20 @@ def inject_portfolio(days: int = 5) -> str:
     this matters most — cannot connect "I bought this for X" to "X did not
     happen and I lost 4%". Recent closes are included for exactly that:
     the losses are the part worth reading before picking again.
+
+    ``trader_id`` scopes it to one book. Showing a trader the pooled
+    portfolio would be worse than showing it nothing: it would size
+    against money it does not have and reason about positions it never
+    took.
     """
     from alpha_agents.data.portfolio import (
         get_closed_positions, get_open_positions_summary,
     )
 
-    sections = [f"【我的持仓】\n{get_open_positions_summary()}"]
+    sections = [f"【我的持仓】\n{get_open_positions_summary(trader_id)}"]
 
     try:
-        closed = get_closed_positions(limit=8)
+        closed = get_closed_positions(limit=8, trader_id=trader_id)
     except Exception:
         closed = []
     if closed:

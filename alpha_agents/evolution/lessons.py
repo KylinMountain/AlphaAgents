@@ -105,8 +105,13 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
             {"role": "system", "content": _CONSOLIDATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        max_tokens=3000,
-        timeout=60,
+        # 4000, not 3000: the observed failure was a response that began
+        # with valid JSON and simply stopped — cut off mid-object, which no
+        # regex salvage can repair. Principles are the only long-term
+        # memory this system has, so the call that produces them should not
+        # be the one running closest to its ceiling.
+        max_tokens=4000,
+        timeout=90,
     )
     content = (resp.choices[0].message.content or "").strip()
     try:
@@ -118,9 +123,27 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
                 return json.loads(m.group(0))
             except Exception:
                 pass
+        _log_consolidation_failure("解析失败", content)
         logger.warning("Consolidation LLM returned unparseable content: %s",
                        content[:200])
         return {"operations": []}
+
+
+def _log_consolidation_failure(kind: str, detail: str) -> None:
+    """Record that lessons did not become principles, and why.
+
+    This is the only path from a day's observations into long-term memory.
+    When it produces nothing the system does not degrade visibly — it just
+    keeps its one-week window forever, and nobody notices for weeks.
+    """
+    try:
+        from alpha_agents.data.activity_log import log_activity
+        log_activity("learning_stalled", task="consolidate_principles",
+                     status="degraded",
+                     message=f"教训未能转化为原则（{kind}）：{detail[:300]}",
+                     detail={"kind": kind})
+    except Exception as e:
+        logger.debug("Could not log consolidation failure: %s", e)
 
 
 def consolidate_principles(today: str) -> dict:
@@ -155,6 +178,14 @@ def consolidate_principles(today: str) -> dict:
         return {"created": 0, "reinforced": 0, "weakened": 0}
 
     ops = result.get("operations", []) if isinstance(result, dict) else []
+    if not ops:
+        # Silence here is how this path stayed broken. A run that proposes
+        # nothing logged nothing at all, so "lessons never became
+        # principles" looked identical to "the consolidation never ran" —
+        # and trading_principles sat at 0 with no trace of why.
+        _log_consolidation_failure(
+            "模型未提出任何原则",
+            f"输入 {len(lessons)} 条教训、{len(principles)} 条已有原则")
     counts = {"created": 0, "reinforced": 0, "weakened": 0}
     for op in ops:
         if not isinstance(op, dict):

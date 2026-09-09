@@ -200,3 +200,77 @@ class TestPromptVocabulary:
         listed = {line.split('"')[1] for line in T.prompt_vocabulary().splitlines()
                   if '"' in line}
         assert listed == set(T.VALID_KINDS)
+
+
+class TestFromRecommendation:
+    """One constructor, two producers. The morning agent writes its own
+    conditions; the intraday picks are code-generated, so theirs are
+    derived from the signals that selected the stock — the entry reasons
+    inverted rather than thresholds a model guessed at."""
+
+    def test_agent_written_conditions_are_kept(self, store):
+        rec = {"name": "东方钽业", "theme": "小金属概念", "prob": 0.7,
+               "horizon_days": 5, "claim": "补涨",
+               "invalidations": [{"kind": "price_below", "value": 49.5}]}
+        T.from_recommendation(rec, "000962", created_by="morning")
+        th = T.get_active()[0]
+        assert [c.kind for c in th.conditions] == ["price_below"]
+        assert th.conditions[0].value == 49.5
+        assert th.created_by == "morning"
+
+    def test_a_code_pick_derives_from_its_own_signals(self, store):
+        rec = {"name": "锡业股份", "theme": "金属铜", "reason": "高beta+机构买入",
+               "stop_loss": 32.5, "confidence": "high"}
+        T.from_recommendation(rec, "000960", created_by="intraday")
+        th = T.get_active()[0]
+        kinds = [c.kind for c in th.conditions]
+        assert "price_below" in kinds, "止损是选股时算出来的真实价位"
+        assert "theme_daily_score_below" in kinds, "买入依据是主线在流入"
+        assert "no_progress_by_day" in kinds
+        assert th.conditions[0].value == 32.5
+
+    def test_a_themeless_pick_gets_no_theme_condition(self, store):
+        """A stock picked on its own merits must not exit on a theme it
+        was never in."""
+        rec = {"name": "X", "theme": "", "stop_loss": 10.0}
+        T.from_recommendation(rec, "000001", created_by="intraday")
+        kinds = [c.kind for c in T.get_active()[0].conditions]
+        assert "theme_daily_score_below" not in kinds
+
+    def test_no_stop_loses_the_price_condition_not_the_thesis(self, store):
+        rec = {"name": "X", "theme": "金属铜"}
+        assert T.from_recommendation(rec, "000001", created_by="intraday")
+        kinds = [c.kind for c in T.get_active()[0].conditions]
+        assert "price_below" not in kinds
+        assert kinds, "其余条件仍在，仓位不该没有任何防守"
+
+    def test_an_invalid_agent_condition_falls_back_to_derived(self, store):
+        """A dropped condition must not leave the position unguarded."""
+        rec = {"name": "X", "theme": "金属铜", "stop_loss": 10.0,
+               "invalidations": [{"kind": "rsi_oversold", "value": 30}]}
+        T.from_recommendation(rec, "000001", created_by="morning")
+        assert T.get_active()[0].conditions
+
+    def test_probability_is_clamped(self, store):
+        T.from_recommendation({"prob": 1.5, "name": "X"}, "000001", "morning")
+        assert T.get_active()[0].prob == 0.95
+
+    def test_a_missing_probability_falls_back_to_the_label(self, store):
+        T.from_recommendation({"confidence": "high", "name": "X"},
+                              "000001", "morning")
+        assert 0 < T.get_active()[0].prob < 1
+
+    def test_conviction_follows_probability(self, store):
+        T.from_recommendation({"prob": 0.8, "name": "X"}, "000001", "morning")
+        assert T.get_active()[0].conviction == pytest.approx(0.6)
+
+    def test_a_coin_flip_earns_no_extra_size(self, store):
+        T.from_recommendation({"prob": 0.5, "name": "X"}, "000001", "morning")
+        assert T.get_active()[0].conviction == 0.0
+
+    def test_a_zero_conviction_survives_the_round_trip(self, store):
+        """`or 0.5` read 0.0 as missing, so an idea the agent had no
+        conviction in came back as a medium one and sized near the top of
+        the range instead of the floor."""
+        T.from_recommendation({"prob": 0.4, "name": "X"}, "000001", "morning")
+        assert T.get_active()[0].conviction == 0.0

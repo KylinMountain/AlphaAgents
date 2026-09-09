@@ -292,13 +292,25 @@ class Thesis:
     checkpoints: list[dict] = field(default_factory=list)
 
 
+def _num(value, fallback):
+    """A stored number, keeping a legitimate zero.
+
+    ``row["conviction"] or 0.5`` reads 0.0 as missing and hands back 0.5 —
+    so a thesis the agent had no conviction in came back as a medium one
+    and sized its position near the top of the range instead of the floor.
+    Zero is a real answer for every numeric column here.
+    """
+    return fallback if value is None else value
+
+
 def _row_to_thesis(row) -> Thesis:
     conds = [Condition(**c) for c in json.loads(row["conditions"] or "[]")]
     return Thesis(
         id=row["id"], code=row["code"], name=row["name"] or "",
         theme=row["theme"] or "", claim=row["claim"] or "",
-        horizon_days=row["horizon_days"] or 5, prob=row["prob"] or 0.5,
-        conviction=row["conviction"] or 0.5, conditions=conds,
+        horizon_days=_num(row["horizon_days"], 5),
+        prob=_num(row["prob"], 0.5),
+        conviction=_num(row["conviction"], 0.5), conditions=conds,
         status=row["status"], position_id=row["position_id"],
         created_by=row["created_by"] or "", created_at=row["created_at"] or "",
         closed_at=row["closed_at"], close_kind=row["close_kind"] or "",
@@ -398,6 +410,103 @@ def get_closed(days: int = 30) -> list[Thesis]:
         "AND closed_at >= date('now', ?) ORDER BY closed_at DESC",
         (ACTIVE, f"-{days} days")).fetchall()
     return [_row_to_thesis(r) for r in rows]
+
+
+def from_recommendation(rec: dict, code: str, created_by: str) -> int | None:
+    """Turn one pick into a thesis, whoever made the pick.
+
+    Two producers, deliberately handled by one function. The morning agent
+    writes its own claim, probability and invalidations. The intraday
+    picks are *code-generated* — a scoring function, not a model — so
+    there is nobody to ask, and the thesis is derived from the very
+    signals that selected the stock. That is stricter than it sounds: the
+    exit conditions become the entry reasons inverted, rather than
+    thresholds a model guessed at.
+
+    ``created_by`` is kept because it makes the two comparable. Once there
+    are closed theses on both sides, the calibration split by producer
+    answers a question worth asking — whether the agent's picks are better
+    than the scorer's, or just more expensive.
+
+    A pick with no usable invalidation still becomes a thesis. Refusing it
+    would silently drop the position; recording it with an empty condition
+    list makes the omission countable.
+    """
+    from alpha_agents.data.scoring import confidence_to_prob
+
+    conditions = []
+    raw = rec.get("invalidations")
+    if isinstance(raw, list):
+        conditions = [c for c in (validate_condition(i) for i in raw) if c]
+
+    if not conditions:
+        conditions = _derive_conditions(rec)
+
+    if not conditions:
+        logger.warning("Pick %s carries no usable invalidation — it can only "
+                       "exit on horizon or hard stop", code)
+
+    try:
+        prob = min(max(float(rec.get("prob")), 0.05), 0.95)
+    except (TypeError, ValueError):
+        prob = confidence_to_prob(rec.get("confidence"))
+
+    try:
+        horizon = max(1, min(30, int(rec.get("horizon_days") or _DEFAULT_HORIZON)))
+    except (TypeError, ValueError):
+        horizon = _DEFAULT_HORIZON
+
+    try:
+        return create(Thesis(
+            code=code,
+            name=rec.get("name", ""),
+            theme=rec.get("theme", ""),
+            claim=(rec.get("claim") or rec.get("reason") or "")[:300],
+            horizon_days=horizon,
+            prob=prob,
+            # Conviction tracks the stated probability rather than a second
+            # number that would have to be kept consistent by hand.
+            conviction=round((prob - 0.5) * 2, 3) if prob > 0.5 else 0.0,
+            conditions=conditions,
+            created_by=created_by,
+        ))
+    except Exception as e:
+        logger.warning("Could not save thesis for %s: %s", code, e)
+        return None
+
+
+_DEFAULT_HORIZON = 5
+
+
+def _derive_conditions(rec: dict) -> list[Condition]:
+    """Invalidations for a pick that had no model to write them.
+
+    Only conditions grounded in something the pick actually used. A stop
+    that came from the scorer is a real level; a fixed drawdown percentage
+    stamped on every pick is boilerplate, and boilerplate is what
+    ``condition_usefulness`` exists to catch — writing it here would poison
+    that statistic at the source.
+    """
+    out = []
+    stop = rec.get("stop_loss")
+    if stop:
+        try:
+            out.append(Condition("price_below", float(stop),
+                                 "选股时算出的止损位"))
+        except (TypeError, ValueError):
+            logger.debug("Pick %s has an unparseable stop_loss %r — the "
+                         "thesis loses its price condition",
+                         rec.get("code", "?"), stop)
+
+    # Only when the pick was made *because of* a theme. A stock picked on
+    # its own merits should not be exited on a theme it was never in.
+    if rec.get("theme"):
+        out.append(Condition("theme_daily_score_below", 0,
+                             "买入依据是主线在流入，当天转出即逻辑不成立"))
+
+    out.append(Condition("no_progress_by_day", _DEFAULT_HORIZON,
+                         "短线逻辑，不动就是错了"))
+    return out
 
 
 def prompt_vocabulary() -> str:

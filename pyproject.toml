@@ -14,8 +14,12 @@ dependencies = [
     "anyio",
     "numpy>=1.26",
     "httpx>=0.28.1",
-    "openai>=2.30.0",
-    "openai-agents>=0.16.0",
+    # Floors, not decoration: there is no lockfile, so `uv sync` resolves
+    # from these and anything installed by hand outside it gets reverted on
+    # the next run. Raising the floor is the only thing that makes an
+    # upgrade stick.
+    "openai>=3.10.0",
+    "openai-agents>=0.22.1",
     "fastapi>=0.135.3",
     "uvicorn>=0.42.0",
     "websockets>=16.0",

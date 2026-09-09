@@ -167,13 +167,80 @@ async def get_portfolio_api():
     closed = await asyncio.to_thread(get_closed_positions, 50)
     stats = await asyncio.to_thread(get_portfolio_stats, 30)
     available = await asyncio.to_thread(get_available_capital)
+
+    # A position without its thesis is a row of numbers. The thesis is why
+    # it is held and what would end it, so it travels attached rather than
+    # as a separate list the UI would have to join by hand.
+    positions = await asyncio.to_thread(_attach_theses, positions)
+
     return JSONResponse({
         "pending": pending,
         "positions": positions,
         "closed": closed,
         "stats": stats,
+        "theses": await asyncio.to_thread(_closed_theses),
         "capital": {"total": TOTAL_CAPITAL, "available": available,
                     "invested": TOTAL_CAPITAL - available},
+    })
+
+
+def _thesis_dict(th) -> dict:
+    from alpha_agents.data.thesis import describe
+    return {
+        "id": th.id, "code": th.code, "name": th.name, "theme": th.theme,
+        "claim": th.claim, "horizon_days": th.horizon_days,
+        "prob": th.prob, "conviction": th.conviction, "status": th.status,
+        "created_at": th.created_at, "closed_at": th.closed_at,
+        "close_kind": th.close_kind, "close_note": th.close_note,
+        "checkpoints": th.checkpoints,
+        # Rendered server-side from the same table the evaluator reads, so
+        # the page cannot describe a condition differently from the code
+        # that fires it.
+        "conditions": [{"kind": c.kind, "value": c.value, "note": c.note,
+                        "text": describe(c)} for c in th.conditions],
+    }
+
+
+def _attach_theses(positions: list[dict]) -> list[dict]:
+    try:
+        from alpha_agents.data.thesis import get_by_position
+    except Exception:
+        return positions
+    for pos in positions:
+        try:
+            th = get_by_position(pos["id"])
+            pos["thesis"] = _thesis_dict(th) if th else None
+        except Exception as e:
+            logger.debug("Thesis lookup failed for position %s: %s",
+                         pos.get("id"), e)
+            pos["thesis"] = None
+    return positions
+
+
+def _closed_theses(days: int = 30) -> list[dict]:
+    try:
+        from alpha_agents.data.thesis import get_closed
+        return [_thesis_dict(t) for t in get_closed(days=days)]
+    except Exception as e:
+        logger.debug("Closed thesis read failed: %s", e)
+        return []
+
+
+@app.get("/api/calibration")
+async def get_calibration_api():
+    """How wrong the agent's own confidence has been.
+
+    Separate from /api/portfolio because it answers a different question:
+    not "what do I hold" but "should I believe myself". It is also the
+    number that stays interesting when nothing is held.
+    """
+    from alpha_agents.evolution.calibration import (
+        blind_spot_rate, calibration, condition_usefulness,
+    )
+    return JSONResponse({
+        "curve": await asyncio.to_thread(calibration, 60),
+        "blind_spots": await asyncio.to_thread(blind_spot_rate, 60),
+        "conditions": await asyncio.to_thread(condition_usefulness, 60),
     })
 
 

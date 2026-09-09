@@ -91,9 +91,13 @@ class Condition:
 #   needs    — the MarketView attribute this reads; None when it reads
 #              several, or one always present
 #   unit     — shown to the agent so it writes 5 rather than 0.05 for 5%
-#   template — how the condition reads in a report; a plain format string
-#              rather than a lambda so prompt_vocabulary can render it
-#              with a placeholder instead of a number
+#   template — how the condition reads on the dashboard and in a report;
+#              a plain format string rather than a lambda so
+#              prompt_vocabulary can render it with a placeholder
+#   hint     — extra explanation for the agent only. Kept out of template
+#              because the display already appends the agent's own note,
+#              and two parentheticals in a row read as a bug:
+#              "主线今日分低于 -1（当天转弱）（主线当日资金转为净流出）"
 #   fired    — the predicate
 #
 # Keeping them in one table rather than an if-chain means the agent-facing
@@ -109,7 +113,8 @@ _CONDITIONS: dict[str, dict] = {
     "price_above": {
         "needs": None,
         "unit": "元",
-        "template": "股价升破 {v}（目标达成）",
+        "template": "股价升破 {v}",
+        "hint": "目标达成",
         "fired": lambda mv, v: mv.price > v,
     },
     "drawdown_from_peak": {
@@ -134,7 +139,8 @@ _CONDITIONS: dict[str, dict] = {
     "theme_daily_score_below": {
         "needs": "theme_daily_score",
         "unit": "",
-        "template": "主线今日分低于 {v}（当天转弱）",
+        "template": "主线今日分低于 {v}",
+        "hint": "当天转弱，比连续走弱更早",
         "fired": lambda mv, v: mv.theme_daily_score < v,
     },
     "theme_flow_negative": {
@@ -152,13 +158,15 @@ _CONDITIONS: dict[str, dict] = {
     "breadth_below": {
         "needs": "breadth_ratio",
         "unit": "",
-        "template": "市场涨跌比跌破 {v}（大盘转弱）",
+        "template": "市场涨跌比跌破 {v}",
+        "hint": "大盘转弱",
         "fired": lambda mv, v: mv.breadth_ratio < v,
     },
     "no_progress_by_day": {
         "needs": None,
         "unit": "天",
-        "template": "持仓 {v} 天仍未走出方向（浮动在 ±1% 内）",
+        "template": "持仓 {v} 天仍未走出方向",
+        "hint": "浮动在 ±1% 内算没走出方向",
         "fired": lambda mv, v: (mv.holding_days >= v
                                 and abs(mv.current_return_pct) < 1.0),
     },
@@ -405,7 +413,8 @@ def prompt_vocabulary() -> str:
         if kind == "narrative":
             continue
         unit = f"，单位{spec['unit']}" if spec["unit"] else ""
-        lines.append(f'  "{kind}" — {spec["template"].format(v="X")}{unit}')
+        hint = f"（{spec['hint']}）" if spec.get("hint") else ""
+        lines.append(f'  "{kind}" — {spec["template"].format(v="X")}{hint}{unit}')
     lines.append('  "narrative" — 无法机械判定的条件，写在 note 里，'
                  '系统会在收盘前安排一次模型复核')
     return "\n".join(lines)

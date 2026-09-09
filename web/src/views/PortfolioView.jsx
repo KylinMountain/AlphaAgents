@@ -39,6 +39,70 @@ function Empty({ children }) {
   return <p className="empty-note" style={{ padding: '14px' }}>{children}</p>
 }
 
+/* A position and the thesis it exists to test.
+ *
+ * These used to be a wide table of numbers, which was the right shape when
+ * a position was just a fill. It is not any more: the position is held
+ * *because of* a claim, and the claim names what would end it. Showing the
+ * numbers without the exit conditions hides the only part that is a
+ * decision — everything else is arithmetic.
+ */
+function PositionCard({ pos }) {
+  const th = pos.thesis
+  const ret = Number(pos.return_pct)
+  return (
+    <div className="pos-card">
+      <div className="pos-head">
+        <div>
+          <b>{pos.name}</b> <span className="soft">{pos.code}</span>
+          {pos.theme ? <span className="stage-chip stage-active">{pos.theme}</span> : null}
+        </div>
+        <b className={trendClass(ret)} style={{ fontSize: 19 }}>{fmtPct(ret)}</b>
+      </div>
+
+      <div className="pos-facts">
+        <div><span>成本</span><b>{pos.open_price ?? DASH}</b></div>
+        <div><span>股数</span><b>{pos.shares ?? DASH}</b></div>
+        <div><span>峰值</span>
+          <b className={trendClass(pos.peak_return_pct)}>{fmtPct(pos.peak_return_pct)}</b>
+        </div>
+        <div><span>回撤</span><b className="down">{fmtPct(pos.max_drawdown_pct)}</b></div>
+        <div><span>持有</span><b>{pos.holding_days ?? 0} 天</b></div>
+        <div><span>止损</span><b>{pos.stop_loss ?? DASH}</b></div>
+      </div>
+
+      {th ? (
+        <div className="thesis">
+          <div className="thesis-claim">{th.claim || '（未写论点）'}</div>
+          <div className="thesis-meta">
+            <span>自报概率 <b>{Math.round((th.prob ?? 0) * 100)}%</b></span>
+            <span>期限 <b>{th.horizon_days} 天</b></span>
+            <span>仓位权重 <b>{Math.round((th.conviction ?? 0) * 100)}%</b></span>
+          </div>
+          {th.conditions?.length ? (
+            <ul className="thesis-conds">
+              {th.conditions.map((c, i) => (
+                <li key={i}>
+                  <code>{c.kind}</code> {c.text}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="thesis-warn">
+              没有写失效条件——这笔仓位只能到期或触及风控硬线才会退出，
+              亏损会被记为盲点。
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className="thesis-warn">
+          无关联论点（建仓于论点机制上线之前）。规则信号会交给模型判断。
+        </p>
+      )}
+    </div>
+  )
+}
+
 export default function PortfolioView({ portfolio }) {
   const pending = portfolio?.pending || []
   const positions = portfolio?.positions || []
@@ -94,32 +158,9 @@ export default function PortfolioView({ portfolio }) {
             不是故障。
           </Empty>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>标的</th><th>主线</th><th>开仓价</th><th>股数</th>
-                <th>浮动收益</th><th>峰值</th><th>最大回撤</th>
-                <th>持有天数</th><th>止损</th>
-              </tr>
-            </thead>
-            <tbody>
-              {positions.map((p) => (
-                <tr key={p.id}>
-                  <td><b>{p.name}</b> · {p.code}</td>
-                  <td>{p.theme || DASH}</td>
-                  <td>{p.open_price ?? DASH}</td>
-                  <td>{p.shares ?? DASH}</td>
-                  <td className={trendClass(p.return_pct)}>{fmtPct(p.return_pct)}</td>
-                  <td className={trendClass(p.peak_return_pct)}>
-                    {fmtPct(p.peak_return_pct)}
-                  </td>
-                  <td className="down">{fmtPct(p.max_drawdown_pct)}</td>
-                  <td>{p.holding_days ?? DASH}</td>
-                  <td>{p.stop_loss ?? DASH}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="pos-list">
+            {positions.map((p) => <PositionCard key={p.id} pos={p} />)}
+          </div>
         )}
       </article>
 

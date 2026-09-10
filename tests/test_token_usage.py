@@ -215,3 +215,54 @@ class TestAllTimeTableHasEveryColumn:
         row = U.summary(7)["alltime_modules"][0]
         assert row["inp"] == 100 and row["outp"] == 50
         assert set(U.summary(7)["modules"][0]) >= set(row)
+
+
+class TestTruncationIsVisible:
+    """json_repair made a cut-off batch look like a finished one.
+
+    A batch packed to fill the *input* window emits more events than the
+    output ceiling holds; the array comes back half-written, json_repair
+    salvages it into a shorter but perfectly valid list, and nothing
+    anywhere says news was dropped. Three of three batches in a real
+    morning scan were truncated and every one was accepted silently.
+    """
+
+    def test_a_truncated_batch_is_split_not_accepted(self):
+        import asyncio
+        import types
+
+        from alpha_agents.pipeline import digest as D
+
+        calls = []
+
+        async def fake(client, batch):
+            calls.append(len(batch))
+            # Only the full batch overflows; the halves fit.
+            return [{"event": f"e{len(batch)}"}], len(batch) > 4
+
+        orig = D._digest_once
+        D._digest_once = fake
+        try:
+            out = asyncio.run(D._digest_batch(None, list(range(8))))
+        finally:
+            D._digest_once = orig
+
+        assert 8 in calls, "整批先试一次"
+        assert 4 in calls, "顶到天花板必须拆开重试"
+        assert len(out) == 2, "两半的事件都要收回来"
+
+    def test_a_single_item_that_overflows_is_not_split_forever(self):
+        import asyncio
+
+        from alpha_agents.pipeline import digest as D
+
+        async def always_truncated(client, batch):
+            return [{"event": "e"}], True
+
+        orig = D._digest_once
+        D._digest_once = always_truncated
+        try:
+            out = asyncio.run(D._digest_batch(None, [1]))
+        finally:
+            D._digest_once = orig
+        assert out == [{"event": "e"}], "拆不动了就收下，不能无限递归"

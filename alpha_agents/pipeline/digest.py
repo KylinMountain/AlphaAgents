@@ -11,6 +11,7 @@ Configure via env vars: DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 """
 
 import json
+import asyncio
 import logging
 import os
 import re
@@ -23,7 +24,18 @@ from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
-MAX_OUTPUT_TOKENS = 4096
+# Raised from 4096 after every batch of a real morning scan came back at
+# exactly that number — the ceiling, not the answer. One news item costs
+# roughly 1.4K output tokens once the six per-market impact blocks are
+# written, so 4096 held about three events while the batch carried a
+# hundred and thirty items.
+MAX_OUTPUT_TOKENS = int(os.environ.get("DIGEST_MAX_OUTPUT", "8192"))
+
+# A batch that still hits the ceiling is split and retried rather than
+# accepted half-written. Two levels is enough to take 130 items down to
+# ~32; below that the ceiling is not the problem and a third split would
+# just multiply calls.
+MAX_SPLIT_DEPTH = 2
 # Reserve tokens for system prompt + output + overhead
 _RESERVED_TOKENS = MAX_OUTPUT_TOKENS + 2000  # ~2K for system prompt
 # Model context window (configurable, default 32K for Qwen free tier)
@@ -215,8 +227,17 @@ def _get_client() -> AsyncOpenAI:
         module="digest")
 
 
-async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
-    """Digest a single batch of news items."""
+async def _digest_once(client: AsyncOpenAI,
+                       batch: list[dict]) -> tuple[list[dict], bool]:
+    """One call. Returns (events, was_truncated).
+
+    The truncation flag exists because nothing else could see it.
+    ``_parse_response`` runs json_repair, which salvages a half-written
+    array into a shorter but perfectly valid list of events — so a batch
+    cut off at the token ceiling looked exactly like a batch the model had
+    finished. Three of three batches in a real morning scan were truncated
+    and every one of them was accepted silently.
+    """
     user_message = _build_user_message(batch)
     response = await client.chat.completions.create(
         model=DIGEST_MODEL,
@@ -227,8 +248,44 @@ async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:
             {"role": "user", "content": user_message},
         ],
     )
-    text = (response.choices[0].message.content if response.choices else "") or ""
-    return _parse_response(text)
+    choice = response.choices[0] if response.choices else None
+    text = (choice.message.content if choice else "") or ""
+    truncated = bool(choice and choice.finish_reason == "length")
+    return _parse_response(text), truncated
+
+
+async def _digest_batch(client: AsyncOpenAI, batch: list[dict],
+                        depth: int = 0) -> list[dict]:
+    """Digest a batch, halving it if the model ran out of room.
+
+    Contract unchanged for callers and for the tests that patch this as
+    their failure seam: a batch in, a list of events out. Splitting is an
+    implementation detail of getting that list complete.
+
+    Splitting rather than raising the ceiling further, because the ceiling
+    is not the real bound: batches are packed to fill the *input* window
+    and the number of events they produce is a property of the news, not
+    of a constant anyone can pick. Reacting to the actual truncation needs
+    no ratio to be guessed right.
+    """
+    events, truncated = await _digest_once(client, batch)
+    if not truncated or len(batch) < 2 or depth >= MAX_SPLIT_DEPTH:
+        if truncated:
+            logger.warning(
+                "Digest batch of %d items still truncated at depth %d — "
+                "keeping %d events, some news in this batch was never read",
+                len(batch), depth, len(events))
+        return events
+
+    mid = len(batch) // 2
+    logger.info("Digest batch of %d items hit the %d-token output ceiling — "
+                "splitting into %d + %d and retrying",
+                len(batch), MAX_OUTPUT_TOKENS, mid, len(batch) - mid)
+    halves = await asyncio.gather(
+        _digest_batch(client, batch[:mid], depth + 1),
+        _digest_batch(client, batch[mid:], depth + 1),
+    )
+    return [e for half in halves for e in half]
 
 
 async def digest_news(news_items: list[dict]) -> list[dict]:

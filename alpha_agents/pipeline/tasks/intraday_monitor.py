@@ -78,6 +78,48 @@ def _format_themes_for_monitoring(themes: list[dict]) -> str:
 
 
 
+
+def _market_view() -> dict:
+    """Sector rank, sector flow and market breadth, for evaluating theses.
+
+    Three of the eleven invalidation kinds read these — theme_rank_worse_than,
+    theme_flow_negative and breadth_below. Nothing ever passed them, so
+    ``MarketView`` carried None for all three and ``evaluate`` correctly
+    declined to fire on data it did not have. The result was silent: the
+    vocabulary offered the agent three conditions, the agent wrote them
+    into real theses, and the monitor could never check them.
+
+    "I could not measure it" must not read as "the thesis broke", so the
+    fix is to supply the measurement rather than to loosen the check.
+
+    Returns {} on failure, which restores exactly the previous behaviour —
+    those conditions simply do not fire this cycle.
+    """
+    out: dict = {}
+    try:
+        full = json.loads(get_concept_ranking_fn(top_n=999))
+        # Rank by net inflow across the whole board, not a slice: a theme
+        # that fell to 300th is the case theme_rank_worse_than exists for,
+        # and a truncated list would leave it unranked and unfireable.
+        ordered = sorted(full.get("gainers", []) + full.get("losers", []),
+                         key=lambda c: -(c.get("net_flow_yi") or 0))
+        out["sector_ranks"] = {c.get("concept", ""): i + 1
+                               for i, c in enumerate(ordered)}
+        out["sector_flows"] = {c.get("concept", ""): c.get("net_flow_yi")
+                               for c in ordered}
+    except Exception as e:
+        logger.warning("板块排名/资金流不可用，本轮 theme_rank / theme_flow "
+                       "类条件无法判定: %s", e)
+    try:
+        breadth = json.loads(get_market_breadth_fn())
+        ratio = breadth.get("ad_ratio") or breadth.get("advance_decline_ratio")
+        if ratio is not None:
+            out["breadth_ratio"] = float(ratio)
+    except Exception as e:
+        logger.warning("市场宽度不可用，本轮 breadth_below 条件无法判定: %s", e)
+    return out
+
+
 async def run_intraday_monitor() -> str | None:
     """Execute one intraday monitoring cycle.
 
@@ -125,9 +167,10 @@ async def run_intraday_monitor() -> str | None:
         rt_prices = await asyncio.to_thread(get_realtime_quotes, all_codes)
         if rt_prices:
             price_map = {code: data["price"] for code, data in rt_prices.items()}
+            world = await asyncio.to_thread(_market_view)
 
             for _trader in load_traders():
-                await manage_book(_trader, price_map, today_str)
+                await manage_book(_trader, price_map, today_str, world)
 
             # Check price alerts
             if price_alerts:

@@ -266,3 +266,47 @@ class TestTruncationIsVisible:
         finally:
             D._digest_once = orig
         assert out == [{"event": "e"}], "拆不动了就收下，不能无限递归"
+
+
+class TestTheMarketViewReachesTheThesis:
+    """Three of eleven invalidation kinds could never fire.
+
+    theme_rank_worse_than, theme_flow_negative and breadth_below all read
+    fields nothing ever populated, so MarketView carried None and evaluate
+    correctly declined to fire on data it did not have. Silent by
+    construction: the vocabulary offered them, the agent wrote them into
+    real theses, and the monitor could not check a single one.
+    """
+
+    def test_the_three_data_dependent_kinds_fire_when_given_data(self):
+        from alpha_agents.data import thesis as T
+
+        mv = T.MarketView(price=10, current_return_pct=-2,
+                          theme_rank=323, theme_net_flow_yi=-45.8,
+                          breadth_ratio=0.22)
+        for kind, value in (("theme_rank_worse_than", 50),
+                            ("theme_flow_negative", 10),
+                            ("breadth_below", 0.8)):
+            assert T.evaluate([T.Condition(kind, value)], mv), \
+                f"{kind} 拿到数据后仍然不触发"
+
+    def test_missing_data_still_means_no_fire(self):
+        """The other half of the contract: "I could not measure it" must
+        never read as "the thesis broke"."""
+        from alpha_agents.data import thesis as T
+
+        mv = T.MarketView(price=10, current_return_pct=-2)
+        for kind, value in (("theme_rank_worse_than", 50),
+                            ("theme_flow_negative", 10),
+                            ("breadth_below", 0.8)):
+            assert T.evaluate([T.Condition(kind, value)], mv) is None
+
+    def test_the_monitor_is_handed_the_market_view(self):
+        """Regression on the wiring, not the arithmetic: check_all took
+        these three arguments and the one call site passed none of them."""
+        import inspect
+
+        from alpha_agents.pipeline.tasks import book_manager
+        src = inspect.getsource(book_manager.manage_book)
+        assert "sector_ranks" in src and "sector_flows" in src
+        assert "breadth_ratio" in src

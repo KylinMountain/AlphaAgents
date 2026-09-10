@@ -590,6 +590,7 @@ def _build_context() -> str:
 
 
 def _create_chat_agent() -> Agent:
+    # Agent client — counted by the tracing hook, not wrapped here.
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
     model = OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
 

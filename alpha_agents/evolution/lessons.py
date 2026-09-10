@@ -14,6 +14,7 @@ from alpha_agents.data.memory_store import (
     reinforce_trading_principle,
     set_principle_status,
 )
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,8 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
             ensure_ascii=False, indent=2,
         )
     )
-    client = OpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+    client = instrument(OpenAI(api_key=AGENT_API_KEY,
+                               base_url=AGENT_BASE_URL), module="lessons")
     resp = client.chat.completions.create(
         model=AGENT_MODEL or "qwen-plus",
         messages=[

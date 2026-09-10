@@ -22,6 +22,7 @@ from alpha_agents.config import (
     EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
 )
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,9 @@ def _get_store() -> VectorStore:
 
 def _get_openai_client() -> OpenAI:
     """Create OpenAI-compatible client for embeddings."""
-    return OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
+    return instrument(OpenAI(api_key=EMBEDDING_API_KEY,
+                             base_url=EMBEDDING_BASE_URL),
+                      module="embedding")
 
 
 def _call_embedding_api(texts: list[str]) -> list[list[float]]:

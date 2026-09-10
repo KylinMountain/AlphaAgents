@@ -12,6 +12,7 @@ import ReportsView from './views/ReportsView'
 import MemoryView from './views/MemoryView'
 import PortfolioView from './views/PortfolioView'
 import SystemView from './views/SystemView'
+import UsageView from './views/UsageView'
 
 const NAV = [
   { group: 'Workspace', items: [
@@ -25,6 +26,7 @@ const NAV = [
   { group: 'Research', items: [
     { id: 'reports', icon: '▤', label: '分析报告', count: 'reports' },
     { id: 'memory', icon: '◎', label: '记忆与验证' },
+    { id: 'usage', icon: '◐', label: 'Token 消耗' },
     { id: 'system', icon: '⚙', label: '系统状态' },
   ] },
 ]
@@ -207,6 +209,7 @@ export default function App() {
               {view === 'graph' && <GraphView {...d} />}
               {view === 'reports' && <ReportsView {...d} />}
               {view === 'memory' && <MemoryView {...d} />}
+              {view === 'usage' && <UsageView {...d} />}
               {view === 'system' && <SystemView {...d} />}
             </>
           )}

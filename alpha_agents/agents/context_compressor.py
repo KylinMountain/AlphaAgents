@@ -15,6 +15,7 @@ from typing import Any
 from openai import OpenAI
 
 from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,9 @@ class ContextCompressor:
             prompt = SUMMARY_TEMPLATE_FIRST.format(content=content)
 
         try:
-            client = OpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+            client = instrument(OpenAI(api_key=AGENT_API_KEY,
+                                       base_url=AGENT_BASE_URL),
+                                module="context_compressor")
             response = client.chat.completions.create(
                 model=AGENT_MODEL or "qwen-plus",
                 messages=[{"role": "user", "content": prompt}],

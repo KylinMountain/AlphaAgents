@@ -37,26 +37,45 @@ def _refresh_theme_strengths() -> None:
     Also discovers new themes from top gainers.
     """
     try:
-        ranking = json.loads(get_concept_ranking_fn(top_n=20))
-        all_concepts = ranking.get("gainers", []) + ranking.get("losers", [])
-        concept_lookup = {c.get("concept", ""): c for c in all_concepts}
+        # The whole board, not the top of it. Scoring a theme we hold
+        # against a top-20 slice means a line that falls out of the
+        # ranking stops being scored at all — and a line falls out of the
+        # ranking precisely when it starts being distributed.
+        #
+        # Measured: 小金属概念 carried three of eight open positions with
+        # daily_score frozen at +1 from the previous session, while the
+        # board actually ran -1.22% on 45.8億 of net outflow. Every thesis
+        # guarded by theme_daily_score_below was evaluating yesterday's
+        # number, so none of them could fire. The system closed its eyes
+        # at the exact moment the theme turned.
+        #
+        # One fetch either way — get_concept_fund_flow returns all 386
+        # boards and top_n only truncates the response.
+        full = json.loads(get_concept_ranking_fn(top_n=999))
+        concept_lookup = {c.get("concept", ""): c
+                          for c in full.get("gainers", []) + full.get("losers", [])}
 
-        themes = get_active_themes()
-        for theme in themes:
-            if theme["name"] in concept_lookup:
-                c = concept_lookup[theme["name"]]
-                signals = evaluate_theme_signals(
-                    sector_name=theme["name"],
-                    sector_change_pct=c.get("change_pct", 0),
-                    sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
-                    market_change_pct=0,
-                )
-                update_theme_strength(theme["name"], signals)
+        for theme in get_active_themes():
+            c = concept_lookup.get(theme["name"])
+            if c is None:
+                # Genuinely absent from the board — not merely unranked.
+                # Worth a line: a tracked theme the data source no longer
+                # carries is a theme whose exit conditions cannot fire.
+                logger.info("主线 '%s' 不在板块数据里，本轮无法评分", theme["name"])
+                continue
+            signals = evaluate_theme_signals(
+                sector_name=theme["name"],
+                sector_change_pct=c.get("change_pct", 0),
+                sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
+                market_change_pct=0,
+            )
+            update_theme_strength(theme["name"], signals)
 
-        # Top 10, not top 5: the cut sat above 天然气 (8th by inflow) on a
-        # day the digest called the energy shock the most important event
-        # of the session.
-        for gainer in ranking.get("gainers", [])[:10]:
+        # Discovery still reads the top of the board — that is what "hot"
+        # means. Top 10, not top 5: the cut sat above 天然气 (8th by
+        # inflow) on a day the digest called the energy shock the most
+        # important event of the session.
+        for gainer in full.get("gainers", [])[:10]:
             concept_name = gainer.get("concept", "")
             if not concept_name:
                 continue

@@ -30,6 +30,7 @@ from alpha_agents.tools.futures_quotes import (
 )
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.tools.price_levels import get_price_levels_fn
+from alpha_agents.tools.limit_ladder import get_limit_ladder_fn
 from alpha_agents.tools.financial_data import get_financial_data_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.earnings_calendar import get_earnings_calendar_fn
@@ -265,6 +266,28 @@ def get_stock_quotes(codes: str) -> str:
     用于验证推荐股票的当前价格位置和市值规模。
     """
     return get_stock_quotes_fn(codes=codes)
+
+
+@function_tool
+@with_timeout
+def get_limit_ladder(date: str = "") -> str:
+    """今天这个市场能不能做——涨停梯队、炸板率、赚钱效应。
+
+    短线交易员开盘前看的第一张表，**在选票之前先看它**。不传日期就是今天。
+
+    返回：
+    - **炸板率**：炸板数 / 封板尝试数。高=承接弱，昨日涨停今日多半贴水
+    - **赚钱效应**：昨日涨停股今日平均涨跌 + 收红比例。**为负说明跟进的人在亏钱**
+    - **梯队**：4板/3板/2板各几个。断层=高度做不上去
+    - **最高板**：决定这个市场的想象空间
+    - **早盘封板占比**：9:35 前封住的比例。低=资金犹豫
+    - **题材集中度**：涨停最集中的板块
+    - **连板股**：板数、封单额、炸板次数、首封时间
+
+    这里只有事实没有结论。**今天该不该动手、动多大，是你的判断**——
+    包括"今天不做"，那也是一个决策，复盘会评价它。
+    """
+    return get_limit_ladder_fn(date=date)
 
 
 @function_tool

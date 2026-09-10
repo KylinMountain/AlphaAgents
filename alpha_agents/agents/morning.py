@@ -19,7 +19,8 @@ from alpha_agents.tools.registry import (
     get_concept_ranking, get_earnings_calendar, get_financial_data,
     get_global_overview, get_institutional_position, get_lhb_detail,
     get_margin_data, get_market_breadth, get_north_flow, get_pizzint,
-    get_price_levels, get_sector_best_stocks, get_sector_data,
+    get_limit_ladder, get_price_levels, get_sector_best_stocks,
+    get_sector_data,
     get_sector_ranking, get_sentiment_phase, get_stock_fund_flow,
     get_stock_quotes, get_us_market, search_news, search_stocks, web_search,
 )
@@ -46,7 +47,8 @@ MORNING_TOOLS = [
     get_lhb_detail, get_north_flow, get_margin_data, get_stock_fund_flow,
     get_institutional_position, get_block_trade,
     # 市场状态 — 今天该不该出手，仓位给多大
-    get_market_breadth, get_sentiment_phase, get_anomaly_stocks,
+    get_limit_ladder, get_market_breadth, get_sentiment_phase,
+    get_anomaly_stocks,
     # 排雷 — 5 天持仓期内的可预防损失
     get_earnings_calendar, get_financial_data,
     # 外盘与消息

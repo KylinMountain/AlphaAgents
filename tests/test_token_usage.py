@@ -310,3 +310,56 @@ class TestTheMarketViewReachesTheThesis:
         src = inspect.getsource(book_manager.manage_book)
         assert "sector_ranks" in src and "sector_flows" in src
         assert "breadth_ratio" in src
+
+
+class TestTheAnomalyGateSelects:
+    """25 of 25 intraday cycles reported an anomaly.
+
+    The five concept cases cover rise+inflow, rise+outflow, flat+inflow,
+    fall+outflow and fall+inflow — between them nearly every state a board
+    can be in, so something always matched. Each match ran a full
+    attribution agent and boosted the schedule from five minutes to two:
+    274 calls and 1.8M tokens in one afternoon. The gate was describing
+    the market, not selecting from it.
+    """
+
+    def _reset(self):
+        from alpha_agents.pipeline.tasks import anomaly_scan as A
+        A._last_signals, A._last_seen = set(), None
+
+    def test_the_same_signals_twice_is_not_an_anomaly(self):
+        from alpha_agents.pipeline.tasks import anomaly_scan as A
+        self._reset()
+        sig = ["🔴资金异动: 小金属概念 涨1.3% + 净流入57.1亿"]
+        assert A._is_novel(sig) is True, "第一次必须分析"
+        assert A._is_novel(sig) is False, "没有新东西就不该再花模型"
+
+    def test_drifting_numbers_are_the_same_observation(self):
+        """1.3% -> 1.4% two minutes later is not news."""
+        from alpha_agents.pipeline.tasks import anomaly_scan as A
+        self._reset()
+        A._is_novel(["🔴资金异动: 小金属概念 涨1.3% + 净流入57.1亿"])
+        assert A._is_novel(
+            ["🔴资金异动: 小金属概念 涨1.4% + 净流入57.4亿"]) is False
+
+    def test_a_genuinely_new_signal_gets_through(self):
+        from alpha_agents.pipeline.tasks import anomaly_scan as A
+        self._reset()
+        A._is_novel(["🔴资金异动: 小金属概念 涨1.3% + 净流入57.1亿"])
+        assert A._is_novel([
+            "🔴资金异动: 小金属概念 涨1.3% + 净流入57.1亿",
+            "⚠️量价背离: CPO 涨2.5% 但资金净流出8.0亿",
+        ]) is True
+
+    def test_a_long_gap_reopens_the_question(self):
+        """After forty minutes it is a different market, so the same
+        sentence is worth re-reading."""
+        from datetime import datetime, timedelta
+
+        from alpha_agents.pipeline.tasks import anomaly_scan as A
+        self._reset()
+        sig = ["🔴资金异动: 小金属概念 涨1.3% + 净流入57.1亿"]
+        A._is_novel(sig)
+        A._last_seen = datetime.now() - timedelta(
+            minutes=A._NOVELTY_TTL_MINUTES + 1)
+        assert A._is_novel(sig) is True

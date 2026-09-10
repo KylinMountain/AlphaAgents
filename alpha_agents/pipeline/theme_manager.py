@@ -14,6 +14,10 @@ from alpha_agents.data.memory_store import (
     get_active_themes, get_theme_by_name, upsert_theme, archive_theme,
 )
 from alpha_agents.data.market_data import get_stock_history
+from alpha_agents.tools.sector_ranking import (
+    get_concept_ranking_fn as _concept_ranking_fn,
+    get_sector_ranking_fn as _sector_ranking_fn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +263,30 @@ def _match_board(sector: str, boards: dict[str, dict]) -> str | None:
         return None
 
 
+
+def _full_boards() -> list[dict]:
+    """Every concept and industry board, for matching a news label to one.
+
+    News names a sector in the digest's own words ("石油石化"); the
+    tradable line is a concept board. Matching across the whole list is
+    the point — a board the news just made interesting is often nowhere
+    near the top of the flow ranking *yet*, which is precisely the case
+    this function exists to catch.
+
+    Returns [] on failure: no board means no confirmation, and no
+    confirmation means no theme. Falling silent here is the conservative
+    direction.
+    """
+    out = []
+    for fn, label in ((_concept_ranking_fn, "概念"), (_sector_ranking_fn, "行业")):
+        try:
+            out.append(json.loads(fn(top_n=999)))
+        except Exception as e:
+            logger.warning("%s板块全量获取失败，新闻驱动的主线发现本轮受限: %s",
+                           label, e)
+    return out
+
+
 def discover_themes_from_events(events: list[dict], *rankings: dict) -> list[str]:
     """Create or strengthen themes the news named AND the money confirms.
 
@@ -266,6 +294,14 @@ def discover_themes_from_events(events: list[dict], *rankings: dict) -> list[str
     theme out of a headline; flow alone is what the system already did,
     and it misses the sector that just moved because of an event. A
     sector is only promoted when it appears in the live concept ranking.
+
+    **The board is fetched here, not taken on trust from the caller.**
+    Three separate bugs in this codebase had the same shape: a holding
+    was looked up in a truncated slice of the market, and a board drops
+    out of the slice exactly when it starts to matter. Callers may still
+    pass rankings they already have — those are merged in as a
+    supplement — but the correctness of this function no longer depends
+    on someone else having asked for enough rows.
 
     Returns the theme names touched.
     """
@@ -276,7 +312,7 @@ def discover_themes_from_events(events: list[dict], *rankings: dict) -> list[str
     # Concept and industry boards both: the digest's labels sit closer to
     # industry names, but the tradable theme is usually a concept.
     concepts: dict[str, dict] = {}
-    for ranking in rankings:
+    for ranking in (*rankings, *_full_boards()):
         for row in (ranking.get("gainers") or []) + (ranking.get("losers") or []):
             name = row.get("concept") or row.get("sector") or ""
             if name:

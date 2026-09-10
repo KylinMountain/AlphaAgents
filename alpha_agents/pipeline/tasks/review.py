@@ -204,12 +204,21 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         market_change = 0.0  # Approximate from breadth
         ad_ratio = breadth.get("advance_decline_ratio", 1)
 
-        # Get concept ranking (matches DB concept names)
-        ranking = json.loads(get_concept_ranking_fn(top_n=10))
-        all_concepts = ranking.get("gainers", []) + ranking.get("losers", [])
-
-        # Build lookup by concept name
-        concept_lookup = {c.get("concept", ""): c for c in all_concepts}
+        # The whole board for scoring, the top of it for discovery.
+        #
+        # Same trap as the intraday refresh: a theme is looked up in the
+        # ranking, and a theme falls out of the ranking exactly when it
+        # starts being distributed. Scoring off a top-10 slice meant the
+        # close — the one pass of the day that also reads leader health —
+        # skipped precisely the lines that most needed downgrading. They
+        # kept yesterday's score and their exit conditions could not fire.
+        #
+        # One fetch either way: get_concept_fund_flow returns all ~386
+        # boards and top_n only truncates the response.
+        ranking = json.loads(get_concept_ranking_fn(top_n=999))
+        concept_lookup = {c.get("concept", ""): c
+                          for c in ranking.get("gainers", [])
+                          + ranking.get("losers", [])}
 
         # Get anomaly data — check which stocks hit limit up today
         limit_up_codes: set[str] = set()
@@ -226,22 +235,25 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         # Update existing themes
         existing_names = {t["name"] for t in existing_themes}
         for theme in existing_themes:
-            if theme["name"] in concept_lookup:
-                c = concept_lookup[theme["name"]]
-                # Check if this theme's leader hit limit up
-                leader_code = theme.get("leader_code", "")
-                leader_hit = leader_code in limit_up_codes if leader_code else False
-                # Check if leader is breaking down (price < 5-day MA)
-                leader_down = check_leader_health(theme)
-                signals = evaluate_theme_signals(
-                    sector_name=theme["name"],
-                    sector_change_pct=c.get("change_pct", 0),
-                    sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
-                    market_change_pct=market_change,
-                    leader_hit_limit=leader_hit,
-                    leader_breaking_down=leader_down,
-                )
-                update_theme_strength(theme["name"], signals)
+            c = concept_lookup.get(theme["name"])
+            if c is None:
+                logger.info("主线 '%s' 不在板块数据里，收盘无法评分 —— "
+                            "它的失效条件今天不会触发", theme["name"])
+                continue
+            # Check if this theme's leader hit limit up
+            leader_code = theme.get("leader_code", "")
+            leader_hit = leader_code in limit_up_codes if leader_code else False
+            # Check if leader is breaking down (price < 5-day MA)
+            leader_down = check_leader_health(theme)
+            signals = evaluate_theme_signals(
+                sector_name=theme["name"],
+                sector_change_pct=c.get("change_pct", 0),
+                sector_fund_flow=c.get("net_flow_yi", 0) * 1e8,
+                market_change_pct=market_change,
+                leader_hit_limit=leader_hit,
+                leader_breaking_down=leader_down,
+            )
+            update_theme_strength(theme["name"], signals)
 
         # Discover new themes from top-performing concepts
         for gainer in ranking.get("gainers", [])[:8]:

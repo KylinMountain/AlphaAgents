@@ -26,7 +26,8 @@ from alpha_agents.pipeline.tasks import exit_decision, thesis_monitor
 logger = logging.getLogger(__name__)
 
 
-async def manage_book(trader, price_map: dict, today_str: str) -> None:
+async def manage_book(trader, price_map: dict, today_str: str,
+                      world: dict | None = None) -> None:
     """One trader's book: fills, exits, and the discipline check.
 
     Runs once per trader against the same quotes. The market half of the
@@ -79,8 +80,15 @@ async def manage_book(trader, price_map: dict, today_str: str) -> None:
                 # evaluated in code, so they cost nothing and they run
                 # before the hard floor gets a chance to close a
                 # position the agent had already accounted for.
+                # ``world`` carries sector rank, sector flow and market
+                # breadth. Without it three of the eleven invalidation
+                # kinds can never fire — the agent writes them, the
+                # monitor cannot check them, and nothing says so.
+                w = world or {}
                 result = await asyncio.to_thread(
                     thesis_monitor.check_all, price_map,
+                    w.get("sector_ranks"), w.get("sector_flows"),
+                    w.get("breadth_ratio"),
                     trader_id=trader.id)
                 pos_alerts += result["closed"]
                 # A position the floor already took, with nothing the

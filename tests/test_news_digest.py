@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+from alpha_agents.pipeline import digest as digest_mod
 from alpha_agents.pipeline.digest import (
     _build_user_message,
     _parse_response,
@@ -194,7 +195,10 @@ async def test_digest_news_calls_api_correctly():
 
     call_kwargs = mock_create.call_args.kwargs
     assert call_kwargs["model"] == "test-model"
-    assert call_kwargs["max_tokens"] == 4096
+    # Read the constant rather than restating it: the ceiling moved once
+    # already, when every batch of a real scan came back at exactly the
+    # old value.
+    assert call_kwargs["max_tokens"] == digest_mod.MAX_OUTPUT_TOKENS
     # User message should contain all titles
     user_msg = call_kwargs["messages"][1]["content"]
     for item in SAMPLE_NEWS:

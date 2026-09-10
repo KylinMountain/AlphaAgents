@@ -831,6 +831,78 @@ def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
     return report
 
 
+
+# How long a trader's "no" stays valid for the same stock. One intraday
+# cycle is five minutes; a stock's position in its 20-day range does not
+# change in that time, and neither does the answer. Long enough to stop
+# re-asking every cycle, short enough that a real move gets a fresh look.
+_DECLINE_TTL_MINUTES = 45
+
+# ...unless the price itself moved this far, which is a different stock
+# than the one that was declined.
+_DECLINE_PRICE_TOLERANCE = 0.03
+
+# Declines, in memory: {(code, price_at_decline): datetime}. Process-local
+# on purpose — it is a cost optimisation, not state anyone should reason
+# about, and a restart getting one extra look is the right failure.
+_declined: dict[str, tuple[float, "datetime"]] = {}
+
+
+def note_decline(code: str, price: float) -> None:
+    """Remember that a trader looked at this and said no."""
+    _declined[code] = (price, datetime.now())
+
+
+def _recently_declined(code: str, price: float) -> bool:
+    prev = _declined.get(code)
+    if not prev:
+        return False
+    old_price, when = prev
+    if (datetime.now() - when).total_seconds() > _DECLINE_TTL_MINUTES * 60:
+        return False
+    if not old_price or not price:
+        return True
+    return abs(price - old_price) / old_price <= _DECLINE_PRICE_TOLERANCE
+
+
+def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
+    """Drop the candidates a model cannot help with.
+
+    Three filters, all free:
+
+      * the theme is not one the system tracks — the order would be
+        refused at creation, so the pricing that precedes it is spent on
+        a position that could never open;
+      * the theme is too weak to carry a position — same, one check later;
+      * a trader already declined this stock at about this price a few
+        minutes ago, and the reasons it gave (position in the 20-day
+        range, distance to support) do not change in five minutes.
+    """
+    from alpha_agents.data.portfolio import _theme_too_weak, resolve_theme
+
+    out, dropped = [], []
+    for r in recs:
+        code = r["code"]
+        theme = r.get("theme", "")
+        resolved = resolve_theme(theme)
+        if resolved is None:
+            dropped.append(f"{code}(主线'{theme}'不在跟踪列表)")
+            continue
+        weak = _theme_too_weak(resolved)
+        if weak:
+            dropped.append(f"{code}({weak})")
+            continue
+        if _recently_declined(code, prices.get(code) or 0):
+            dropped.append(f"{code}(刚被否过)")
+            continue
+        out.append({**r, "theme": resolved})
+
+    if dropped:
+        logger.info("定价前过滤掉 %d 个候选（不花模型）: %s",
+                    len(dropped), ", ".join(dropped[:6]))
+    return out
+
+
 async def _save_intraday_recommendations(report: str) -> None:
     """Extract recommendations from intraday report and save with real-time prices."""
     import asyncio
@@ -902,6 +974,15 @@ async def _save_intraday_recommendations(report: str) -> None:
 
     buys = [r for r in valid_recs if r.get("type", "actionable") == "actionable"
             and prices.get(r["code"])]
+    # Everything code can settle for free, settled before a model is asked.
+    #
+    # It was the other way round for one morning: 335 pricing calls, 1.6M
+    # tokens, zero orders. The agent priced 博敏电子 twice on themes
+    # (存储芯片, 先进封装) the system does not track, and the rejection
+    # came at the *order*, after the thinking was paid for. 301511 was
+    # priced nineteen times and declined nineteen times with the same
+    # sentence, because nothing remembered the last eighteen.
+    buys = _worth_asking(buys, prices)
     if not buys:
         if saved:
             logger.info("Saved %d intraday predictions", saved)
@@ -921,7 +1002,9 @@ async def _save_intraday_recommendations(report: str) -> None:
             if decision is None:
                 # Priced out, skipped, or the model never answered. All
                 # three mean no order — the fallback constant this
-                # replaced is exactly what must not come back.
+                # replaced is exactly what must not come back. Remember it
+                # so the next cycle does not buy the same answer again.
+                note_decline(code, prices.get(code) or 0)
                 continue
             if _record_intraday_pick(trader, {**r, **_order_fields(decision)},
                                      code, today, "intraday",

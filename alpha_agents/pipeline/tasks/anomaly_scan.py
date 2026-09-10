@@ -277,4 +277,64 @@ def _detect_anomalies() -> tuple[bool, str]:
         return False, ""
 
     context = "【实时市场数据异动】\n" + "\n".join(f"• {s}" for s in signals)
+    if not _is_novel(signals):
+        return False, context
     return True, context
+
+
+# What the last cycle saw. Process-local: this decides whether to spend a
+# model call, not what to trade, and a restart getting one extra look is
+# the right way for it to fail.
+_last_signals: set[str] = set()
+_last_seen: datetime | None = None
+
+# Beyond this the market has had time to become a different market, so the
+# same sentence is worth re-reading even if it has not changed.
+_NOVELTY_TTL_MINUTES = 40
+
+
+def _signal_key(text: str) -> str:
+    """A signal's identity, with its numbers rounded away.
+
+    "小金属概念 涨1.3% 净流入57.1亿" and the same line two minutes later
+    at 1.4% / 57.4亿 are the same observation. Comparing raw strings would
+    make every cycle novel, which is the behaviour being fixed.
+    """
+    return re.sub(r"[\d.]+", "#", text)
+
+
+def _is_novel(signals: list[str]) -> bool:
+    """Is this different from what the last cycle already saw?
+
+    The five concept cases below cover rise+inflow, rise+outflow,
+    flat+inflow, fall+outflow and fall+inflow — between them, nearly every
+    state a board can be in. So *something* always matched: 25 of 25
+    intraday cycles reported an anomaly, each one triggering a full
+    attribution agent and boosting the schedule from five minutes to two.
+    The gate was not selecting; it was describing.
+
+    An anomaly is something that is *different from a moment ago*, not
+    something that exists. Same signals as last cycle means nothing new
+    happened, whatever the market is doing.
+    """
+    global _last_signals, _last_seen
+
+    now = datetime.now()
+    keys = {_signal_key(s) for s in signals}
+    stale = (_last_seen is None
+             or (now - _last_seen).total_seconds() > _NOVELTY_TTL_MINUTES * 60)
+    new = keys - _last_signals
+
+    _last_signals, _last_seen = keys, now
+
+    if stale:
+        logger.info("异动门控: 距上次判定已超过 %d 分钟，本轮重新分析",
+                    _NOVELTY_TTL_MINUTES)
+        return True
+    if not new:
+        logger.info("异动门控: %d 条信号与上一轮相同，跳过分析（不花模型）",
+                    len(keys))
+        return False
+    logger.info("异动门控: %d 条新信号 — %s", len(new),
+                "; ".join(list(new)[:2]))
+    return True

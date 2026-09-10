@@ -21,6 +21,7 @@ from alpha_agents.data.report_store import (
     save_review,
 )
 from alpha_agents.notify import notify_all, format_review_notification
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,9 @@ async def run_daily_review(target_date: str | None = None) -> dict:
     review_text = ""
     if DIGEST_API_KEY:
         try:
-            client = AsyncOpenAI(api_key=DIGEST_API_KEY, base_url=DIGEST_BASE_URL)
+            client = instrument(AsyncOpenAI(api_key=DIGEST_API_KEY,
+                                            base_url=DIGEST_BASE_URL),
+                                module="daily_review")
             user_msg = (
                 f"日期: {target_date}\n\n"
                 f"预测详情:\n{json.dumps(details, ensure_ascii=False, indent=2)}\n\n"

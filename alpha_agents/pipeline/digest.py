@@ -19,6 +19,7 @@ import tiktoken
 from openai import AsyncOpenAI
 
 from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -209,10 +210,9 @@ def _parse_response(text: str) -> list[dict]:
 
 def _get_client() -> AsyncOpenAI:
     """Create an OpenAI-compatible async client."""
-    return AsyncOpenAI(
-        api_key=DIGEST_API_KEY,
-        base_url=DIGEST_BASE_URL,
-    )
+    return instrument(
+        AsyncOpenAI(api_key=DIGEST_API_KEY, base_url=DIGEST_BASE_URL),
+        module="digest")
 
 
 async def _digest_batch(client: AsyncOpenAI, batch: list[dict]) -> list[dict]:

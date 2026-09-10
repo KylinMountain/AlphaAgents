@@ -150,6 +150,21 @@ async def get_market_overview_api():
     })
 
 
+@app.get("/api/usage")
+async def get_usage_api(days: int = 7):
+    """Token spend, split by module.
+
+    The split is the point. "We are burning tokens" was as specific as
+    anyone could get before this, and the fix depends entirely on which
+    half is burning them — a digest that runs after hours and an agent
+    loop that runs 40 turns are different problems.
+    """
+    from alpha_agents.data.token_usage import recent, summary
+    data = await asyncio.to_thread(summary, days)
+    data["recent"] = await asyncio.to_thread(recent, 40)
+    return JSONResponse(data)
+
+
 @app.get("/api/portfolio")
 async def get_portfolio_api():
     """Virtual portfolio: what the picks turned into.

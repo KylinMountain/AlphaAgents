@@ -22,7 +22,12 @@ def load_env() -> None:
 # Load .env BEFORE importing config (config reads os.environ at import time)
 load_env()
 
-# Suppress OpenAI Agents SDK trace export warning (we don't use OpenAI tracing)
+# The SDK's default trace processor exports to OpenAI and warns on every
+# run when no OPENAI_API_KEY is set. Disabling tracing wholesale silenced
+# that — and also silenced the token counter, which reads the same spans:
+# a whole morning scan billed 311K tokens and recorded them as "unknown".
+# token_usage.install() now owns the processor list instead, so there is
+# no exporter to warn and the counter still sees every generation.
 os.environ.setdefault("OPENAI_AGENTS_DISABLE_TRACING", "1")
 
 from alpha_agents.config import DB_PATH, CHROMA_PATH, DATA_DIR, MONITOR_INTERVAL_SECONDS
@@ -117,6 +122,17 @@ def _build_lock():
     return _lock()
 
 
+def _install_usage_tracking() -> None:
+    """Turn on token accounting before anything can spend.
+
+    Called from every entry point rather than from a library import: an
+    import-time side effect that registers a global processor is the kind
+    of thing that surprises a test run.
+    """
+    from alpha_agents.data.token_usage import install
+    install()
+
+
 def _ensure_index() -> None:
     """Build stock index + embeddings if not already done."""
     with _build_lock():
@@ -187,6 +203,7 @@ def _ensure_embeddings_locked() -> None:
 
 def cmd_web(args: argparse.Namespace) -> None:
     """Start web UI with real-time pipeline visualization."""
+    _install_usage_tracking()
     _ensure_index()
     _ensure_embeddings()
 
@@ -249,6 +266,7 @@ def cmd_web(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     """One command to rule them all: ensure index → ensure embeddings → start monitor."""
+    _install_usage_tracking()
     _ensure_index()
     _ensure_embeddings()
 
@@ -272,6 +290,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_run_v2(args: argparse.Namespace) -> None:
     """Run AlphaAgents 2.0 with trading-day scheduler."""
+    _install_usage_tracking()
     _ensure_index()
     _ensure_embeddings()
 
@@ -512,6 +531,7 @@ def cmd_review(args: argparse.Namespace) -> None:
 
 def cmd_chat(args: argparse.Namespace) -> None:
     """Interactive chat with the trading analyst."""
+    _install_usage_tracking()
     _ensure_index()
     _ensure_embeddings()
 
@@ -532,6 +552,7 @@ def cmd_build_index(args: argparse.Namespace) -> None:
 
 def cmd_build_beta(args: argparse.Namespace) -> None:
     """Manually trigger beta calculation for all active themes."""
+    _install_usage_tracking()
     _ensure_index()
     from alpha_agents.data.beta_calculator import run_weekly_beta_calculation
     logging.info("Starting manual beta calculation...")

@@ -55,6 +55,9 @@ def _fallback_models() -> list[str]:
 
 def create_model() -> OpenAIChatCompletionsModel:
     """The chat model every agent runs on."""
+    # Not instrumented for usage: this client is handed to an Agent, and
+    # the tracing hook already counts every generation the SDK makes
+    # through it. Wrapping it too would bill each agent turn twice.
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
     return OpenAIChatCompletionsModel(
         model=AGENT_MODEL or DEFAULT_MODEL, openai_client=client,

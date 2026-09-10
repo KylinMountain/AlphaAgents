@@ -14,6 +14,7 @@ const ENDPOINTS = {
   portfolio: '/api/portfolio',
   calibration: '/api/calibration',
   version: '/api/version',
+  usage: '/api/usage?days=14',
 }
 
 async function getJson(url) {
@@ -32,7 +33,7 @@ export function useDashboard(intervalMs = 20000) {
   const [data, setData] = useState({
     reports: [], reviews: [], sources: [], activity: [], news: [],
     themes: [], stats: null, signals: [], market: null, graph: null,
-    portfolio: null, calibration: null, version: null,
+    portfolio: null, calibration: null, version: null, usage: null,
   })
   const [failed, setFailed] = useState([])
   const [loading, setLoading] = useState(true)

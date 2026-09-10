@@ -13,6 +13,7 @@ from alpha_agents.data.memory_store import (
     set_playbook_annotation,
     create_playbook,
 )
+from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,9 @@ def annotate_degraded(playbook: dict) -> str:
             f"avg_return={playbook.get('avg_return', 0):.2f}%\n\n"
             "用一句话（不超过30字）解释这个 playbook 近期为什么失灵。"
         )
-        client = OpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+        client = instrument(OpenAI(api_key=AGENT_API_KEY,
+                                   base_url=AGENT_BASE_URL),
+                            module="playbook")
         resp = client.chat.completions.create(
             model=AGENT_MODEL or "qwen-plus",
             messages=[{"role": "user", "content": msg}],

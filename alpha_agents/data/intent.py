@@ -276,7 +276,8 @@ def _dispatch(intent: TradeIntent):
 
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    from alpha_agents.data import clock
+    return clock.today()
 
 
 def _accepted(action: str, result) -> bool:
@@ -391,13 +392,45 @@ def _finalise(conn: sqlite3.Connection, intent_id: int,
                            (intent_id,)).fetchone()
         current = row["status"] if row else SUBMITTED
         assert_intent_transition(current, target)
+        # The row the action produced, if it produced one. Recorded as a
+        # column rather than only inside result_json because the fill
+        # path reads it back to ask what the originating decision was
+        # allowed to know — a link you can only reach by parsing JSON is
+        # a link no query can join on. COALESCE keeps a refusal (which
+        # carries no id) from erasing an id written earlier.
+        order_id = detail.get("order_id") if detail else None
+        position_id = detail.get("position_id") if detail else None
         conn.execute(
             "UPDATE intents SET status = ?, reject_reason = ?, "
-            "result_json = ?, decided_at = ? WHERE id = ?",
+            "result_json = ?, order_id = COALESCE(?, order_id), "
+            "position_id = COALESCE(?, position_id), decided_at = ? "
+            "WHERE id = ?",
             (target, reject_reason,
              json.dumps(detail, ensure_ascii=False) if detail else None,
+             order_id, position_id,
              datetime.now().strftime("%Y-%m-%dT%H:%M:%S"), intent_id))
         conn.commit()
+
+
+def cutoff_for_order(conn: sqlite3.Connection,
+                     order_id: int) -> str | None:
+    """The information cutoff of the decision that placed this order.
+
+    ``None`` when nothing placed it through the door — an order that
+    pre-dates the intents table, or one written directly by a test. The
+    fill path treats that as "no claim made" rather than as a violation:
+    the guards check declarations, and an absent declaration is not a
+    false one. What must not happen is the reverse — a declaration that
+    is present and ignored.
+
+    Earliest matching intent wins: an order is placed once, and if an
+    order id were ever reused the first row is the act that created it.
+    """
+    row = conn.execute(
+        "SELECT information_cutoff FROM intents "
+        "WHERE order_id = ? AND information_cutoff IS NOT NULL "
+        "ORDER BY id LIMIT 1", (order_id,)).fetchone()
+    return row["information_cutoff"] if row else None
 
 
 # ── Read side ──────────────────────────────────────────────────────────

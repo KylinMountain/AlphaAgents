@@ -1,9 +1,12 @@
-# Trader Core Implementation: Phase 1 实际状态
+# Trader Core Implementation: Phase 1–2 实际状态
 
-- 记录日期：2026-09-11。
-- 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、[设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
+- 记录日期：2026-09-11（第四轮补记 Phase 2，同日）。
+- 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
+  [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
+  [设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
+- 第 1–6 节描述 Phase 1 的交付；Phase 2 的逐项交付见第 10 节，未实现项一律留在第 7 节。
 
 ## 1. 现金反映累计结果
 
@@ -91,14 +94,24 @@
 
 ## 7. 明确未实现
 
-以下属**后续阶段**（按设计 §14 的分期标注），**当前代码中不存在**，不要按本文件误读为已交付：
+以下**当前代码中不存在**，不要按本文件或设计文档误读为已交付。分三类：Phase 3/4 的后续阶段、
+Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」）、以及 Phase 2 只做到一半的项。
 
-- **完整账本与结算**（Phase 2）。无逐笔建仓手续费落账（买入摩擦只在计算净收益时计入，未作为独立记账条目）、无 T+1 结算、无订单冻结、无 global 事件日志；`decision_snapshots` 是决策边界，不是会计凭证。
-- **订单状态机**（Phase 2）。现有 `pending → open → stopped/target_hit/expired/cancelled` 不覆盖 §6 的 `partially_filled` / `cancel_pending` / `rejected`，部分成交仅由多次 `position_exits` 腿隐式表达。
+**后续阶段**
+
 - **结果生命周期的完整状态机**（Phase 3）。§9 的 `pending / matured / censored / revised` 尚未落到独立状态列；当前只能从 `hit` 是否为 NULL 与 `scored_at` 推断，未成交、删失、修订三种情况无法区分。
 - **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。`policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
-- **信息边界的强制校验**（Phase 2 起）。`information_cutoff` 已被冻结，但**没有消费者拿它去校验某个输入是否真的落在边界内**；设计 §15 的「Every actionable input satisfies the availability cutoff」仍是目标合同。当前强制的是「边界不可事后改写」（触发器 + 哈希），**不是**「决策确实没越界」。这两件事不要混为一谈。
-- **生产数据迁移**（需单独授权）。存量行未被重新计算或回填；legacy 聚合仍是兼容估算，不是重建后的历史。`thesis_id` 对历史行一律为 NULL，符合「未知保持未知」。
+
+**Phase 2 主动不做（非目标，不是遗漏）**
+
+- **费用引擎**。无逐笔建仓手续费落账。`COMMISSION_RATE` / `STAMP_DUTY_SELL_RATE` / `SLIPPAGE_RATE` 仍是**手工版本化的假设**，只在计算净收益时参与，不作为独立记账条目。设计 §6 自己写着「这不是普遍固定的市场常数」，§16 把「市场规则核实」列为非目标。**这是用户明确定的非目标，不要当作待办补上。**
+- **部分成交模拟器**。无 `partially_filled`。本仓库没有撮合量与参与率的模拟，凭空造一个状态会让它永远进不去；退出侧的部分成交已由多条 `position_exits` 腿表达。
+- **`rejected` / `cancel_pending` 两个订单状态**。`order_state.py` 声明了状态集与合法迁移，但这两个状态**尚未被任何写入路径产生** —— 它们是设计 §6 的目标态，当前只在状态机里被允许，未在业务里出现。
+- **global 事件日志**。无跨表统一事件流。
+
+**Phase 2 只做到一半**
+
+- **信息边界的强制校验**。现在**有消费者了**（第四轮新增）：`attribution.freeze` 拒绝晚于内核时钟的边界，成交时 `clock.guard_fill` 校验「下单决策的 `information_cutoff` 不得晚于成交日」。但设计 §15 的完整合同「Every actionable input satisfies the availability cutoff」**仍未成立**：只有这两处，校验的是**声明的边界本身**是不是未来，而不是「这次决策引用的每一个输入都落在边界内」。当前强制的仍然是「边界不可事后改写」（触发器 + 哈希）与「边界不得是未来」；**不是**「每个输入都被逐一验证过」。
 
 ## 8. 行为契约变更（供 review 对照）
 
@@ -118,6 +131,15 @@
 | 未验证经验可直接进活跃知识 | 一律进候选区，无晋升 API |
 | 上一交易日硬编码项目数据路径 | 读取配置的数据目录 |
 | `portfolio.py` 一个文件承担下单与平仓 | 平仓切片（摩擦模型 + 退出记账）移入 `portfolio_exit.py` |
+| 状态只有裸 `UPDATE`，无处声明合法迁移 | `order_state.assert_transition` 在每个写入点断言，非法迁移抛错 |
+| 下单不冻结资金：两笔挂单可共用同一笔现金 | 建单即 `reservations` 冻结，成交转 `consumed`，终态 `released` |
+| 「现金」一个口径，卖出当日即可再花 | `get_available_capital`（可花）与 `get_total_capital`（总）分家，卖出所得 T+1 前只进后者 |
+| T+1 是一句 `open_date < today` | `settlement_lots` 按批结算 FIFO，同一持仓可部分可卖 |
+| 派生值是否正确只能靠人看 | 八个不变量由 `reconciliation` 独立重算并留审计（只报告，不自动改账） |
+| 四条写入路径各自回答「成了吗」 | 全部经 `intent.submit_intent`，写一行 `intents` 记录决定与结果 |
+| 加仓规则自带一份 sizing 并直接 `UPDATE`（绕过 T+1） | 规则只决定是否触发，写入交给 `add_to_position(recalc_stop=True)` |
+| 内核的「今天」= 机器当天 | `clock.today()`：重放时取重放时刻，前视被 `LookAheadError` 拒绝 |
+| `information_cutoff` 只写不读 | `attribution.freeze` 与 `clock.guard_fill` 都会真的读它并拒绝未来边界 |
 
 ## 9. 验证记录
 
@@ -172,3 +194,60 @@
 - `information_cutoff` 的「已冻结」与「已强制」被混为一谈，已在 §7 分开表述。
 
 **Phase 1 判定为已完成**，依据是设计 §14 对它的范围定义，而不是「所有后续阶段都做完了」。残留项的分期见 §7。
+
+### 第四轮（Phase 2 完整交易内核：S1–S6）
+
+六切片，逐条见 [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)。
+用户 2026-09-11 决定：做完整 Phase 2，**减去费用引擎**。
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1373 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（146 个文件），存量 47 条待偿还 |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+| 切片 | 交付 | 备注 |
+|---|---|---|
+| S1 | `order_state.py`：8 状态 + 合法迁移图 + `assert_transition`，接入 3 个写入点 | `rejected` / `cancel_pending` 被允许但尚未被业务产生，见 §7 |
+| S2 | `reservations.py`：建单冻结、成交消耗、终态释放；`get_available_capital` 减去未释放预留 | 修的是真实正确性漏洞：此前两笔挂单可共用同一笔现金 |
+| S3 | `reconciliation.py` + `scripts/reconcile.py`：八个不变量独立重算，只报告不自动改账 | 首次在真实库上跑即抓到 1 条 critical（旧仓位 000510 无预留） |
+| S4 | `settlement.py` + `settlement_lots` / `pending_settlements`：T+1 按批结算 FIFO；`available` / `total` 正式分家 | 卖出所得在 T+1 前只进 `total`，「卖出即变富」消失 |
+| S5 | `intent.py` + `intents` 表：六个 action 经 `submit_intent` 一个门，写 `submitted → accepted \| rejected` | 顺带修掉 `_check_add_position` 的第二条加仓路径（曾绕过 T+1） |
+| S6 | `clock.py`：内核时钟 + 两个前视守卫；`information_cutoff` 从只写不读变成真被读取 | 修掉内核三处墙钟泄漏；修掉 `except Exception` 吞掉前视的路径 |
+
+**本轮的三个变异探针**（先证明测试会红，再复原）：S5 注释掉 `CANCEL` 分派 → 对应用例变红；
+S6 把 `clock.today()` 退回墙钟 → 8 个用例变红（含「三月重放里把平仓日写成九月」）；
+S6 去掉前视的 re-raise → 吞异常用例变红。
+
+**Phase 2 判定为已完成**，同样依据设计 §14 的范围定义与计划里的「非目标」，
+而不是「设计里提到的每一件事都做了」：费用引擎、部分成交模拟器、global 事件日志是
+**明确定的非目标**，`information_cutoff` 的完整 §15 合同是**只做到一半并已如实标注**的一项。
+
+## 10. Phase 2 逐项交付（S1–S6）
+
+- **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
+  `portfolio.py`（成交、撤单）与 `portfolio_exit.py`（平仓）是仅有的两个写入
+  `virtual_portfolio.status` 的模块，两者都必须经过 `assert_transition`。
+  该约束由 `tests/test_intent.py::TestOnlyTheStateMachineWritesStatus` 机械钉住。
+- **现金预留**：`alpha_agents/data/reservations.py`。建单即写 `held`，
+  成交转 `consumed`（差额释放），撤单/过期/拒绝转 `released`。
+  `get_available_capital` = 总现金 − 未释放预留 − 未结算卖出所得。
+- **对账**：`alpha_agents/data/reconciliation.py`，八个不变量：`orphan_exit`、
+  `exit_trader_mismatch`、`exit_math_inconsistent`、`orphan_reservation`、
+  `missing_reservation`、`stale_reservation`、`consumed_amount_mismatch`、
+  `oversold_position`。写入 `reconciliation_runs` / `reconciliation_diffs`。
+  **只报告，不修正** —— 自动改账会把一个能被发现的 bug 变成一个不能发现的。
+- **T+1 结算**：`alpha_agents/data/settlement.py` + 两个新表。
+  `next_settle_date` = 日历 +1（判据是 `settle_date <= today`，周五建仓 → 周一可卖，与券商一致）。
+  卖出按 `settle_date` FIFO 消耗批次；无批次的历史行回退 `open_date < today`。
+- **统一执行路径**：`alpha_agents/data/intent.py` + `portfolio_intent.py` + `intents` 表。
+  `create_pending_order` / `open_position` / `add_to_position` / `close_position`
+  保留同签名同返回值的兼容包装，内部一律走 `submit_intent`。
+  **`submit_intent` 不吞异常**：先记录再抛出，因为「数据库拒绝这笔卖出」是系统故障，
+  不是「业务上不卖」。
+- **内核时间边界**：`alpha_agents/data/clock.py`。`today()` 重放感知；
+  `assert_not_from_the_future` 与 `assert_decided_no_later_than` 拒绝前视；
+  `guard_fill` 把两条合成成交前置检查。管线侧的业务日期（`intraday_monitor` 的
+  `today_str` 与下单选单日、`morning_scan` 的下单选单日）也改取该时钟。
+  不覆盖 `tools` / `evolution` / `memory_store` 统计查询 / `pipeline` 的 review、scheduler ——
+  它们问的是「现在」，不是「模拟到哪一天」。

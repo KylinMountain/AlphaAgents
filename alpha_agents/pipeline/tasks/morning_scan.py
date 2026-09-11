@@ -35,6 +35,7 @@ from alpha_agents.agents.morning import run_morning_analysis
 # cross_validate agent replaced by code-driven 5-dimension check (v2.3)
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
+from alpha_agents.data import clock
 from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone, parse_stop_loss
 from alpha_agents.data.thesis import from_recommendation
 from alpha_agents.data.trader import load_traders
@@ -611,7 +612,12 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
     """
     from alpha_agents.data.trader import DEFAULT_TRADER, get_trader
     trader = trader or get_trader(DEFAULT_TRADER)
-    today = time.strftime("%Y-%m-%d")
+    # The kernel clock, not the wall clock: this date becomes the order's
+    # ``order_date`` and the information cutoff frozen against it, so under
+    # replay it has to be the replayed day. A wall-clock date here would
+    # freeze a decision boundary in the future and the kernel would refuse
+    # the order rather than mis-date it.
+    today = clock.today()
     if not recs:
         return
 

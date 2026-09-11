@@ -16,7 +16,7 @@
 设计 §14 的 Phase 2 是「完整交易内核」。按用户 2026-09-11 的决定实施，**减去费用引擎**
 （见「非目标」）。六个切片，按依赖顺序：
 
-### S1 订单状态机与合法迁移
+### S1 订单状态机与合法迁移 ✅（commit a996963）
 
 现在状态只有 `pending → open → stopped/target_hit/expired/cancelled`，散布在 `_fill_order`、
 `_cancel_order_unlocked`、`close_position` 三处的裸 `UPDATE`，没有地方声明哪些迁移是合法的。
@@ -28,7 +28,11 @@
 
 **为什么先做这个**：储备金（S2）需要「撤单确认才释放」，没有状态机就无处表达「未确认」。
 
-### S2 储备金
+**实际产出**：`alpha_agents/data/order_state.py`（8 状态 + 合法迁移图 + `assert_transition`），
+接入 `_fill_order` / `_cancel_order_unlocked` / `close_position` 三个写入点。`tests/test_order_state.py`
+（20 用例）+ `tests/test_order_state_integration.py`（27 用例）。全量 1253 passed。
+
+### S2 储备金 ✅（commit 0fbe89a）
 
 现在下单不冻结任何东西：`create_pending_order` 只写一行 `pending`，不占资金；
 `_fill_order` 到成交时才重算 `available`。于是两笔挂单可以被同一笔现金同时「担保」——
@@ -42,7 +46,14 @@
 
 **这是本阶段最实的一块**：它修的是一个真实的正确性漏洞，不是偏好问题。
 
-### S3 对账
+**实际产出**：`alpha_agents/data/reservations.py`（held/consumed/released 生命周期 + `unconsumed_total(trader_id)`），
+接入 `create_pending_order`（建单即 reserve `MAX_POSITION_PCT * (1+SLIPPAGE_RATE)`）、
+`_fill_order`（成交即 consume at `actual_cost`）、`_cancel_order_unlocked`（终态后 release；
+二次 cancel 是 no-op 不二次释放）、`get_available_capital`（减 `unconsumed_total`）。
+`tests/test_reservations.py`（20 用例，含模块契约 + portfolio 串联通路）。
+全量 1273 passed, 18 skipped；lint_harness 140 文件；lint_docs clean。
+
+### S3 对账 ✅
 
 - 新模块 `reconciliation.py`（位于 `data/`）：把派生值（现金、持仓股数与成本）从
   账本（`position_exits` + `virtual_portfolio` + `reservations`）独立重算一遍，逐 trader 比对。
@@ -51,6 +62,33 @@
 - 提供可执行入口（`scripts/` 下），供定时任务与本地核查调用。
 
 **性价比最高的一块**：它把前面所有「我们说它成立」的说法变成机器检查。
+
+**实际产出**：
+
+- `reconciliation_runs` / `reconciliation_diffs` 两个新表（memory_store.py 的 _SCHEMA 内）。
+  runs 表存每次运行的 status/diff_count/trader_count/summary_json；diffs 表存每个不变量
+  违例的 (run_id, trader_id, invariant, severity, detail_json, position_id, reservation_id)。
+  无外键约束——审计日志应该比生产表活得久，删生产表不应该带走历史。
+- `alpha_agents/data/reconciliation.py`：八个不变量独立通过 SQL 直接读生产表，**不调用
+  portfolio.py 函数**——对账工具自身依赖被对账对象会让 bug 永远看不见：
+  1. `orphan_exit` (major) — exit 引用不存在的 position。
+  2. `exit_trader_mismatch` (critical) — exit 与所属 position 的 trader_id 不一致，
+     实现盈亏会被记到错的账本。
+  3. `exit_math_inconsistent` (major) — net_amount ≠ gross_amount − costs。
+  4. `orphan_reservation` (critical) — reservation 引用不存在的 order。
+  5. `missing_reservation` (critical) — open 仓位无 held/consumed 预留。
+  6. `stale_reservation` (major) — 终态 order 上仍挂着 held 预留。
+  7. `consumed_amount_mismatch` (critical) — consumed_amount ≠ shares × open_price ×
+     (1 + SLIPPAGE_RATE)，或 consumed 引用未成交的 position。
+  8. `oversold_position` (major) — Σ(exits.shares) > position.shares。
+- `scripts/reconcile.py`：CLI 入口；`--json`、`--trader <id>`、`--no-fail`；
+  退出码 0/1/2（clean 或仅 minor / 有 major 或 critical / runner 自身失败）。
+- `tests/test_reconciliation.py`：17 用例，含空库、良好构建、八种不变量分别的篡改注入、
+  多不变量同存、summary 准确性、审计日志持久化、CLI 序列化往返。
+- 全量 1290 passed, 18 skipped（+17）；lint_harness 141 文件（+1 reconciliation.py）；
+  lint_docs clean。
+- 在真实 DB 上首次运行即发现 1 条 critical（旧仓位 000510 无预留），证明不变量抓得到
+  历史引入的问题，不是只对新建数据有效。
 
 ### S4 T+1 结算批次
 

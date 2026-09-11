@@ -19,6 +19,7 @@ from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, update_theme_strength, maybe_discover_theme
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.notify import notify_all
+from alpha_agents.data import clock
 from alpha_agents.data.portfolio import (
     create_pending_order, check_pending_orders, check_positions,
     get_open_positions, get_pending_orders,
@@ -156,7 +157,17 @@ async def run_intraday_monitor() -> str | None:
         logger.debug("market snapshot capture failed: %s", e)
 
     # ── Portfolio monitoring: check pending orders + open positions ──
-    today_str = now.strftime("%Y-%m-%d")
+    #
+    # The business date comes from the kernel clock, not from ``now``.
+    # Everything downstream of this line — the fill date, the exit date,
+    # the T+1 settle date — is dated inside the window being simulated,
+    # and under replay a wall-clock date would put a September fill on a
+    # March order. The kernel refuses that (clock.LookAheadError) rather
+    # than writing it, so this is not merely tidier: it is what keeps a
+    # replayed cycle working at all. ``now`` above stays the wall clock:
+    # the lunch check asks whether the market is open *here and now*,
+    # which is a scheduling fact rather than a simulated one.
+    today_str = clock.today()
     from alpha_agents.data.memory_store import get_active_price_alerts, trigger_price_alert
 
     # Quotes are fetched once for every trader's book: the market is
@@ -942,7 +953,9 @@ async def _save_intraday_recommendations(report: str) -> None:
     except Exception:
         return
 
-    today = time.strftime("%Y-%m-%d")
+    # The kernel clock, not the wall clock: this date becomes the order's
+    # ``order_date`` and the information cutoff frozen against it.
+    today = clock.today()
     valid_recs = [r for r in recs if re.match(r"^\d{6}$", r.get("code", ""))]
     if not valid_recs:
         return

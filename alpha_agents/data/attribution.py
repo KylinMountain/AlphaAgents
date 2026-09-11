@@ -43,6 +43,8 @@ import json
 import logging
 import sqlite3
 
+from alpha_agents.data import clock
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,11 +115,21 @@ def freeze(conn: sqlite3.Connection, *, trader_id: str, code: str,
     yesterday's close has a cutoff of yesterday's close, and recording the
     wall clock instead would make every later availability check trivially
     true while proving nothing.
+
+    S6 makes the cutoff load-bearing: a boundary dated after the kernel
+    clock is refused. Invariant 4 ("a decision may use only what was
+    available when it was made") was until now kept on the honour
+    system — this column was written faithfully and then read by nothing,
+    so claiming to have seen next week cost nothing, and under replay the
+    future would have leaked silently into the learning data.
     """
     trader_id = _text(trader_id, "trader_id")
     code = _text(code, "code")
     information_cutoff = _text(information_cutoff, "information_cutoff")
     decided_at = _text(decided_at, "decided_at")
+    clock.assert_not_from_the_future(
+        information_cutoff, what="decision information_cutoff")
+    clock.assert_not_from_the_future(decided_at, what="decision decided_at")
     if not isinstance(payload, dict):
         raise ValueError("A decision snapshot payload must be an object")
     sources = list(sources or [])

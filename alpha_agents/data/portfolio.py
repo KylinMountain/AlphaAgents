@@ -15,7 +15,7 @@ import re
 from datetime import datetime
 
 from alpha_agents.data import (
-    attribution, order_state, reservations, settlement, trade_ledger,
+    attribution, clock, order_state, reservations, settlement, trade_ledger,
 )
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
@@ -402,6 +402,14 @@ def _create_pending_order_impl(
                 prediction_id=prediction_id,
                 sources=[source] if source else [],
             )
+        except clock.LookAheadError:
+            # Not the same failure as the one below. A boundary that
+            # cannot be written is a missing audit; a boundary dated in
+            # the future is the *content* being wrong, and it must not be
+            # demoted to a warning — that is how a look-ahead reaches the
+            # learning data while every log line looks healthy. Re-raise
+            # before the tolerant handler can catch it.
+            raise
         except Exception as e:
             # The order is the trade; the boundary is the audit. Losing the
             # audit must not stop the trade — but it must be visible.
@@ -659,12 +667,21 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
     capital, its exposure, its drawdown. A limit read off the pooled book
     would let one strategy's positions decide whether another gets to
     open one.
+
+    Two time guards run before anything else (S6). The fill may not be
+    dated after the kernel clock, and it may not act on information the
+    decision behind the order could not have had. Both *raise* rather
+    than return: a look-ahead is a fault in the simulation, not a trade
+    that business rules turned down, and returning ``None`` would file it
+    as the latter — which is how a leak stays invisible for months.
     """
     code = order["code"]
     name = order.get("name", "")
     theme = order.get("theme", "")
     trader_id = order.get("trader_id") or DEFAULT_TRADER
     capital = trader_capital(trader_id)
+
+    clock.guard_fill(fill_date, order_id=order["id"], conn=_get_conn())
 
     with _write_lock:
         # Capital checks (including sentiment-based total exposure limit)
@@ -1016,6 +1033,10 @@ def _open_position_impl(
                 prediction_id=prediction_id,
                 sources=[source] if source else [],
             )
+        except clock.LookAheadError:
+            # See the note on the pending-order path: a boundary that is
+            # *wrong* is not a boundary that is merely missing.
+            raise
         except Exception as e:
             logger.warning("Could not freeze decision boundary for position "
                            "#%s: %s", position_id, e)
@@ -1116,7 +1137,7 @@ def _add_to_position_impl(position_id: int, *, price: float, reason: str,
         # sellable only from add_date + 1 onward. Without this, the
         # entire position looked like one old batch on the monitor's
         # T+1 check, and the agent could sell today's shares today.
-        add_date = datetime.now().strftime("%Y-%m-%d")
+        add_date = clock.today()
         settlement.create_lot(
             conn, position_id=position_id, trader_id=trader_id,
             code=pos["code"], shares=add_shares, open_date=add_date,

@@ -22,9 +22,10 @@ declared horizon.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
-from alpha_agents.data import intent, order_state, settlement, trade_ledger
+from alpha_agents.data import (
+    clock, intent, order_state, settlement, trade_ledger,
+)
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -172,7 +173,7 @@ def _close_position_impl(
             if legacy is None:
                 legacy = round((row["return_amount"] or 0) - prior["net_amount"], 2)
             net = _estimate_net_close_result(row["open_price"], close_price, sell)
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = clock.today()
             # T+1 share-side: take the sold shares out of the
             # position's settled lots FIFO. A position with no lots
             # is a legacy row that pre-dates the S4 cutover; the

@@ -1,6 +1,6 @@
 # Trade Learn Evolve：第二阶段完整交易内核
 
-状态：实施中。负责人：本次开发会话。创建：2026-09-11。
+状态：六切片全部完成（S1–S6），验收见「实施与验证记录」。负责人：本次开发会话。创建：2026-09-11。
 
 ## 目标
 
@@ -205,13 +205,66 @@
   导入 `portfolio`，故不影响运行；彻底修需把 `portfolio` 末尾的转发改成惰性
   （PEP 562 模块 `__getattr__`），是独立的一小件事，不塞进 S5。
 
-### S6 交易内核的时间边界
+### S6 交易内核的时间边界 ✅
 
 - `evolution.replay_mode` 已存在（`get_replay_as_of` / `effective_eod_cut_date`），
   数据层与工具层已广泛使用，**交易内核没用**。
 - 让 `portfolio` / `trade_ledger` / `attribution` 的「今天」都取自该时钟，
   使重放时不会用真实当日时间判定过期、成交与结算。
 - 成交时用 `information_cutoff` 校验：本次决策引用的数据不得晚于该时刻（S3 起可强制）。
+
+**实际产出**：
+
+- 新模块 `alpha_agents/data/clock.py`（143 行），`data/` 下唯一回答「今天几号」的地方：
+  - `today()`：有重放取重放时刻的**日期部分**，否则取本地日期。
+  - **刻意不用 `effective_eod_cut_date`**：那个函数回答「我能看到哪天的收盘数据」，
+    盘前会回滚到 T-1。内核问的是「今天几号」——06:30 下的单是 3/20 的单，T+1 批次 3/21 结算。
+    用数据切点会让每个盘前成交早一天，并让每个 lot 与它的订单脱钩。
+  - `LookAheadError(ValueError)`：前视是**系统故障**，不是被业务规则拒掉的交易。
+  - 两个守卫，按**日期**（前十字符）比较，即内核实际工作的时间粒度：
+    `assert_not_from_the_future(stamp, what=…)`（不得写入世界尚未到达的那一天）、
+    `assert_decided_no_later_than(cutoff, stamp, what=…)`（不得用晚于动作本身的时点当依据）。
+    方向是容易反的那个：cutoff **早于**动作是正常情形（用昨收决策，今天动手），
+    cutoff **晚于**动作才是不可能的情形。
+  - `guard_fill(fill_date, *, order_id, conn)`：把上面两条合成一次前置检查，
+    于是 `_fill_order` 仍然只谈资本与仓位。
+- 堵掉内核的**三处墙钟泄漏**（这是本切片修的真实缺陷）：
+  `portfolio._add_to_position_impl` 的加仓批次日期、`portfolio_exit._close_position_impl`
+  的平仓日、`intent._today()` 的默认下单日。此前重放三月时这三处会把行写到九月：
+  T+1 窗口从重放尚未到达的日期起算，写进 `settlement_lots` 的 `settle_date`
+  是后续任何重放日都无法满足的日期，持仓看起来永远不可卖。
+- `information_cutoff` **从只写不读变成真被读取**：填充 `intents.order_id`
+  （该列此前存在且从未被写入——与「字段只写不读」同类），新增
+  `intent.cutoff_for_order(conn, order_id)`，`_fill_order` 据此查验
+  「下单时的决策依据不得晚于成交日」；`attribution.freeze` 拒绝晚于内核时钟的边界。
+- **修掉一条吞异常的路径**：`attribution.freeze` 的调用被 `except Exception`
+  包着（本意是「审计写不进去不该阻止交易」）。`LookAheadError` 是 `ValueError`，
+  会落进这个宽容处理器被降级成一行 warning：交易照做、日志全绿、学习数据带着泄漏。
+  `_create_pending_order_impl` / `_open_position_impl` 现在先 `except clock.LookAheadError: raise`。
+  已用变异探针验证：去掉这一句，`test_the_order_path_refuses_rather_than_warns` 变红。
+- 管线侧的业务日期改取内核时钟（否则重放会直接抛错）：`intraday_monitor` 的
+  `today_str`（→ 成交日）与下单选单日期、`morning_scan` 的下单选单日期。
+  `intraday_monitor` 的午休判断保留墙钟——那是「此刻此地市场是否开门」的调度事实，不是被模拟的事实。
+- `tests/test_kernel_clock.py`：21 用例，分四组——时钟语义（含与 `effective_eod_cut_date` 的分野、
+  上下文退出不泄漏）、守卫（将来日期的成交被拒、重放时刻约束成交、依据晚于动作被拒、
+  方向正确性、无声明不算违例）、账本确实写在重放窗口内（成交建 lot、平仓落 `exit_date`、
+  加仓建 lot、意图默认日期）、以及管线取时 + 不吞前视两处契约。
+- 全量 **1373 passed, 18 skipped**（1352 + 21）；lint_harness 146 文件（+1 clock.py，
+  存量 47 条未扩充）；lint_docs clean。
+- **三个变异探针**（都先红后复原）：① `clock.today()` 退回墙钟 → 8 个用例变红，
+  含 `test_a_close_is_booked_on_the_replay_day`（三月重放里把平仓日写成九月）；
+  ② 停用 `assert_not_from_the_future` → 4 个守卫用例变红；
+  ③ 去掉前视的 re-raise → 吞异常用例变红。
+
+**边界说明（本切片不做，明确划出）**：非内核写入路径仍读墙钟——`tools/`（vpa、行情）、
+`evolution/`（holdout、playbook 的窗口）、`memory_store` 的统计查询、`pipeline` 的
+review/scheduler（其「今天」是调度语义）。S6 的对象是**交易内核的写路径**；把这些也改掉
+是另一件事，且其中多数问的是「现在」，不是「模拟到哪一天」。
+
+**已知遗留**：`portfolio.py` 1190/1200 行。本切片把它从 1169 推到 1198（+29），
+已把守卫抽到 `clock.guard_fill` 并清掉一个死导入，压回 1190。**下次再动这个文件必须先拆**，
+拆的口子是主题暴露（`_theme_too_weak` / `resolve_theme` / `_cluster_room` / `get_theme_exposure`），
+不要扩 lint 豁免基线。
 
 ## 非目标与迁移安全
 
@@ -253,6 +306,14 @@
   避免在大改路线的同时改账。
 - 2026-09-11：对账只报告差异、不自动修正。自动改账会把一个能被发现的 bug 变成一个不能被发现的。
 - 2026-09-11：不引入部分成交模拟器。造一个永远进不去的状态是死代码，不是完整度。
+- 2026-09-11：S6 的内核时钟用重放时刻的**日期**，不用 `effective_eod_cut_date`。
+  后者是「我能看到哪天的数据」，盘前回滚 T-1；内核问的是「今天几号」。两者混用会让
+  每个盘前成交早一天，并使 `settlement_lots.settle_date` 与订单日期脱钩。
+- 2026-09-11：`LookAheadError` 继承 `ValueError`（与 `order_state.IllegalTransition` 一致的姿态），
+  但**必须**在宽容的 `except Exception` 之前被 re-raise。继承谁只决定「能被谁接住」，
+  不决定「该不该被接住」——后者是调用点的责任。
+- 2026-09-11：S6 只改**交易内核的写路径**。`tools` / `evolution` / `memory_store` 的统计
+  查询 / `pipeline` 的 review、scheduler 仍读墙钟，它们问的是「现在」，不是「模拟到哪一天」。
 
 ## 实施与验证记录
 

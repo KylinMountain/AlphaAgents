@@ -14,7 +14,9 @@ import os
 import re
 from datetime import datetime
 
-from alpha_agents.data import attribution, order_state, reservations, settlement, trade_ledger
+from alpha_agents.data import (
+    attribution, order_state, reservations, settlement, trade_ledger,
+)
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
 # The exit slice lives in portfolio_exit: the friction model, the append-only
@@ -28,6 +30,17 @@ from alpha_agents.data.portfolio_exit import (
     _estimate_net_close_result,
     _status_from_reason,
     close_position,
+)
+# Sizing lives in portfolio_sizing: how big a position may be is a
+# different question from whether it may exist, and splitting them is
+# what kept this file under the ceiling when S5 added the intent
+# wrappers. Imported at module scope rather than re-exported at the
+# bottom because the implementations above call into them directly.
+from alpha_agents.data.portfolio_sizing import (
+    _calc_shares,
+    _trader_pct,
+    _wanted_pct,
+    get_sentiment_exposure_limit,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,71 +95,6 @@ HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT", "8.0"))
 # cancelling them, then counting those cancellations as evidence about
 # entry prices.
 MIN_THEME_STRENGTH = 4
-
-
-def get_sentiment_exposure_limit(trader_id: str = DEFAULT_TRADER) -> float:
-    """Max total exposure for one trader, given the sentiment phase.
-
-    The phase is a fact about the market and is shared; the money it
-    applies to is the trader's own.
-    """
-    capital = trader_capital(trader_id)
-    try:
-        from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
-        cycle = get_sentiment_cycle()
-        phase = cycle.get("phase", "修复")
-        pct = cycle["strategy"]["max_exposure_pct"]
-        max_invest = capital * pct / 100
-        logger.debug("Sentiment cycle: %s → max %.0f元 (%.0f%%)", phase, max_invest, pct)
-        return max_invest
-    except Exception as e:
-        logger.warning("Sentiment cycle failed, defaulting to 50%%: %s", e)
-        return capital * 0.50
-
-
-def _calc_shares(price: float, max_amount: float) -> int:
-    """Calculate how many shares to buy (must be multiple of 100).
-    Returns 0 if can't afford even 1 lot."""
-    if price <= 0:
-        return 0
-    max_shares = int(max_amount / price)
-    lots = max_shares // LOT_SIZE
-    return lots * LOT_SIZE
-
-
-def _wanted_pct(code: str, trader_id: str = DEFAULT_TRADER) -> float:
-    """How much of the book this idea asked for, as a fraction.
-
-    The thesis states it. A pick that says nothing falls back to the
-    trader's own default, which keeps behaviour unchanged for anything
-    written before sizing was a decision.
-    """
-    try:
-        from alpha_agents.data.thesis import get_active
-        theses = [t for t in get_active(code=code, trader_id=trader_id)
-                  if t.position_id is None]
-        if theses and theses[-1].size_pct:
-            return max(0.005, min(1.0, theses[-1].size_pct))
-    except Exception as e:
-        logger.debug("Size lookup fallback for %s: %s", code, e)
-    return _trader_pct(trader_id, "default_size_pct", DEFAULT_POSITION_PCT)
-
-
-def _trader_pct(trader_id: str, field: str, fallback: float) -> float:
-    """One sizing parameter off the trader's config, or the global default.
-
-    Falls back rather than raising for the same reason ``get_trader``
-    does: a position whose config file was deleted still has to be
-    managed with *some* number.
-    """
-    if trader_id == DEFAULT_TRADER:
-        return fallback
-    try:
-        from alpha_agents.data.trader import get_trader
-        return float(getattr(get_trader(trader_id), field, fallback))
-    except Exception as e:
-        logger.debug("Trader %s %s fallback: %s", trader_id, field, e)
-        return fallback
 
 
 def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
@@ -344,7 +292,7 @@ def _valid_prediction(conn, prediction_id: int | None, code: str, trader_id: str
     ).fetchone() is not None
 
 
-def create_pending_order(
+def _create_pending_order_impl(
     *,
     code: str,
     name: str,
@@ -926,6 +874,17 @@ def _cancel_order_unlocked(order_id: int, reason: str) -> None:
 
 
 def _cancel_order(order_id: int, reason: str) -> None:
+    """Cancel a pending order through the intent path (compat alias).
+
+    Internal callers — the weak-theme, expiry and run-away-price cancels
+    in ``check_pending_orders`` — reach the same audit trail a
+    business-initiated cancel does.
+    """
+    from alpha_agents.data.portfolio_intent import cancel_order
+    cancel_order(order_id, reason)
+
+
+def _cancel_order_impl(order_id: int, reason: str) -> None:
     """Cancel a pending order (acquires _write_lock)."""
     with _write_lock:
         _cancel_order_unlocked(order_id, reason)
@@ -988,7 +947,7 @@ def get_closed_positions(limit: int = 50,
     return [dict(r) for r in rows]
 
 
-def open_position(
+def _open_position_impl(
     *,
     code: str,
     name: str,
@@ -1077,8 +1036,9 @@ def _round_lot(shares: int) -> int:
     return (int(shares) // LOT_SIZE) * LOT_SIZE
 
 
-def add_to_position(position_id: int, *, price: float, reason: str,
-                    size_pct: float | None = None) -> dict | None:
+def _add_to_position_impl(position_id: int, *, price: float, reason: str,
+                          size_pct: float | None = None,
+                          recalc_stop: bool = False) -> dict | None:
     """Buy the second tranche of a position the agent wants more of.
 
     How many times to add, and how much each time, is the agent's call —
@@ -1087,12 +1047,16 @@ def add_to_position(position_id: int, *, price: float, reason: str,
 
     ``size_pct`` is the share of the book to add; without one it adds the
     default position size again.
+
+    ``recalc_stop`` keeps the stop the same percentage below the new
+    (lower) average. It is on for the automated pullback top-up, off for
+    the agent's own adds — see the wrapper.
     """
     with _write_lock:
         conn = _get_conn()
         pos = conn.execute(
-            "SELECT code, name, theme, open_price, shares, reason, trader_id "
-            "FROM virtual_portfolio WHERE id = ? AND status = 'open'",
+            "SELECT code, name, theme, open_price, shares, reason, trader_id, "
+            "stop_loss FROM virtual_portfolio WHERE id = ? AND status = 'open'",
             (position_id,)).fetchone()
         if not pos or price <= 0:
             return None
@@ -1125,10 +1089,29 @@ def add_to_position(position_id: int, *, price: float, reason: str,
         # every return the monitor computes has to be against that or the
         # add would flatter the numbers for free.
         avg = round((cost + add_shares * price) / total, 3)
-        conn.execute(
-            "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
-            "reason = ? WHERE id = ?",
-            (total, avg, f"{pos['reason'] or ''} | {reason}"[:300], position_id))
+        # ``recalc_stop`` keeps the stop the same fraction below the new
+        # average: averaging down must not widen the risk per share. Only
+        # the automated top-up sets it; the agent's own adds leave the
+        # stop where the agent put it.
+        new_stop = None
+        if recalc_stop:
+            old_stop = pos["stop_loss"] or 0
+            old_open = pos["open_price"] or 0
+            if old_open > 0 and old_stop > 0:
+                new_stop = round(
+                    avg * (1 - (old_open - old_stop) / old_open), 2)
+        if new_stop is not None:
+            conn.execute(
+                "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
+                "stop_loss = ?, reason = ? WHERE id = ?",
+                (total, avg, new_stop,
+                 f"{pos['reason'] or ''} | {reason}"[:300], position_id))
+        else:
+            conn.execute(
+                "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
+                "reason = ? WHERE id = ?",
+                (total, avg, f"{pos['reason'] or ''} | {reason}"[:300],
+                 position_id))
         # T+1 share-side: the add gets its own lot so its shares are
         # sellable only from add_date + 1 onward. Without this, the
         # entire position looked like one old batch on the monitor's
@@ -1142,7 +1125,8 @@ def add_to_position(position_id: int, *, price: float, reason: str,
 
     logger.info("Added to #%d %s: +%d股 @ %.2f → %d股 均价%.2f — %s",
                 position_id, pos["code"], add_shares, price, total, avg, reason)
-    return {"shares": add_shares, "avg_price": avg, "total_shares": total}
+    return {"shares": add_shares, "avg_price": avg, "total_shares": total,
+            "stop_loss": new_stop}
 
 
 # ── Summaries ───────────────────────────────────────────────
@@ -1161,6 +1145,20 @@ __all__ = [
     "get_portfolio_stats", "get_today_changes_summary",
     "parse_entry_zone", "parse_stop_loss",
 ]
+
+
+# The public write API, split out when the S5 intent wrappers pushed this
+# file past the 1200-line ceiling. Re-exported so `from portfolio import
+# create_pending_order` keeps working.
+#
+# Imported *before* position_monitor, which imports it: the bottom of this
+# file is a dependency chain, not a list, and one of the modules below
+# reads `add_to_position` back out of this namespace. Ordering it the
+# other way round only worked while position_monitor happened to be the
+# only consumer.
+from alpha_agents.data.portfolio_intent import (  # noqa: E402
+    add_to_position, cancel_order, create_pending_order, open_position,
+)
 
 
 # Re-exported so callers keep importing check_positions from portfolio.

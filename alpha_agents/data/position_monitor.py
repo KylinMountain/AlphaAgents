@@ -18,14 +18,24 @@ from datetime import datetime
 from alpha_agents.data.memory_store import (
     _get_conn, _write_lock, get_theme_by_name,
 )
+# Only what the rule layer still reads: the drop that triggers a top-up,
+# the hard floor, the P&L of a hypothetical close. What is *not* here any
+# more is the sizing (``add_to_position`` sizes) and the capital reads
+# that existed only to feed the duplicate add implementation S5 deleted.
 from alpha_agents.data.portfolio import (
-    ADD_POSITION_DROP_PCT, DEFAULT_POSITION_PCT, HARD_STOP_PCT, LOT_SIZE,
-    MAX_POSITION_WITH_ADD, MAX_THEME_PCT,
-    _calc_shares, _estimate_net_close_result, close_position,
-    get_available_capital, get_open_positions, get_sentiment_exposure_limit,
-    get_theme_exposure, trader_capital,
+    ADD_POSITION_DROP_PCT, HARD_STOP_PCT, _estimate_net_close_result,
 )
-from alpha_agents.data.trader import DEFAULT_TRADER
+# The two write paths come from the modules that own them, not from
+# ``portfolio``. ``portfolio`` does re-export both names for callers, but
+# it does so at the *bottom* of that file — below the line that imports
+# this module — which made the import order load-bearing: pull
+# ``add_to_position`` from ``portfolio`` and it only resolves if
+# ``portfolio`` was imported first, because the re-export had not run
+# yet when this module was loaded from inside it. Reading from the source
+# is the honest dependency anyway: a top-up is a ``portfolio_intent``
+# intent and a close is ``portfolio_exit``.
+from alpha_agents.data.portfolio_exit import close_position
+from alpha_agents.data.portfolio_intent import add_to_position
 
 logger = logging.getLogger(__name__)
 
@@ -405,8 +415,14 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
     Conditions:
     - Price dropped >= ADD_POSITION_DROP_PCT from entry
     - Theme still healthy (strength >= 4)
-    - Current position < MAX_POSITION_WITH_ADD (30%)
-    - Have available capital
+
+    The sizing, the room checks and the write all belong to
+    ``add_to_position``; this function only decides *whether* the rule
+    fires. Before S5 it also carried its own copy of the sizing and did
+    its own ``UPDATE virtual_portfolio`` — a second add path that
+    bypassed the intent layer, the settlement lots and the theme/
+    cluster/sentiment caps the real add path enforces. One rule, one
+    implementation.
     """
     if current_return > -ADD_POSITION_DROP_PCT:
         return None  # Not down enough
@@ -415,70 +431,36 @@ def _check_add_position(pos: dict, price: float, current_return: float) -> dict 
     name = pos.get("name", "")
     theme_name = pos.get("theme", "")
 
-    # Check theme health (read-only, safe outside lock)
+    # Check theme health (read-only, cheap; avoids submitting an intent
+    # the add path would refuse anyway, but the refusal is still
+    # recorded if it gets past this).
     if theme_name:
         theme = get_theme_by_name(theme_name)
         if theme and theme.get("strength", 0) < 4:
             return None  # Theme too weak, don't throw good money after bad
 
-    trader_id = pos.get("trader_id") or DEFAULT_TRADER
+    added = add_to_position(pos["id"], price=price,
+                            reason="回调补仓",
+                            recalc_stop=True)
+    if not added:
+        return None
 
-    with _write_lock:
-        open_price = pos.get("open_price", 0)
-        existing_shares = pos.get("shares", 0)
-        existing_cost = open_price * existing_shares
-
-        # Check position limit (30% with add), against this trader's own pot
-        max_total_cost = trader_capital(trader_id) * MAX_POSITION_WITH_ADD
-        room = max_total_cost - existing_cost
-        if room <= 0:
-            return None  # Already at max
-
-        # Check available capital (sentiment limit does NOT apply to add-positions —
-        # bearish markets are exactly when you want to average down)
-        available = get_available_capital(trader_id)
-        room = min(room, available)
-
-        add_shares = _calc_shares(price, room)
-        if add_shares == 0:
-            return None
-
-        add_cost = add_shares * price
-
-        # Execute add: update shares and recalculate avg open_price
-        new_total_shares = existing_shares + add_shares
-        new_avg_price = round((existing_cost + add_cost) / new_total_shares, 2)
-
-        # Recalculate stop_loss to maintain original percentage distance from new avg price
-        old_stop = pos.get("stop_loss") or 0
-        if open_price > 0 and old_stop > 0:
-            original_stop_pct = (open_price - old_stop) / open_price  # e.g. 0.10 for 10% distance
-            new_stop_loss = round(new_avg_price * (1 - original_stop_pct), 2)
-        else:
-            new_stop_loss = old_stop
-
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE virtual_portfolio SET open_price = ?, shares = ?, stop_loss = ? WHERE id = ?",
-            (new_avg_price, new_total_shares, new_stop_loss, pos["id"]),
-        )
-        conn.commit()
-
-    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f→%.2f, 止损 %.2f→%.2f, 总%d股, 总成本%.0f元)",
-                code, name, add_shares, price,
-                open_price, new_avg_price, old_stop, new_stop_loss,
-                new_total_shares, new_avg_price * new_total_shares)
+    total_cost = round(added["avg_price"] * added["total_shares"])
+    logger.info("Add position: %s %s +%d股 @ %.2f (均价 %.2f, 止损 %s, 总%d股, 总成本%.0f元)",
+                code, name, added["shares"], price, added["avg_price"],
+                added.get("stop_loss") or "不变", added["total_shares"],
+                total_cost)
 
     return {
         "type": "add_position",
         "code": code,
         "name": name,
-        "add_shares": add_shares,
+        "add_shares": added["shares"],
         "add_price": price,
-        "new_avg_price": new_avg_price,
-        "new_stop_loss": new_stop_loss,
-        "total_shares": new_total_shares,
-        "total_cost": round(new_avg_price * new_total_shares),
+        "new_avg_price": added["avg_price"],
+        "new_stop_loss": added.get("stop_loss"),
+        "total_shares": added["total_shares"],
+        "total_cost": total_cost,
     }
 
 

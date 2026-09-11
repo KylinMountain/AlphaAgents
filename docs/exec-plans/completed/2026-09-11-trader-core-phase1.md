@@ -1,6 +1,11 @@
 # Trade Learn Evolve：第一阶段可信事实与学习边界
 
-状态：实施中。负责人：本次开发会话。创建：2026-09-11。
+状态：**已完成**（2026-09-11 收口轮判定）。负责人：本次开发会话。创建：2026-09-11。
+
+> 完成后按 AGENTS.md 的约定移入 `docs/exec-plans/completed/`。
+> Phase 1 的范围由设计 §14 界定：可信的最小切片，含现金与累计平仓核算、可审计逐笔记录、
+> 显式 trader/source 绑定、独立交易结果、候选制学习边界。完整账本/结算、策略版本注册与
+> 前向影子实验**不属于本阶段**（设计 §14 原文列为后续阶段），见实现文档 §7 的分期标注。
 
 ## 目标
 
@@ -77,7 +82,7 @@
 
 上一轮「未完成」清单里的前三项，本轮全部实施（第四项以下仍留待后续阶段）：
 
-1. **thesis 端到端绑定。** `theses` 之外，`virtual_portfolio` 与 `position_exits` 各自新增 `thesis_id` 列（迁移非重建）；`create_pending_order` / `open_position` 接受并校验 `thesis_id`，平仓时从持仓复制而非事后查询派生；`record_exit` 一并落账。链条 `thesis_id → order_id → fill_id → ledger_entry_id` 每跳都是列，`resolve_chain` 直接解析，不靠扫描或就近匹配。
+1. **thesis 端到端绑定。** `theses` 之外，`virtual_portfolio` 与 `position_exits` 各自新增 `thesis_id` 列（迁移非重建）；`create_pending_order` / `open_position` 接受并校验 `thesis_id`，平仓时从持仓复制而非事后查询派生；`record_exit` 一并落账。链条落成显式列（`virtual_portfolio.thesis_id`、`position_exits.thesis_id`），`resolve_chain` 直接解析，不靠扫描或就近匹配。**没有独立的 fills 表**：入场成交即持仓行、账本条目即退出腿，所以设计 §4 的四跳链在本仓库实际解析为 `thesis → order → exits`（见 `docs/TRADER_CORE_IMPLEMENTATION.md` §4）。
 2. **不可变决策归属快照。** 新增 `decision_snapshots` 表与 `BEFORE UPDATE` / `BEFORE DELETE` 触发器：`payload_json`、`information_cutoff`、`decided_at`、`policy_ref`、`model_ref`、`sources_json` 在**建单时**冻结，`content_hash` 覆盖被冻结字段供独立复算。事后改写被 SQLite 直接 `RAISE(ABORT)`，不依赖约定。区分 `information_cutoff`（决策允许使用的最晚时刻）与 `decided_at`（任务运行时刻）。
 3. **三类结果互不覆盖。** `forecast_outcome`（只读 `predictions`）、`trade_outcome`（只读 `position_exits`）、过程结果（`evolution/process_quality.py`）各自读独立存储；平仓不触碰 prediction 的 `hit` / `week_return` / `brier`。未成交时 `trade_outcome` 返回 `fills=0, return_pct=None`（而非零收益），未到期返回 `graded=False`。
 
@@ -91,4 +96,26 @@
 - `.venv/bin/python scripts/lint_harness.py` → 通过（138 个文件），存量 47 条待偿还，基线未扩充。
 - `.venv/bin/python scripts/lint_docs.py` → 知识库校验通过。
 
-未完成且不冒充交付：完整账本/结算与订单冻结、策略版本注册与前向影子实验、结果状态机列（`pending / matured / censored / revised`）、生产数据迁移。Phase 1 保持实施中。
+> **口径更正（第三轮发现）。** 上面两轮的 pytest 命令带了 `--ignore=tests/test_web_no_monitor.py`，**这是多余的**：该文件单独跑与全量跑都通过。它一直在少报 7 个用例，而 CI 并不 ignore。第三轮起一律按全量口径记录；历史数字保留原样，但按此更正理解。
+
+---
+
+### 2026-09-11 收口轮：按 Phase 1 自己的范围判定完成
+
+前两轮的「未完成且不冒充交付」清单混入了**后续阶段**的工作（完整账本/结算、策略版本注册、前向影子实验、生产迁移）。设计 §14 明确这些是 Phase 2/3/4 的范围——原文：*full reservations, securities settlement, global event history, and forward version experiments are expressly later work*。继续把它们记作「Phase 1 未完成」，既拖长了阶段，也让真正的缺口混在噪音里看不见。本轮按 Phase 1 自己的范围重新判定，并修掉审计出的真实缺口。
+
+**审计发现的缺口（本轮修掉）：**
+
+1. **`ARCHITECTURE.md` 未更新。** 范围第 1 项写的是「更新 AGENTS/**ARCHITECTURE** 的主线与依赖规则」，但 `ARCHITECTURE.md` 全文 87 行完全没提交易员核心。已补「The trader book」一节：执行链、冻结的信息边界、三类结果三处存储、候选隔离；并更新 `data/` 层职责与 `memory.db` 的表清单。
+2. **过度声称四跳链。** `attribution.py` 文档字符串、`memory_store.py` 注释、本计划均称 `thesis_id → order_id → fill_id → ledger_entry_id`「每一跳都是列」。实际**没有 fills 表**，`fill_id` / `ledger_entry_id` 不是列。已全部改为真实链并写明解析关系。
+3. **`content_hash` 没有可调用入口。** 文档承诺「消费方可检测快照被改写」，但此前只有测试里内联重复 12 个字段的拼装。新增 `attribution.verify_snapshot(conn, snapshot_id)`，写入与校验收敛到同一份字段清单 `_FROZEN_FIELDS`；补两个用例（绕过触发器改写后校验失败、未知 ID 不可信）。
+4. **一条验收仅有实现、没有测试。** 验收明写「相同指令携带不同参数被拒绝」，`record_exit` 里确有 `raise ValueError`，但此前只有「精确重试返回同一行」的用例。已补 `test_the_same_command_id_with_different_arguments_is_refused`。
+5. **`information_cutoff` 只冻结、未强制。** 已在实现文档 §7 如实标注：当前强制的是「边界不可事后改写」，**不是**「决策确实未越界」；后者是设计 §15 的目标合同，属后续阶段。
+
+**第三轮验证（仓库根目录，2026-09-11）：**
+
+- `.venv/bin/python -m pytest tests/ -q` → **1226 passed, 18 skipped**（全量口径，不再 ignore）。
+- `.venv/bin/python scripts/lint_harness.py` → 通过（138 个文件），存量 47 条待偿还，基线未扩充。
+- `.venv/bin/python scripts/lint_docs.py` → 知识库校验通过。
+
+**完成判定。** 范围 5 项与验收各条逐条核对，均有代码与测试支撑（对应关系见实现文档 §1–§6）。按设计 §14 对 Phase 1 的定义——可信的最小切片：现金与累计平仓核算、可审计逐笔记录、显式 trader/source 绑定、独立交易结果、候选制学习边界——本阶段**已达成**。残留项全部属于 Phase 2/3/4 或需单独授权的生产迁移，已在实现文档 §7 逐项标注分期，不再计入 Phase 1。本计划随之移入 `docs/exec-plans/completed/`。

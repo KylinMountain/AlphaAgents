@@ -165,12 +165,14 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     -- unknown: it is never filled in by a later guess.
     prediction_id INTEGER,
     legacy_realized_amount REAL,
-    -- The thesis this order serves. Design §4 makes the execution chain
-    -- explicit (thesis_id → order_id → fill_id → ledger_entry_id); this
-    -- column is the order end of it. Before it existed the link lived
-    -- only on theses.position_id, which meant "given an order, which idea
-    -- is it for" was answerable only by scanning live theses for the
-    -- same stock — and a scan is not an ownership relation.
+    -- The thesis this order serves. Design §4's chain is
+    -- thesis_id → order_id → fill_id → ledger_entry_id; this column is
+    -- the order end of it and position_exits.thesis_id is the ledger end.
+    -- There is no separate fills table, so the entry fill is this row.
+    -- Before the column existed the link lived only on
+    -- theses.position_id, which meant "given an order, which idea is it
+    -- for" was answerable only by scanning live theses for the same stock
+    -- — and a scan is not an ownership relation.
     thesis_id INTEGER,
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );

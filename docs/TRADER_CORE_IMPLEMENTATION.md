@@ -1,7 +1,7 @@
 # Trader Core Implementation: Phase 1 实际状态
 
 - 记录日期：2026-09-11。
-- 依据：[Phase 1 计划](exec-plans/active/2026-09-11-trader-core-phase1.md)、[设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
+- 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、[设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
 
@@ -49,7 +49,7 @@
 
 **已实现。** 新增 `alpha_agents/data/attribution.py`，承担两件事：把执行链每一跳落成列，把决策时点的信息边界冻结下来。
 
-**链条。** 设计 §4 要求 `thesis_id → order_id → fill_id → ledger_entry_id` 每一跳都可解析。
+**链条。** 设计 §4 的目标链是 `thesis_id → order_id → fill_id → ledger_entry_id`。代码里落地的是其中**不需要凭空造记录**的那部分：`theses.id` ← `virtual_portfolio.thesis_id` ← `position_exits.thesis_id`。**本仓库没有独立的 fills 表**，入场成交就是持仓行本身（`open_price` / `open_date` / `shares`），账本条目就是退出腿，所以 `ledger_entry_id` 实际解析为 `position_exits.id`。`resolve_chain` 只走这条链，不多声称。
 
 - **订单端记录 thesis。** `virtual_portfolio.thesis_id` 与 `position_exits.thesis_id` 是显式列，`create_pending_order` / `open_position` 接收并在写入前用 `valid_thesis` 校验（要求 `code` 与 `trader_id` 同时一致）。不匹配即拒绝，不留到事后发现。
 - **退出腿自带归属。** `record_exit` 写入 `position_exits.thesis_id`（从持仓复制，不是查询派生），所以一笔已实现损益即使持仓行被改动，也仍然指名它属于哪个论点。
@@ -60,7 +60,7 @@
 
 - **建单即冻结。** `decision_snapshots` 记录声明的决策输入（介入区间、止损、目标、理由、来源）、`information_cutoff`（决策被允许使用的最晚时刻，不是任务运行时刻）、`decided_at`、producer 引用与 `content_hash`。
 - **由数据库保证只增不改。** 表上装了 `BEFORE UPDATE` / `BEFORE DELETE` 触发器直接 `RAISE(ABORT)`，而不是指望每个调用方记得不要改。修订视图是**新增一行并指名被替代者**，旧行始终可读 —— 它是证据，不是草稿。
-- **哈希可独立复算。** `content_hash` 覆盖冻结字段，即使触发器被移除也能检测出改写。
+- **哈希可独立复算。** `content_hash` 覆盖冻结字段，即使触发器被移除也能检测出改写。`verify_snapshot(conn, snapshot_id)` 是它的可调用入口：重算哈希并返回是否仍匹配（未知 ID 返回 `False`，因为「不存在」与「被改写」都是不可信）。写入与校验共用同一份字段清单 `_FROZEN_FIELDS`，避免校验的字段集与写入的字段集悄悄分叉。
 
 **结果拆分（§9）。** 三类结果各自可独立读出，互不覆盖：
 
@@ -91,13 +91,14 @@
 
 ## 7. 明确未实现
 
-以下属后续阶段，**当前代码中不存在**，不要按本文件误读为已交付：
+以下属**后续阶段**（按设计 §14 的分期标注），**当前代码中不存在**，不要按本文件误读为已交付：
 
-- **完整账本与结算。** 无逐笔建仓手续费落账（买入摩擦只在计算净收益时计入，未作为独立记账条目）、无 T+1 结算、无订单冻结、无 global 事件日志；`decision_snapshots` 是决策边界，不是会计凭证。
-- **策略版本注册与前向影子实验。** 无 frozen policy、无独立前向评估闸门、无批准的晋升路径。`policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
-- **结果生命周期的完整状态机。** §9 的 `pending / matured / censored / revised` 尚未落到独立状态列；当前只能从 `hit` 是否为 NULL 与 `scored_at` 推断，未成交、删失、修订三种情况无法区分。
-- **订单状态机。** 现有 `pending → open → stopped/target_hit/expired/cancelled` 不覆盖 §6 的 `partially_filled` / `cancel_pending` / `rejected`，部分成交仅由多次 `position_exits` 腿隐式表达。
-- **生产数据迁移。** 存量行未被重新计算或回填；legacy 聚合仍是兼容估算，不是重建后的历史。`thesis_id` 对历史行一律为 NULL，符合「未知保持未知」。
+- **完整账本与结算**（Phase 2）。无逐笔建仓手续费落账（买入摩擦只在计算净收益时计入，未作为独立记账条目）、无 T+1 结算、无订单冻结、无 global 事件日志；`decision_snapshots` 是决策边界，不是会计凭证。
+- **订单状态机**（Phase 2）。现有 `pending → open → stopped/target_hit/expired/cancelled` 不覆盖 §6 的 `partially_filled` / `cancel_pending` / `rejected`，部分成交仅由多次 `position_exits` 腿隐式表达。
+- **结果生命周期的完整状态机**（Phase 3）。§9 的 `pending / matured / censored / revised` 尚未落到独立状态列；当前只能从 `hit` 是否为 NULL 与 `scored_at` 推断，未成交、删失、修订三种情况无法区分。
+- **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。`policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
+- **信息边界的强制校验**（Phase 2 起）。`information_cutoff` 已被冻结，但**没有消费者拿它去校验某个输入是否真的落在边界内**；设计 §15 的「Every actionable input satisfies the availability cutoff」仍是目标合同。当前强制的是「边界不可事后改写」（触发器 + 哈希），**不是**「决策确实没越界」。这两件事不要混为一谈。
+- **生产数据迁移**（需单独授权）。存量行未被重新计算或回填；legacy 聚合仍是兼容估算，不是重建后的历史。`thesis_id` 对历史行一律为 NULL，符合「未知保持未知」。
 
 ## 8. 行为契约变更（供 review 对照）
 
@@ -111,6 +112,7 @@
 | 成交时扫「该代码下第一个未绑定论点」 | 用订单显式 `thesis_id`；回退按 `trader_id` 限定 |
 | 归属只存在 `theses.position_id` 一侧 | order 与 exit 腿各自持有 `thesis_id`，链条可解析 |
 | 决策依据不留痕，事后无从核对 | 建单即冻结 `decision_snapshots`，触发器禁止改写 |
+| 改写检测只有触发器一道锁 | 触发器之外另有 `verify_snapshot` 重算哈希，绕过触发器也能查出来 |
 | 预测与交易结果混在一个标签里 | `forecast_outcome` / `trade_outcome` 各自读独立存储 |
 | 提示词含 playbook 胜率与原始教训 | 只含规则字段；原始教训仅研究用途 |
 | 未验证经验可直接进活跃知识 | 一律进候选区，无晋升 API |
@@ -148,3 +150,25 @@
 - 新增 `tests/test_attribution_chain.py`（17 个用例）。按计划要求**先证旧后证新**：把 `_fill_order` 的绑定逻辑临时退回未按交易员过滤的版本，`test_the_fill_binds_its_own_thesis_not_the_first_live_one` 变红（1 failed / 16 passed），恢复后转绿。
 - 拆分 `portfolio_exit` 后，三处测试的 patch 目标随之更新（`tests/test_portfolio.py`、`tests/test_trader_ledger.py`、`tests/test_learning_loop.py`）。这些测试原本就靠显式列出「所有绑定 `_get_conn` 的模块」来重定向 I/O，本次只是把新模块补进那张表 —— 是拆分本身的代价，不是行为回归。
 - `portfolio.py` 因新增归属校验与冻结逻辑一度达 1239 行、越过 1200 行上限。按职责把平仓切片（摩擦模型 + 退出记账）移入 `portfolio_exit.py`，现分别 1032 / 249 行。**未扩充 lint 豁免基线。**
+
+### 口径更正：前两轮少报了 7 个用例
+
+第一、二轮的 pytest 命令带了 `--ignore=tests/test_web_no_monitor.py`，**这是多余的**：该文件单独跑 7 passed，全量跑也通过。它一直在少报 7 个用例，而 CI（`.github/workflows/harness.yml`）并不 ignore。第三轮起一律按全量口径记录；上面的 1199 / 1216 保留原样，按此更正理解。
+
+### 第三轮（Phase 1 收口：审计缺口与完成判定）
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1226 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（138 个文件），存量 47 条待偿还 |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+本轮修掉的缺口，都是「文档承诺了代码没做的事」一类：
+
+- 补 `ARCHITECTURE.md` 的「The trader book」一节——范围第 1 项要求更新 ARCHITECTURE，此前只更新了 AGENTS。
+- 四跳链过度声称：`fill_id` / `ledger_entry_id` 不是列（无 fills 表），已改为真实链 `thesis → order → exits`。
+- 新增 `verify_snapshot`，让 `content_hash` 的「可检测改写」成为可调用的保证，而不是只写在文档里；补 2 个用例（含绕过触发器改写后校验失败）。
+- 补 `test_the_same_command_id_with_different_arguments_is_refused`：验收里有这条，实现也有 `raise ValueError`，但此前无测试钉住。
+- `information_cutoff` 的「已冻结」与「已强制」被混为一谈，已在 §7 分开表述。
+
+**Phase 1 判定为已完成**，依据是设计 §14 对它的范围定义，而不是「所有后续阶段都做完了」。残留项的分期见 §7。

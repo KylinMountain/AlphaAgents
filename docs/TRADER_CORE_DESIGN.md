@@ -9,12 +9,12 @@
 ## 1. Authority and implementation boundary
 
 The design formalizes the local [Trade Learn Evolve proposal](../outputs/trade-learn-evolve-design.html).
-The [active Phase 1 plan](exec-plans/active/2026-09-11-trader-core-phase1.md) governs the initial implementation scope and its eventual verification.
+The [Phase 1 plan](exec-plans/completed/2026-09-11-trader-core-phase1.md) governed the initial implementation scope; it closed on 2026-09-11 with each acceptance criterion mapped to a test, and the measured results are recorded in the [implementation status](TRADER_CORE_IMPLEMENTATION.md).
 The [architecture map](../ARCHITECTURE.md), [repository instructions](../AGENTS.md), and [golden principles](GOLDEN_PRINCIPLES.md) provide engineering and evidence constraints.
 The verified dependency order is `data → sources → tools → evolution → pipeline → agents → server`, as declared in [scripts/lint_harness.py:35](../scripts/lint_harness.py#L35).
 Layer-order text in [AGENTS.md](../AGENTS.md) and [golden principles](GOLDEN_PRINCIPLES.md) has since been corrected to match that declaration; the order is stated once in the linter and restated, not redefined.
 The HTML proposal's static observations are design inputs, not a fresh audit of concurrently changing code or a measurement of historical losses.
-This document makes no claim that Phase 1 has passed acceptance, or that a full broker, ledger, runtime, or experiment registry has shipped.
+This document states the target and asserts nothing about what is built. For whether Phase 1 passed, read the implementation status document, which records the commands run, their output, and what remains unimplemented; no claim here should be read as a substitute for that.
 
 ## 2. Product definition and governing invariants
 

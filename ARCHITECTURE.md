@@ -13,7 +13,7 @@ data → sources → tools → evolution → pipeline → agents → server
 
 | Layer | Owns | Does not |
 |---|---|---|
-| `data/` | SQLite schemas and access, scoring, decision context | Call the network |
+| `data/` | SQLite schemas and access, scoring, decision context, the trader book (orders, exits, theses, decision snapshots), attribution | Call the network |
 | `sources/` | 13 news feeds, each normalising to one shape | Decide anything |
 | `tools/` | Market queries the agents can call — quotes, fund flow, breadth, exit signals | Hold state |
 | `evolution/` | Memory utility, principles, playbooks, the holdout gate | Talk to an LLM to decide |
@@ -32,7 +32,7 @@ with the one store that cannot be rebuilt.
 
 | File | Holds | Rebuildable |
 |---|---|---|
-| `data/memory.db` | Themes, predictions, principles, playbooks, virtual portfolio | **No** — back it up |
+| `data/memory.db` | Themes, predictions, principles, playbooks, and the trader book — `virtual_portfolio`, `position_exits`, `theses`, `decision_snapshots`, `learning_candidates` | **No** — back it up |
 | `data/market_snapshots.db` | News items, market snapshots | Yes, by re-ingesting |
 | `data/market_history.db` | Full-market daily K-lines, ~1.1 GB | Yes, slowly (`init-history`) |
 | `data/activity.db` | The live activity feed | Yes, it is a feed |
@@ -73,6 +73,57 @@ review (T+5)
 
 Nothing in that chain asks a model whether it did well. See
 `docs/GOLDEN_PRINCIPLES.md`.
+
+## The trader book
+
+A forecast that becomes a trade: one execution chain, one information
+boundary, three outcomes that never overwrite each other. The target state
+is `docs/TRADER_CORE_DESIGN.md`; what actually exists is
+`docs/TRADER_CORE_IMPLEMENTATION.md`.
+
+**Ownership is stored, never re-derived.**
+
+```
+theses.id ──▸ virtual_portfolio.thesis_id ──▸ position_exits.thesis_id
+```
+
+`theses.position_id` also points back, but the two forward columns are the
+ones that survive a position being re-opened. "The nearest live thesis with
+this code" is not an ownership relation — with two traders on one stock it
+books A's result against B's idea, which is a bug this repo has already
+paid for. There is no separate fills table: the entry fill *is* the
+position row, and the ledger entries *are* the exit legs, so the resolvable
+chain is `thesis → order → exits`.
+
+**The decision boundary is frozen when the decision is made.**
+`decision_snapshots` records the declared inputs, `information_cutoff` (the
+latest instant the decision was allowed to use — not the time the job ran)
+and the producer refs. `BEFORE UPDATE` / `BEFORE DELETE` triggers
+`RAISE(ABORT)`, so append-only is enforced by the database rather than by
+every caller remembering; a revision is a new row naming the one it
+supersedes. `attribution.verify_snapshot` recomputes the covered hash, so a
+rewrite that got past a dropped trigger is still detectable.
+
+**Three outcomes, three stores** (design §9):
+
+| Outcome | Reads | Answers |
+|---|---|---|
+| `attribution.forecast_outcome` | `predictions` | did it beat the market over the declared horizon |
+| `attribution.trade_outcome` | `position_exits` | what the position actually realised |
+| `evolution.process_quality` | episode records | how the decision was made |
+
+A correct forecast and a losing trade coexist, and so do a wrong forecast
+and a win. Closing a position never writes the prediction's label. A thesis
+that never filled reports `fills=0` with `return_pct=None` rather than a
+zero return: "did not trade" and "traded flat" are different facts, and
+only one of them is evidence about skill.
+
+**Unvalidated experience is quarantined.** Candidates land in
+`learning_candidates` and there is no promotion API to call. Decision
+prompts carry rule fields only — never `hit_rate`, `wins` or
+`total_trades` — and raw lessons are research-only, so an unapproved lesson
+cannot reach a morning or chat decision context. Same principle as the
+grading chain above: nothing asks a model to rate itself.
 
 ## Frontend
 

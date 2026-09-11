@@ -17,8 +17,8 @@ Start with `ARCHITECTURE.md` for the domain map and layering.
 Enforced mechanically by `scripts/lint_harness.py` (run in CI). Violating
 one fails the build; the error message tells you how to fix it.
 
-1. **Layer direction.** `sources → data → tools → pipeline → agents →
-   server`. Never import backwards. Cross-cutting (`config`,
+1. **Layer direction.** `data → sources → tools → evolution → pipeline →
+   agents → server`. Never import backwards. Cross-cutting (`config`,
    `http_client`, `notify`) may be imported from anywhere.
 2. **No LLM grades its own output.** Utility of a memory, principle or
    playbook comes from market data only. See `docs/GOLDEN_PRINCIPLES.md`.
@@ -38,6 +38,7 @@ one fails the build; the error message tells you how to fix it.
 | What rules keep it coherent? | `docs/GOLDEN_PRINCIPLES.md` |
 | What is the strategy, and does it work? | `docs/strategy_evaluation_2026-09.md` |
 | What is being built next, and why? | `docs/self_improvement_roadmap.md` |
+| What is the trader core, and what of it exists? | `docs/TRADER_CORE_DESIGN.md` (target) · `docs/TRADER_CORE_IMPLEMENTATION.md` (built) |
 | What is in flight? | `docs/exec-plans/active/` |
 | What was decided and shipped? | `docs/exec-plans/completed/` |
 | What do we owe? | `docs/exec-plans/tech-debt-tracker.md` |

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="ZlvRuupB5WETtbK4UQaueB">
+<head data-page-node-id="EGl7kFmKCmDEwZLjvVLg6q">
+<meta charset="utf-8" data-page-node-id="iMQ7QljsvjwvjFz7BH2NML">
+<meta name="viewport" content="width=device-width,initial-scale=1" data-page-node-id="dGC2w3SDQy6I09f6B9jVrV">
+<title>AlphaAgents · Trade Learn Evolve 交易员核心设计</title>
+<style>
+:root{--bg:#f5f7fa;--paper:#fff;--ink:#172a3a;--muted:#526677;--line:#dbe3eb;--blue:#185fa5;--soft:#eaf3fc;--teal:#0f6e56;--green:#edf7f3;--amber:#805116;--warm:#fff5e7;--red:#963b32;--rose:#fff0ed}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}main{max-width:1140px;margin:auto;padding:42px 28px 72px}header{padding:34px 38px;background:var(--paper);border:1px solid var(--line);border-top:5px solid var(--blue);border-radius:12px}.eyebrow{color:var(--blue);font-size:12px;letter-spacing:2px;font-weight:650}h1{font-size:42px;line-height:1.2;margin:12px 0 16px;letter-spacing:-1px}h1 small{display:block;font-size:23px;font-weight:550;letter-spacing:0;margin-top:13px}h2{font-size:25px;line-height:1.4;margin:0 0 17px}h3{font-size:18px;line-height:1.5;margin:18px 0 8px}p{margin:9px 0 15px}.lead{font-size:20px;max-width:920px}.meta{font-size:13px;color:var(--muted)}.badge{display:inline-block;padding:2px 9px;border:1px solid var(--line);border-radius:5px;font-size:12px;margin:0 6px 5px 0;background:#fff}.bad{background:var(--rose);color:var(--red);border-color:#eed2cb}.good{background:var(--green);color:var(--teal);border-color:#cae5da}nav{display:flex;flex-wrap:wrap;gap:9px 22px;margin:24px 0;padding:18px 23px;background:#fff;border:1px solid var(--line);border-radius:10px;font-size:14px}section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:30px 34px;margin-top:21px}.num{font-size:12px;color:var(--blue);display:block;letter-spacing:1.4px;margin-bottom:6px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:20px 0}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:19px 21px;border:1px solid var(--line);border-radius:9px;background:#fafcfe}.card h3{margin-top:0}.card p:last-child{margin-bottom:0}.card.blue{background:var(--soft);border-color:#ccdeef}.callout{border-left:4px solid var(--blue);background:var(--soft);padding:17px 21px;margin:20px 0;border-radius:0 8px 8px 0}.callout.warn{background:var(--warm);border-color:#c99543}.callout.green{background:var(--green);border-color:var(--teal)}ul,ol{padding-left:23px;margin:10px 0 18px}li{margin:6px 0}strong{font-weight:650}table{width:100%;border-collapse:collapse;font-size:14px;margin:17px 0}th{text-align:left;font-weight:650;background:#edf2f7;color:#243d54}th,td{padding:12px 13px;border:1px solid var(--line);vertical-align:top}td:first-child{min-width:105px}code{font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#eef2f6;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}pre{background:#f1f5f9;border:1px solid var(--line);border-radius:8px;padding:18px 20px;overflow:auto;font:13px/1.9 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}pre code{background:none;padding:0}.small{font-size:13px;color:var(--muted)}.flow{display:flex;align-items:stretch;gap:12px;flex-wrap:wrap;margin:18px 0}.flow>div{flex:1;min-width:140px;border:1px solid #cbddea;border-radius:8px;padding:15px;background:var(--soft)}.flow b{display:block;margin-bottom:4px;color:#174d7c}.flow span{font-size:13px;color:#385b7c}.divider{border-top:1px solid var(--line);margin:25px 0}.path{display:block;font-size:12px;color:var(--muted);margin-top:6px;word-break:break-word}details{border:1px solid var(--line);border-radius:8px;padding:13px 17px;margin:13px 0}summary{cursor:pointer;font-weight:600}footer{margin-top:25px;font-size:13px;color:var(--muted)}.scroll{overflow-x:auto}
+@media(max-width:760px){main{padding:18px 13px 40px}header,section{padding:23px 20px}h1{font-size:31px}h1 small{font-size:20px}h2{font-size:23px}.lead{font-size:18px}.grid,.grid.two{grid-template-columns:1fr}table{min-width:650px}nav{gap:8px 17px;padding:14px 18px}body{font-size:15px}}
+@media print{body{background:#fff;font-size:11pt}main{padding:0;max-width:none}header,section{border-radius:0;padding:18px 0;border-left:0;border-right:0}nav{display:none}.card,table,pre{break-inside:avoid}h2,h3{break-after:avoid}a{color:inherit}details{break-inside:avoid}.scroll{overflow:visible}table{min-width:0}h1{font-size:30pt}}
+</style>
+</head>
+<body data-page-node-id="JepiygalugPbWfYKipxO9q"><main data-page-node-id="NonAMI52H06mlsBwoP46OF">
+<header data-page-node-id="HsWe0BkOiOilbwaPalEh0K">
+<div class="eyebrow" data-page-node-id="p7JxBAB1vNXKHHiQJuD1y9">ALPHAAGENTS / ARCHITECTURE PROPOSAL / 2026-09-11</div>
+<h1 data-page-node-id="HuobwbFZyOXRy6GzNKdo5g">Trade. Learn. Evolve.<small data-page-node-id="FyYKHRGleDBwaAAvX8qU2V">把“模拟交易员”变成系统的第一性对象</small></h1>
+<p class="lead" data-page-node-id="P7EHHMxrH5T0Gj0XgiQoYo">不是让一组 Agent 更频繁地生成市场报告，而是让一个持续存在的交易员，在有限信息与资金约束下行动，承担结果，从证据中学习，再通过受控实验改变自己的行为。</p>
+<p data-page-node-id="F8IwhSMhg6QgD9ne0ScXI9"><span class="badge" data-page-node-id="iWZXey2FHh6PMaG6TGTqEP">设计提案 · 待确认</span><span class="badge" data-page-node-id="xV1wlMzwaU5mkwwGP3DJFm">基于本地源码静态核查</span><span class="badge" data-page-node-id="uQ8vNpBRbk58ThfHAdDiCg">未修改交易逻辑</span><span class="badge" data-page-node-id="DCVwdv7V5Ny2KJ3tnWk4Dj">不涉及实盘接入</span></p>
+<div class="callout" data-page-node-id="QQeWnLuY9EvQyTyX3gGDSK"><strong data-page-node-id="WlETHU4Qa7EyX8lXirX1co">核心裁决：</strong>保留现有交易与研究基础，把架构中心从“任务 → 报告”迁移为“交易员 → 决策事件 → 成交与账本 → 经验 → 策略版本”。<br data-page-node-id="DgmyEsK2nptbXwbeNwuIBp"><strong data-page-node-id="AQS6g330W3oZtWzKQrrPlA">实施顺序：</strong>可信交易事实 → 可归因学习 → 可验证进化。不能反过来。</div>
+<p class="meta" data-page-node-id="Cc5VmuUipgm5LeQNiPVo5B">审视范围：架构与原则、交易员配置、订单/仓位/净值、学习回流、holdout、入口与前端。未读取业务数据库、未重跑收益研究、未运行项目测试；下文静态发现不等同于对历史实绩的测量。</p>
+</header>
+<nav aria-label="设计目录" data-page-node-id="hE9dRRN6nfK36TeD3fCDK5">
+<a href="#north" data-page-node-id="FZI5xNja1qz4B1QeaeFHvX">01 核心定义</a><a href="#audit" data-page-node-id="Kj8P2QLupBK3XU73ZdwjuD">02 现状证据</a><a href="#trader" data-page-node-id="Gb6IVnT1f1WACBnhTObbvx">03 交易员模型</a><a href="#runtime" data-page-node-id="fFt9Ywr6TZMhqgCZz8HxLf">04 运行架构</a><a href="#trade" data-page-node-id="lH4GDT0my3F3QKHwvIBIkC">05 Trade</a><a href="#learn" data-page-node-id="cuCkvaZTjEFqSkJWqGxSkq">06 Learn</a><a href="#evolve" data-page-node-id="QoVrOkcA1vpCdriOcslopV">07 Evolve</a><a href="#evaluation" data-page-node-id="MjKgA6XyQevsXhfyRluq67">08 如何证明更好</a><a href="#product" data-page-node-id="sScwD9mViGz9drbKPHFUup">09 产品形态</a><a href="#migration" data-page-node-id="9JBaV4bBbfyZq7gOFhbQFB">10 迁移计划</a><a href="#acceptance" data-page-node-id="g8BNWgMBAtb8O5Qwq5xnBF">11 验收契约</a><a href="#decisions" data-page-node-id="yQiCPOwFjnvIZ8afmXB7HQ">12 设计决策</a>
+</nav>
+<section id="north" data-page-node-id="IzCh2PrPX5bPWAEPF6rT85">
+<span class="num" data-page-node-id="d3HlbAvR4gJtmMDwDa0v28">01 / PRODUCT THESIS</span><h2 data-page-node-id="LKtOO0xWOqMHskm8QzAjEE">项目应回答的，不是“今天分析了什么”</h2>
+<p data-page-node-id="X8IvBbW9v0WEttozx1V6aS">而是四个连续的问题：<strong data-page-node-id="FL2pFpWgSxZdAk4SsxOaVZ">我现在相信什么？我因此做了什么？市场与执行结果证明了什么？下一版行为为什么值得改变？</strong></p>
+<div class="grid" data-page-node-id="altOZhVKLDzemPk6Et0vIQ">
+<div class="card blue" data-page-node-id="c3fNkAeyfCbBKKX5GQjsfw"><h3 data-page-node-id="kKb4uwxMaGfLP84zHgfFCO">Trade · 行动并承担结果</h3><p data-page-node-id="rLXoeO0pGwL9AHdSv9ZLJ4">有预算、有仓位、有约束，能开仓、持有、减仓、退出，也能明确拒绝交易。每次决策有当时信息、理由、失效条件及可核对的后果。</p></div>
+<div class="card blue" data-page-node-id="imE2Da8TcpDNVehMxQEYl4"><h3 data-page-node-id="892XFdwToGEDEA9BBEdUHO">Learn · 从结果提出假设</h3><p data-page-node-id="jl9h7a0JLFvKh41VZqOVEK">区分判断错、定价错、规模错、执行受阻与规则违约。产物是带来源、适用范围和反例的经验候选，不是一段自动生效的“心得”。</p></div>
+<div class="card blue" data-page-node-id="iVeD6v42chTDnEANUwtQ01"><h3 data-page-node-id="MCachxczlKBMBiYD6JoiJC">Evolve · 通过证据换版本</h3><p data-page-node-id="C096CTdxKWJakBFZA4SYGy">冻结候选策略，在后续未参与开发的数据上与旧版比较。通过才晋升，失败保留原因，证据不足就等待。没有“每天必须进化”。</p></div>
+</div>
+<p data-page-node-id="vjFLjeStbQEnqaueqmoJCm"><strong data-page-node-id="6WmgWxjN0u03SgQ0yUJF5I">“模拟”应模拟交易约束，不是模拟确定性赚钱；“交易员”应有持续身份，不是让每个定时任务临时扮演一个人。</strong></p>
+<ul data-page-node-id="yWKm2kmJgG7IT0aGgoO7T8"><li data-page-node-id="xrCgpmPW5wUR7Ar8qTFGS3">报告是交易状态与证据的读模型，报告生成失败不应阻断记账、风控或标签成熟。</li><li data-page-node-id="TnbPYW9WtGFGBiUAZUkVmv">不追求交易次数、Agent 数量、记忆条数或版本发布频率。这些是活动量，不是能力。</li><li data-page-node-id="C3BF7jTXIUGw0A88qQDnSc">目标是在预先限定风险与资源预算内，证明策略相对冻结基线有可重复的净表现改善；不能用更大风险买到“进步”。</li></ul>
+</section>
+<section id="audit" data-page-node-id="A0xYUQAD1ixJAxlzL3QvWa">
+<span class="num" data-page-node-id="GclWaB72NRaZKxU9lXAv6S">02 / EVIDENCE BEFORE DESIGN</span><h2 data-page-node-id="dpEUjyWzzzK72jvHFiJmXx">现状：已有交易员雏形，但闭环还不可信</h2>
+<p data-page-node-id="K2QQgZmjrjkwfsmfB2IUQs"><span class="badge bad" data-page-node-id="Wavr0stFqzefZAxi9s9yoL">架构审视：REWORK</span>不意味着全量重写。现有 <code data-page-node-id="27K1acR4y6gGHOnTeYEjAt">Trader</code>、按交易员管理订单与持仓、thesis 失效检查、概率评分、经验注入等值得保留。问题是它们的事实契约与控制边界尚不统一。</p>
+<div class="scroll" data-page-node-id="J6ShX6cAtATm2dgEWqM0ja"><table data-page-node-id="N7LukPQQa4rOnyKGCbVt8s"><thead data-page-node-id="ic8eCDJ0XhSCVKKNSjAJv8"><tr data-page-node-id="KiyjMzbWMId7F5mmTeQTCX"><th data-page-node-id="2AGp0YdWbCK7rUU3pBhdCk">表面能力 / Price</th><th data-page-node-id="B2gDo2A3xWcFCa0nw9Hpnn">源码证据 / Volume</th><th data-page-node-id="g6kzE9XoiWcTfc5BifZzeh">设计含义</th></tr></thead><tbody data-page-node-id="zJfVlVroDo2SglWNGW5Xf6">
+<tr data-page-node-id="3yC7k1GEqvTFM79l337fda"><td data-page-node-id="TrjRtSNhKgME7HVJH5BdQy">持续的模拟交易员</td><td data-page-node-id="Bm1ICsCvwAa82iZcXRAEJf">已有身份、资金、提示词、风险上限、周期配置；<code data-page-node-id="GaPrx94NvCN6aQfoBiSOpM">manage_book</code> 按交易员执行订单检查、持仓与 thesis 管理。<span class="path" data-page-node-id="roQkGBNUfTOMAYJUptoCIg">alpha_agents/data/trader.py:58–85<br data-page-node-id="YjZ5eiXBWtyKzG35p12ucN">alpha_agents/pipeline/tasks/book_manager.py:29–109</span></td><td data-page-node-id="WLGnvDkO9DR2nSyiWqY9Ga">复用其语义；将 YAML 配置提升为稳定身份 + 版本策略 + 持久状态，而不是增加更多 persona。</td></tr>
+<tr data-page-node-id="sui1gHf9B7s2WTGepktkAI"><td data-page-node-id="XN81BiR1K4AWXSJ0Tl2lbz">账户净值能度量能力</td><td data-page-node-id="4pkvQ8A6bEcOsBmTZZfTua"><code data-page-node-id="LKvc3xNDNZflxBhTSqO7Db">get_available_capital</code> 返回初始资金减未平仓成本；净值再加当前市值。已实现盈亏不进入现金，空仓时该计算回到初始资金。<span class="path" data-page-node-id="sm25jPd23FjrZEJFNRAhzo">alpha_agents/data/portfolio.py:251–259<br data-page-node-id="xSJyVnl2o3RCF4nzFzdz31">alpha_agents/data/portfolio_risk.py:159–169</span></td><td data-page-node-id="2qE6JBHND9Vl0RVbWCxA7W"><strong data-page-node-id="VgiDIFwsCYSiz16sBE8bda">P0：</strong>先建立现金/成交账本，否则收益、回撤、资金规模和进化评价都会失真。</td></tr>
+<tr data-page-node-id="mB0iM6SW9Db1GJbplB3jyB"><td data-page-node-id="B5KmnCXhizmhMF5zFnh8l3">完整一笔交易的损益</td><td data-page-node-id="bTKChqcNxK2HncGiViTixV">部分退出累加 <code data-page-node-id="IW1gbyjSxBEDwm2xAxyR7l">return_amount</code>，最终退出却把剩余数量的损益覆盖写入。<span class="path" data-page-node-id="0sJDm4Z1GunE7JOyJqv9gB">alpha_agents/data/portfolio.py:853–876、983–995</span></td><td data-page-node-id="tKAYctrGegGoinjy72LoIq"><strong data-page-node-id="RCLFJRdFFZdH09aEUsRo3F">P0：</strong>成交明细与累计记账必须是事实来源；仓位只是投影，不能代替账本。</td></tr>
+<tr data-page-node-id="S09kH72O84YHgZbHWROkZO"><td data-page-node-id="M5ZHsqvKB4khn00zEf9daU">经验属于自己的交易员</td><td data-page-node-id="upic7v47whZCAaJiKvRCaG">成交按 <code data-page-node-id="RhCyqpTiLaWOh9iegtGAVJ">get_active(code=code)</code> 找 thesis；平仓反馈按股票和日期找最近 prediction，未用显式来源 ID 或 trader 限定。<span class="path" data-page-node-id="HPXIAT803Xc6VjSHQQxM8E">alpha_agents/data/portfolio.py:709–713、1022–1049</span></td><td data-page-node-id="VQHLeheTS2QWw2lSPE4tRf"><strong data-page-node-id="ddACm0HsQJIkuIsM7KF7yN">P0：</strong>全链路身份与来源 ID；禁止启发式猜测“这笔结果属于谁”。</td></tr>
+<tr data-page-node-id="c530dSE1ijecWpl3bgeSae"><td data-page-node-id="3U367sQDSnFwmGpwz0H85J">有闸门，所以受控进化</td><td data-page-node-id="1ABOPGuCMx5raPCkRs9z0B"><code data-page-node-id="R9zZSGwhtQHT3NXvf32bx9">run_gate("daily_playbook", today, today)</code> 后未检查结果，仍更新和创建 playbook；新原则与 playbook 可直接 active。<span class="path" data-page-node-id="1bZXCZ5ptmrJVXirZVW7rH">alpha_agents/evolution/lessons.py:237–276<br data-page-node-id="0iVdRgzuRMeQymQtxyO5fV">alpha_agents/data/memory_store.py:1301–1314、1381–1390</span></td><td data-page-node-id="o5PHnuAS0AZwmkOu84Zk4L"><strong data-page-node-id="MJPJFeV4UBrfuVMh0Vh7Xn">P0：</strong>“记录验证结果”不是“阻止未验证行为”。只有一个晋升入口可以改变活动版本。</td></tr>
+<tr data-page-node-id="Xb6gVG7LT7PTgUIoVEJMF7"><td data-page-node-id="OUEhlViVRhG1R3r03EYLab">概率评分即交易员成绩</td><td data-page-node-id="mxkSMoNhc0IFwAoAknNG2K">晨间 prediction 的概率由 <code data-page-node-id="buzHlF2sF9SyclA1siRB4u">confidence_to_prob</code> 映射；评分定义为固定周期相对市场超额；平仓反馈又覆盖 prediction 的 hit/week_return。<span class="path" data-page-node-id="mDs7UOIhznM7p5lMAfEkv3">alpha_agents/pipeline/tasks/morning_scan.py:647–659<br data-page-node-id="Jn4DuiNpyrct6UMUeg7HY7">alpha_agents/data/scoring.py:261–282<br data-page-node-id="jdbnrtQrm70zdnGKyDl1ap">alpha_agents/data/portfolio.py:1043–1049</span></td><td data-page-node-id="SWFFGmAtFUE3uBd4DORiPs"><strong data-page-node-id="kcJeT3kFUOJ0EymQDi0yr2">P1：</strong>预测质量、交易损益、纪律表现必须分开；概率事件需由决策显式声明。</td></tr>
+<tr data-page-node-id="Fsfl94SzJ1kjSZSq0HRCGN"><td data-page-node-id="V0J4R8fjh8pBvw6VUJdxwS">按证据更新规则</td><td data-page-node-id="MMlnyH46t5ilrcAh309Nbs">holdout 接受条件是 Brier 均差不超过容差，t 值不控制晋升；playbook 存在 5/10 笔的降级/加权阈值。<span class="path" data-page-node-id="3qFnqzDXaE5eRczD3as8Cu">alpha_agents/evolution/holdout_gate.py:96–126<br data-page-node-id="euBtWcsYHEaCxvC01JIXaw">alpha_agents/evolution/playbook.py:22–27</span></td><td data-page-node-id="VWx5qjNtjZoPxwmro96GZM"><strong data-page-node-id="E0L3X56LAeoNtfpbv2FADD">P1：</strong>样本描述与生产变更不能共用低门槛；遵守项目 n≥50 底线，并报告独立窗口与不确定性。</td></tr>
+</tbody></table></div>
+<p class="small" data-page-node-id="tQna3hdFyjROAAfDiDgDJK">P0 表示阻断可信闭环的结构性问题；P1 表示学习与评价的高优先级缺陷；不是实盘事故等级，也不声称已经测出它们造成的历史损失。</p>
+<div class="callout warn" data-page-node-id="kFD5CKBO7pXvp2IDjDbHCI"><strong data-page-node-id="CCg0RKDyT5EaDVkJDlywMC">另一项需要先对齐的契约：</strong><code data-page-node-id="XY6WGI60oZz1IWq1m2IBrT">AGENTS.md</code> / <code data-page-node-id="BmAeyo3CJ7Dj9K4pHhmV3j">GOLDEN_PRINCIPLES.md</code> 的层序与实际 lint 不一致。<code data-page-node-id="tYdPXPvJY0yp298BcgMEb0">ARCHITECTURE.md:11</code> 与 <code data-page-node-id="jqNMwvf2DCudGjRenykGXC">scripts/lint_harness.py:35</code> 对齐为 <code data-page-node-id="IPGBfzUfOyrDkTZ6fEASBS">data → sources → tools → evolution → pipeline → agents → server</code>。箭头表达层级排序，较后层可以依赖较前层，不是数据流方向。迁移前应明确并统一，不靠增加 lint 豁免掩盖冲突。</div>
+</section>
+<section id="trader" data-page-node-id="bSyxmTPigWhOWphsONa5rJ">
+<span class="num" data-page-node-id="3xj0EPQLE7FrS7viVARswA">03 / DOMAIN MODEL</span><h2 data-page-node-id="KNpyAUModNFgwLY1YPRJek">Trader 不是一个 prompt，也不是一个超大类</h2>
+<pre data-page-node-id="rGWSqJGobWjIJHSiLloDrs"><code data-page-node-id="h62h0I9GpqDjLkVAD3jHWi">Trader = Identity + Mandate + ActivePolicy + Book + WorkingState + EvidenceHistory
+
+身份持续存在；策略按版本变化；资金由账本计算；经验有来源与时间边界。</code></pre>
+<div class="scroll" data-page-node-id="Byd1eEe4vTLW7KQ567o99O"><table data-page-node-id="P6o9EQUrI92C7yaijCqId3"><thead data-page-node-id="uc55SA14ZO0VMZEwigLU3R"><tr data-page-node-id="oAHnUAmhcsHQcxy4Htkp9Q"><th data-page-node-id="RQvBWPxSNXsknaLZceiUo0">对象</th><th data-page-node-id="h0UTQfSW8Yq7iRWO5xBMxT">职责与关键字段</th><th data-page-node-id="NFoGDsweGKLEBBQDx9GSjC">谁可以改变</th></tr></thead><tbody data-page-node-id="dB3RP3RgagThbZ6IWZtDCL">
+<tr data-page-node-id="Aq0HQOzkn9RkkyWfKOhUT2"><td data-page-node-id="mGCn6jePm1WjYzXp1DU108">TraderIdentity</td><td data-page-node-id="Aq0lPlD85JPuezoHN8twnB"><code data-page-node-id="95pH3efWolPrBTKqGkafRt">trader_id</code>、名称、父系 lineage、创建时间；不随策略升级换 ID。</td><td data-page-node-id="Da101h3G9P3viEKQbLPt1A">用户或管理控制面。</td></tr>
+<tr data-page-node-id="dwxpDgxhxadxnUXLK0u4zG"><td data-page-node-id="XdEij9AAjxf0GnZGOt7yGp">Mandate</td><td data-page-node-id="wwwcdayWzuWnFIObwBjnPd">资金授权、允许的市场/工具、风险硬上限、计算预算、策略边界；版本化保存。</td><td data-page-node-id="MhHsDEPi8R2TnWg6gXPDDB">外部授权。学习系统不能自行放松限制。</td></tr>
+<tr data-page-node-id="YNKhSVSCqWWgeafX8creiy"><td data-page-node-id="HKnA8BkFl6hdlU8LBkYNlG">PolicyVersion</td><td data-page-node-id="9tHqOxKsUM9U8AhAtpARyB">prompt 内容哈希、模型配置/已知版本、工具契约、选股/定价/持仓/退出策略、检索策略、批准知识快照、适用环境。</td><td data-page-node-id="a3xm1yHOOqeBb38bE0IKAW">候选可以生成；活动版本只能经晋升服务切换。</td></tr>
+<tr data-page-node-id="Q9WPGZaEMfsA5nnxHEj1zT"><td data-page-node-id="dHEEADfRw4kCLnlViSz2f5">TraderRuntime</td><td data-page-node-id="tj1gRqO9MXRRFoJWSt0ZQH">当前工作状态、待处理事件、读到的信息边界、活动仓位及订单引用；调度多个组件，不吞并其实现。</td><td data-page-node-id="EELkN2fLDQQFeiOUQoUisr">合法事件状态转移。</td></tr>
+<tr data-page-node-id="bKnKbgqqjCGmARYRPgNLTn"><td data-page-node-id="fefm9VeCydbkkCxsHpXKWz">Decision / Thesis</td><td data-page-node-id="B7cBuhaL9fbg1OxX6a9AUQ">决策目标、预测事件、概率、期限、证据、反证、动作、订单约束与失效条件；不记录不可验证的“心理”。</td><td data-page-node-id="q6EU87idyGXOYOpnMvAyVw">追加新修订，不能改写过去版本。</td></tr>
+<tr data-page-node-id="abceHrlSx9TDoMko8zd9AC"><td data-page-node-id="DLO1I5ueqzJv48lAqfiFuj">Order / Fill / Ledger</td><td data-page-node-id="GtogtPlMyj3TXTnjdyUQN2">订单意图、订单状态、逐笔成交、费用、现金/库存流水、结算批次。</td><td data-page-node-id="daai82tfHE8xpIMTU95rBw">执行与记账内核；LLM 无直接写权限。</td></tr>
+<tr data-page-node-id="ijBBmAZQBYrZuXzAoeSgws"><td data-page-node-id="bwmIn3NowPFHKfulhxy3Hj">Episode / Experience</td><td data-page-node-id="COTAazWAEq70rVxk0cVARX">从决策到结果的经历及对应经验候选；一次 episode 可含多决策、多订单、多笔成交。</td><td data-page-node-id="znnjkOU4wQzxeDqtEUjUAM">确定性归集 + 学习器提出解释；事实不可变。</td></tr>
+<tr data-page-node-id="yooZH0X1bnbgW4cBlTDqST"><td data-page-node-id="v6iAhPWy97awco26OrVcsd">Experiment / Promotion</td><td data-page-node-id="Q17Lrvukd7XxJkze8ScpWe">父子策略版本、冻结时点、数据协议、比较目标、验证结果、晋升/拒绝/回滚记录。</td><td data-page-node-id="WJ9ECYlj2YS8QXhByc0VO4">独立评估器测量，控制面按契约批准。</td></tr>
+</tbody></table></div>
+<h3 data-page-node-id="EJPY3vlMfHUy0O6uYu7XqT">跨对象追溯，不靠股票代码猜关系</h3>
+<pre data-page-node-id="RUQDFGFoZZtrciQm0ig0TX"><code data-page-node-id="kQbqebaLr2t81LYsyfaBLL">run_id / mode / trader_id / policy_version_id / snapshot_id / decision_id
+    ├─ forecast_id → ForecastOutcome
+    ├─ thesis_id → episode_id
+    └─ order_id → fill_id → ledger_entry_id → TradeOutcome
+
+Experience → evidence_episode_ids + applicable_context + counterevidence
+Experiment → parent_version + candidate_version + evaluation_protocol_hash</code></pre>
+<p data-page-node-id="8jgGnMUERFQBsmbF9ED38M">各事件只携带适用字段，主外键补全链路；同一股票可以被不同交易员独立持有。<code data-page-node-id="xMXyfqO7awqnqVE6y3T7dh">mode</code> 明确区分常规模拟、影子实验、历史回放，禁止混入一套业绩。</p>
+<h3 data-page-node-id="WVc1Q6AcdvJ6S8c3pEadlC">交易员生命周期，不等于配置文件开关</h3>
+<p data-page-node-id="FDNkzj0KyjYae8qt0Sw6Zp"><code data-page-node-id="5D2TNhAsFLkrgoBuXZFrG9">active → paused / draining → archived</code>。暂停禁止新风险，仍管理存量仓位；清算中持续处理退出；归档前应无未完成订单或未管理仓位。删除 YAML 不能让持仓失去责任人。故障状态进入保护模式，不能静默变成另一位默认交易员。</p>
+</section>
+<section id="runtime" data-page-node-id="uzy7JkAqJaxzv3HyG7JzfL">
+<span class="num" data-page-node-id="BVkfcoovYI1D1Ui2AwjwGp">04 / OPERATING MODEL</span><h2 data-page-node-id="MnUrRoVj1dRrDFpZssXN0q">一个事件驱动的交易员内核，多种时间与市场适配器</h2>
+<div class="flow" data-page-node-id="ZOQ2D4tueeegICnCLpxbJL"><div data-page-node-id="0W9dDvBkA9sqXaeNY1XHdu"><b data-page-node-id="4sr4Q1i7GIqyWvSD0lyw8U">共享世界</b><span data-page-node-id="bPfLsUUmON31Z66u1nJnak">原始数据、可见时间、行情质量、市场日历</span></div><div data-page-node-id="JgGdPcjd3EqUeyPzQTJMH4"><b data-page-node-id="HgmDrDpU9a5qiNwyikQWXd">交易员运行时</b><span data-page-node-id="kCHPxMfvsk8nCuHGjNxXcY">接收事件、读取状态、检索证据、形成结构化决策</span></div><div data-page-node-id="EpRZcgtHe7JIt4w1CYBbYT"><b data-page-node-id="Cq2SiM56V14W6EDemsB3GJ">执行与账本</b><span data-page-node-id="7wvKFaKm8HX44uJoDZjpvt">风控、订单、成交、费用、持仓与对账</span></div><div data-page-node-id="WmnH5RAb0R2iwQwUDib2Je"><b data-page-node-id="xgkz58k9oZ8SSHZMqcQZ88">证据与版本治理</b><span data-page-node-id="XojVwL3KEspH7UMnzfIRoe">标签成熟、经验候选、影子实验、批准晋升</span></div></div>
+<div class="grid two" data-page-node-id="Tkr1334rBJHCEZzwjfvnfi"><div class="card" data-page-node-id="NGjYYj09qVYxoFHNmRocEd"><h3 data-page-node-id="YztZUuhDWa7Z0Orl8sCejN">快循环：保安全，保持事实正确</h3><p data-page-node-id="gxMju8Qt8kF8ATt0xkT1gA">行情到达、订单状态变化、持仓触发条件、风险越界、交易日切换。确定性检查不等待 LLM，不等待报告，也不等待下一次复盘。</p></div><div class="card" data-page-node-id="9ibLilk4uSICTLnmma5QiT"><h3 data-page-node-id="52fVBWFYuWSwLMoH9VdHHq">慢循环：做判断，检验新行为</h3><p data-page-node-id="lPJ3KWxJmu84swqdSCuHjw">信息变化足够大时调用模型；结果成熟后归集证据；足够的新证据才发起实验。日程只触发事件，不携带策略规则。</p></div></div>
+<p data-page-node-id="3iqXs0sFwdIHvNAdX3vBeC"><strong data-page-node-id="GNfQVehvwIzcmZFW6T63Mb">优先模块化单体。</strong>一个进程内可有按交易员串行的事件队列；市场读取共享只读快照。账户内状态转移串行、不同交易员隔离执行。单写者或数据库事务配合幂等键；不急于引入消息中间件、分布式 Actor 或多个微服务。</p>
+<h3 data-page-node-id="cmDNCpYHl2k1FwvH9pJyCY">三个模式，共用同一交易内核</h3>
+<ul data-page-node-id="4P2HomWRQh6Enll2r3mpJu"><li data-page-node-id="fASRt227Uj8cyPCC6Ta80N"><strong data-page-node-id="JuIVLXoeF4bWfKlqad4Hc5">常规模拟：</strong>实时接收市场数据，只通过 PaperBroker 产生模拟成交。</li><li data-page-node-id="Wv0zuw5ePoFvH2Wlzrv5RH"><strong data-page-node-id="kCkkVpGEM0huejhBbHlFiB">历史回放：</strong>换成 ReplayClock 与历史数据适配器，仍走相同决策契约、风控、成交和记账。</li><li data-page-node-id="npevnAXu8qHCGlx5DsCJ3u"><strong data-page-node-id="J5ODKIfZ4MwCAA1aEVcN56">影子实验：</strong>冻结候选版本，独立账户与记忆命名空间；不能修改主交易员的状态或活动知识。</li></ul>
+<p data-page-node-id="3chQoXO1Xwhv8aDksRZBBE">“重放记录中的模型输出”可以要求确定性一致；“再次调用模型重新决策”是新的实验，不能承诺逐字或逐笔相同。模型名称、温度与 seed 不足以保证跨供应商升级重现，必须保留请求、返回和已知模型标识。</p>
+<h3 data-page-node-id="nPuvKjpD33CTKD7jpXmh5o">共享事实，隔离判断</h3>
+<p data-page-node-id="6eJ2EiwqPjbbZIGcD9wyQB">新闻、行情可以共享；“这个主线进入衰退”已经是推断，必须带作者、时间、版本和证据。共享推断只能作为可选研究输入，不能冒充无偏事实。实验时共同输入被冻结，避免一个候选反过来改变另一个的世界。</p>
+</section>
+<section id="trade" data-page-node-id="6zmcBiMS6KJTpgG28iy9l6">
+<span class="num" data-page-node-id="A5VQgLLsu4l2W09vmEb1Rf">05 / TRADE</span><h2 data-page-node-id="XPkR3PKBmqkJ7UsU0LNsAs">先造一个不会自欺的模拟交易员</h2>
+<h3 data-page-node-id="i5gzVqDQBJ4hZCx3YadTLG">统一的决策与执行入口</h3>
+<pre data-page-node-id="778FVJ7ZNCzuhBImdRhyUk"><code data-page-node-id="rFH7De3ulp5I2jHKANl5OJ">MarketEvent
+  → WorldSnapshot(as_of, available_at, quality)
+  → DecisionIntent(action, thesis, constraints, provenance)
+  → SchemaValidation
+  → PreTradeRisk + cash / inventory reservation
+  → PaperBroker(order state machine)
+  → FillEvent + fees
+  → LedgerTransaction + outbox
+  → Position / Cash / Equity projections
+  → Reconciliation</code></pre>
+<p data-page-node-id="Sc5nRR2ICvBmT0wijHXfY7">入场、加仓、减仓、清仓、自动保护退出全部通过这一条链。模型不能直接调用“改仓位”或“写收益”。风险拒绝、缺数据、模型无响应、主动跳过要有不同状态，不能统一当成“没有交易”。</p>
+<h3 data-page-node-id="gFiZ7vTwIDPsl9algAxHef">明确订单状态，不把“触价”当“成交”</h3>
+<p data-page-node-id="OhiMZs6IQw964Bx1d1YV1b"><code data-page-node-id="AR8dXzVQJ2I4YSeVkh9m8Q">submitted → accepted → partially_filled → filled</code>，并有 <code data-page-node-id="Haq8N057cr3Wk5ozJrcizt">rejected / cancel_pending / cancelled / expired</code> 分支。取消与成交可能交错；取消请求不自动抹去在途成交。停止损失是交易意图，不保证止损价能成交。</p>
+<div class="scroll" data-page-node-id="yukc1fkNeTE8hfT0rUkB20"><table data-page-node-id="Fip0x0wTdDE1UUl0WLEzP4"><thead data-page-node-id="5s9njA7XBcDYiQGsNz3WZm"><tr data-page-node-id="Ez4leHv7xvy3lGGyIP1MQd"><th data-page-node-id="XxTsGGsZ0s57E0OVtmfd5H">仿真契约</th><th data-page-node-id="5Klkb1TTnC6n4cx8EmdRF6">最低要求</th></tr></thead><tbody data-page-node-id="2njqzGhLuGICyWc6bZXMjP">
+<tr data-page-node-id="O9uY5nwXSrB5F1qlla0MCc"><td data-page-node-id="uI1ikk1mAr2zI9SRLqL9V8">信息时间</td><td data-page-node-id="0Zg8CFr87xPYoJRGtpLHh7">区分事件发生、发布、系统接收、决策、订单提交、成交时点。用于决策的信息必须满足 <code data-page-node-id="QfiyAO9c7HxdQb0MjKxW7k">available_at ≤ decision_at</code>；盘后完整 K 线不能生成同根 K 线内的理想成交。</td></tr>
+<tr data-page-node-id="xwzwAvw4UsuqUtH6fbD14D"><td data-page-node-id="8VVuux0pAVUiYNZbpLNknV">市场规则</td><td data-page-node-id="AcPaoBtf0PCKts87was9EF">按证券与生效日期加载交易日历、交易时段、结算、手数/零股、价格限制、停牌与费用模型。不能把一套固定常数当成全部 A 股工具的永久规则；实现阶段再核对官方规则。</td></tr>
+<tr data-page-node-id="SM9XK0Frmz5dihcACugBAV"><td data-page-node-id="aYNMd4D8I7tImBf2CHpaxj">可成交性</td><td data-page-node-id="7XdcDBmppmNl6GeBzyvxVN">校验行情新鲜度、可用成交量、价格范围、订单延迟与参与率。只有日线时，对同根 K 线先后顺序不明的情况采用预声明保守方案，不挑对策略有利的路径。</td></tr>
+<tr data-page-node-id="t7CEw47Dhb8pYbC89G28mt"><td data-page-node-id="ILA0A0QJxWq3SkOwPDd2tN">现金与库存</td><td data-page-node-id="cvr2gOaWl4Sa5oa9JfjJ7g">订单批准时冻结足够资金/可卖库存，取消或剩余失效时释放。费用按实际成交与收费契约记账；买入批次保留可卖时点，不仅保存平均价。</td></tr>
+<tr data-page-node-id="vHsFytqpokL3ImC0aKxhpr"><td data-page-node-id="HYBmFywNd3A9ImvfATu1cg">风险不可绕过</td><td data-page-node-id="r3O0CMrzhAmCDb1uMZ7zYW">提交前及成交前均验证需要动态检查的约束；全局 kill switch、单交易员暂停、数据失效保护独立于模型。紧急退出仍尊重可成交性，受阻时记录未解除风险。</td></tr>
+<tr data-page-node-id="pCBn5axrVxmbB19eOYArqT"><td data-page-node-id="7YmFXYdA2tRzj999oJ0Afl">失败与幂等</td><td data-page-node-id="dWemxLrDiAOH9EjohUwLti">唯一命令键、事件序号、数据库事务、outbox 以及消费去重。中断重试不重复成交/收费；有多 worker 时增加锁租约或 fencing，内存锁不能代替跨进程约束。</td></tr>
+</tbody></table></div>
+<h3 data-page-node-id="KILVgNBz4aBxOWxXMzZMq2">账本是唯一资金事实来源</h3>
+<pre data-page-node-id="JDYPzuwG5TqjwPGe2n0x09"><code data-page-node-id="unFg9mhWyGXxNFlPYHuite">总现金 = 初始/外部现金流 + 卖出款 - 买入款 - 实际费用 + 已发生现金权益
+可用现金 = 总现金 - 冻结现金
+账户权益 = 总现金 + 持仓按规定估值的市值 + 应收权益 - 应付款项
+净损益 = 账户权益 - 初始权益 - 净外部投入</code></pre>
+<p data-page-node-id="TyJk064F16lzLs79sPrTFd">已实现盈亏是上述流水的派生指标，不能在卖出款之外再加一次。分批卖出的累计结果从 fills/ledger 汇总，最终退出不能覆盖前面的已实现结果。分红、拆并股、退市等事件需纳入规则适用范围；缺失时标记受影响区间不适合能力评价，而不是悄悄跳过。</p>
+<p data-page-node-id="2mCLBYlKDFLUxVynLN9Zt8">价格缺失时可以保留“最后可靠估值”供运维观察，但必须标记陈旧与不确定性；不能用成本价填补后把零波动净值当作有效表现。</p>
+</section>
+<section id="learn" data-page-node-id="XVNvXRnbiid1AcsAnTqYDr">
+<span class="num" data-page-node-id="gItHCcHkCHgGNvzAvLmmUF">06 / LEARN</span><h2 data-page-node-id="OncKFDd3kGg1FNdsSSSHoc">学习单位是一段决策经历，不是一篇复盘报告</h2>
+<p data-page-node-id="JHKrUhbQOoqKfPrD93rQME"><strong data-page-node-id="L86CXjoe3bz4udU3ZYAS0L">DecisionEpisode</strong> 将机会识别、决定交易或放弃、订单反馈、持仓调整、退出、标签成熟串起来。一笔持仓可能含多次决策；一个未成交订单也能提供执行证据。不要只收集赚钱交易。</p>
+<div class="grid two" data-page-node-id="lwy7vYAgYpk8Ndt4vGScL1"><div class="card" data-page-node-id="hm4AtNFyxeAcPAoRoVwVxi"><h3 data-page-node-id="J2QzqSjkEJ1uY7zLg4N8EF">记录“做了什么”，也记录“没做什么”</h3><p data-page-node-id="pQcT4RynHkj1cR2MGyNCWC">交易、持有、放弃、风控拒绝、超时缺答、取消、未成交、部分成交、提前退出。明确机会全集与覆盖率，防止通过只记容易的样本制造高胜率。</p></div><div class="card" data-page-node-id="ygAkkKwOWS5GJuLUw9gcmG"><h3 data-page-node-id="p9p6HGpbnK2Hezg6sDLC5c">学习可以持续，策略不必持续变</h3><p data-page-node-id="Gu4WwjfFrzqSG1SMboVBLI">工作记忆可记住新事件和已作决定；账本可持续更新。可执行经验、检索权重、校准器和 prompt 都属于行为依赖，改动必须进入新版本。</p></div></div>
+<h3 data-page-node-id="dLo3WEPqRc6qy3bMJTjvxP">至少拆开三类结果</h3>
+<div class="scroll" data-page-node-id="n0Hyzk5Gd7BB1DA3FdKPQO"><table data-page-node-id="XMNscQR6TBWml5z4j3Oe1w"><thead data-page-node-id="UpxdTIqJahhoe2Upn0RRC3"><tr data-page-node-id="YUf2aiG6ovYQRmjYr6veyD"><th data-page-node-id="yhx12UAeBlcyTd2fEtxVFv">结果对象</th><th data-page-node-id="QuiZAXGoz6TwztuAwzJgjI">测量什么</th><th data-page-node-id="71vX3qZNvnRlrQyWgStcOG">不能混淆什么</th></tr></thead><tbody data-page-node-id="YvYg4Ha7zPAw0Nd7t3mgMn">
+<tr data-page-node-id="mPTsJLCSlwqG9ns8C0AhQj"><td data-page-node-id="Amd5HAqHERRI6d6x8npgiP">ForecastOutcome</td><td data-page-node-id="lwVCjQOWeorjSDdOymojlU">显式声明的目标事件是否发生，Brier / log score、校准、预测覆盖率。</td><td data-page-node-id="9svmIxClWo38ebT0Umtl0D">未买入也可验证预测；被迫提前退出不能覆盖原预测的固定期限标签。映射概率与模型显式概率注明来源。</td></tr>
+<tr data-page-node-id="EHxGeiyhE9MZziAX07kcyu"><td data-page-node-id="P8nauVV16va4H1BZQfxVnH">TradeOutcome</td><td data-page-node-id="Yzu5YGNX8vW4kcCGF2LeGl">真实模拟 fills 对应的净损益、费用、持有期、资金占用、MFE/MAE、成交缺口。</td><td data-page-node-id="5Fpt54Mn5ilcE8pOLuqtfD">看对方向但没成交不等于赚到；原预测跑赢但实际交易亏损，两项都应如实保留。</td></tr>
+<tr data-page-node-id="U5JjWE7GFraJfqEIJG0DeF"><td data-page-node-id="PSCZ4F9tvxZuE0ENUBqLkH">ProcessOutcome</td><td data-page-node-id="iXqMSIocUsz9vqATPoMzXw">是否遵守当时已冻结的决策与风险规则；是否受延迟、缺数据或系统错误阻碍。</td><td data-page-node-id="KOFp0FCnXCVYul5vQFKK4q">遵守规则不保证盈利；盈利也不豁免违规。系统故障与策略判断错误分开统计。</td></tr>
+</tbody></table></div>
+<p data-page-node-id="YUFjXCE4bHe8mcqvmHLy7M">标签有 <code data-page-node-id="lsV7cAY9eV4tMsgK7JNAxU">pending / matured / censored / revised</code> 生命周期。持仓尚未退出不能先贴盈利/亏损终局标签；预测期限按固定市场日历对齐，不因股票缺 K 线就延长。保留 <code data-page-node-id="OacsnhNcBO7ibjcZ4QlGpX">label_available_at</code>，后来的修正追加版本，不改写当年可见记录。</p>
+<h3 data-page-node-id="KKH3HNyBUBRagFoB8COECJ">经验应该长什么样</h3>
+<pre data-page-node-id="b0kBJ94xOTjbkjxXB29Izc"><code data-page-node-id="Lw83xUAb7f3EzkIuu9azCN">ExperienceCandidate
+  claim                 : 一个可以被否证的行为改进假设
+  applicable_context    : 在什么环境/条件下适用
+  proposed_behavior_delta: 相比当前版本具体改哪一处
+  evidence_episode_ids  : 正反案例，按ID引用
+  alternatives          : 其他可解释结果的因素
+  observed_n / window_n : 样本与独立窗口口径
+  data_quality          : 已知缺口、代理变量、偏差
+  status                : observation / hypothesis / testing / validated / retired</code></pre>
+<p data-page-node-id="LkjG3Lxk0CilnOZr54926N">确定性指标先计算，模型再解释与提出假设。模型可以说“可能是进入太迟”，但不能仅凭叙述把它判成原因，更不能写出“有效性评分=高”并自动启用。</p>
+<h3 data-page-node-id="zROfD3uC0nKRqECJw6mH8v">反事实用于研究，不能偷渡成历史利润</h3>
+<p data-page-node-id="Uxz3583zGYwbnC61UeM0JO">“不退出会怎样”“采用另一种入场约束会怎样”必须事先定义替代策略，并在相同信息、执行规则与资本限制下重放。结果存独立 <code data-page-node-id="bCHkcjHbJxV9EyuW27tYjP">CounterfactualOutcome</code>。不能事后寻找最优买卖点，也不能把未成交机会的最高涨幅称为损失。</p>
+<p data-page-node-id="SAZguq3BfnSHaOMGrYEBmi">某条经验被成功交易引用，只能证明共现；要证明它的增量贡献，需比较有/无该经验的冻结版本。最小可理解改动优先，但允许有依赖关系的策略包一起实验，代价是不能把收益精确归给其中某一条。</p>
+</section>
+<section id="evolve" data-page-node-id="fGcZbkuhLDWcfBYzuNhWhN">
+<span class="num" data-page-node-id="ln9wkoACGGCFTGsdTdNEU6">07 / EVOLVE</span><h2 data-page-node-id="wFFu8LK7ANJ8yJeXmAsJu4">进化的产物是策略版本，不是不断增厚的 prompt</h2>
+<pre data-page-node-id="HyFPlkfNMoikhf9Z0YGSWy"><code data-page-node-id="561IGtVcHJhPdMnXBxP4CG">observation → hypothesis → draft candidate → frozen
+                                    ↓
+                    forward shadow evaluation
+                                    ↓
+              insufficient / rejected / validated
+                                           ↓
+                            approved → promoted
+                                           ↓
+                              monitored → rollback / retire</code></pre>
+<h3 data-page-node-id="0MUwFhFKB9MKyf7SWHlQ3a">一份冻结版本要冻结所有行为依赖</h3>
+<p data-page-node-id="9eJ9KccM5bDTLOCB4lyRhX">包括 prompt 实际内容、模型配置、工具接口、选股与排序、入退出和规模策略、知识条目快照、检索排序与过滤、校准器，以及评估所依赖的仿真/数据版本。只有一个文件名或模型别名不够；冻结后文件变化不能悄悄改变实验。</p>
+<ul data-page-node-id="QC9QzHhsqG9onhlryVb9jO"><li data-page-node-id="hq7sNuGguS4hRkgu06SdcL"><strong data-page-node-id="adwEyedHcCDDYPNlZ3r4sE">学习器的权限：</strong>提出候选、追加证据、申请实验；不能改活动策略、风险硬上限、历史结果或评价标准。</li><li data-page-node-id="t9YLTSKbvqy7kEoMG9sAyk"><strong data-page-node-id="BDaX6LZ8CEJeGLsIbmtsXg">评估器的权限：</strong>基于独立结果计算指标与证据等级，不读取模型的“自我评分”作为真值。</li><li data-page-node-id="5mUexoxN9oexqapB6JrEU0"><strong data-page-node-id="vtixrjHD9y52bzHJoq4YNe">晋升器的权限：</strong>检查被冻结的协议与审批条件，原子切换一个活动版本指针，留下批准者与理由。</li><li data-page-node-id="FKRHDHhl3RgiWQgXlas9NA"><strong data-page-node-id="chLs7krmCLFPJSA2doVRoV">首版建议：</strong>即使自动评估通过，也经人工批准晋升；验证流程成熟后才考虑按窄范围授权自动化。</li></ul>
+<h3 data-page-node-id="0m99nkmWkceSKMVFXKN0TG">主版本、候选版本与非 LLM 基线</h3>
+<p data-page-node-id="XDc69IVFY9SzCnk8EGoqm3">先保留<strong data-page-node-id="sa55CwbCVTjrQn3RB4rbTA">一个主版本（champion）、一个候选（challenger）和一个冻结的简单基线</strong>。两套账户从同一账本快照分叉，此后独立持仓、独立占用资金，接受同样的原始市场流、成本模型与风险授权。不把候选强行成交到主版本账上。</p>
+<p data-page-node-id="9gRYr8bC6v79H5iOiBbxWb">比较“整个交易员”时允许其选择不同机会；比较“某个定价/退出模块”时应固定其他上游依赖。简单基线、无记忆版与冻结旧版回答不同问题，按实验目的选择，不一次堆出大量组合。</p>
+<h3 data-page-node-id="3hEWAsXOxM9RWXWbcSuDDz">拒绝必须真的阻止生效</h3>
+<p data-page-node-id="wV6KLyC3JpI5s8KV26y041">新原则不能直接 active；学习后更新现有 playbook 权重、退休条目、改变检索顺序同样可能改变行为，也要生成候选版本。因污染数据或系统故障触发的安全禁用走独立应急流程，标记原因，不能包装成已验证策略改善。</p>
+<h3 data-page-node-id="4WQZ0MdEjdfANmXPaNnaaa">切版本只改变未来，不修改已经发生的交易</h3>
+<p data-page-node-id="DwQ1NsXMRuPrh5Smj3Ldij">默认让存量仓位继续由建仓时的策略版本管理；如需新版本接管，产生显式 handover 事件。切换时同样处理未成交订单、在途决策与过期快照，不能用旧版报价偷偷在新版账户开仓。<strong data-page-node-id="5M0FD1uABb56VVCtPnG5AD">回滚恢复行为版本，不“撤销”真实记录的模拟成交或亏损。</strong></p>
+</section>
+<section id="evaluation" data-page-node-id="6DmUIBR21f1HYIIrlurclq">
+<span class="num" data-page-node-id="NpLXt7IJVB9z09t97Qucou">08 / PROVING IMPROVEMENT</span><h2 data-page-node-id="oVrdlkntX0CNOskxJGRCiE">“学到更多”与“变得更好”必须是两件事</h2>
+<div class="scroll" data-page-node-id="y9SGGR9QbF5UsEgQbU9XpU"><table data-page-node-id="rzgMJpUssYiSuyFbESjFHV"><thead data-page-node-id="xZZvBICWzlqHsbc1PxTdOX"><tr data-page-node-id="bjUMIOF6M1ErnKRng2R0cG"><th data-page-node-id="oBcf9JG2LYJRrvTEpqHpFf">评价层</th><th data-page-node-id="T9oj6agdCygwWIphGVDwtY">关注指标</th><th data-page-node-id="nONcTONO7fsdLf8g1RSg0P">门槛原则</th></tr></thead><tbody data-page-node-id="dq01VfH0T6uw5tqyfeNdOQ">
+<tr data-page-node-id="UGxKLQqea3GaO0JNOlLBSt"><td data-page-node-id="YExoR05cSgmMRBjV5YRmBk">完整性：能否相信结果</td><td data-page-node-id="zhAs444oX347As8WNPKetW">账本对平、数据质量、来源链完整、规则违约、影子隔离、事件重放一致性。</td><td data-page-node-id="u3EOuIJynfNAmzmCJvH4kV">硬门槛。此层失败，收益和学习结论不进入晋升评价。</td></tr>
+<tr data-page-node-id="twCuHFqIOoj4PsqXpTokyf"><td data-page-node-id="BGev5XDc2hBiUZpgGv1h3C">交易：是否更有效</td><td data-page-node-id="SKeXS5gqd4sXGt1OV1ZqNi">扣费净值、与可实施冻结基线的差异、回撤/尾部风险、敞口、换手、容量、成交率与资源成本。</td><td data-page-node-id="E9fzugPFSBNAWYMzWnGbWI">同资金/风险/成本协议比较；事先声明主指标与不能退化的约束。</td></tr>
+<tr data-page-node-id="Ye21yYUBOC6MG43oUWyxi7"><td data-page-node-id="7dFDCASfPfCvOX1jEgja2B">判断：是否更准确</td><td data-page-node-id="S0sslI3EoMDqHZx6VUVpeG">匹配目标事件的 Brier / log score、校准、覆盖率；风格残差作为诊断。</td><td data-page-node-id="BGAFnzSdEJhnGKZQbo8m34">不允许换预测事件、挑交集或放弃难题后仍用相同分母。不同目标不能混池。</td></tr>
+<tr data-page-node-id="ZencPJpTQgDgFqIx6YfgbZ"><td data-page-node-id="VaS7U8dVwHB2NnPOanvNRy">进化：是否有增量</td><td data-page-node-id="ug5hFtTgY93e0IkKi05Vac">冻结候选相对父版本的前向配对差异、置信区间、独立窗口数、不同环境稳定性。</td><td data-page-node-id="0p6p1pUq9rmuPfv1oX47Y3">不能因“未发现显著变差”就声称“证明不退化”或“证明改善”。</td></tr>
+</tbody></table></div>
+<h3 data-page-node-id="uEEDRCKmgXSsw8rEGfveZr">两种对照不可混为一谈</h3>
+<ul data-page-node-id="FODuw7OLy8VCwNqUkQXBhW"><li data-page-node-id="vdW7DzA2f0jdXRQ5PRibxC"><strong data-page-node-id="9Bv2ZctMzCQBHKDScxe6ck">预测对照：</strong>冻结共同机会面板、目标、时间戳与期限；记录全部输出和缺答。缺答的覆盖率/处理规则预先定义，不能只比较双方恰好都看好的股票。</li><li data-page-node-id="Dj7q7Zcwa1qnsXfItteXs9"><strong data-page-node-id="Y4GRqhyaDj5US68qMupsSY">整本交易对照：</strong>从相同初始状态分叉后各自行动；按对齐的时间区间比较账户表现。候选选股不同不应被交集筛掉。</li><li data-page-node-id="J3KtfV0Us0heXynN4Hb5G7"><strong data-page-node-id="1kbxVDjvE1laVAmZzbJJhA">不同交易员横向排名：</strong>风险授权或资金规模不同，不能直接以金额排名。先统一评价协议或分组展示，提示非可比性。</li></ul>
+<h3 data-page-node-id="Cbo0rcMXJDwE0khC4412PJ">前向、隔离、预注册</h3>
+<ol data-page-node-id="Jo8Nzl79lMlC9opogjSAKo"><li data-page-node-id="ekUlSEHCDInJnCvqKCRntT">候选冻结时登记训练数据可见截止、评价区间、主指标、最小效应、容忍边界、风险约束与检查时点。</li><li data-page-node-id="lsrJZmNXnsIuAmFm57X0tG">评价记录不得流入候选构造、反思或知识检索。未来重新开放给研究的数据，不能继续充当未污染 holdout；新候选等待新的前向区间。</li><li data-page-node-id="Wlo7RthUHEj5mU1EKUPKYV">重叠持有期和同日股票结果相关，不能把它们当独立观测做简单 t 检验。按时间块/市场簇测不确定性，并清除训练与验证标签区间的重叠泄漏。</li><li data-page-node-id="GM6V2rDVQ8KyPcEVoD7LIl">遵守项目 <strong data-page-node-id="DrWxKvUTaZ3EYiEWEs5BiW">n≥50</strong> 的最低治理要求，同时报告样本单位、独立窗口数、环境覆盖和置信区间。50 笔不是充分证据，更不是50笔高度相关交易即代表50次独立试验。</li><li data-page-node-id="dcagA1C1nBkZHM4JFcwe9J">控制候选数量、重复查看和多重比较；不让“每天试一次直到偶然过关”变成进化机制。预算、停止规则及统计处理在实验前约定。</li><li data-page-node-id="bSXAdpIlOd3TjIgIbT7vpA">若主张收益改善，应给改善区间与风险约束；若主张低成本下不劣，应检验事先定义的不劣边界，并给成本收益。证据不足保留旧版。</li></ol>
+<div class="callout warn" data-page-node-id="7jy3ZBAfx1hDYgHJTfqOYd"><strong data-page-node-id="GpqTZdmdFoSKgtEBmp9Lnu">两个无法靠漂亮回测消除的限制：</strong>历史回放无法完全排除模型预训练中已知未来的信息；PaperBroker 也不等于真实成交。因此历史实验用于筛错与开发，前向模拟是必要证据，但仍不能直接证明实盘可实现收益。</div>
+<p class="small" data-page-node-id="1VT5fP10F8BJeIoKL1g5EW">这里的门槛是评价设计，不是已测出的表现。本轮不引用未经复核的外部研究收益，也不为项目虚构胜率或年化指标。</p>
+</section>
+<section id="product" data-page-node-id="SCDDjGvGJA9Ah0UDPlCNSr">
+<span class="num" data-page-node-id="3CgslmruT83VaxvEpGNrMF">09 / PRODUCT EXPERIENCE</span><h2 data-page-node-id="lxBUkMtdeQGBFazfFG8D7n">首页应是一张“交易员工作台”，不是资讯门户</h2>
+<p data-page-node-id="onPp11m9gKZ7WWiqKSP8Nm">当前导航仍以资讯、异动、主线、报告与虚拟持仓为主（<code data-page-node-id="oGEfo8NBU4BymeVUJIPhCi">web/src/App.jsx:17–31</code>）。不是删除这些能力，而是将其组织到“服务谁、导致了什么决策”的上下文中。</p>
+<div class="grid" data-page-node-id="ZSSpdrD8KaEiWIvIVC5JGL"><div class="card" data-page-node-id="p4B8e2xgZANGDzpYsIpc8I"><h3 data-page-node-id="n6hOSRfkkzkpYAvLhVAOpC">Trade 工作台</h3><p data-page-node-id="KHjHaCJ47gAfMNCc0u6UEc">当前交易员/活动版本、净值与数据质量、可用/冻结资金、持仓与未成交订单、当前 thesis、下一触发条件、最近决策与拒绝原因。</p></div><div class="card" data-page-node-id="GdOsIqIbKgN79vEqasU48e"><h3 data-page-node-id="AkTli8o90hR85BoVWA6iBF">Learn 经历簿</h3><p data-page-node-id="kAASQyxFFD007koCGXxNDs">按 episode 展示信息 → 判断 → 订单 → 成交 → 结果。可以查看看对未赚、看错但守纪、系统受阻、经验候选与反例。</p></div><div class="card" data-page-node-id="KjeHr9f1xp5TEj8ccP2I6q"><h3 data-page-node-id="oIbqGS8RyoOx74D9XZmcAo">Evolve 实验室</h3><p data-page-node-id="NwYCghw29FQud4d4CwRjGZ">版本差异、冻结时间、假设与协议、样本进度、主/候选对照、晋升原因、拒绝原因及回滚历史。</p></div></div>
+<p data-page-node-id="GOETbwBVdnwFvih8pyjKx7">资讯、主线和研究报告变成辅助视图；用户从每个数字能追到事实。首页必须直说“证据不足”“行情陈旧”“账户不可比”，而不是所有空值显示为零。</p>
+<div class="callout green" data-page-node-id="i5SIPjraUG92FXnCoyAtO9"><strong data-page-node-id="iZXzW73l33rknW40pXCpWv">检验产品是否真正转向交易员：</strong>关掉报告生成，订单管理、风控、记账、结果核验和实验仍应运行；关掉交易员运行时，则产品不应还能假装自己完成了核心任务。</div>
+</section>
+<section id="migration" data-page-node-id="OCMPsyGVsGS29xlPsmZ4kI">
+<span class="num" data-page-node-id="FTBfgWb1w7RDTAhYaoMBKm">10 / INCREMENTAL MIGRATION</span><h2 data-page-node-id="LNSp5zEDwmWpPCbYATYZQo">围绕已有工程收拢责任，而非重新造一套系统</h2>
+<div class="scroll" data-page-node-id="fRiX5rHdcTYUqDgOmC5Q4p"><table data-page-node-id="DePTIMUpDijUW2cgO8XCfk"><thead data-page-node-id="OD6w5nQyUSWzr7zpS28c3A"><tr data-page-node-id="r116NM2NHqUlixqHQdMFzv"><th data-page-node-id="ws4h6vYdzTybTOLLA7wLT1">阶段</th><th data-page-node-id="Y1o8vQEJAzpd0YGj1CHhF9">具体边界</th><th data-page-node-id="FhMC2e9npwKlwzhEEoTCMQ">完成后的能力</th></tr></thead><tbody data-page-node-id="svzXHvWkUxqZyFq7dcQfTI">
+<tr data-page-node-id="GI1mjWAybzAsogtPbj59im"><td data-page-node-id="6HaWZk0TvbSBDWUrE5zzoZ">P0a · 契约与证据</td><td data-page-node-id="zHMftVXkaJfTrcRLB62oyi">先统一架构/依赖规则、ID、模式、时钟、数据可见性与账本 schema。审视旧数据可恢复程度；明确未验证规则不再直接改变行为的方案。</td><td data-page-node-id="8fUkwsObQMpI1TWqlNP9XX">能定义“谁、哪个版本、何时、据什么做了什么”，并区分旧记录证据等级。</td></tr>
+<tr data-page-node-id="4azGjQt8YCd5GdHWuJ7rwG"><td data-page-node-id="lQxYVgCY1K4oCwJTAULHFe">P0b · 可信账本</td><td data-page-node-id="Y4OLjjmpkEbJ8G1wGkT04I">从 <code data-page-node-id="Ozl5QRTOSlXWeLqTE9X9D6">data/portfolio.py</code> 拆出成交/现金流水、结算批次、订单状态和投影；改造 <code data-page-node-id="Zu7c0M4tMATzlmzHZBOcuv">portfolio_risk.py</code> 的净值来源；显式绑定 thesis/prediction。</td><td data-page-node-id="Q8NlCPXFk8upQPCTnt0CC1">一次买入—加仓—部分退出—平仓能对账；所有盈亏与费用可追踪。</td></tr>
+<tr data-page-node-id="c0R3yy6IAqjNP4hJDmJZ9Y"><td data-page-node-id="UelMfiKy9YCR2uPOAZOlQv">P1 · 统一交易内核</td><td data-page-node-id="PPIO3iHS5UfRbAob3XPyYd"><code data-page-node-id="AiD2mnRPzmLD5TuHIvIzkH">morning_scan / intraday_monitor / book_manager / exit_decision / thesis_monitor</code> 只提交统一意图；调度转事件，旧调用变薄适配器，全部风险走同一入口。</td><td data-page-node-id="YKcldyPbeq8pM4HRh4mZpA">同一交易员逻辑能常规模拟与历史回放；报告故障不影响保护与交易事实。</td></tr>
+<tr data-page-node-id="lWQE34zSeKRAboob6zFNni"><td data-page-node-id="S8gsXThusH1eG71nA8RIE7">P2 · Episode 学习</td><td data-page-node-id="i3egOtmHYlkshjpTZcDIFb">替换 <code data-page-node-id="L3JiAYRYpsh2DqPTKksA27">_feed_close_to_learning</code> 的启发式关联；<code data-page-node-id="p1runJqxbHzm4hrD0WzW1D">scoring / lessons / principle_scoring / context_builder</code> 消费明确结果对象和批准知识。</td><td data-page-node-id="yeWoSAhyOtlMMaASndv8SM">三类结果不互相覆盖；经验可追溯、有反例，未成熟标签不提前学习。</td></tr>
+<tr data-page-node-id="I7YkOFUMYT06KDsM3zFUAs"><td data-page-node-id="s4kjozdcGyAX0pJYkLkuiD">P3 · 受控进化</td><td data-page-node-id="rli2FuqYC73G9sGY9bN9aD">将 <code data-page-node-id="O1AdU92D0HQJK2KdgPpSJo">holdout_gate</code> 升级为版本级实验评估；新增版本注册/影子账户/单一晋升操作；阻止 <code data-page-node-id="Mim2OvZJSPMC8qkvGAV0Kv">create_playbook / reinforce</code> 等直接改变当前行为。</td><td data-page-node-id="KgMiJfvs5Lo5sMWBNrT18C">拒绝真正阻断，候选可积累前向证据，批准切换与回滚有审计。</td></tr>
+<tr data-page-node-id="ZJLN1uoEBRYUIearRxCvJC"><td data-page-node-id="zCeEauNKBLpMaYwv9bIvRY">P4 · 产品收口</td><td data-page-node-id="Iyrvjzjfvnqgjyb80MDFnc">server/API 与前端围绕 trader/episode/experiment 构造投影；合并触发同一业务的旧入口，减少平行报告链。</td><td data-page-node-id="JEBlANgSnE4EG6bhtvA0jQ">用户看到一个持续交易与成长的主体，而不是几组互相不完全相认的页面。</td></tr>
+</tbody></table></div>
+<h3 data-page-node-id="rwmKGGwFAtWX9QkpHyXlSK">建议的职责落点，不是本轮已创建的目录</h3>
+<pre data-page-node-id="gJUQojqVgbtGV8JRwh9HSR"><code data-page-node-id="C9HUJNsmDeVwhterXSW4Tp">data/          记录模型、repository、事件/账本持久化、确定性基础状态转移
+sources/       外部数据边界、标准化与接收时间
+ tools/        市场查询/计算能力（沿用，不存交易员业务状态）
+evolution/     episode 评价、经验候选、实验测量、版本治理规则
+pipeline/      TraderRuntime 编排、事件调度、执行流程服务
+agents/        DecisionPolicy / Learner 的模型实现与调用适配
+server/        API、读模型与管理控制面</code></pre>
+<p data-page-node-id="xFmF21F0ygSBTMiM7Vjw0T">上述落点沿用当前 lint 层序。低层编排依赖结构化策略接口，由更高层组装并注入模型实现；不能让 <code data-page-node-id="jbCJgHqK58HwMxJn94khAo">evolution</code> 反向 import <code data-page-node-id="3Strx7KTB1lLQxx0p4BdF0">pipeline</code>，也不能让存储模块调用 Agent。若需新增最底层 domain/contracts 包，应先通过依赖规则与结构测试确认，再迁移；不先大规模搬文件。</p>
+<h3 data-page-node-id="V3Vx96wZ8WEyWY1jxHBUUm">存量数据迁移的底线</h3>
+<ul data-page-node-id="Key8LJiQ9ByWdMACNFf2Kr"><li data-page-node-id="uRyxPQJBCIAdinXGhLqJ8D">有充分旧明细时才重建账本，并逐账户核对；缺少成交/费用记录时不能补造历史 fills。</li><li data-page-node-id="RBnZC2gY9WJpmvD5AIBxFB">无法可靠还原的旧历史保留为 legacy 证据，以明确来源和不确定性的期初余额/库存快照开始新核算期；不能把新净值拼接成已验证的旧业绩。</li><li data-page-node-id="Mw7G5AP0TWQ8Tpd9Jc94pw">建立新投影并对账后再切读路径；避免长期双写两个事实源。迁移中保留恢复路径与数据备份，具体操作另行确认。</li><li data-page-node-id="sCP8WbR5Ut7PTbHH5tjQar">这一轮只交设计；后续实施再按项目要求建立执行计划、补失败测试、运行完整测试和架构检查。</li></ul>
+</section>
+<section id="acceptance" data-page-node-id="hy903ida7KGUfXzG21IO6g">
+<span class="num" data-page-node-id="shQM00FOLh0GgVTnFG7BrD">11 / EXECUTABLE ACCEPTANCE</span><h2 data-page-node-id="Ng48wf50SWZVyCqqPGSUkK">不用“更加智能”验收，用能失败的测试验收</h2>
+<p class="small" data-page-node-id="ojDyz4yjmUoAGLuahMVcyf">以下数量为建议的工程验收目标，不是已完成测试结果；统计门槛还需按策略频率与数据功效预注册。当前未运行项目测试。</p>
+<div class="scroll" data-page-node-id="5ABo29QlRXVNQ5YLI8xxrc"><table data-page-node-id="47MGiEpSfeu8S85OT1GRzx"><thead data-page-node-id="MVDHAcVYcVLUf5qRUwHhBP"><tr data-page-node-id="aFXe0WBUbPlzgv6cCmvSZu"><th data-page-node-id="QG3DvBCDI9ERuftTuAJpho">契约</th><th data-page-node-id="RnVH2T6SvKLkqQwq0Vc67Q">建议的机器可检查标准</th></tr></thead><tbody data-page-node-id="AGPs3AXkAsy2VmrGSEteqo">
+<tr data-page-node-id="gdQQB9nVtSrQszBCYC6OYO"><td data-page-node-id="jnuR9YA2phbMYILIoXrlih">会计正确</td><td data-page-node-id="gR8rO8J0UNYINDorloC4U6">整数最小货币单位或固定精度核算；在显式舍入策略下，对账差额为 0。覆盖买入/加仓/多次减仓/最终平仓/费用/公司行动，空仓权益等于期初权益加净外部现金流与累计净损益。</td></tr>
+<tr data-page-node-id="pWeSF2Na9KHbnyRVfXp3zr"><td data-page-node-id="vGh074hRmLuScWn7AA7tYK">身份完整</td><td data-page-node-id="1RP9yPAdv8AizenADQUF5A">100% 成交、账本、结果记录可追到 trader/run/version/decision；必需外键缺失 0 条；同股同日两位交易员及多个版本的归属串线 0 次。</td></tr>
+<tr data-page-node-id="mO1OoUGIWGF3eA1hhoDZjL"><td data-page-node-id="QzGCc0rfywLVbue1NU2iGj">幂等与恢复</td><td data-page-node-id="p4aIYXppFMZRqxSwL9YeZx">生成至少 10,000 条合成事件并注入重复、乱序、重启；每个 fill 仅一次经济影响，最终投影一致，无负库存/非法状态。通知可重试，但不可重复记账。</td></tr>
+<tr data-page-node-id="wvDHR3qaSiNiyu8zZpRiGR"><td data-page-node-id="abDgJXCddg0QDRcEiOaFCd">交易约束</td><td data-page-node-id="WVUP7tiQCVa3HdCzBLODOL">测试覆盖可卖批次、冻结现金/库存、停牌、价格限制、缺量、陈旧行情、取消/成交竞态、同根 K 线歧义；所有路径经过统一风控与执行器，直接改仓位的业务旁路为 0。</td></tr>
+<tr data-page-node-id="povcdw6ke7yIonp7t51W01"><td data-page-node-id="sH4o7HE26ZDGUCcrgF77zH">时间与重放</td><td data-page-node-id="F8youky1DFi0TgiHNfpZHA">任一决策输入均满足可见时间约束；固定输入/模型返回/仿真版本重放两次得到相同规范化事件与账本。重放 hash 排除墙钟审计时间或使用稳定逻辑 ID；后来修订不改变过去输入。</td></tr>
+<tr data-page-node-id="WUhHz4oDoUZtbxqTE6ijgL"><td data-page-node-id="2pMaP4ovU0NKAddR2jlXFE">结果互不覆盖</td><td data-page-node-id="vYXyxn4ImQ9KifnSJoOrwV">同一案例可同时出现预测命中、实际净亏、流程合规三种结果；任何重新评分不覆盖其他结果类型。未成熟、删失与修订标签有明确状态。</td></tr>
+<tr data-page-node-id="MPQmiyFBAd3EprE4ZzzLMY"><td data-page-node-id="ldbjktAQHjBrxmD6eCHZ1O">闸门有效</td><td data-page-node-id="CAlJHd2JHS4NAwitIYqBEC">验证拒绝、数据不足、评估异常时，活动策略及行为依赖 hash 不变；每位交易员同时仅 1 个活动策略指针；禁止未经授权激活知识/权重/prompt。</td></tr>
+<tr data-page-node-id="Jhf5DhoB69LObi5yQ97T7k"><td data-page-node-id="vrlBPydoTfGM6dj7cv3iMj">前向实验隔离</td><td data-page-node-id="QhrH3AHPDJR8UIPR5wqXv6">candidate 固定 created/frozen_at；shadow 的订单/资金/知识不得写主账户；验证标签与派生记忆不能进入开发上下文；不足 n≥50 时不得晋升，达到后仍执行独立窗口与不确定性要求。</td></tr>
+<tr data-page-node-id="7I5Y598xd45OLtwiYcoBU7"><td data-page-node-id="IxjpqlUrpSTazVNaLrVswd">版本切换</td><td data-page-node-id="Qiz5Dpez3J3vIFIFjM3Tzi">晋升/回滚具有完整审计；存量仓位与挂单的版本归属清楚；旧决策不会在新版本下无痕执行；回滚前后既有成交与账本记录不变。</td></tr>
+<tr data-page-node-id="rrizJ7tliEc4w2oaoZ5zSh"><td data-page-node-id="lvF6nZWkIDDMJdjC8M3siN">去报告依赖</td><td data-page-node-id="pTPpweg2ziLbe0DxHj16W6">注入报告生成超时/异常，订单状态、风控、对账与标签成熟照常完成；禁用某交易员新开仓后，其存量仓位仍持续管理。</td></tr>
+</tbody></table></div>
+<h3 data-page-node-id="GDN5vPRjyAbxCIir2oJHY1">最小复审通过条件</h3>
+<p data-page-node-id="v6qo55JkEhHj2PDvbakLnj">先完成 <strong data-page-node-id="WnCzFtJwzyMfVythQycJKK">可信资金账本 + 显式来源绑定 + 拒绝能阻止行为变更</strong> 的集成测试，再讨论更复杂的学习算法。后续每一阶段都遵循项目既有测试、lint_harness 与 lint_docs 检查；本次没有把静态检查包装成测试通过。</p>
+</section>
+<section id="decisions" data-page-node-id="OLxiQbaiaDhzzuHjUsmekT">
+<span class="num" data-page-node-id="vkb5WdG9eTPFJG7UyZoFSt">12 / RECOMMENDED DECISIONS</span><h2 data-page-node-id="JdUKdvQbTtt56i53X0luMw">建议现在确认的五个方向</h2>
+<ol data-page-node-id="4tLogOPzwRg2mUa8jSN6bn"><li data-page-node-id="B9HK8cjJhO7fKS9Fhi1jqi"><strong data-page-node-id="rAdiQfGEsY61EIC4BtJPbA">产品身份：</strong>AlphaAgents 是模拟交易员的持续运行与受控成长系统；研究工具与报告围绕它服务。</li><li data-page-node-id="bVBU6FKcHDO7jrl1NO4s8L"><strong data-page-node-id="XI6hRO2zZW23IvUA9lWgaF">首版边界：</strong>专注现有 A 股模拟，不接实盘；先一个完整主交易员、一个候选版本与冻结基线，证明纵向闭环。</li><li data-page-node-id="mCn6lIGh7nyMbMFGF0TziM"><strong data-page-node-id="NdsOqqmcTw3XSjfbExSvs6">自治边界：</strong>模型负责判断与提出改进；确定性内核负责约束、执行、记账；独立证据与审批负责晋升。</li><li data-page-node-id="OTawzIU81yJwkpydZfhxC1"><strong data-page-node-id="cGcBzDJN3g9wVNkcW99mcG">技术形态：</strong>模块化单体、按交易员隔离状态、轻量事件与不可改写账本；先收拢事实源，不做大规模基础设施扩张。</li><li data-page-node-id="3Lvnuxe02TgPfHMyDzmwbq"><strong data-page-node-id="jHLScN3DACWEhBXwL9ZFfm">实施优先级：</strong>先修复会计和来源，再统一执行与学习对象，最后接通版本实验和交易员工作台。</li></ol>
+<h3 data-page-node-id="jtwUJM7k8zNu62uNLnsGGX">明确暂缓</h3>
+<p data-page-node-id="iYEAYP1Cua6ezZsCUFpAIC">在线 RL/模型权重自更新、交易员自动改生产代码、无上限记忆积累、每天自动放大资本、多个角色辩论投票、复杂“性格/情绪”数值以及仅凭短期排名淘汰交易员。它们都不能替代可信结果与前向验证。</p>
+<div class="callout" data-page-node-id="9K7F154PKJ3CTtbkUMAMwm"><strong data-page-node-id="SJr0eYJPIykk4TqV57D9LF">下一步最有价值的工作：</strong>以“一个交易员的一次完整交易经历”为纵向切片，先让信息、决策、订单、成交、资金、退出、评价全部可追溯，再用同一条事实链驱动经验候选和版本实验。<br data-page-node-id="1mTqXB6AzrAxKzFrW3bssu"><br data-page-node-id="51lpJIt4m2JEYsCr1hBIU5"><strong data-page-node-id="LsuIiOS3UBiIQkWFHR5zUs">一句话：</strong>让交易员承担结果，让学习提出假设，让进化服从证据。</div>
+</section>
+<footer data-page-node-id="iYUynKUAQDnrz274oyGafA">工作区：/Users/evilkylin/Projects/AlphaAgents · 设计日期：2026-09-11<br data-page-node-id="wtyWG3OVaxD3eOekTR6BOq">本文件为架构设计提案，路径与行号对应本轮查看的本地源码，后续修改可能变化。未发布上线、未改业务逻辑、未验证项目收益；所有模拟执行规则须在实现阶段按适用市场与时点核验。</footer>
+</main></body></html>

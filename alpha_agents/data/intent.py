@@ -39,6 +39,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from alpha_agents.data import episodes
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -310,6 +311,138 @@ def _reject_from_result(action: str, result) -> str:
     return "refused"
 
 
+# ── The learning unit ──────────────────────────────────────────────────
+# Design §9: the unit of learning is the decision episode, not the
+# retrospective report and not only the positions that ran to profit. So
+# an episode is opened for *every* decision at this door, before any
+# business rule has run, and the events are appended as the outcome
+# becomes known. A refusal, a cancel and a malformed intent are all
+# episodes; without them the learning sample is the set of decisions that
+# happened to trade, which is selection bias with a database behind it.
+#
+# Both writes below are best-effort and say so when they fail: an episode
+# is an audit record, and "the audit could not be written" must not
+# become "the trade did not happen". The door's other promise — that a
+# refused action is recorded and returned rather than raised — outranks
+# it, which is why a failure here logs and returns None instead of
+# propagating.
+
+#: Which event an accepted action appends. CANCEL is deliberately absent:
+#: a cancel is recorded where it actually happens
+#: (``portfolio._cancel_order_unlocked``), because two of the cancels —
+#: the drawdown gate and the unaffordable lot inside ``_fill_order`` —
+#: never pass through this door, and an event written here would have
+#: covered only the cancels that had already been recorded elsewhere.
+_ACTION_EVENT = {
+    OPEN: episodes.ORDER,
+    OPEN_NOW: episodes.FILL,
+    ADD: episodes.ADD,
+    TRIM: episodes.TRIM,
+    CLOSE: episodes.CLOSE,
+}
+
+
+def _open_episode(conn: sqlite3.Connection, intent: TradeIntent,
+                  intent_id: int, at: str) -> int:
+    """The episode this decision belongs to, opening one if needed.
+
+    An open is a *new* decision and starts a new episode. Everything else
+    acts on a row that already exists, so it joins that row's episode —
+    otherwise a single trade would be spread across a trim episode and a
+    close episode and no one unit would describe it.
+
+    The position-scoped actions carry no stock code, because the caller
+    named a position and the position is where the code lives. A row that
+    does not exist therefore leaves the code unset; the implementation is
+    about to refuse that intent, and the episode records the decision
+    anyway with no instrument to name rather than dropping it.
+    """
+    if intent.action in (OPEN, OPEN_NOW):
+        return episodes.open_episode(
+            conn, trader_id=intent.trader_id, code=intent.code or None,
+            at=at, intent_id=intent_id, thesis_id=intent.thesis_id,
+            prediction_id=intent.prediction_id,
+            information_cutoff=intent.information_cutoff)
+    found = episodes.episode_for_ref(conn, intent.position_id)
+    if found is not None:
+        return found
+    owner = episodes.owner_of(conn, intent.position_id or 0)
+    return episodes.open_episode(
+        conn, trader_id=intent.trader_id,
+        code=(owner or {}).get("code") or intent.code or None,
+        at=at, intent_id=intent_id, position_id=intent.position_id)
+
+
+def _start_episode(conn: sqlite3.Connection, intent: TradeIntent,
+                   intent_id: int) -> int | None:
+    """Open the learning unit and record that the decision was asked.
+
+    The ``intent`` event is written *before* the implementation runs. That
+    is the honest order — the decision came first and its consequence
+    second, and ``episode_events`` is read as a sequence — and it makes
+    "the process died mid-action" a property rather than a gap: such an
+    episode has an event whose intent row is still at 'submitted'.
+    """
+    at = intent.order_date or _today()
+    try:
+        with _write_lock:
+            episode_id = _open_episode(conn, intent, intent_id, at)
+            episodes.add_event(conn, episode_id, episodes.INTENT, at=at,
+                               ref_id=intent_id)
+            conn.commit()
+        return episode_id
+    except Exception as e:
+        logger.warning("Could not open an episode for intent #%d (%s): %s",
+                       intent_id, intent.action, e)
+        return None
+
+
+def _append_action(conn: sqlite3.Connection, episode_id: int,
+                   intent: TradeIntent, detail: dict, at: str) -> None:
+    """Record what an accepted action produced, and link the row it produced.
+
+    ``ref_id`` names the book row that carries the detail — the order, the
+    position, or for a trim/close the position the leg belongs to. The
+    exit leg itself is not named: ``_close_position_impl`` answers with a
+    bool and widening that contract is not this slice's job, so a leg is
+    found from ``position_exits`` by position and date. Recorded as a
+    known gap in TRADER_CORE_IMPLEMENTATION.md rather than papered over
+    with a nearest-row lookup, which is the reconstruction this codebase
+    rejects everywhere else.
+    """
+    kind = _ACTION_EVENT.get(intent.action)
+    if kind is None:
+        return
+    ref_id = (detail.get("order_id") or detail.get("position_id")
+              or intent.position_id)
+    episodes.add_event(conn, episode_id, kind, at=at, ref_id=ref_id)
+    if ref_id is None:
+        return
+    # ``order_id`` and ``position_id`` are read as different claims, so they
+    # are set by different events: a pending order is not a position, and
+    # only a fill may say this decision traded.
+    if kind == episodes.ORDER:
+        episodes.attach_ref(conn, episode_id, order_id=ref_id)
+    elif kind == episodes.FILL:
+        episodes.attach_ref(conn, episode_id, position_id=ref_id)
+    else:
+        return
+    _link_boundary(conn, episode_id, ref_id)
+
+
+def _link_boundary(conn: sqlite3.Connection, episode_id: int,
+                   book_id: int) -> None:
+    """Hang the episode on the frozen decision boundary, if there is one.
+
+    The state machine also refuses this on a direct write; the statement
+    guard is here because it is the one that says what the intent was.
+    """
+    from alpha_agents.data import attribution
+    snapshot = attribution.snapshot_for_order(conn, book_id)
+    if snapshot is not None:
+        episodes.link_snapshot(conn, episode_id, snapshot["id"])
+
+
 # ── The entry point ────────────────────────────────────────────────────
 
 
@@ -325,15 +458,22 @@ def submit_intent(intent: TradeIntent,
     Never raises for a refused action; a refusal is a recorded outcome,
     not an exception. A *malformed* intent is refused the same way, so
     there is one shape of answer for callers to handle.
+
+    Every decision also opens a learning episode (§9) before the rules
+    run, so a refusal is a recorded unit rather than an absence. That
+    write is best-effort and never changes this function's answer.
     """
     if conn is None:
         conn = _get_conn()
 
     reason = _reject_reason(intent)
     intent_id = _record_submitted(conn, intent)
+    episode_id = _start_episode(conn, intent, intent_id)
 
     if reason is not None:
         _finalise(conn, intent_id, REJECTED, reason, None)
+        _note_outcome(conn, episode_id, intent_id, intent, None,
+                      accepted=False)
         logger.info("Intent #%d %s refused: %s", intent_id, intent.action, reason)
         return IntentResult(intent_id=intent_id, action=intent.action,
                             accepted=False, reject_reason=reason)
@@ -353,19 +493,52 @@ def submit_intent(intent: TradeIntent,
         except Exception as inner:
             logger.error("Could not mark intent #%d rejected: %s",
                          intent_id, inner)
+        _note_outcome(conn, episode_id, intent_id, intent, None,
+                      accepted=False)
         logger.warning("Intent #%d %s raised: %s", intent_id, intent.action, msg)
         raise
 
     if _accepted(intent.action, result):
         _finalise(conn, intent_id, ACCEPTED, None, detail)
+        _note_outcome(conn, episode_id, intent_id, intent, detail,
+                      accepted=True)
         return IntentResult(intent_id=intent_id, action=intent.action,
                             accepted=True, result=result, detail=detail)
 
     rej = _reject_from_result(intent.action, result)
     _finalise(conn, intent_id, REJECTED, rej, detail)
+    _note_outcome(conn, episode_id, intent_id, intent, detail,
+                      accepted=False)
     logger.info("Intent #%d %s refused: %s", intent_id, intent.action, rej)
     return IntentResult(intent_id=intent_id, action=intent.action,
                         accepted=False, reject_reason=rej, result=result)
+
+
+def _note_outcome(conn: sqlite3.Connection, episode_id: int | None,
+                  intent_id: int, intent: TradeIntent, detail: dict | None,
+                  *, accepted: bool) -> None:
+    """Append what the action produced, and end the episode if it is over.
+
+    An episode ends when nothing about the decision is still running — a
+    refusal or a cancel ends it immediately, a full close ends it, and a
+    fill, an add or a trim leave it open because the position is still
+    live. The verdict itself is not copied here: it lives on the intent
+    row this episode's ``intent`` event names, which is why that event
+    carries a ``ref_id`` instead of a dict of duplicated fields.
+    """
+    if episode_id is None:
+        return
+    at = intent.order_date or _today()
+    try:
+        with _write_lock:
+            if accepted:
+                _append_action(conn, episode_id, intent, detail or {}, at)
+            if not accepted or intent.action == CLOSE:
+                episodes.close_episode(conn, episode_id, at=at)
+            conn.commit()
+    except Exception as e:
+        logger.warning("Could not record the episode outcome for intent #%d "
+                       "(%s): %s", intent_id, intent.action, e)
 
 
 def _record_submitted(conn: sqlite3.Connection,

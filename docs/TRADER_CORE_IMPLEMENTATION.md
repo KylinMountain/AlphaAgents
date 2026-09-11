@@ -1,6 +1,6 @@
 # Trader Core Implementation: Phase 1–3 实际状态
 
-- 记录日期：2026-09-12（第五轮补记 Phase 3 的 T1）。
+- 记录日期：2026-09-12（第六轮补记 Phase 3 的 T2）。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
   [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)、
@@ -8,7 +8,7 @@
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
 - 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付。
-  **Phase 3 尚在进行中**：T1 已交付，T2–T4 未开始，未实现项一律留在第 7 节。
+  **Phase 3 尚在进行中**：T1、T2 已交付，T3–T4 未开始，未实现项一律留在第 7 节。
 
 ## 1. 现金反映累计结果
 
@@ -101,11 +101,6 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 
 **后续阶段**
 
-- **结果生命周期的状态机**（Phase 3 的 T2，**未开始**）。`outcomes` 表已建（第三次建表时一并落地），
-  但**没有任何写入路径**：`kind='forecast' / 'trade' / 'process'` 三个标签的评估器都还没写，
-  `predictions.horizon_days` / `deadline` 两列也还没加。§9 的
-  `pending / matured / censored / revised` 目前仍只能从 `hit` 是否为 NULL 与 `scored_at` 推断，
-  未成交、删失、修订三种情况无法区分。
 - **候选证据的结构化与生命周期**（Phase 3 的 T3，**未开始**）。`learning_candidates` 仍缺
   `claim` / `applicable_context` / `proposed_behavior_delta` / `evidence_episode_ids` 四列，
   状态列仍被 `CHECK(status = 'candidate')` 钉死成单值。
@@ -139,8 +134,17 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 - **`episodes` / `outcomes` 的生产读者还很薄**。`episodes` 有一个只读入口
   （`scripts/episode_coverage.py`，读 `episodes.coverage` / `open_episodes`）与
   `episodes.get_episode` / `events_for`；它**不进 prompt、不进检索、不进决策上下文** ——
-  这是刻意的（§10 说验证不等于授权）。`outcomes` 目前**一个读者都没有**，因为它一个写者都没有，
-  T2 落地时两者会同时出现。**T1 不接线任何生效路径。**
+  这是刻意的（§10 说验证不等于授权）。T2 给了 `outcomes` 一个真实的写者
+  （`pipeline/tasks/review.py` 的 `_label_outcomes`）与一个只读入口
+  （同一个运维脚本，读 `outcomes.counts` / `pending_labels` / `integrity`），
+  但**标签同样不进任何决策上下文**，也没有任何按 label 过滤/加权的读路径。
+- **`outcomes` 的标签不与 `predictions.hit` 对账**。T2 新增的三条标签链是**增量**的：
+  `predictions.hit` / `scored_at` 仍是原路径，写标签时**不校验两者一致**。
+  两套记录目前可以互相矛盾而无人发现 —— 合并它们属于后续阶段。
+- **`information_cutoff` / `content_hash` 的强制面仍与 §7 描述一致**，T2 未触及。
+- **`sweep_trade_labels` 的 `pending` 标签不记当日的浮动盈亏**。开仓中的持仓只标
+  `state=pending` + `legs=0`，**不写估值**：估值是市场数据的函数，标签是决策的函数，
+  把 mark 写进标签会让「这个决策本身好不好」变成「今天行情好不好」。
 
 ## 8. 行为契约变更（供 review 对照）
 
@@ -174,6 +178,12 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 | 撤单是日志里的一行 | 撤单在 `_cancel_order_unlocked` 这个唯一落点记事件并结束 episode —— 含成交路径内部发起的两次撤单（回撤闸门、资金不足） |
 | 「某个标签是哪版规则算的」只能靠 `scored_at` 猜 | `episodes` 挂在冻结的 `decision_snapshots.id` 上，边界只写一次、不可改指 |
 | 覆盖度（决定数 vs 成交数）无法回答 | `episodes.coverage()` + `scripts/episode_coverage.py`：decisions / verdicts / refused / cancelled / traded / fill_rate |
+| `predictions.hit` 是一个可被下一次评分覆盖的单元格 | 标签是 append-only 的 `outcomes` 行，带 `state` / `evaluator_version` / `available_at`；修正**追加**一行 `supersedes_id` 指回被修正行 |
+| 「未成交 / 删失 / 修订」三种情况只能从 `hit IS NULL` 猜 | `pending / matured / censored / revised` 四态由 `outcomes.assert_outcome_transition` 断言，非法迁移抛 `IllegalOutcomeTransition` 且不落任何行 |
+| 一个标签同时表示「预测对了」和「这笔赚了」 | `kind='forecast' / 'trade' / 'process'` 三条独立链；trade 标签只带 `exit_ids` 这类**引用**，不带金额 |
+| 程序违规可以因为这笔赚了而被放过 | `assert_no_pnl_in_process` 拒绝 process 标签携带 `return_pct` / `pnl` / `profit` / `win` 等任一字段，抛错不 warning |
+| 预测的评估窗口是一刀切的默认天数 | `predictions.horizon_days` / `deadline` 由写预测时**声明**；未声明的历史行在标签 evidence 里标 `legacy_horizon`，**不回填**一个它没做过的声明 |
+| 撤单且从未成交的挂单会被当成一笔「打平的交易」 | `sweep_trade_labels` 直接跳过（无 exit 腿即无标签）；这次决策的痕迹留在 episode 里 |
 
 ## 9. 验证记录
 
@@ -276,7 +286,8 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   用真实重放日期跑完 `open → fill → add → trim → close`，断言事件序列恰好是
   `intent, order, fill, intent, add, intent, trim, intent, close`。
 - 两个 trader 同日推荐同一 code 是**两个** episode → `test_two_traders_on_one_stock_are_two_episodes`。
-- 对 `outcomes` 行直接 UPDATE/DELETE 被触发器拒绝 → **未做**，`outcomes` 无写者，属 T2。
+- 对 `outcomes` 行直接 UPDATE/DELETE 被触发器拒绝 → **T1 期间未做**（`outcomes` 无写者），
+  已由 T2 补上：`tests/test_outcomes.py::test_a_label_cannot_be_updated_or_deleted`。
 
 **本轮的四个变异探针**（先证明测试会红，再复原）：
 
@@ -300,6 +311,71 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 
 **`portfolio.py` 1197 行**（上限 1200），已是本阶段最紧的一处。T1 只往里加了 2 个调用点与 2 行注释；
 下一次需要改动该文件前应先把「资金与主线敞口」那一组读函数拆出去，不要靠压缩注释换行数。
+
+### 第六轮（Phase 3 的 T2：三种结果的生命周期）
+
+2026-09-12：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1441 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（149 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_outcomes.py`（40 个用例），分五组：状态机、不可变性与链形状、
+§9 的三条禁令、声明的期限、三个扫描与 episode 归属。
+
+**计划里写下的验收条目，逐条对照**：
+
+- `pending → matured | censored` 合法、`matured → revised` 合法且追加、
+  `matured → pending` 被拒且**不落任何行** → `TestTheStateMachine` 九条用例，
+  含「被拒的迁移不得写入任何东西」的断言。
+- 直接对 `outcomes` 行 UPDATE / DELETE 被触发器拒绝 → `test_a_label_cannot_be_updated_or_deleted`。
+- 一条链只有一个头、一个行只能有一个后继 → 两条部分唯一索引各有一条用例证明索引本身会咬。
+- §9 的三条禁令 → `TestTheThreeSubstitutionsAreProhibited` 六条用例；其中
+  「不因赚钱而豁免」断言两条 process 标签**除主体身份外逐字段相同**，
+  且 `virtual_portfolio` 里根本没有持仓 —— 让「胜负只能从账本读出」成为可验证的陈述。
+- 3 天期限的预测 3 天后到期、5 天的 5 天后到期 → `TestTheHorizonIsDeclared`；
+  未声明期限的行标 `legacy_horizon` 而不是被回填。
+- 标签可归因到产生它的决策 → 成交过的预测其标签带 `episode_id`，
+  没成交的预测标签 `episode_id IS NULL`（这就是覆盖度的陈述）。
+
+**本轮的六个变异探针**（先证明测试会红，再复原）：
+
+| 探针 | 结果 |
+|---|---|
+| `ensure_label` 退回 `declare`（拿到链头而不是活行） | 8 failed / 32 passed |
+| 状态迁移守卫变成恒真（`assert_outcome_transition` 直接 `return target`） | 3 failed / 37 passed |
+| `outcomes` 的 append-only 触发器失效（`RAISE(ABORT)` → `SELECT 1`） | 1 failed / 39 passed |
+| `assert_no_pnl_in_process` 恒不报错（`found = []`） | 1 failed / 39 passed |
+| 已 `matured` 的预测标签被重新派生（`if state == MATURED` → `if False`） | 1 failed / 39 passed |
+| `sweep_process_labels` 的计数重新重叠（`elif` → `if` + 无条件 `unchanged`） | 2 failed / 38 passed |
+
+**本轮查出并修掉的两个真缺陷**（都是测试先红，不是靠读代码发现的）：
+
+1. **三个标签生产者拿到了链头而不是活行。** `outcomes.declare` 的契约是「返回这条链的
+   **第一**行」，而生产者要的是「当前活着的行」。第二次跑扫描时它们去 `resolve` 一行
+   已经被 `supersedes_id` 占用的行，撞 `UNIQUE constraint failed: outcomes.supersedes_id`。
+   修法是新增 `outcomes.ensure_label`（`declare` 之后返回 `current`），三个生产者改用它。
+   **`declare` 的返回语义本身没有改** —— 幂等的「我确保它存在」与「把它给我」是两件事。
+2. **`sweep_process_labels` 的三个计数会重叠。** 一条 thesis 先成熟、当次又因为已结束而
+   被追加修正时，`matured` 与 `revised` 各记一次；而未结束的成熟 thesis 被记进
+   `matured` **又**记进 `unchanged`，于是「评了 40 条、其中 29 条什么都不用做」这句话
+   在数上不成立。改成互斥分支，并在文档里写下「三者之和 = 本次评过的 thesis 数」这条不变量，
+   由 `test_the_process_counts_partition_the_theses_graded` 钉住。
+
+**本轮查出的「承诺超过代码」一例**，已在 §7 如实标注：
+
+- `predictions.hit` / `scored_at` 与新的 `outcomes` 标签是**两套并行的记录**，
+  写标签时**不对账**。§9 要求「预测标签」可独立于旧路径存在，但没要求它们一致，
+  于是现在两套可以互相矛盾而无人发现。合并/对账属于后续阶段，不假装已经做完。
+
+**一处操作风险（非代码缺陷，但值得记下）**：`alpha_agents.config.MEMORY_DB_PATH` 是**固定路径**，
+不读 `TMPDIR`，测试靠 `conftest.py` 的 monkeypatch 才重定向。因此**临时脚本 / 冒烟脚本
+默认会写进开发者本地的 `data/memory.db`**。T1 的 `scripts/episode_coverage.py` 是纯只读的所以没事；
+本轮一次冒烟写入误加了 2 行 `predictions` + 1 行 `theses` + 50 行 `outcomes`，
+已按时间戳逐行核对后清除、并验证 append-only 触发器复原。
+**写临时脚本时先把 `memory_store.MEMORY_DB_PATH` 指到临时目录**（README 无此提示，故记在这里）。
 
 ## 10. Phase 2 逐项交付（S1–S6）
 
@@ -338,7 +414,7 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 | 切片 | 状态 | 交付 |
 |---|---|---|
 | T1 episode 关联 | ✅ 已交付（第五轮） | `episodes` / `episode_events` 两表 + `alpha_agents/data/episodes.py`；门在 `intent.submit_intent`，成交/撤单两个钩子在 `portfolio`；只读入口 `scripts/episode_coverage.py` |
-| T2 三种结果的生命周期 | ⬜ 未开始 | `outcomes` 表已在 T1 建好（无写者），其余未做 |
+| T2 三种结果的生命周期 | ✅ 已交付（第六轮） | `outcomes` 状态机 + `alpha_agents/data/outcomes.py` 写读；三个标签生产者在 `evolution/outcome_labels.py`；写入者在 `pipeline/tasks/review.py::_label_outcomes`；`predictions.horizon_days` / `deadline` 两列 |
 | T3 候选证据与生命周期 | ⬜ 未开始 | 四列与状态迁移均未做 |
 | T4 已批准知识快照 | ⬜ 未开始 | `knowledge_snapshots` 未建 |
 
@@ -361,4 +437,38 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 - **两个钩子是尽力而为**：`episodes.note_fill` / `note_cancel` 失败只记 warning，不阻断成交或撤单。
   「审计写不下」不能变成「交易没发生」，但必须留痕 —— 与 `attribution.freeze` 在其调用点的姿态一致。
   两者**都不取 `_write_lock`**：调用方已经在临界区里，而该锁不可重入。
+
+### T2 的边界，逐条说清
+
+- **标签是 append-only 的行，不是一个可写单元格。** `predictions.hit` 可以被下一次评分覆盖，
+  而 §9 要的是「一个事后事件无法改写它的标签」+「事后能看出是哪个版本的评估器给出的」。
+  因此每条标签带 `state` / `evaluator_version` / `available_at`；修正是**追加**一行
+  `supersedes_id` 指向被修正的那行，`BEFORE UPDATE` / `BEFORE DELETE` 触发器 `RAISE(ABORT)`
+  把不可变性交给数据库。
+- **一条链只能有一个头、一个后继。** `declare` 幂等（`kind + subject_type + subject_id` 上
+  的部分唯一索引，`WHERE supersedes_id IS NULL`），每个后继只能被认领一次
+  （`supersedes_id` 上 `WHERE supersedes_id IS NOT NULL` 的部分唯一索引）。
+  两条索引都在 SQLite 的「唯一索引里 NULL 互不相等」语义下才咬得住。
+- **三个标签生产者都在 `evolution/`，不在 `data/`。** 分层方向是
+  `data → sources → tools → evolution → …`，而过程评分器本来就在
+  `evolution/process_quality.py`；把 `forecast` / `trade` / `process` 三个标签放一起，
+  是因为它们是同一个决策的三个不同提问，不是为了整齐。
+- **三条禁令各有一个可执行形式**（§9 的「不能拿一个替换另一个」）：
+  - 平仓**不得重写**预测标签 —— `kind='trade'` 的标签只从 `position_exits` 派生。
+  - **预测正确不等于已实现盈利** —— trade 标签只带 `exit_ids` 这类**引用**，不带金额；
+    `assert_no_pnl_in_process` 拒绝 process 标签里出现 `return_pct` / `net_amount` /
+    `pnl` / `profit` / `hit` / `win` 等任一字段（抛异常，不是 warning）。
+  - **程序违规不因赚钱而豁免** —— 同一断言把「读 P&L 的评分器」挡在门外。
+- **期限是「声明」，不是「假定」**。`predictions.horizon_days` / `deadline` 由写预测的人给出；
+  历史行没有声明，`get_predictions_due_for_scoring` 回退 `DEFAULT_HORIZON_DAYS` 并在标签的
+  evidence 里打 `legacy_horizon: true` —— **不为老数据回填一个它没做过的声明**。
+- **未成交的订单拿不到 trade 标签，但决策仍被记录**。撤单且从未成交的挂单
+  `sweep_trade_labels` 直接跳过（「没成交」和「成交后打平」是两件不同的事实，
+  只有后者是关于技能的证据）；这次决策的痕迹留在 episode 里。
+- **`sweep_process_labels` 的三个计数互斥**：每个被评的 thesis 只落进
+  `matured` / `revised` / `unchanged` 之一，三者之和 = 本次评过的 thesis 数。
+  一次扫描里「刚成熟又立刻修正」的 thesis 只记 `revised` 一次 —— 否则
+  「多少条什么都不需要做」无法回答。
+- **标签**不进**任何决策上下文。** T2 只写标签、只读标签；`hit` 的旧路径保持不变，
+  两者尚未对账（见 §7）。
 

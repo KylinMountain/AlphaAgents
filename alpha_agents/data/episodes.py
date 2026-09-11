@@ -208,6 +208,33 @@ def close_episode(conn: sqlite3.Connection, episode_id: int, *,
         (CLOSED, at, episode_id, OPEN))
 
 
+#: The columns an episode can be found by. A whitelist because the column
+#: name is interpolated into SQL, and because the set of links an episode
+#: claims is a design decision rather than a caller's.
+REF_COLUMNS = ("order_id", "position_id", "prediction_id", "thesis_id")
+
+
+def episode_for(conn: sqlite3.Connection, *, column: str,
+                value: int | None) -> int | None:
+    """The newest episode naming ``value`` in ``column``, or None.
+
+    The lookup that makes an outcome joinable to the decision it grades:
+    a forecast is linked through the prediction it came from, a thesis's
+    process label through the thesis. None is a real answer — most
+    forecasts never became an order, so most have no episode, and that
+    absence is itself the coverage statement §9 asks for.
+    """
+    if column not in REF_COLUMNS:
+        raise ValueError(f"{column!r} is not an episode ref column; known: "
+                         f"{', '.join(REF_COLUMNS)}")
+    if value is None:
+        return None
+    row = conn.execute(
+        f"SELECT id FROM episodes WHERE {column} = ? "
+        "ORDER BY id DESC LIMIT 1", (value,)).fetchone()
+    return row["id"] if row else None
+
+
 def episode_for_ref(conn: sqlite3.Connection, ref_id: int | None) -> int | None:
     """The episode that owns a book row, or None if none does.
 

@@ -428,25 +428,39 @@ def _score_due_predictions() -> str:
     from datetime import datetime as _dt
     from alpha_agents.data.memory_store import (
         get_predictions_due_for_scoring, save_prediction_score,
-        get_scored_predictions,
+        get_scored_predictions, _get_conn,
     )
     from alpha_agents.data.scoring import (
         score_prediction, summarize_scores, DEFAULT_HORIZON_DAYS,
     )
+    from alpha_agents.evolution import outcome_labels as OL
 
     today = _dt.now().strftime("%Y-%m-%d")
     due = get_predictions_due_for_scoring(today, DEFAULT_HORIZON_DAYS)
+    conn = _get_conn()
     scored = 0
     for pred in due:
+        # The window is the horizon *this forecast declared*; the global
+        # default is only the fallback for rows that pre-date the
+        # declaration, and ``legacy_horizon`` carries that distinction
+        # into the label. Grading a 3-day call over 5 days measured
+        # neither, and doing it silently made the two books comparable on
+        # a window only one of them chose.
+        horizon = pred.get("horizon_days") or DEFAULT_HORIZON_DAYS
         try:
             result = score_prediction(pred["code"], pred["date"], pred["prob"],
-                                      DEFAULT_HORIZON_DAYS)
+                                      horizon)
         except Exception as e:
             logger.debug("Scoring failed for #%s: %s", pred["id"], e)
             continue
         if result:
             save_prediction_score(pred["id"], result)
             scored += 1
+        # Labelled whether or not a score came back: "the horizon arrived
+        # and the evidence did not" is a censored label, and dropping it
+        # would report a hit rate over a sample of the gradeable ones.
+        OL.label_forecast(conn, prediction=pred, scored=result, as_of=today)
+    conn.commit()
 
     if scored:
         logger.info("Scored %d/%d due predictions", scored, len(due))
@@ -472,6 +486,38 @@ def _score_due_predictions() -> str:
             f"(剔除动量/反转/波动/换手后，n={summary['n_with_residual']})"
         )
     return "\n".join(x for x in lines if x)
+
+
+def _label_outcomes(today: str) -> dict:
+    """Produce the three §9 labels that are not per-prediction.
+
+    ``_score_due_predictions`` labels each forecast as it grades it (the
+    score is the label, so the two cannot be separated). What is left is
+    the set that is *derived from the book* rather than from a score:
+    the outstanding forecasts (so "how many are still awaiting their
+    horizon" is a number), the trade result of each position, and the
+    process grade of each thesis.
+
+    All three are sweeps rather than per-write hooks, deliberately. There
+    is no moment at which a position's realised result becomes knowable
+    that is not "it closed", and hooking that moment would mean missing
+    the ones that closed before the hook existed. A sweep cannot miss a
+    row: it re-derives from the ledger, which is the only home the number
+    has.
+    """
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.evolution import outcome_labels as OL
+
+    conn = _get_conn()
+    result = {
+        "outstanding_forecasts": OL.declare_outstanding_forecasts(
+            conn, as_of=today),
+        "trade": OL.sweep_trade_labels(conn, as_of=today),
+        "process": OL.sweep_process_labels(conn, as_of=today),
+    }
+    conn.commit()
+    logger.info("Outcome labels: %s", result)
+    return result
 
 
 def _exposure_note(today: str) -> str:
@@ -579,6 +625,15 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Prediction scoring failed: %s", e)
         score_block = ""
+
+    # Phase 3 / T2: the other two of §9's three outcome labels, plus the
+    # outstanding-forecast count. Forecasts are labelled inside the
+    # scoring pass above; trades and process grades are derived from the
+    # book, so they are swept rather than hooked.
+    try:
+        await asyncio.to_thread(_label_outcomes, today)
+    except Exception as e:
+        logger.warning("Outcome labelling failed: %s", e)
 
     # 1. Verify today's predictions in Python (batch, no LLM needed)
     pending = get_pending_predictions(today)

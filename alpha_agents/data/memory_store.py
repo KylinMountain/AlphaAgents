@@ -97,7 +97,15 @@ CREATE TABLE IF NOT EXISTS predictions (
     -- Whose call this was. Part of the uniqueness key, so two traders
     -- recommending the same stock on the same day are two predictions to
     -- be graded separately rather than one overwriting the other.
-    trader_id TEXT DEFAULT 'default'
+    trader_id TEXT DEFAULT 'default',
+    -- The horizon this forecast *declared*, and the day it therefore
+    -- matures on. Both NULL for rows written before the declaration
+    -- existed: the evaluator falls back to the global default for those
+    -- and says so in the outcome's evidence, rather than back-filling a
+    -- claim the author never made. A forecast's maturity is part of what
+    -- it asserted, so it cannot be a global constant.
+    horizon_days INTEGER,
+    deadline TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pred_date ON predictions(date);
 CREATE INDEX IF NOT EXISTS idx_pred_code ON predictions(code);
@@ -815,6 +823,10 @@ def _get_conn() -> sqlite3.Connection:
             "ALTER TABLE predictions ADD COLUMN residual_alpha REAL",
             "ALTER TABLE predictions ADD COLUMN scored_at TEXT",
             "ALTER TABLE predictions ADD COLUMN created_at TEXT",
+            # Phase 3 / T2: the horizon a forecast declared, and the day it
+            # matures. Nullable on purpose — see the note in _SCHEMA.
+            "ALTER TABLE predictions ADD COLUMN horizon_days INTEGER",
+            "ALTER TABLE predictions ADD COLUMN deadline TEXT",
         ):
             try:
                 conn.execute(migration)
@@ -844,6 +856,10 @@ def _get_conn() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_portfolio_trader "
             "ON virtual_portfolio(trader_id)",
             "CREATE INDEX IF NOT EXISTS idx_theses_trader ON theses(trader_id)",
+            # The evaluator's "what has matured" query, which reads the
+            # declared deadline rather than a global horizon.
+            "CREATE INDEX IF NOT EXISTS idx_pred_deadline "
+            "ON predictions(deadline)",
         ):
             try:
                 conn.execute(migration)
@@ -1072,6 +1088,27 @@ def archive_theme(name: str) -> None:
 
 # ── Predictions ──────────────────────────────────────────────
 
+def _deadline_for(date: str, horizon_days: int | None) -> str | None:
+    """The day a forecast with this declared horizon matures, or None.
+
+    None when no horizon was declared. Returning the date + the global
+    default instead would silently convert "the caller did not say" into
+    "the caller said five days", and the whole point of storing the
+    declaration is that those are different facts.
+    """
+    if horizon_days is None:
+        return None
+    try:
+        days = int(horizon_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    from datetime import timedelta
+    return (datetime.strptime(str(date)[:10], "%Y-%m-%d")
+            + timedelta(days=days)).strftime("%Y-%m-%d")
+
+
 def save_prediction(
     date: str,
     report_type: str,
@@ -1085,6 +1122,7 @@ def save_prediction(
     features: dict | None = None,
     prob: float | None = None,
     trader_id: str = "default",
+    horizon_days: int | None = None,
 ) -> int:
     """Record a stock recommendation.
 
@@ -1102,8 +1140,19 @@ def save_prediction(
     a bare 看多/看空 can only be scored on accuracy, which says nothing
     about confidence and needs years of P&L to reach significance. Legacy
     callers pass None and are simply never scored.
+
+    ``horizon_days`` (Phase 3 / T2): how long this forecast gave itself to
+    be right. It is a *declaration*, stored with the deadline it implies,
+    because "when does this mature" is part of what the forecast asserted
+    and a global constant cannot answer it for a per-trader horizon — the
+    breakout book trades a 3-day horizon and the pullback book a 5-day
+    one, and grading both at 5 measured neither. Callers that do not know
+    leave it None, which is honest: the evaluator falls back to the global
+    default for those and marks them as un-declared rather than pretending
+    a horizon was stated.
     """
     features_json = json.dumps(features or {}, ensure_ascii=False)
+    deadline = _deadline_for(date, horizon_days)
     with _write_lock:
         conn = _get_conn()
         # Intraday monitoring re-saves its whole top-5 every cycle, so a
@@ -1122,10 +1171,13 @@ def save_prediction(
             conn.execute(
                 "UPDATE predictions SET name = ?, direction = ?, confidence = ?, "
                 "theme_line = ?, entry_price = COALESCE(entry_price, ?), "
-                "reason = ?, features_json = ?, prob = COALESCE(?, prob) "
+                "reason = ?, features_json = ?, prob = COALESCE(?, prob), "
+                "horizon_days = COALESCE(?, horizon_days), "
+                "deadline = COALESCE(?, deadline) "
                 "WHERE id = ?",
                 (name, direction, confidence, theme_line, entry_price,
-                 reason, features_json, prob, existing["id"]),
+                 reason, features_json, prob, horizon_days, deadline,
+                 existing["id"]),
             )
             conn.commit()
             return existing["id"]
@@ -1135,11 +1187,12 @@ def save_prediction(
         cur = conn.execute(
             "INSERT INTO predictions (date, report_type, code, name, direction, "
             "confidence, theme_line, entry_price, reason, features_json, prob, "
-            "created_at, trader_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, trader_id, horizon_days, deadline) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (date, report_type, code, name, direction, confidence, theme_line,
              entry_price, reason, features_json, prob,
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), trader_id),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), trader_id,
+             horizon_days, deadline),
         )
         conn.commit()
         return cur.lastrowid
@@ -1149,15 +1202,23 @@ def get_predictions_due_for_scoring(as_of: str, horizon_days: int = 5,
                                     limit: int = 200) -> list[dict]:
     """Probabilistic predictions whose horizon has elapsed but are unscored.
 
+    Maturity is read from the row's **declared** ``deadline`` (Phase 3 /
+    T2). ``horizon_days`` is now only the fallback for rows that pre-date
+    the declaration and is reported as such through ``legacy_horizon``,
+    so a caller can label those honestly instead of recording a
+    declaration the forecast never made. Grading every book at one global
+    horizon measured neither of them once two traders ran different ones.
+
     Only rows carrying a ``prob`` can be graded — legacy rows without one
     are skipped rather than back-filled with a guess.
     """
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, date, code, name, prob FROM predictions "
+        "SELECT id, date, code, name, prob, horizon_days, deadline, "
+        "(deadline IS NULL) AS legacy_horizon FROM predictions "
         "WHERE prob IS NOT NULL AND scored_at IS NULL "
-        "AND date <= date(?, ?) ORDER BY date LIMIT ?",
-        (as_of, f"-{horizon_days} days", limit),
+        "AND COALESCE(deadline, date(date, ?)) <= ? ORDER BY date LIMIT ?",
+        (f"+{int(horizon_days)} days", as_of, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 

@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """What did we decide, and what came of it. Read-only.
 
-The number design §9 calls "selection and coverage", and the one the book
-could not produce before the ``episodes`` table: how many decisions were
-made, how many were refused before an order was written, how many orders
-were cancelled without ever trading, and how many actually filled. Before
-this, "we decided 40 times and filled 6" was unanswerable — the only rows
-that survived were the ones a decision produced, so a low fill rate and a
-quiet week looked identical.
+Two halves of design §9's "selection and coverage".
+
+*Decisions.* The number the book could not produce before the ``episodes``
+table: how many were made, how many were refused before an order was
+written, how many orders were cancelled without ever trading, and how many
+actually filled. Before this, "we decided 40 times and filled 6" was
+unanswerable — the only rows that survived were the ones a decision
+produced, so a low fill rate and a quiet week looked identical.
+
+* Results.* The live outcome labels by kind and state, the count still
+awaiting a result, and whether the label store is structurally sound. The
+three kinds are reported side by side and never merged: a decision can be
+a correct forecast and a losing trade at once, and one "performance"
+figure would hide exactly that.
 
 It reads. It writes nothing, and it has no exit-code contract: this is a
 report an operator reads, not a gate a cron pages on (for that, see
@@ -29,10 +36,19 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from alpha_agents.data import episodes, memory_store  # noqa: E402
+from alpha_agents.data import outcomes  # noqa: E402
+
+#: Report order. Alphabetical puts "censored" first, which reads as if
+#: giving up were the normal end of a label.
+_STATE_ORDER = (outcomes.PENDING, outcomes.MATURED, outcomes.CENSORED,
+                outcomes.REVISED)
 
 
 def _report(conn, trader_id: str | None, limit: int) -> dict:
     out = {"coverage": episodes.coverage(conn, trader_id=trader_id),
+           "outcomes": outcomes.counts(conn),
+           "awaiting_result": len(outcomes.pending_labels(conn)),
+           "complaints": outcomes.integrity(conn),
            "open_episodes": []}
     for ep in episodes.open_episodes(conn, trader_id=trader_id, limit=limit):
         kinds = [e["kind"] for e in episodes.events_for(conn, ep["id"])]
@@ -69,6 +85,23 @@ def _render(data: dict) -> str:
                 f"{ep['code'] or '(no instrument)':12} "
                 f"book={where if where is not None else '-':<6} "
                 f"since {ep['opened_at']}  {'/'.join(ep['kinds'])}")
+
+    lines.append("")
+    lines.append("Outcome labels — the three kinds stay apart")
+    tally = data["outcomes"]
+    width = max(len(k) for k in tally)
+    for kind in sorted(tally):
+        cells = "  ".join(f"{state} {tally[kind].get(state, 0):<4}"
+                          for state in _STATE_ORDER)
+        lines.append(f"  {kind:<{width}}  {cells}")
+    lines.append(f"  awaiting a result   {data['awaiting_result']}")
+    problems = data["complaints"]
+    if problems:
+        lines.append(f"  integrity           {len(problems)} problem(s):")
+        for p in problems:
+            lines.append(f"    - {p}")
+    else:
+        lines.append("  integrity           clean")
     return "\n".join(lines)
 
 

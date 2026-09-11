@@ -33,7 +33,7 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
 | 切片 | 状态 |
 |---|---|
 | T1 episode 关联 | ✅ 已交付 2026-09-12（`tests/test_episodes.py`，28 用例；四个变异探针全红） |
-| T2 三种结果的生命周期 | ⬜ 未开始（`outcomes` 表已随 T1 建好，暂无写者） |
+| T2 三种结果的生命周期 | ✅ 已交付 2026-09-12（`tests/test_outcomes.py`，40 用例；六个变异探针全红） |
 | T3 候选证据结构化与生命周期 | ⬜ 未开始 |
 | T4 已批准知识快照 | ⬜ 未开始 |
 
@@ -89,7 +89,33 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
   - 平仓**不得**改写预测标签（trade outcome 只写 `kind='trade'`）。
   - 预测正确**不得**计为已实现盈利（trade outcome 只从账本派生）。
   - 违反规则**不因赚钱而豁免**（process outcome 独立成行，不看 P&L）。
-- 未平仓的仓位留 `pending` + 中间估值，**不编造终值**；缺终局证据留 `censored` 或 `pending`（§9）。
+- 未平仓的仓位留 `pending`，**不编造终值**；缺终局证据留 `censored` 或 `pending`（§9）。
+  （交付时**去掉了「中间估值」** —— 见下方实际结果。）
+
+**实际结果（2026-09-12）**
+
+- 新模块 `alpha_agents/data/outcomes.py`（375 行）：`_LEGAL` 状态机 + `declare` / `ensure_label` /
+  `resolve` 三个写入口 + `get` / `initial` / `current` / `history` / `for_episode` /
+  `pending_labels` / `counts` / `integrity` 读侧。
+- 三个标签生产者放 `alpha_agents/evolution/outcome_labels.py`（301 行），
+  **不是** `data/`：过程评分器 `process_quality` 本来就在 `evolution/`，
+  而分层方向是 `data → … → evolution`，放 `data/` 会反向 import。
+- 生产写入者：`pipeline/tasks/review.py` 的 `_label_outcomes`，
+  每轮 review 调 `declare_outstanding_forecasts` / `sweep_trade_labels` /
+  `sweep_process_labels`（best-effort，失败只记 warning）；
+  `_score_due_predictions` 按**声明的期限**评分，并对每个到期行写标签（无论是否拿到分数）。
+- 只读入口：`scripts/episode_coverage.py` 扩了结果段（`counts` / `pending_labels` /
+  `integrity`）。**标签不进任何决策上下文。**
+- **与计划的偏差（两处）**：
+  1. 计划写「未平仓的仓位留 `pending` + **中间估值**」，实现**不写估值**。
+     估值是市场数据的函数、标签是决策的函数；把 mark 塞进标签会让
+     「这个决策本身好不好」退化成「今天行情好不好」。只记 `state=pending` + `legs=0`。
+  2. `sweep_process_labels` 的三个计数改为**互斥**（计划未规定口径）。
+     原实现让一条 thesis 同时落进 `matured` 与 `unchanged`，
+     使「评了 N 条、其中几条什么都不用做」在数上不成立。
+- **修掉的两个真缺陷**（均由测试先红发现）：`ensure_label`（`declare` 返回链头而非活行，
+  第二次扫描撞 `UNIQUE constraint failed`）；上述计数重叠。详见
+  `docs/TRADER_CORE_IMPLEMENTATION.md` §9 第六轮。
 
 ### T3 候选证据结构化与生命周期
 

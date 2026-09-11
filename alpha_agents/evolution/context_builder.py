@@ -18,7 +18,7 @@ def build_morning_context(themes: list[dict], stats: str,
                           trader_id: str | None = None) -> str:
     """Build the enriched context injected into the morning agent.
 
-    mode: "full" (default) includes all Phase 1/2/3 sections.
+    mode: "full" (default) includes Phase 1/2/3 sections except raw lessons.
           "baseline" includes only Phase 1 (sentiment + cognition + stats) —
           used by Phase 4 A/B validation to compare against pre-evolution prompts.
 
@@ -64,8 +64,7 @@ def build_morning_context(themes: list[dict], stats: str,
         if part:
             sections.append(part)
     if mode != "baseline":
-        for part in (inject_principles(), inject_recent_lessons(),
-                     inject_playbooks()):
+        for part in (inject_principles(), inject_playbooks()):
             if part:
                 sections.append(part)
     if stats:
@@ -78,12 +77,11 @@ def build_chat_context(portfolio_summary: str, themes_summary: str,
     """Build the chat agent's system-prompt context string.
 
     Phase 1: adds sentiment on top of the existing portfolio / themes / stats.
-    Phase 2: also injects principles + recent lessons (3-day window).
+    Phase 2: also injects existing principles, never raw daily lessons.
     """
     sections = []
     for part in (portfolio_summary, themes_summary, stats_summary,
-                 inject_sentiment(), inject_principles(),
-                 inject_recent_lessons(days=3)):
+                 inject_sentiment(), inject_principles()):
         if part:
             sections.append(part)
     return "\n\n".join(sections)
@@ -100,6 +98,9 @@ def build_review_context(portfolio_summary: str = "",
     write the sentence that is actually worth reading: "I knew this and
     did it anyway."
 
+    Raw lessons are explicitly unverified research material, not trading
+    rules. Only this research context opts in to reading them.
+
     Calibration is here for the same reason. The review is where the agent
     grades itself, and grading without seeing your own track record is
     just narrating the day.
@@ -112,7 +113,7 @@ def build_review_context(portfolio_summary: str = "",
     from alpha_agents.data.portfolio_risk import inject_entry_side
 
     for part in (portfolio_summary, inject_principles(),
-                 inject_recent_lessons(days=30),
+                 inject_recent_lessons(days=30, purpose="research"),
                  inject_calibration(trader_id=trader_id),
                  inject_consistency(trader_id=trader_id),
                  inject_process_quality(trader_id=trader_id),

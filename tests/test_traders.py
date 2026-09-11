@@ -288,3 +288,96 @@ class TestLegacyBook:
                                                      traders_dir):
         write(traders_dir, "slow", PULLBACK)
         assert [t.id for t in TR.load_traders()] == ["slow"]
+
+
+class TestPredictionAttribution:
+    """An order names its forecast, and a fill keeps that name.
+
+    Attribution used to be re-derived at close time by matching stock code
+    plus a nearby date, which is not an ownership relation — with two
+    traders on the same stock it could hand one book's result to the
+    other's call. These tests pin the explicit link and its isolation.
+    """
+
+    def _link(self, trader_id="default"):
+        """A prediction owned by ``trader_id``.
+
+        The order records which book made the call, and ``portfolio``
+        refuses to bind an order to another book's prediction — so the
+        fixture has to produce one that matches.
+        """
+        from alpha_agents.data import memory_store
+        pid = memory_store.save_prediction(
+            date="2026-01-05", report_type="morning", code="600000",
+            name="A", direction="bullish", confidence="high",
+            theme_line="t", entry_price=10.0, reason="r",
+            trader_id=trader_id)
+        return pid
+
+    def test_a_filled_order_keeps_the_prediction_it_came_from(
+            self, store, traders_dir, theme):
+        write(traders_dir, "slow", PULLBACK)
+        pid = self._link(trader_id="slow")
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, trader_id="slow",
+            prediction_id=pid)
+        assert oid
+
+        P.check_pending_orders({"600000": 10.0}, "2026-01-06",
+                               trader_id="slow")
+
+        from alpha_agents.data import memory_store
+        row = memory_store._get_conn().execute(
+            "SELECT status, prediction_id FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()
+        assert row["status"] == "open"
+        assert row["prediction_id"] == pid
+
+    def test_two_traders_on_one_stock_keep_their_own_prediction(
+            self, store, traders_dir, theme):
+        write(traders_dir, "slow", PULLBACK)
+        write(traders_dir, "fast", BREAKOUT)
+        slow_pred = self._link(trader_id="slow")
+        fast_pred = self._link(trader_id="fast")
+        assert slow_pred != fast_pred
+
+        slow_id = P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, trader_id="slow",
+            prediction_id=slow_pred)
+        fast_id = P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, trader_id="fast",
+            prediction_id=fast_pred)
+
+        from alpha_agents.data import memory_store
+        conn = memory_store._get_conn()
+        links = {r["id"]: r["prediction_id"] for r in conn.execute(
+            "SELECT id, prediction_id FROM virtual_portfolio").fetchall()}
+        assert links[slow_id] == slow_pred
+        assert links[fast_id] == fast_pred
+
+    def test_another_traders_prediction_is_refused(
+            self, store, traders_dir, theme):
+        """An order may not claim a call another book made."""
+        write(traders_dir, "slow", PULLBACK)
+        write(traders_dir, "fast", BREAKOUT)
+        foreign = self._link(trader_id="default")
+        assert P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, trader_id="slow",
+            prediction_id=foreign) is None
+
+    def test_an_order_without_a_forecast_stays_unlinked(
+            self, store, traders_dir, theme):
+        """A manual order has no prediction, and none is invented for it."""
+        write(traders_dir, "slow", PULLBACK)
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, trader_id="slow")
+        from alpha_agents.data import memory_store
+        row = memory_store._get_conn().execute(
+            "SELECT prediction_id FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()
+        assert row["prediction_id"] is None

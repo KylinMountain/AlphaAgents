@@ -24,7 +24,8 @@ import logging
 import math
 from datetime import datetime
 
-from alpha_agents.data.memory_store import _get_conn, _write_lock
+from alpha_agents.data.memory_store import _get_conn
+from alpha_agents.data.learning_candidates import record_observation
 
 logger = logging.getLogger(__name__)
 
@@ -133,42 +134,31 @@ def score_principle(principle: dict, as_of: datetime | None = None) -> dict:
 
 
 def rescore_all_principles(as_of: datetime | None = None) -> dict:
-    """Re-derive every principle's win rate from graded predictions.
+    """Persist measurements separately; never rewrite or retire live knowledge.
 
-    Fills trading_principles.win_rate, which the LLM path left NULL
-    forever, and retires principles the market has contradicted. Returns
-    counts for the review report.
+    Even win_rate is injected into live principle prompts, so overwriting it
+    would be a behavior update. Measurements here are not forward validation
+    or approval; `retired` always remains zero in phase one.
     """
-    from alpha_agents.data.memory_store import (
-        get_all_principles_including_weakened, set_principle_status,
-    )
+    from alpha_agents.data.memory_store import get_all_principles_including_weakened
 
     as_of = as_of or datetime.now()
     principles = get_all_principles_including_weakened()
-    scored = retired = 0
-
+    scored = 0
     for p in principles:
         result = score_principle(p, as_of)
-        if result["win_rate"] is None and result["brier"] is None:
-            continue
-
-        with _write_lock:
-            conn = _get_conn()
-            conn.execute(
-                "UPDATE trading_principles SET win_rate = ? WHERE id = ?",
-                (result["win_rate"], p["id"]),
-            )
-            conn.commit()
-        scored += 1
-
-        if result["should_retire"] and p.get("status") == "active":
-            set_principle_status(p["id"], "weakened")
-            retired += 1
-            logger.info("Retired principle #%s on evidence: %s",
+        record_observation(
+            entity_type="principle", target_id=p["id"], source="principle_scoring",
+            source_date=as_of.strftime("%Y-%m-%d"),
+            payload={**result, "evidence": p.get("evidence"), "as_of": as_of.isoformat()},
+        )
+        if result["win_rate"] is not None or result["brier"] is not None:
+            scored += 1
+        if result["should_retire"]:
+            logger.info("Principle #%s flagged by measurement only: %s",
                         p["id"], result["reason"])
 
-    return {"scored": scored, "retired": retired,
-            "total": len(principles)}
+    return {"scored": scored, "retired": 0, "total": len(principles)}
 
 
 def format_principle_health(as_of: datetime | None = None) -> str:
@@ -193,5 +183,5 @@ def format_principle_health(as_of: datetime | None = None) -> str:
         lines.append(f"• 胜率区间 {min(wins)*100:.0f}%~{max(wins)*100:.0f}%")
     weak = [r for r in graded if r["should_retire"]]
     if weak:
-        lines.append(f"• {len(weak)} 条被证据否定，已退休")
+        lines.append(f"- {len(weak)} principles flagged by measurements; no retirement applied")
     return "\n".join(lines)

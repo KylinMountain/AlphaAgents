@@ -78,26 +78,38 @@ def test_match_playbook_operators():
                                 "change_pct": 1.0}) is None
 
 
-def test_update_playbook_stats_degrades_low_hit_rate():
+def test_update_playbook_stats_quarantines_a_degradation():
+    """A low hit rate proposes `degraded`; the live playbook is untouched.
+
+    Counting stays in record_playbook_trade. Moving a rule to weight 0.5
+    changes what the prompt retrieval rank sees, so it needs a candidate
+    version rather than a daily rule engine applying it in place.
+    """
     pb = {"id": 1, "name": "X", "status": "active", "weight": 1.0,
           "total_trades": 6, "wins": 2, "hit_rate": 0.33, "avg_return": -1.0,
           "pattern_json": "{}", "annotation": ""}
     with patch("alpha_agents.evolution.playbook.get_all_playbooks",
                return_value=[pb]), \
-         patch("alpha_agents.evolution.playbook.update_playbook_status") as m_upd, \
-         patch("alpha_agents.evolution.playbook.set_playbook_annotation") as m_ann, \
-         patch("alpha_agents.evolution.playbook.annotate_degraded",
-               return_value="主线资金退潮"):
+         patch("alpha_agents.evolution.playbook.save_candidate",
+               return_value=31) as m_save, \
+         patch("alpha_agents.data.memory_store.update_playbook_status") as m_live, \
+         patch("alpha_agents.data.memory_store.set_playbook_annotation") as m_ann:
         from alpha_agents.evolution.playbook import update_playbook_stats
         ops = update_playbook_stats("2026-04-17")
-    assert any("degraded" in o.lower() for o in ops)
-    m_upd.assert_called_once()
-    assert m_upd.call_args.kwargs["status"] == "degraded"
-    assert m_upd.call_args.kwargs["weight"] == 0.5
-    m_ann.assert_called_once()
+
+    assert any("candidate" in o for o in ops)
+    assert m_save.call_count == 1
+    kwargs = m_save.call_args.kwargs
+    assert kwargs["entity_type"] == "playbook"
+    assert kwargs["operation"] == "update"
+    assert kwargs["target_id"] == 1
+    assert kwargs["payload"]["proposal"]["status"] == "degraded"
+    assert kwargs["payload"]["proposal"]["weight"] == 0.5
+    m_live.assert_not_called()
+    m_ann.assert_not_called()
 
 
-def test_update_playbook_stats_restores_degraded_on_recovery():
+def test_update_playbook_stats_quarantines_a_restore():
     pb = {"id": 1, "name": "Y", "status": "degraded", "weight": 0.5,
           "total_trades": 10, "wins": 3, "hit_rate": 0.3,
           "pattern_json": "{}", "annotation": "hit_rate<40%",
@@ -106,15 +118,18 @@ def test_update_playbook_stats_restores_degraded_on_recovery():
                return_value=[pb]), \
          patch("alpha_agents.evolution.playbook._recent_hit_rate",
                return_value=(0.8, 5)), \
-         patch("alpha_agents.evolution.playbook.update_playbook_status") as m_upd:
+         patch("alpha_agents.evolution.playbook.save_candidate",
+               return_value=32) as m_save, \
+         patch("alpha_agents.data.memory_store.update_playbook_status") as m_live:
         from alpha_agents.evolution.playbook import update_playbook_stats
         ops = update_playbook_stats("2026-04-17")
-    assert any("active" in o.lower() for o in ops)
-    assert m_upd.call_args.kwargs["status"] == "active"
-    assert m_upd.call_args.kwargs["weight"] == 1.0
+
+    assert m_save.call_args.kwargs["payload"]["proposal"]["status"] == "active"
+    assert m_save.call_args.kwargs["payload"]["proposal"]["weight"] == 1.0
+    m_live.assert_not_called()
 
 
-def test_update_playbook_stats_deprecates_after_14_days():
+def test_update_playbook_stats_quarantines_a_deprecation():
     from datetime import datetime, timedelta
     fifteen_ago = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
     pb = {"id": 1, "name": "Z", "status": "degraded", "weight": 0.5,
@@ -127,26 +142,48 @@ def test_update_playbook_stats_deprecates_after_14_days():
                return_value=[pb]), \
          patch("alpha_agents.evolution.playbook._recent_hit_rate",
                return_value=(0.3, 5)), \
-         patch("alpha_agents.evolution.playbook.update_playbook_status") as m_upd:
+         patch("alpha_agents.evolution.playbook.save_candidate",
+               return_value=33) as m_save, \
+         patch("alpha_agents.data.memory_store.update_playbook_status") as m_live:
         from alpha_agents.evolution.playbook import update_playbook_stats
         ops = update_playbook_stats(today_str)
-    assert any("deprecated" in o.lower() for o in ops)
-    assert m_upd.call_args.kwargs["status"] == "deprecated"
-    assert m_upd.call_args.kwargs["weight"] == 0.0
+
+    assert m_save.call_args.kwargs["payload"]["proposal"]["status"] == "deprecated"
+    assert m_save.call_args.kwargs["payload"]["proposal"]["weight"] == 0.0
+    m_live.assert_not_called()
 
 
-def test_update_playbook_stats_boosts_high_performer():
+def test_update_playbook_stats_quarantines_a_boost():
     pb = {"id": 1, "name": "H", "status": "active", "weight": 1.0,
           "total_trades": 15, "wins": 12, "hit_rate": 0.80, "avg_return": 3.5,
           "pattern_json": "{}"}
     with patch("alpha_agents.evolution.playbook.get_all_playbooks",
                return_value=[pb]), \
-         patch("alpha_agents.evolution.playbook.update_playbook_status") as m_upd:
+         patch("alpha_agents.evolution.playbook.save_candidate",
+               return_value=34) as m_save, \
+         patch("alpha_agents.data.memory_store.update_playbook_status") as m_live:
         from alpha_agents.evolution.playbook import update_playbook_stats
         ops = update_playbook_stats("2026-04-17")
-    assert any("boost" in o.lower() or "1.5" in o for o in ops)
-    assert m_upd.call_args.kwargs["weight"] == 1.5
-    assert m_upd.call_args.kwargs["status"] == "active"
+
+    proposal = m_save.call_args.kwargs["payload"]["proposal"]
+    assert proposal["weight"] == 1.5
+    assert proposal["status"] == "active"
+    m_live.assert_not_called()
+
+
+def test_update_playbook_stats_is_a_no_op_without_a_trigger():
+    """A healthy playbook inside the thresholds proposes nothing."""
+    pb = {"id": 1, "name": "K", "status": "active", "weight": 1.0,
+          "total_trades": 8, "wins": 4, "hit_rate": 0.55,
+          "pattern_json": "{}", "annotation": ""}
+    with patch("alpha_agents.evolution.playbook.get_all_playbooks",
+               return_value=[pb]), \
+         patch("alpha_agents.evolution.playbook.save_candidate") as m_save:
+        from alpha_agents.evolution.playbook import update_playbook_stats
+        ops = update_playbook_stats("2026-04-17")
+
+    assert ops == []
+    m_save.assert_not_called()
 
 
 def test_scan_and_auto_create_ignores_signal_rows():
@@ -159,7 +196,8 @@ def test_scan_and_auto_create_ignores_signal_rows():
     m.assert_called_once()
 
 
-def test_scan_and_auto_create_creates_new_playbook():
+def test_scan_and_auto_create_quarantines_a_new_pattern():
+    """The cluster is described as a candidate; no playbook is created live."""
     cluster = {"vpa_verdict": "bullish", "theme": "CPO",
                "institutional_present": 1,
                "hits": 4, "total": 5, "avg_return": 4.2}
@@ -167,20 +205,26 @@ def test_scan_and_auto_create_creates_new_playbook():
                return_value=[cluster]), \
          patch("alpha_agents.evolution.playbook.get_all_playbooks",
                return_value=[]), \
-         patch("alpha_agents.evolution.playbook.create_playbook",
-               return_value=42) as m_create:
+         patch("alpha_agents.evolution.playbook.save_candidate",
+               return_value=42) as m_save, \
+         patch("alpha_agents.data.memory_store.create_playbook") as m_live:
         from alpha_agents.evolution.playbook import scan_and_auto_create
         created = scan_and_auto_create("2026-04-17")
+
     assert created == [42]
-    m_create.assert_called_once()
-    args = m_create.call_args.kwargs
-    pattern = args["pattern_json"]
+    assert m_save.call_count == 1
+    kwargs = m_save.call_args.kwargs
+    assert kwargs["entity_type"] == "playbook"
+    assert kwargs["operation"] == "create"
+    assert not kwargs.get("target_id")
+    pattern = kwargs["payload"]["pattern_json"]
     # Conditions must reference theme + vpa_verdict + institutional (contains 机构)
     fields = {c["field"] for c in pattern["conditions"]}
     assert fields == {"theme", "vpa_verdict", "institutional"}
     # Name includes identifying bits
-    assert "CPO" in args["name"]
-    assert "bullish" in args["name"]
+    assert "CPO" in kwargs["payload"]["name"]
+    assert "bullish" in kwargs["payload"]["name"]
+    m_live.assert_not_called()
 
 
 def test_scan_and_auto_create_skips_existing_pattern():
@@ -195,8 +239,8 @@ def test_scan_and_auto_create_skips_existing_pattern():
                return_value=[cluster]), \
          patch("alpha_agents.evolution.playbook.get_all_playbooks",
                return_value=existing), \
-         patch("alpha_agents.evolution.playbook.create_playbook") as m_create:
+         patch("alpha_agents.evolution.playbook.save_candidate") as m_save:
         from alpha_agents.evolution.playbook import scan_and_auto_create
         created = scan_and_auto_create("2026-04-17")
     assert created == []
-    m_create.assert_not_called()
+    m_save.assert_not_called()

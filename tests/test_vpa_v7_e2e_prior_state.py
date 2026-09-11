@@ -103,7 +103,20 @@ def test_e2e_prior_state_propagates_into_user_message(monkeypatch):
 
 
 def test_misaligned_prior_state_raises_runtime_error(monkeypatch):
+    """A stale prior_state must fail loudly, without reading the corpus.
+
+    The guard compares the caller's analysis_date against the previous
+    trading day of as_of. Resolving that date from real data would make
+    this a corpus test and drag the business DB into the sandbox, so the
+    lookup is stubbed: the point under test is the comparison, not the
+    calendar. The stub also proves the guard fires *before* any data load,
+    which is what keeps a misaligned backtest from silently degrading.
+    """
     from alpha_agents.tools import vpa as vpa_mod
+    from alpha_agents.tools.vpa import api as vpa_api
+
+    monkeypatch.setattr(vpa_api, "_prev_trading_day",
+                        lambda as_of, **kwargs: "2025-12-12")
 
     # prior_state's analysis_date is NOT the previous trading day of as_of
     bad_prior = {
@@ -116,3 +129,25 @@ def test_misaligned_prior_state_raises_runtime_error(monkeypatch):
             code="300136", name="信维通信", as_of="2025-12-15",
             skip_save=True, prior_state=bad_prior,
         )
+
+
+def test_aligned_prior_state_does_not_trip_the_guard(monkeypatch):
+    """The mirror case: a correctly dated baseline clears the alignment
+    check. With no corpus in the sandbox the call stops at the data load
+    and reports an error result — it must not raise a misalignment."""
+    from alpha_agents.tools import vpa as vpa_mod
+    from alpha_agents.tools.vpa import api as vpa_api
+
+    monkeypatch.setattr(vpa_api, "_prev_trading_day",
+                        lambda as_of, **kwargs: "2025-12-12")
+    good_prior = {
+        "analysis_date": "2025-12-12",
+        "phase": "拉升", "verdict": "看多",
+        "selected_candidate_id": "cand-2025-12-12", "rationale": "aligned",
+    }
+    result = vpa_mod.compute_vpa_with_llm(
+        code="300136", name="信维通信", as_of="2025-12-15",
+        skip_save=True, prior_state=good_prior,
+    )
+    assert result.get("ok") is False  # data load, not the guard, stopped it
+    assert "misalignment" not in str(result)

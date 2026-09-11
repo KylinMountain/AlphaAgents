@@ -1,4 +1,4 @@
-"""The learning loop: dedup, benchmark-adjusted grading, close→prediction."""
+"""The learning loop: dedup, benchmark-adjusted grading, explicit attribution."""
 
 import sqlite3
 from unittest.mock import patch
@@ -123,64 +123,111 @@ class TestPredictionDedup:
 
 
 class TestCloseFeedsLearning:
-    """A realised round trip overwrites the next-day proxy."""
+    """A close feeds the playbook. It does not grade the forecast.
 
-    def _seed(self, ms, conn, *, return_pct):
+    These tests used to assert the opposite — that a realised return
+    overwrote ``predictions.hit`` and ``week_return``. That collapsed two
+    different questions: "did this beat the market over the declared
+    horizon" (the forecast label, filled by review.py) and "what did this
+    position earn" (a trade outcome, recorded in position_exits). The
+    assertions now pin the separation and the explicit attribution.
+    """
+
+    def _seed(self, ms, conn, *, prediction_id, position_trader="default",
+              prediction_trader="default", features=None):
         pid = ms.save_prediction(
             date="2026-09-01", report_type="intraday", code="300308",
             name="中际旭创", direction="看多", confidence="high",
             theme_line="AI算力", entry_price=150.0, reason="r",
+            features=features, trader_id=prediction_trader,
         )
         conn.execute(
             "INSERT INTO virtual_portfolio (id, code, name, theme, order_date, "
-            "open_date, open_price, shares, status) "
+            "open_date, open_price, shares, status, trader_id, prediction_id) "
             "VALUES (1, '300308', '中际旭创', 'AI算力', '2026-09-01', "
-            "'2026-09-01', 150.0, 100, 'closed')"
+            "'2026-09-01', 150.0, 100, 'closed', ?, ?)",
+            (position_trader, pid if prediction_id else None),
         )
         conn.commit()
         return pid
 
-    def test_loss_overwrites_a_would_be_hit(self, store):
+    def test_a_loss_does_not_overwrite_the_forecast_label(self, store):
         ms, conn = store
-        from alpha_agents.data import portfolio as pf
-        pid = self._seed(ms, conn, return_pct=-8.0)
-        with patch.object(pf, "_get_conn", lambda: conn), \
-             patch.object(pf, "_write_lock", ms._write_lock):
-            pf._feed_close_to_learning(1, -8.0, "止损触发")
+        from alpha_agents.data import portfolio_exit as pe
+        pid = self._seed(ms, conn, prediction_id=True)
+
+        with patch.object(pe, "_get_conn", lambda: conn):
+            pe._feed_close_to_learning(1, -8.0, "止损触发")
+
         row = conn.execute("SELECT hit, week_return, review_note FROM predictions "
                            "WHERE id = ?", (pid,)).fetchone()
-        assert row["hit"] == 0
-        assert row["week_return"] == -8.0
-        assert "止损触发" in row["review_note"]
+        assert row["hit"] is None
+        assert row["week_return"] is None
+        assert not row["review_note"]
 
-    def test_profit_records_a_hit(self, store):
+    def test_a_profit_does_not_overwrite_the_forecast_label(self, store):
         ms, conn = store
-        from alpha_agents.data import portfolio as pf
-        pid = self._seed(ms, conn, return_pct=12.0)
-        with patch.object(pf, "_get_conn", lambda: conn), \
-             patch.object(pf, "_write_lock", ms._write_lock):
-            pf._feed_close_to_learning(1, 12.0, "止盈触发")
+        from alpha_agents.data import portfolio_exit as pe
+        pid = self._seed(ms, conn, prediction_id=True)
+
+        with patch.object(pe, "_get_conn", lambda: conn):
+            pe._feed_close_to_learning(1, 12.0, "止盈触发")
+
         row = conn.execute("SELECT hit, week_return FROM predictions WHERE id = ?",
                            (pid,)).fetchone()
-        assert row["hit"] == 1
-        assert row["week_return"] == 12.0
+        assert row["hit"] is None
+        assert row["week_return"] is None
+
+    def test_the_matched_playbook_still_hears_the_outcome(self, store):
+        """Observation counting is allowed; only the forecast label is off limits."""
+        ms, conn = store
+        from alpha_agents.data import portfolio_exit as pe
+        self._seed(ms, conn, prediction_id=True, features={"playbook_id": 7})
+
+        with patch.object(pe, "_get_conn", lambda: conn), \
+             patch.object(ms, "record_playbook_trade") as m_trade:
+            pe._feed_close_to_learning(1, -8.0, "止损触发")
+
+        m_trade.assert_called_once()
+        assert m_trade.call_args.kwargs["return_pct"] == -8.0
+        assert m_trade.call_args.kwargs["hit"] is False
+
+    def test_a_position_with_no_link_gets_no_feedback(self, store):
+        """An unknown origin stays unknown — it is not matched to a neighbour.
+
+        The old lookup took the newest prediction with the same code near
+        the fill date, so this position *would* have been graded against
+        the prediction sitting right next to it.
+        """
+        ms, conn = store
+        from alpha_agents.data import portfolio_exit as pe
+        self._seed(ms, conn, prediction_id=False)
+
+        with patch.object(pe, "_get_conn", lambda: conn), \
+             patch.object(ms, "record_playbook_trade") as m_trade:
+            pe._feed_close_to_learning(1, 12.0, "止盈触发")
+
+        m_trade.assert_not_called()
+        assert conn.execute(
+            "SELECT hit FROM predictions"
+        ).fetchone()["hit"] is None
+
+    def test_another_traders_prediction_is_not_used(self, store):
+        """Same stock is not the same owner."""
+        ms, conn = store
+        from alpha_agents.data import portfolio_exit as pe
+        # The order points at a prediction belonging to a different book.
+        self._seed(ms, conn, prediction_id=True, position_trader="momentum",
+                   prediction_trader="default")
+
+        with patch.object(pe, "_get_conn", lambda: conn), \
+             patch.object(ms, "record_playbook_trade") as m_trade:
+            pe._feed_close_to_learning(1, 12.0, "止盈触发")
+
+        m_trade.assert_not_called()
 
     def test_missing_position_is_silent(self, store):
         ms, conn = store
-        from alpha_agents.data import portfolio as pf
-        with patch.object(pf, "_get_conn", lambda: conn), \
-             patch.object(pf, "_write_lock", ms._write_lock):
-            pf._feed_close_to_learning(999, 5.0, "止盈触发")  # must not raise
-
-    def test_no_matching_prediction_is_silent(self, store):
-        ms, conn = store
-        from alpha_agents.data import portfolio as pf
-        conn.execute(
-            "INSERT INTO virtual_portfolio (id, code, name, theme, order_date, "
-            "open_date, open_price, shares, status) "
-            "VALUES (2, '999999', 'X', 'T', '2026-09-01', '2026-09-01', 10.0, 100, 'closed')"
-        )
-        conn.commit()
-        with patch.object(pf, "_get_conn", lambda: conn), \
-             patch.object(pf, "_write_lock", ms._write_lock):
-            pf._feed_close_to_learning(2, 5.0, "止盈触发")  # must not raise
+        from alpha_agents.data import portfolio_exit as pe
+        with patch.object(pe, "_get_conn", lambda: conn):
+            pe._feed_close_to_learning(999, 5.0, "止盈触发")  # must not raise

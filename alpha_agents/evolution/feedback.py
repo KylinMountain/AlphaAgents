@@ -173,12 +173,21 @@ def inject_principles() -> str:
     return "\n".join(lines)
 
 
-def inject_recent_lessons(days: int = 7) -> str:
-    """Render last N days of daily_lessons. Budget: 600 chars."""
+def inject_recent_lessons(days: int = 7, *, purpose: str = "decision") -> str:
+    """Render raw lessons only for explicit research use. Budget: 600 chars.
+
+    Raw LLM suggestions are not approved rules. Default/unknown purposes
+    return empty without querying storage, including for legacy callers.
+    """
+    if purpose != "research":
+        return ""
     rows = get_recent_daily_lessons(days=days)
     if not rows:
         return ""
-    lines = ["【近期教训】"]
+    lines = [
+        "[Recent lessons — unverified research material]",
+        "Raw LLM suggestions, not approved. Do not apply directly as trading rules.",
+    ]
     for r in rows:
         date = r.get("date", "")[5:]  # "04-17"
         ltype = r.get("lesson_type", "")
@@ -236,20 +245,17 @@ _PLAYBOOKS_BUDGET = 400
 
 
 def inject_playbooks() -> str:
+    """Render existing rule fields, excluding mutable outcome measurements."""
     rows = get_active_or_degraded_playbooks()
     if not rows:
         return ""
     lines = [f"【活跃 Playbook】（{len(rows)}条）"]
     for pb in rows:
-        hr = pb.get("hit_rate", 0) or 0
-        ttl = pb.get("total_trades", 0)
-        wins = pb.get("wins", 0)
         w = pb.get("weight", 1.0)
-        tag = "⚠️" if pb["status"] == "degraded" else ("⭐" if w >= 1.5 else "")
         ann = pb.get("annotation", "")
         ann_bit = f" — {ann}" if ann else ""
-        line = (f"• {tag}{pb['name']} — 胜率{hr*100:.0f}%"
-                f"（{wins}/{ttl}）weight={w:.1f}{ann_bit}")
+        line = (f"• {pb['name']} — status={pb['status']} "
+                f"weight={w:.1f}{ann_bit}")
         if sum(len(x) for x in lines) + len(line) > _PLAYBOOKS_BUDGET:
             break
         lines.append(line)

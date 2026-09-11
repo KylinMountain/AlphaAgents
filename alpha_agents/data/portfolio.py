@@ -14,8 +14,20 @@ import os
 import re
 from datetime import datetime
 
+from alpha_agents.data import attribution, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
+# The exit slice lives in portfolio_exit: the friction model, the append-only
+# exit legs, and the close path that books them. Re-exported here because entry
+# sizing needs LOT_SIZE and because callers have always reached for
+# close_position through this module.
+from alpha_agents.data.portfolio_exit import (
+    LOT_SIZE,
+    _blended_return_pct,
+    _estimate_net_close_result,
+    _status_from_reason,
+    close_position,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +56,6 @@ DEFAULT_POSITION_PCT = float(os.environ.get("DEFAULT_POSITION_PCT", "0.03"))
 MAX_POSITION_PCT = float(os.environ.get("MAX_POSITION_PCT", "0.10"))
 MAX_POSITION_WITH_ADD = MAX_POSITION_PCT
 MAX_THEME_PCT = 0.30             # 单主线上限
-LOT_SIZE = 100                   # A股一手 = 100股
 ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 
 # The one exit the trading agent may not overrule.
@@ -70,49 +81,6 @@ HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT", "8.0"))
 # cancelling them, then counting those cancellations as evidence about
 # entry prices.
 MIN_THEME_STRENGTH = 4
-
-# Conservative A-share execution assumptions for virtual portfolio P&L.
-# Net return includes buy/sell slippage, commissions, transfer fees, and
-# sell-side stamp duty so the portfolio is not evaluated on frictionless fills.
-COMMISSION_RATE = 0.0003         # 0.03% each side
-MIN_COMMISSION = 5.0             # RMB minimum per order
-STAMP_DUTY_SELL_RATE = 0.0005    # 0.05% on sell side
-TRANSFER_FEE_RATE = 0.00001      # 0.001% each side
-SLIPPAGE_RATE = 0.0005           # 5 bps each side
-
-
-def _estimate_net_close_result(open_price: float, close_price: float, shares: int) -> dict:
-    """Estimate net round-trip P&L for an A-share virtual trade."""
-    if open_price <= 0 or close_price <= 0 or shares <= 0:
-        return {
-            "return_pct": 0.0,
-            "return_amount": 0.0,
-            "gross_amount": 0.0,
-            "costs": 0.0,
-        }
-
-    buy_price = open_price * (1 + SLIPPAGE_RATE)
-    sell_price = close_price * (1 - SLIPPAGE_RATE)
-    buy_value = buy_price * shares
-    sell_value = sell_price * shares
-
-    buy_commission = max(buy_value * COMMISSION_RATE, MIN_COMMISSION)
-    sell_commission = max(sell_value * COMMISSION_RATE, MIN_COMMISSION)
-    buy_transfer = buy_value * TRANSFER_FEE_RATE
-    sell_transfer = sell_value * TRANSFER_FEE_RATE
-    stamp_duty = sell_value * STAMP_DUTY_SELL_RATE
-
-    cost_basis = buy_value + buy_commission + buy_transfer
-    net_proceeds = sell_value - sell_commission - sell_transfer - stamp_duty
-    net_amount = net_proceeds - cost_basis
-    gross_amount = (close_price - open_price) * shares
-
-    return {
-        "return_pct": round(net_amount / cost_basis * 100, 2) if cost_basis else 0.0,
-        "return_amount": round(net_amount, 2),
-        "gross_amount": round(gross_amount, 2),
-        "costs": round(gross_amount - net_amount, 2),
-    }
 
 
 def get_sentiment_exposure_limit(trader_id: str = DEFAULT_TRADER) -> float:
@@ -242,21 +210,37 @@ def account_capital() -> float:
     total = 0.0
     for t in traders:
         if t.legacy:
-            total += t.capital - get_available_capital(t.id)
+            total += get_invested_capital(t.id)
         else:
             total += t.capital
     return float(total)
 
 
 def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
-    """Remaining cash for one trader = its capital − its own positions."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT open_price, shares FROM virtual_portfolio "
-        "WHERE status = 'open' AND trader_id = ?", (trader_id,)
-    ).fetchall()
-    invested = sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
-    return trader_capital(trader_id) - invested
+    """Remaining cash for one trader.
+
+    The pot, plus what this trader has actually realised on closed
+    positions, minus what is still tied up in its open book. The old
+    ``capital − positions`` reading left realised P&L out entirely, so a
+    trader that had made money could not spend it and one that had lost
+    money could still spend money it no longer had — the account never
+    reflected the trading, only the position.
+
+    Legacy aggregate results are included as compatibility estimates, never
+    reconstructed fills. This is not yet a fee-at-fill cash ledger.
+    """
+    return (trader_capital(trader_id)
+            + trade_ledger.realized_total(_get_conn(), trader_id)
+            - get_invested_capital(trader_id))
+
+
+def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
+    """Open cost exposure, independent of realized gains or losses."""
+    row = _get_conn().execute(
+        "SELECT COALESCE(SUM(open_price * shares), 0) FROM virtual_portfolio "
+        "WHERE status='open' AND trader_id=?", (trader_id,),
+    ).fetchone()
+    return float(row[0])
 
 
 def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
@@ -311,6 +295,17 @@ def resolve_theme(theme: str) -> str | None:
     return None
 
 
+def _valid_prediction(conn, prediction_id: int | None, code: str, trader_id: str) -> bool:
+    if prediction_id is None:
+        return True
+    if type(prediction_id) is not int or prediction_id <= 0:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM predictions WHERE id=? AND code=? AND trader_id=?",
+        (prediction_id, code, trader_id),
+    ).fetchone() is not None
+
+
 def create_pending_order(
     *,
     code: str,
@@ -324,13 +319,38 @@ def create_pending_order(
     source: str = "morning",
     reason: str = "",
     trader_id: str = DEFAULT_TRADER,
+    prediction_id: int | None = None,
+    thesis_id: int | None = None,
 ) -> int | None:
     """Create a pending order (挂单). Triggered when price enters entry zone.
+
+    ``prediction_id`` names the call this order came from. It is optional
+    because a manual order has no forecast behind it, but when the caller
+    knows the prediction it must pass it: the closing path no longer guesses
+    the link from stock and date, so an order created without one closes
+    with no learning feedback rather than with a plausible but wrong one.
+
+    ``thesis_id`` names the idea the order serves. Both links are stored on
+    the order, so the chain ``thesis → order → exit`` is a set of columns
+    rather than a search, and both are checked for ownership before the row
+    exists — a mismatched link is refused here, not discovered later.
+
+    The decision's information boundary is frozen at the same moment: the
+    order is the decision, and a boundary recorded afterwards is a
+    reconstruction, not a record.
 
     Returns order id, or None if duplicate/rejected.
     """
     with _write_lock:
         conn = _get_conn()
+        if not _valid_prediction(conn, prediction_id, code, trader_id):
+            logger.warning("Rejected prediction link %s for %s/%s", prediction_id, trader_id, code)
+            return None
+        if not attribution.valid_thesis(conn, thesis_id, code, trader_id):
+            logger.warning("Rejected thesis link %s for %s/%s — not this "
+                           "book's idea about this stock",
+                           thesis_id, trader_id, code)
+            return None
         # No duplicate: same stock pending or open
         # Scoped to the trader: two traders holding the same stock is the
         # comparison working, not a duplicate. Only one book may hold it
@@ -369,12 +389,38 @@ def create_pending_order(
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "
             "(code, name, theme, order_date, open_date, open_price, entry_low, entry_high, "
-            " stop_loss, target_price, expire_days, status, source, reason, trader_id) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+            " stop_loss, target_price, expire_days, status, source, reason, trader_id, "
+            " prediction_id, thesis_id) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
             (code, name, theme, order_date, order_date, entry_low, entry_high,
              stop_loss, target_price, PENDING_EXPIRE_DAYS, source, reason,
-             trader_id),
+             trader_id, prediction_id, thesis_id),
         )
+        order_id = cursor.lastrowid
+        # Freeze what this decision was allowed to know, while it is still
+        # the decision rather than a memory of it. The declared inputs are
+        # the order's own terms, so a later edit to the thesis cannot
+        # retcon the basis on which it was placed.
+        try:
+            attribution.freeze(
+                conn, trader_id=trader_id, code=code,
+                information_cutoff=order_date, decided_at=order_date,
+                payload={
+                    "action": "open",
+                    "entry_low": entry_low, "entry_high": entry_high,
+                    "stop_loss": stop_loss, "target_price": target_price,
+                    "expire_days": PENDING_EXPIRE_DAYS,
+                    "source": source, "reason": reason,
+                },
+                thesis_id=thesis_id, order_id=order_id,
+                prediction_id=prediction_id,
+                sources=[source] if source else [],
+            )
+        except Exception as e:
+            # The order is the trade; the boundary is the audit. Losing the
+            # audit must not stop the trade — but it must be visible.
+            logger.warning("Could not freeze decision boundary for order "
+                           "#%s: %s", order_id, e)
         conn.commit()
 
         zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
@@ -629,7 +675,7 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # Must be inside lock to prevent race conditions with concurrent fills
         available = get_available_capital(trader_id)
         sentiment_cap = get_sentiment_exposure_limit(trader_id)
-        invested = capital - available
+        invested = get_invested_capital(trader_id)
         sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
 
         # Size by conviction rather than filling every position to the cap.
@@ -705,12 +751,28 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
     # thesis is an idea; from here the monitor evaluates it against a real
     # cost basis every cycle, and an unbound thesis would be checked
     # against nothing.
+    #
+    # Scoped by trader, and the order's own thesis wins when it named one.
+    # This used to scan every live thesis on the code and take the first
+    # unfilled one: with two traders holding the same stock, the second
+    # fill could bind the first trader's idea, after which the monitor
+    # evaluated one book's thesis against the other book's cost basis and
+    # the review attributed the result to an idea that never traded.
     try:
         from alpha_agents.data.thesis import attach_position, get_active
-        for th in get_active(code=code):
-            if th.position_id is None:
-                attach_position(th.id, order["id"])
-                break
+        candidates = [t for t in get_active(code=code, trader_id=trader_id)
+                      if t.position_id is None]
+        wanted = order.get("thesis_id")
+        if wanted is not None:
+            bound = [t for t in candidates if t.id == wanted]
+            if not bound:
+                logger.warning(
+                    "Order #%s names thesis %s, which is not a live unfilled "
+                    "idea of %s on %s — no binding", order["id"], wanted,
+                    trader_id, code)
+            candidates = bound
+        if candidates:
+            attach_position(candidates[-1].id, order["id"])
     except Exception as e:
         logger.warning("Could not bind thesis to position %s: %s", code, e)
 
@@ -816,65 +878,73 @@ def open_position(
     source: str = "manual",
     reason: str = "",
     shares: int | None = None,
+    trader_id: str = DEFAULT_TRADER,
+    prediction_id: int | None = None,
+    thesis_id: int | None = None,
 ) -> int | None:
-    """Compatibility helper to insert an already-filled virtual position."""
-    if open_price <= 0:
+    """Compatibility helper to insert an already-filled virtual position.
+
+    Takes the same attribution links as ``create_pending_order`` and checks
+    them the same way: a position that cannot name the idea behind it is a
+    position whose result nobody can learn from.
+    """
+    if not trade_ledger.positive_price(open_price):
         return None
     if shares is None:
-        shares = _calc_shares(open_price, TOTAL_CAPITAL * MAX_POSITION_PCT)
-    if shares <= 0:
+        shares = _calc_shares(open_price, trader_capital(trader_id) * MAX_POSITION_PCT)
+    if type(shares) is not int or shares <= 0:
         return None
 
     with _write_lock:
         conn = _get_conn()
+        if not _valid_prediction(conn, prediction_id, code, trader_id):
+            logger.warning("Rejected prediction link %s for %s/%s", prediction_id, trader_id, code)
+            return None
+        if not attribution.valid_thesis(conn, thesis_id, code, trader_id):
+            logger.warning("Rejected thesis link %s for %s/%s — not this "
+                           "book's idea about this stock",
+                           thesis_id, trader_id, code)
+            return None
         existing = conn.execute(
-            "SELECT id FROM virtual_portfolio WHERE code = ? AND status IN ('pending', 'open')",
-            (code,),
+            "SELECT id FROM virtual_portfolio WHERE code = ? AND trader_id=? "
+            "AND status IN ('pending', 'open')",
+            (code, trader_id),
         ).fetchone()
         if existing:
             return None
         cur = conn.execute(
             "INSERT INTO virtual_portfolio "
             "(code, name, theme, order_date, open_date, open_price, shares, "
-            " stop_loss, target_price, status, source, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+            " stop_loss, target_price, status, source, reason, trader_id, "
+            " prediction_id, thesis_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
             (code, name, theme, open_date, open_date, open_price, shares,
-             stop_loss, target_price, source, reason),
+             stop_loss, target_price, source, reason, trader_id,
+             prediction_id, thesis_id),
         )
+        position_id = cur.lastrowid
+        try:
+            attribution.freeze(
+                conn, trader_id=trader_id, code=code,
+                information_cutoff=open_date, decided_at=open_date,
+                payload={"action": "open", "open_price": open_price,
+                         "shares": shares, "stop_loss": stop_loss,
+                         "target_price": target_price, "source": source,
+                         "reason": reason},
+                thesis_id=thesis_id, order_id=position_id,
+                prediction_id=prediction_id,
+                sources=[source] if source else [],
+            )
+        except Exception as e:
+            logger.warning("Could not freeze decision boundary for position "
+                           "#%s: %s", position_id, e)
         conn.commit()
-        return cur.lastrowid
+        return position_id
 
 
 def _round_lot(shares: int) -> int:
     """Down to a whole 手. A-shares sell in multiples of 100."""
     return (int(shares) // LOT_SIZE) * LOT_SIZE
-
-
-def _partial_close(conn, position_id: int, open_price: float,
-                   close_price: float, sell: int, held: int,
-                   booked: float, close_reason: str) -> bool:
-    """Book a trim: realise part, keep the rest open at the same cost.
-
-    The realised amount accumulates in return_amount so a position trimmed
-    twice and then closed still totals what it actually earned. return_pct
-    stays the per-share figure on this sale, which is what the review
-    reads when it asks whether the trim was a good call.
-    """
-    net = _estimate_net_close_result(open_price, close_price, sell)
-    remaining = held - sell
-    conn.execute(
-        "UPDATE virtual_portfolio SET shares = ?, return_amount = ?, "
-        "close_reason = ? WHERE id = ?",
-        (remaining, round(booked + net["return_amount"], 2),
-         close_reason[:200], position_id))
-    conn.commit()
-    logger.info("Trimmed #%d: 卖出 %d股 @ %.2f (净 %+.2f%%, %+.0f元)，"
-                "剩余 %d股 — %s",
-                position_id, sell, close_price, net["return_pct"],
-                net["return_amount"], remaining, close_reason)
-    # No learning feedback here on purpose: the thesis is still live and
-    # its outcome is not decided. The full close writes the label.
-    return True
 
 
 def add_to_position(position_id: int, *, price: float, reason: str,
@@ -913,7 +983,7 @@ def add_to_position(position_id: int, *, price: float, reason: str,
             capital * MAX_THEME_PCT
             - get_theme_exposure(pos["theme"] or "", trader_id),
             max(0.0, get_sentiment_exposure_limit(trader_id)
-                - (capital - available)),
+                - get_invested_capital(trader_id)),
         )
         add_shares = _calc_shares(price, max(0.0, room))
         if add_shares <= 0:
@@ -934,148 +1004,6 @@ def add_to_position(position_id: int, *, price: float, reason: str,
     logger.info("Added to #%d %s: +%d股 @ %.2f → %d股 均价%.2f — %s",
                 position_id, pos["code"], add_shares, price, total, avg, reason)
     return {"shares": add_shares, "avg_price": avg, "total_shares": total}
-
-
-def close_position(
-    position_id: int,
-    *,
-    close_price: float,
-    close_reason: str,
-    shares: int | None = None,
-) -> bool:
-    """Close a position, or part of one. Returns True on success.
-
-    ``shares`` makes 减仓 a real action. Without it the agent could say
-    "trim" and the system recorded a full exit, so every partial-exit
-    decision it ever made was executed as something else and graded as
-    something else — the one sizing skill it was allowed to express was
-    quietly discarded.
-
-    A partial close books the realised P&L on the shares sold and leaves
-    the rest open at the same cost basis. Cost basis does not move on a
-    sale: the remaining shares were bought at the original price, and
-    re-averaging it would flatter the survivors and hide the trim in the
-    numbers.
-    """
-    with _write_lock:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT open_price, shares, return_amount FROM virtual_portfolio "
-            "WHERE id = ?", (position_id,),
-        ).fetchone()
-        if not row:
-            logger.warning("close_position: position #%d not found", position_id)
-            return False
-
-        open_price = row["open_price"] or 0
-        held = row["shares"] or 0
-        sell = held if shares is None else min(max(0, _round_lot(shares)), held)
-        if sell <= 0:
-            logger.warning("close_position #%d: nothing to sell (asked %s of %d)",
-                           position_id, shares, held)
-            return False
-
-        if sell < held:
-            return _partial_close(conn, position_id, open_price, close_price,
-                                  sell, held, row["return_amount"] or 0,
-                                  close_reason)
-
-        shares = held
-        net_result = _estimate_net_close_result(open_price, close_price, shares)
-        return_pct = net_result["return_pct"]
-        return_amount = net_result["return_amount"]
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        conn.execute(
-            "UPDATE virtual_portfolio SET "
-            "status = ?, close_date = ?, close_price = ?, return_pct = ?, "
-            "return_amount = ?, close_reason = ? WHERE id = ?",
-            (_status_from_reason(close_reason), today, close_price, return_pct,
-             return_amount, close_reason, position_id),
-        )
-        conn.commit()
-        logger.info("Closed #%d: %d股 @ %.2f → %.2f (net %+.2f%%, %+.0f元, friction %.0f元) %s",
-                     position_id, shares, open_price, close_price,
-                     return_pct, return_amount, net_result["costs"], close_reason)
-
-    # Outside the write lock — _feed_close_to_learning takes it again.
-    _feed_close_to_learning(position_id, return_pct, close_reason)
-    return True
-
-
-def _feed_close_to_learning(position_id: int, return_pct: float,
-                            close_reason: str) -> None:
-    """Write a realised round trip back into the learning layer.
-
-    Without this the virtual portfolio and the learning system are
-    parallel worlds: review.py grades predictions on next-day direction,
-    which is not what the portfolio actually earned. A stop-out at -8%
-    after a +2% first day counts as a hit under the old scheme.
-
-    The realised net return — costs included, held to the actual exit —
-    is the honest label, so it overwrites the prediction's outcome and
-    drives the playbook stats. Best-effort: a failure here must never
-    prevent a position from closing.
-    """
-    try:
-        conn = _get_conn()
-        pos = conn.execute(
-            "SELECT code, open_date, theme FROM virtual_portfolio WHERE id = ?",
-            (position_id,),
-        ).fetchone()
-        if not pos:
-            return
-
-        # The prediction that originated this order: same stock, on or
-        # just before the fill. Orders can sit pending for
-        # PENDING_EXPIRE_DAYS, so allow that much slack and take the
-        # newest match.
-        pred = conn.execute(
-            "SELECT id, features_json FROM predictions "
-            "WHERE code = ? AND date <= ? AND date >= date(?, ?) "
-            "ORDER BY date DESC, id DESC LIMIT 1",
-            (pos["code"], pos["open_date"], pos["open_date"],
-             f"-{PENDING_EXPIRE_DAYS + 1} days"),
-        ).fetchone()
-        if not pred:
-            return
-
-        hit = 1 if return_pct > 0 else 0
-        with _write_lock:
-            conn.execute(
-                "UPDATE predictions SET hit = ?, week_return = ?, review_note = ? "
-                "WHERE id = ?",
-                (hit, return_pct, f"实盘平仓 {return_pct:+.2f}% ({close_reason})",
-                 pred["id"]),
-            )
-            conn.commit()
-
-        # Feed the playbook the realised outcome rather than the
-        # next-day proxy.
-        try:
-            import json as _json
-            from alpha_agents.data.memory_store import record_playbook_trade
-            feats = _json.loads(pred["features_json"] or "{}")
-            pb_id = feats.get("playbook_id")
-            if pb_id:
-                record_playbook_trade(int(pb_id), hit=bool(hit),
-                                      return_pct=return_pct)
-        except Exception as e:
-            logger.debug("Playbook feedback failed for #%d: %s", position_id, e)
-
-        logger.info("Learning feedback: %s prediction #%d ← 实盘 %+.2f%%",
-                    pos["code"], pred["id"], return_pct)
-    except Exception as e:
-        logger.debug("Close-to-learning feedback failed for #%d: %s",
-                     position_id, e)
-
-
-def _status_from_reason(reason: str) -> str:
-    if "止损" in reason:
-        return "stopped"
-    if "止盈" in reason:
-        return "target_hit"
-    return "expired"
 
 
 # ── Summaries ───────────────────────────────────────────────

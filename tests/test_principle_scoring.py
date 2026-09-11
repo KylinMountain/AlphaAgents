@@ -157,7 +157,14 @@ class TestScorePrinciple:
 
 
 class TestRescoreAll:
-    def test_fills_win_rate_and_retires_on_evidence(self, store):
+    def test_measures_without_writing_or_retiring(self, store):
+        """A contradicted rule is flagged, not silently weakened.
+
+        `win_rate` and `status` are both rendered into the principle prompt
+        (`inject_principles`), so writing either one changes what the model
+        reads. The measurement is kept in the candidate store instead; the
+        live row keeps its status until an approved version says otherwise.
+        """
         ms, conn = store
         today = datetime.now().strftime("%Y-%m-%d")
         ev = []
@@ -176,13 +183,21 @@ class TestRescoreAll:
 
         result = ps.rescore_all_principles()
         assert result["scored"] == 1
-        assert result["retired"] == 1
+        assert result["retired"] == 0
 
+        # The live row is exactly as the writer left it.
         row = conn.execute(
             "SELECT win_rate, status FROM trading_principles"
         ).fetchone()
-        assert row["win_rate"] == pytest.approx(0.0)
-        assert row["status"] == "weakened"
+        assert row["win_rate"] is None
+        assert row["status"] == "active"
+
+        # The measurement is not lost — it is stored where it cannot act.
+        obs = conn.execute("SELECT payload_json FROM learning_observations").fetchall()
+        assert len(obs) == 1
+        payload = json.loads(obs[0]["payload_json"])
+        assert payload["win_rate"] == pytest.approx(0.0)
+        assert payload["should_retire"] is True
 
     def test_no_principles_is_a_no_op(self, store):
         assert ps.rescore_all_principles() == {"scored": 0, "retired": 0, "total": 0}

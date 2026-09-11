@@ -231,3 +231,14 @@ reports/
 # AlphaAgents runtime data (DBs, logs, caches, CSVs)
 /data/
 **/.DS_Store
+
+# Test scratch. conftest requires TMPDIR inside the checkout, so the run root
+# and the tokenizer cache land here on every invocation. tests/fixtures/ is
+# NOT scratch — it holds the committed vocabulary the offline tests read.
+/.pytest-tmp/
+/.tiktoken-cache/
+/.tmp/
+
+# Agent workspace state, never part of the project
+/.workbuddy/
+/.workbuddy-ai/

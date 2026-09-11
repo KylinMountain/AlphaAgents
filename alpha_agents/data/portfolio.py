@@ -14,7 +14,7 @@ import os
 import re
 from datetime import datetime
 
-from alpha_agents.data import attribution, order_state, reservations, trade_ledger
+from alpha_agents.data import attribution, order_state, reservations, settlement, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
 # The exit slice lives in portfolio_exit: the friction model, the append-only
@@ -234,13 +234,42 @@ def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
     the un-absorbed part of any consumed row. Released rows contribute
     nothing — the cash is back.
 
+    Cash-side T+1 is subtracted here too: sales settled today don't
+    become spendable until exit_date + 1. ``unreleased_pending_total``
+    is the cash the trader has earned but the broker is still holding.
+
     Legacy aggregate results are included as compatibility estimates,
     never reconstructed fills. This is not yet a fee-at-fill cash ledger.
     """
     return (trader_capital(trader_id)
             + trade_ledger.realized_total(_get_conn(), trader_id)
             - get_invested_capital(trader_id)
-            - reservations.unconsumed_total(_get_conn(), trader_id))
+            - reservations.unconsumed_total(_get_conn(), trader_id)
+            - settlement.unreleased_pending_total(_get_conn(), trader_id))
+
+
+def get_total_capital(trader_id: str = DEFAULT_TRADER) -> float:
+    """What the trader owns, whether or not it can deploy it yet.
+
+    ``capital + realized`` — the mandate plus everything won or lost.
+    The decomposition against ``get_available_capital`` is::
+
+        total = available + invested + reservations + pending
+
+    i.e. the only things separating "owns" from "can spend" are the open
+    book (cash converted to shares at cost), the cash earmarked against
+    pending orders, and the sale proceeds still in transit under the
+    cash-side T+1 rule. Nothing is double-counted: a sale moves cash
+    from ``available`` to ``pending`` and total does not move at all —
+    which is the point, the trader has not gained anything from the sale
+    that it did not already have.
+
+    Reports that say "what do I actually have" read this. Trading
+    decisions must read ``get_available_capital`` instead: sizing
+    against ``total`` would spend money the broker is still holding.
+    """
+    return (trader_capital(trader_id)
+            + trade_ledger.realized_total(_get_conn(), trader_id))
 
 
 def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
@@ -804,6 +833,15 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         actual_cost = shares * fill_price * (1 + SLIPPAGE_RATE)
         reservations.consume_reservation(
             conn, order_id=order["id"], actual_cost=actual_cost)
+        # T+1 share-side: each fill is its own settlement lot. settle_date
+        # is fill_date + 1 calendar day, so the position cannot be sold
+        # back the same day the order fills. The legacy open_date check
+        # keeps working for rows that pre-date the S4 cutover (no lot,
+        # fall back to open_date < today).
+        settlement.create_lot(
+            conn, position_id=order["id"], trader_id=trader_id,
+            code=code, shares=shares, open_date=fill_date,
+            open_price=fill_price, source="initial")
         conn.commit()
 
     # Bind the thesis to the position it just became. Until the fill the
@@ -1022,6 +1060,14 @@ def open_position(
         except Exception as e:
             logger.warning("Could not freeze decision boundary for position "
                            "#%s: %s", position_id, e)
+        # T+1 share-side: the compatibility helper inserts an
+        # already-filled row, so it must also create the matching lot
+        # (legacy open_position callers expected open_date < today to
+        # gate T+1 — now the lot does the same job mechanically).
+        settlement.create_lot(
+            conn, position_id=position_id, trader_id=trader_id,
+            code=code, shares=shares, open_date=open_date,
+            open_price=open_price, source="initial")
         conn.commit()
         return position_id
 
@@ -1083,6 +1129,15 @@ def add_to_position(position_id: int, *, price: float, reason: str,
             "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
             "reason = ? WHERE id = ?",
             (total, avg, f"{pos['reason'] or ''} | {reason}"[:300], position_id))
+        # T+1 share-side: the add gets its own lot so its shares are
+        # sellable only from add_date + 1 onward. Without this, the
+        # entire position looked like one old batch on the monitor's
+        # T+1 check, and the agent could sell today's shares today.
+        add_date = datetime.now().strftime("%Y-%m-%d")
+        settlement.create_lot(
+            conn, position_id=position_id, trader_id=trader_id,
+            code=pos["code"], shares=add_shares, open_date=add_date,
+            open_price=price, source="add")
         conn.commit()
 
     logger.info("Added to #%d %s: +%d股 @ %.2f → %d股 均价%.2f — %s",

@@ -3,16 +3,23 @@
 Each test names the failure it exists to prevent. Before the ledger existed
 every one of these passed on broken behaviour: cash ignored realised P&L
 entirely, and a trimmed position's final exit overwrote the earlier legs.
+
+The cash-side T+1 rule (S4) splits "owns" from "can spend": the proceeds
+of a sale land in ``pending_settlements`` and only reach
+``get_available_capital`` after their settle date. The tests below assert
+both halves — ``get_total_capital`` moves the moment the trade closes,
+``get_available_capital`` moves once the cash has settled.
 """
 
 import sqlite3
 
 import pytest
 
-from alpha_agents.data import trade_ledger
+from alpha_agents.data import settlement, trade_ledger
 from alpha_agents.data.memory_store import _SCHEMA
 from alpha_agents.data.portfolio import (
-    close_position, get_available_capital, open_position, trader_capital,
+    close_position, get_available_capital, get_total_capital, open_position,
+    trader_capital,
 )
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -46,17 +53,38 @@ def _cash(conn):
     return get_available_capital(DEFAULT_TRADER)
 
 
+def _settle_all(conn):
+    """Advance past T+1: release every pending settlement.
+
+    Uses a far-future date rather than computing the real one so the
+    test does not depend on the clock. After this the pending bucket is
+    empty and ``_cash`` reflects the sale.
+    """
+    settlement.release_due_settlements(conn, "2099-12-31")
+    conn.commit()
+
+
 def test_cash_includes_realised_profit(conn):
-    """A winning trader can spend what it made.
+    """A winning trader can spend what it made — after T+1.
 
     Old behaviour: cash was ``capital − open positions``, so profit from a
-    closed trade was invisible and the account never grew.
+    closed trade was invisible and the account never grew. S4 adds a
+    second clock: on the day of the sale the proceeds are in transit
+    (total grew, available did not), and the next day available catches
+    up.
     """
     before = _cash(conn)
     pos = _open(conn, price=100.0)
     assert _cash(conn) < before          # the buy ties the money up
 
     assert close_position(pos, close_price=110.0, close_reason="止盈触发")
+    # Day T: the trader owns the gain, but the cash is at the broker.
+    assert get_total_capital(DEFAULT_TRADER) > before
+    assert _cash(conn) < before, \
+        "sale proceeds must not be spendable on the day of the sale"
+
+    # T+1: the cash has landed and the profit is spendable.
+    _settle_all(conn)
     assert _cash(conn) > before
 
 
@@ -65,6 +93,11 @@ def test_cash_includes_realised_loss(conn):
     before = _cash(conn)
     pos = _open(conn, price=100.0)
     assert close_position(pos, close_price=90.0, close_reason="止损触发")
+
+    # The loss is visible in total immediately — the trader knows.
+    assert get_total_capital(DEFAULT_TRADER) < before
+    # And once the (smaller) proceeds settle, spendable cash is down too.
+    _settle_all(conn)
     assert _cash(conn) < before
 
 
@@ -199,6 +232,7 @@ def test_the_bounded_pot_still_bounds_a_winning_trader(conn):
     """
     pos = _open(conn, price=100.0)
     close_position(pos, close_price=150.0, close_reason="止盈触发")
+    _settle_all(conn)   # T+1: the proceeds have settled
     assert _cash(conn) > trader_capital(DEFAULT_TRADER)
 
 
@@ -261,4 +295,12 @@ def test_legacy_partial_profit_survives_new_exits(conn):
     assert row["return_amount"] == pytest.approx(500 + sum(r["net_amount"] for r in _exits(conn)))
     assert row["return_pct"] is None  # Historic sold basis is unknown.
     assert len(_exits(conn)) == 2  # No fabricated legacy fill.
-    assert _cash(conn) == pytest.approx(trader_capital() + row["return_amount"])
+    # ``get_total_capital`` is the pot plus everything realised, legacy
+    # included — the same figure the row records. Day-T spendable cash is
+    # lower because both legs' proceeds are in transit; after T+1 the two
+    # agree again.
+    assert get_total_capital(DEFAULT_TRADER) == pytest.approx(
+        trader_capital() + row["return_amount"])
+    _settle_all(conn)
+    assert _cash(conn) == pytest.approx(
+        trader_capital() + row["return_amount"])

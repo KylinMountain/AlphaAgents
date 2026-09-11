@@ -90,7 +90,7 @@
 - 在真实 DB 上首次运行即发现 1 条 critical（旧仓位 000510 无预留），证明不变量抓得到
   历史引入的问题，不是只对新建数据有效。
 
-### S4 T+1 结算批次
+### S4 T+1 结算批次 ✅
 
 现在 T+1 是一句日期比较（`open_date < today`，见 `position_monitor.py:184`），
 无法表达「同一持仓部分可卖、部分不可卖」。
@@ -98,6 +98,45 @@
 - 新表 `settlement_lots`：每次成交记一批 `(position_id, shares, settle_date)`。
 - 可卖数量按 `settle_date <= today` 求和；卖出按批消耗（先到期先出）。
 - `available_cash` 与 `total_cash` 正式分家：卖出所得在 T+1 前计入 `total` 不计入 `available`。
+
+**实际产出**：
+
+- 两个新表（memory_store.py 的 _SCHEMA 内）：
+  - `settlement_lots`：`(position_id, trader_id, code, shares, remaining_shares,
+    open_date, settle_date, open_price, source)`，`source` 区分 initial / add。
+  - `pending_settlements`：`(exit_id, trader_id, code, net_amount, exit_date,
+    settle_date, released, released_at)`，`UNIQUE(exit_id)` 保证退出重试不重复计。
+- `alpha_agents/data/settlement.py`：
+  - `next_settle_date(fill_date)` = 日历 +1。对 A 股 T+1 是正确的：判据是
+    `settle_date <= today`，周五建仓 → 周六 settle ≤ 周一 → 周一可卖，与券商一致。
+  - `create_lot` / `consume_lots_fifo(today=...)` / `sellable_shares` / `has_lots` /
+    `lot_count`；现金侧 `record_pending` / `unreleased_pending_total` /
+    `release_due_settlements` / `pending_summary`。
+  - `consume_lots_fifo` **只取 settled lot**（`settle_date <= today`），settled 不足即
+    `ValueError` 拒绝——写侧兜底，防止绕过读侧 T+1 门卖掉未结算的份额。
+- 接入点四处：
+  - `_fill_order` / `open_position`：成交即建 initial lot。
+  - `add_to_position`：加仓建独立 lot，settle 期为加仓日 +1（这正是旧
+    `open_date < today` 表达不了的场景）。
+  - `close_position`：先 `consume_lots_fifo` 按批扣减（FIFO by settle_date），再
+    `record_pending` 记 **proceeds**（`cost_basis + net_amount`，不是 P&L——记 P&L 会把
+    返还的本金提前一天记回来）。无 lot 的历史行跳过扣减，走旧的 `open_date < today` 口径。
+- `position_monitor.check_positions` 的 T+1 门改为一句话：有 lot 则要求存在
+  `settle_date <= today 且 remaining_shares > 0`；无 lot（历史行）才回退 `open_date < today`。
+- `get_available_capital` 再减 `unreleased_pending_total`；新增 `get_total_capital`
+  = `trader_capital + realized_total`，即
+  `total = available + invested + reservations + pending`——卖出只是把钱从 available
+  挪到 pending，total 不动，这正是不该有的「卖出即变富」的消失。
+- `tests/test_settlement.py`：35 用例，含 `next_settle_date` 边界（跨月/跨年/周五）、
+  lot 读写、FIFO 跨批消耗、跳过未结算批、结算不足拒绝、pending 幂等与释放、
+  以及三处接线与 `check_positions` 的 settled 门（含历史回退）。
+- 全量 1325 passed, 18 skipped（另修了一个既有 `token_usage` 时区 bug，见下）；
+  lint_harness 142 文件（+1 settlement.py）；lint_docs clean。
+
+**顺带修掉的既有 bug（与本切片无关）**：`token_usage.summary` 用 SQLite 的
+`date('now')`（UTC）与 `record` 写的本地 `datetime.now()` 日期比较，在 GMT+8 的
+00:00–08:00 之间差一天，导致看板「今日」读成 0。已把四处查询改为
+`date('now','localtime',...)`。独立提交，便于单独回退。
 
 ### S5 统一执行路径
 

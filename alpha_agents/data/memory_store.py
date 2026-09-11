@@ -322,6 +322,62 @@ CREATE INDEX IF NOT EXISTS idx_recon_diffs_run ON reconciliation_diffs(run_id);
 CREATE INDEX IF NOT EXISTS idx_recon_diffs_trader ON reconciliation_diffs(trader_id);
 CREATE INDEX IF NOT EXISTS idx_recon_diffs_severity ON reconciliation_diffs(severity);
 
+-- T+1 share-side settlement. Each fill (open or add) records one lot
+-- with its own settle_date (open_date + 1 day). Sells consume lots FIFO
+-- by settle_date so that "same position, partially sellable" is a
+-- first-class notion rather than a derived guess from open_date. A
+-- position's ``shares`` column is the sum of lot.remaining_shares; the
+-- reconciliation check on oversold_position uses position_exits to
+-- police that total, and this table is the authoritative source of
+-- "which shares are sellable today". Legacy rows have no lots and fall
+-- back to the original open_date < today semantic.
+CREATE TABLE IF NOT EXISTS settlement_lots (
+    id INTEGER PRIMARY KEY,
+    position_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    shares INTEGER NOT NULL,           -- original lot size
+    remaining_shares INTEGER NOT NULL, -- shares still held in this lot
+    open_date TEXT NOT NULL,           -- when the lot was bought
+    settle_date TEXT NOT NULL,         -- when shares become sellable
+    open_price REAL NOT NULL,          -- fill price for this lot
+    source TEXT,                       -- 'initial' | 'add' | 'migration'
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_lots_position
+    ON settlement_lots(position_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lots_trader
+    ON settlement_lots(trader_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_lots_settle
+    ON settlement_lots(settle_date);
+
+-- T+1 cash-side settlement. When shares are sold the proceeds are not
+-- available for new positions until exit_date + 1 day. Each leg of
+-- position_exits gets one row here; release_due_settlements flips
+-- ``released=1`` once the date passes so get_available_capital can
+-- treat the cash as spendable. Before release the cash is counted in
+-- get_total_capital but excluded from get_available_capital, which is
+-- what the plan means by "available_cash 与 total_cash 正式分家".
+CREATE TABLE IF NOT EXISTS pending_settlements (
+    id INTEGER PRIMARY KEY,
+    exit_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    net_amount REAL NOT NULL,           -- cash from the sale
+    exit_date TEXT NOT NULL,            -- when the sale happened
+    settle_date TEXT NOT NULL,          -- when cash becomes available
+    released INTEGER NOT NULL DEFAULT 0, -- 1 once settle_date has passed
+    released_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(exit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_settle_trader
+    ON pending_settlements(trader_id);
+CREATE INDEX IF NOT EXISTS idx_pending_settle_released
+    ON pending_settlements(released);
+CREATE INDEX IF NOT EXISTS idx_pending_settle_settle
+    ON pending_settlements(settle_date);
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

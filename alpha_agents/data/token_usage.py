@@ -331,7 +331,16 @@ def _wrap(holder, kind: str, module: str | None) -> None:
 # ── Reading it back ─────────────────────────────────────────
 
 def summary(days: int = 7) -> dict:
-    """Totals, plus the same numbers split by module, model and day."""
+    """Totals, plus the same numbers split by module, model and day.
+
+    Every date comparison uses SQLite's ``localtime`` modifier because
+    ``record`` stamps rows with ``datetime.now()`` — local wall-clock
+    time. Without it the reads compared a local date against SQLite's
+    UTC ``date('now')``, and those disagree for the eight hours a day
+    that GMT+8 sits on the far side of midnight: a row written just
+    after local midnight landed on "tomorrow" as far as ``today`` was
+    concerned, and the dashboard's today total read 0.
+    """
     try:
         conn = _conn()
         since = f"-{max(days - 1, 0)} days"
@@ -339,21 +348,21 @@ def summary(days: int = 7) -> dict:
             "SELECT module, model, kind, COUNT(*) calls, "
             " SUM(requests) requests, SUM(input_tokens) inp, "
             " SUM(output_tokens) outp, SUM(total_tokens) total "
-            "FROM token_usage WHERE date >= date('now', ?) "
+            "FROM token_usage WHERE date >= date('now', 'localtime', ?) "
             "GROUP BY module, kind ORDER BY total DESC", (since,)).fetchall()
         by_day = conn.execute(
             "SELECT date, kind, SUM(total_tokens) total, COUNT(*) calls "
-            "FROM token_usage WHERE date >= date('now', ?) "
+            "FROM token_usage WHERE date >= date('now', 'localtime', ?) "
             "GROUP BY date, kind ORDER BY date", (since,)).fetchall()
         models = conn.execute(
             "SELECT model, kind, COUNT(*) calls, SUM(total_tokens) total "
-            "FROM token_usage WHERE date >= date('now', ?) "
+            "FROM token_usage WHERE date >= date('now', 'localtime', ?) "
             "GROUP BY model, kind ORDER BY total DESC", (since,)).fetchall()
         today = conn.execute(
             "SELECT COALESCE(SUM(total_tokens),0) t, COUNT(*) c, "
             " COALESCE(SUM(input_tokens),0) inp, "
             " COALESCE(SUM(output_tokens),0) outp "
-            "FROM token_usage WHERE date = date('now')").fetchone()
+            "FROM token_usage WHERE date = date('now', 'localtime')").fetchone()
         # Since the counter was installed, not since the window. The
         # window answers "what is it costing lately"; this answers "what
         # has it cost", which is the number anyone actually budgets on.

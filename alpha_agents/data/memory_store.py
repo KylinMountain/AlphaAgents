@@ -263,6 +263,32 @@ BEGIN
     SELECT RAISE(ABORT, 'decision_snapshots is append-only');
 END;
 
+-- Cash reservations for pending orders. A pending order is an intent to
+-- spend, not a spent amount; the old get_available_capital reported a
+-- number two simultaneous fills could both respect, because nothing had
+-- earmarked the cash. This table closes the gap: one held row per
+-- (order, kind) pair, the kind lets future slices add inventory
+-- reservations without a schema change. Lifecycle: held (order open) →
+-- consumed (filled) or released (cancelled/expired/rejected). Reconciliation
+-- reads both this table and position_exits to verify the two agree.
+CREATE TABLE IF NOT EXISTS reservations (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'cash_reserve',
+    amount REAL NOT NULL,
+    consumed_amount REAL NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK(state IN ('held','consumed','released')),
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    released_at TEXT,
+    UNIQUE (order_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_reservations_state ON reservations(state);
+CREATE INDEX IF NOT EXISTS idx_reservations_trader ON reservations(trader_id);
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

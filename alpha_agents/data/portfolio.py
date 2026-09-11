@@ -14,7 +14,7 @@ import os
 import re
 from datetime import datetime
 
-from alpha_agents.data import attribution, order_state, trade_ledger
+from alpha_agents.data import attribution, order_state, reservations, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
 # The exit slice lives in portfolio_exit: the friction model, the append-only
@@ -23,6 +23,7 @@ from alpha_agents.data.trader import DEFAULT_TRADER
 # close_position through this module.
 from alpha_agents.data.portfolio_exit import (
     LOT_SIZE,
+    SLIPPAGE_RATE,
     _blended_return_pct,
     _estimate_net_close_result,
     _status_from_reason,
@@ -217,21 +218,29 @@ def account_capital() -> float:
 
 
 def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
-    """Remaining cash for one trader.
+    """Remaining cash for one trader, after every commitment has spoken.
 
     The pot, plus what this trader has actually realised on closed
-    positions, minus what is still tied up in its open book. The old
-    ``capital − positions`` reading left realised P&L out entirely, so a
-    trader that had made money could not spend it and one that had lost
-    money could still spend money it no longer had — the account never
-    reflected the trading, only the position.
+    positions, minus what is still tied up in its open book *and* minus
+    what its pending orders have reserved. The old ``capital −
+    positions`` reading left realised P&L out entirely, so a trader
+    that had made money could not spend it and one that had lost money
+    could still spend money it no longer had. Adding reservations to
+    the subtraction closes the second half of the same gap: two
+    pending orders could each respect the pre-reservation number, fill,
+    and the pot would be the thing that was lying.
 
-    Legacy aggregate results are included as compatibility estimates, never
-    reconstructed fills. This is not yet a fee-at-fill cash ledger.
+    The reservation subtraction is the backstop on the held row plus
+    the un-absorbed part of any consumed row. Released rows contribute
+    nothing — the cash is back.
+
+    Legacy aggregate results are included as compatibility estimates,
+    never reconstructed fills. This is not yet a fee-at-fill cash ledger.
     """
     return (trader_capital(trader_id)
             + trade_ledger.realized_total(_get_conn(), trader_id)
-            - get_invested_capital(trader_id))
+            - get_invested_capital(trader_id)
+            - reservations.unconsumed_total(_get_conn(), trader_id))
 
 
 def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
@@ -421,6 +430,16 @@ def create_pending_order(
             # audit must not stop the trade — but it must be visible.
             logger.warning("Could not freeze decision boundary for order "
                            "#%s: %s", order_id, e)
+        # Reserve the worst-case fill cost against the order. The held row
+        # is what keeps a second pending order from spending the same
+        # cash; computing it here, before commit, means the order and
+        # the reservation are written together or not at all.
+        reservation_amount = (trader_capital(trader_id) * MAX_POSITION_PCT
+                              * (1 + SLIPPAGE_RATE))
+        reservations.reserve_for_order(
+            conn, order_id=order_id, trader_id=trader_id,
+            code=code, amount=reservation_amount,
+            reason="pending-order backstop")
         conn.commit()
 
         zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
@@ -780,6 +799,11 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             "WHERE id = ?",
             (target, fill_date, fill_price, shares, order["id"]),
         )
+        # The held reservation is now the actual cost. Entry_high
+        # over-estimated; the over-reserve is returned to available.
+        actual_cost = shares * fill_price * (1 + SLIPPAGE_RATE)
+        reservations.consume_reservation(
+            conn, order_id=order["id"], actual_cost=actual_cost)
         conn.commit()
 
     # Bind the thesis to the position it just became. Until the fill the
@@ -854,6 +878,11 @@ def _cancel_order_unlocked(order_id: int, reason: str) -> None:
         "UPDATE virtual_portfolio SET status = ?, close_reason = ? WHERE id = ?",
         (target, reason, order_id),
     )
+    # Release the held cash back to available. Only pending /
+    # cancel-pending rows reach this point (the earlier guard
+    # short-circuits everything else), so the reservation is held and
+    # this is a release, not a refund of an already-consumed one.
+    reservations.release_reservation(conn, order_id=order_id, reason=reason)
     conn.commit()
     logger.info("Cancelled order #%d: %s", order_id, reason)
 

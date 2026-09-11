@@ -116,7 +116,20 @@ _INSTRUCTIONS = """你是这个虚拟组合的交易员，负责**定价**。选
   你当时想对了没有
 - **confidence**: high / medium / low
 
-价位数据拿不到（工具返回 error）就 skip，**不要瞎猜**。"""
+价位数据拿不到（工具返回 error）就 skip，**不要瞎猜**。
+
+## 如果候选带着 ⟲ 标记
+
+那是**你自己今天早些时候对这只票的判断**，连同当时的价格和现在的价格。
+
+不要把它当成禁令——它不是来阻止你的，是来让你不必从零开始想的。
+
+- 理由还成立 → 再 skip 一次，理由写"同 X 分钟前，且 <具体数字> 没变"。
+  重复结论不丢人，**没看过就重复才丢人**
+- 情况变了（放量突破了当时的阻力、回踩到你当时嫌远的支撑、主线走强）
+  → 改主意是对的，在 reason 里说清楚**变的是哪个数字**
+
+一个交易员改主意要有新证据，不改主意要说得出旧证据还在。"""
 
 
 def enabled() -> bool:
@@ -147,15 +160,30 @@ def build_context(candidates: list[dict], trader) -> str:
             lines.append(f"  选中原因: {c['note']}")
         if c.get("institutional"):
             lines.append(f"  机构: {c['institutional']}")
+        # What this trader already concluded about this name today. It is
+        # deliberately its own line and deliberately phrased as a question:
+        # the point is not to stop it re-deciding, it is to stop it
+        # deciding blind. 301511 was priced nineteen times in one session
+        # and declined nineteen times in nearly the same words — it never
+        # lacked authority, it lacked memory.
+        if c.get("prior_view"):
+            lines.append(f"  ⟲ {c['prior_view']}")
         lines.append("")
     return "\n".join(lines)
 
 
 async def price(candidates: list[dict], trader) -> dict[str, dict]:
-    """Ask the trader where to buy each candidate.
+    """Ask the trader where to buy each candidate, and why not when not.
 
-    Returns {code: decision} for the ones it wants, keyed so the caller can
-    look up a candidate it may have skipped. An empty result means no
+    Returns {code: decision}, where ``action`` is ``"buy"`` (with prices)
+    or ``"skip"`` (with only a reason). An absent code means the model
+    never answered about it at all — a third thing, and worth telling
+    apart from a considered no.
+
+    The skips used to be logged and dropped. They are returned now because
+    a decision this trader already made is the one piece of context that
+    stops the next cycle from making it again from scratch; see
+    ``intraday_monitor.recall_decline``. An empty result still means no
     order — never a fallback price.
     """
     if not candidates:
@@ -199,9 +227,14 @@ async def price(candidates: list[dict], trader) -> dict[str, dict]:
         logger.warning("交易员 %s 定价失败（%s）— 本轮不下单", trader.id, e)
         return {}
 
-    orders = parse_orders(result.final_output or "")
+    out = result.final_output or ""
+    orders = parse_orders(out)
     _flag_narrow_bands(orders)
-    return orders
+    return {
+        **{c: {**d, "action": "buy"} for c, d in orders.items()},
+        **{c: {"action": "skip", "reason": r}
+           for c, r in parse_skips(out).items() if c not in orders},
+    }
 
 
 def _flag_narrow_bands(orders: dict[str, dict]) -> None:
@@ -282,6 +315,28 @@ def parse_orders(output: str) -> dict[str, dict]:
         logger.info("定价结果: %s", ", ".join(
             f"{c} {d['entry_low']:.2f}-{d['entry_high']:.2f} 止损{d['stop_loss']:.2f}"
             for c, d in out.items()))
+    return out
+
+
+def parse_skips(output: str) -> dict[str, str]:
+    """The candidates this trader looked at and decided against, with why.
+
+    Split from ``parse_orders`` rather than folded into it because the two
+    have different failure modes: a malformed buy must be dropped (a wrong
+    price is worse than no position), while a skip carries no numbers to
+    get wrong — the reason is the whole payload, and a skip without one is
+    still the information that it said no.
+    """
+    items = _extract(output) or []
+    out: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("action", "")).strip().lower() != "skip":
+            continue
+        code = str(item.get("code", "")).strip()
+        if code:
+            out[code] = str(item.get("reason", "")).strip() or "未说明理由"
     return out
 
 

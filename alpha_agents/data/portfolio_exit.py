@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from alpha_agents.data import order_state, trade_ledger
+from alpha_agents.data import order_state, settlement, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -148,8 +148,25 @@ def close_position(
                 legacy = round((row["return_amount"] or 0) - prior["net_amount"], 2)
             net = _estimate_net_close_result(row["open_price"], close_price, sell)
             today = datetime.now().strftime("%Y-%m-%d")
-            trade_ledger.record_exit(
-                conn, position_id=position_id, trader_id=row["trader_id"] or DEFAULT_TRADER,
+            # T+1 share-side: take the sold shares out of the
+            # position's settled lots FIFO. A position with no lots
+            # is a legacy row that pre-dates the S4 cutover; the
+            # sell path for those falls back to the old
+            # ``open_date < today`` gate the caller has already
+            # passed. consume_lots_fifo would refuse a no-lots
+            # position, so skip it.
+            trader_id = row["trader_id"] or DEFAULT_TRADER
+            if settlement.has_lots(conn, position_id):
+                try:
+                    settlement.consume_lots_fifo(
+                        conn, position_id=position_id,
+                        shares_to_sell=sell, today=today)
+                except ValueError as e:
+                    logger.warning(
+                        "Exit #%d refused — %s", position_id, e)
+                    return False
+            exit_id = trade_ledger.record_exit(
+                conn, position_id=position_id, trader_id=trader_id,
                 code=row["code"], exit_date=today, price=close_price, shares=sell,
                 cost_basis=net["cost_basis"], gross_amount=net["gross_amount"],
                 costs=net["costs"], net_amount=net["return_amount"],
@@ -160,6 +177,21 @@ def close_position(
                 # recycled or its thesis link is revised.
                 thesis_id=row["thesis_id"],
             )
+            # T+1 cash-side: the *proceeds* of this leg — the cost basis
+            # coming back plus the net gain — are not available for new
+            # positions until tomorrow. Proceeds, not the P&L: the whole
+            # sale value is what the broker holds, and the cost basis is
+            # only "returned" to the pot because ``invested`` drops when
+            # the position stops being open. Recording the P&L alone
+            # would credit the returned capital a day early.
+            #
+            # Idempotent on exit_id, so a retry of the same close
+            # (matched on command_id) does not double-count the bucket.
+            proceeds = round(net["cost_basis"] + net["return_amount"], 2)
+            settlement.record_pending(
+                conn, exit_id=exit_id, trader_id=trader_id,
+                code=row["code"], net_amount=proceeds,
+                exit_date=today)
             realized = trade_ledger.realized_for_position(conn, position_id)
             return_pct = None if legacy else _blended_return_pct(realized)
             return_amount = round(legacy + realized["net_amount"], 2)

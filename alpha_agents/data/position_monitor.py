@@ -180,10 +180,33 @@ def check_positions(
     / theme signals say the position is at risk.
     """
     conn = _get_conn()
+    # T+1 share-side: a position is monitor-eligible if it has settled
+    # shares. Two cases:
+    #  - new positions (have settlement_lots rows): at least one lot's
+    #    settle_date <= today with remaining_shares > 0.
+    #  - legacy positions (no lots): fall back to open_date < today so
+    #    rows that pre-date the S4 cutover are still governed.
     positions = conn.execute(
-        "SELECT * FROM virtual_portfolio WHERE status = 'open' AND open_date < ?"
-        + (" AND trader_id = ?" if trader_id else ""),
-        [today, *([trader_id] if trader_id else [])],
+        """
+        SELECT p.*
+        FROM virtual_portfolio p
+        WHERE p.status = 'open'
+          AND (
+            EXISTS (
+              SELECT 1 FROM settlement_lots s
+              WHERE s.position_id = p.id
+                AND s.settle_date <= ?
+                AND s.remaining_shares > 0
+            )
+            OR (
+              NOT EXISTS (
+                SELECT 1 FROM settlement_lots s WHERE s.position_id = p.id
+              )
+              AND p.open_date < ?
+            )
+          )
+        """ + (" AND p.trader_id = ?" if trader_id else ""),
+        [today, today, *([trader_id] if trader_id else [])],
     ).fetchall()
 
     # ── Compute shared sentiment context (once per cycle, not per-position) ──

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from alpha_agents.data import trade_ledger
+from alpha_agents.data import order_state, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -164,11 +164,19 @@ def close_position(
             return_pct = None if legacy else _blended_return_pct(realized)
             return_amount = round(legacy + realized["net_amount"], 2)
             full = sell == held
+            new_status = (_status_from_reason(close_reason)
+                          if full else order_state.OPEN)
+            # The earlier "status == open" gate plus BEGIN IMMEDIATE make
+            # this near-formal, but the state machine is the contract, not
+            # the gate. A partial exit is ``open → open`` (the position
+            # shrinks, it does not close); a full close is ``open → stopped
+            # / target_hit / expired`` per the reason.
+            order_state.assert_transition(row["status"], new_status)
             # Closed rows retain last-sale shares for existing report readers.
             conn.execute(
                 "UPDATE virtual_portfolio SET shares=?, status=?, close_date=?, close_price=?, "
                 "return_amount=?, return_pct=?, legacy_realized_amount=?, close_reason=? WHERE id=?",
-                (held if full else held - sell, _status_from_reason(close_reason) if full else "open",
+                (held if full else held - sell, new_status,
                  today if full else None, close_price if full else None,
                  return_amount, return_pct, legacy, close_reason[:200], position_id),
             )

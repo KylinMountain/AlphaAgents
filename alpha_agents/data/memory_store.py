@@ -413,6 +413,154 @@ CREATE INDEX IF NOT EXISTS idx_intents_trader ON intents(trader_id);
 CREATE INDEX IF NOT EXISTS idx_intents_action ON intents(action);
 CREATE INDEX IF NOT EXISTS idx_intents_cutoff ON intents(information_cutoff);
 
+-- Episodes: the learning unit (§9). One row per *decision*, not per position.
+-- A decision that was refused, cancelled or never filled is still an episode,
+-- which is the whole point — it makes selection and coverage countable instead
+-- of only the decisions that happened to make money. Before this the only
+-- trace of a decision was thesis → order → exits, which by construction can
+-- only express the ones that traded.
+CREATE TABLE IF NOT EXISTS episodes (
+    id INTEGER PRIMARY KEY,
+    trader_id TEXT NOT NULL,
+    -- NULL, not '', when the decision named a book row that does not exist or
+    -- a malformed intent arrived before any instrument was mentioned. The
+    -- decision still happened and still belongs in the record — dropping it
+    -- would remove exactly the malformed ones from the coverage count, which
+    -- is the bias this table exists to remove. '' would read as a stock code
+    -- that is merely empty; NULL says "no instrument to name".
+    code TEXT,
+    -- open     — a position exists and has not been fully exited
+    -- closed   — the position was fully exited, or the episode ran to a
+    --            terminal non-trade (cancelled / refused)
+    status TEXT NOT NULL CHECK(status IN ('open', 'closed')),
+    -- The frozen boundary this decision was made on. NULL for rows that
+    -- pre-date decision_snapshots or were written outside the door; "unknown
+    -- basis" is not the same as "no basis", so it stays NULL rather than 0.
+    decision_snapshot_id INTEGER,
+    intent_id INTEGER,
+    thesis_id INTEGER,
+    prediction_id INTEGER,
+    order_id INTEGER,
+    position_id INTEGER,
+    information_cutoff TEXT,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_episodes_trader ON episodes(trader_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_code ON episodes(code);
+CREATE INDEX IF NOT EXISTS idx_episodes_status ON episodes(status);
+CREATE INDEX IF NOT EXISTS idx_episodes_order ON episodes(order_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_position ON episodes(position_id);
+
+-- An episode may be linked as its refs appear (the position exists only once
+-- the pending order fills) and closed once. It may not be renamed and it may
+-- not be reopened: "which decision was this" has to have one answer forever,
+-- or a unit of learning can be reassigned to a different decision after the
+-- result is known, which is the shape of every hindsight bug.
+CREATE TRIGGER IF NOT EXISTS episodes_identity_is_fixed
+BEFORE UPDATE ON episodes
+WHEN NEW.trader_id <> OLD.trader_id
+  OR NEW.code IS NOT OLD.code
+  OR NEW.opened_at <> OLD.opened_at
+  OR (OLD.status = 'closed' AND NEW.status <> 'closed')
+  OR (OLD.closed_at IS NOT NULL AND NEW.closed_at IS NOT OLD.closed_at)
+  OR (OLD.decision_snapshot_id IS NOT NULL
+      AND NEW.decision_snapshot_id IS NOT OLD.decision_snapshot_id)
+BEGIN
+    SELECT RAISE(ABORT, 'an episode''s identity and its end are fixed');
+END;
+
+-- Everything that happened because of one decision, in order. `ref_id` points
+-- at the row that carries the detail (an intent, an order, a position, an exit
+-- leg); the amount is never copied here, so this cannot become a third book.
+CREATE TABLE IF NOT EXISTS episode_events (
+    id INTEGER PRIMARY KEY,
+    episode_id INTEGER NOT NULL,
+    -- Only kinds this repository actually writes. §9 also names holds and
+    -- abstentions; nothing decides "do not buy today" anywhere, so there is no
+    -- write path to record and inventing one would be a promise without a
+    -- caller. ``expire`` is absent for the same reason: the pending-order
+    -- expiry is declared (PENDING_EXPIRE_DAYS) and computed (days_pending) and
+    -- then never read — every order that dies unfinished dies as a cancel.
+    -- Declaring the kind would have made the schema claim a capability the
+    -- code does not have. See TRADER_CORE_IMPLEMENTATION.md.
+    kind TEXT NOT NULL CHECK(kind IN (
+        'intent', 'order', 'fill', 'add', 'trim', 'close', 'cancel')),
+    ref_id INTEGER,
+    at TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_episode_events_episode
+    ON episode_events(episode_id);
+CREATE INDEX IF NOT EXISTS idx_episode_events_kind ON episode_events(kind);
+
+-- Append-only, like decision_snapshots: an event is a fact about what
+-- happened, and a fact that can be edited is not evidence.
+CREATE TRIGGER IF NOT EXISTS episode_events_no_update
+BEFORE UPDATE ON episode_events
+BEGIN
+    SELECT RAISE(ABORT, 'episode_events is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS episode_events_no_delete
+BEFORE DELETE ON episode_events
+BEGIN
+    SELECT RAISE(ABORT, 'episode_events is append-only');
+END;
+
+-- Outcome labels with a lifecycle (§9), append-only, one linear revision chain
+-- per subject. Deliberately stores the *label and its state*, never the money:
+-- amounts stay in position_exits / predictions and are referenced from
+-- evidence_json, so this cannot drift from the ledger.
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('forecast', 'trade', 'process')),
+    state TEXT NOT NULL CHECK(state IN (
+        'pending', 'matured', 'censored', 'revised')),
+    subject_type TEXT NOT NULL,
+    subject_id INTEGER NOT NULL,
+    episode_id INTEGER,
+    -- Which version of the evaluator produced this label. Without it a label
+    -- is unfalsifiable after the fact: you cannot tell a changed rule from a
+    -- changed market.
+    evaluator_version TEXT,
+    -- Refs, never values. A copied amount is a second source of truth.
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    -- When the label became knowable, as distinct from when it was computed.
+    -- Under replay the former is the one that matters.
+    available_at TEXT,
+    supersedes_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+-- Exactly one *initial* label per subject: a subject either has no label yet or
+-- has one that revisions hang off. Partial indexes because SQLite treats NULLs
+-- in a UNIQUE index as distinct, so a plain constraint would not bite.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_initial
+    ON outcomes(kind, subject_type, subject_id) WHERE supersedes_id IS NULL;
+-- One revision per row, so the chain is linear and "the current label" is a
+-- single answer rather than a fork.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_supersedes
+    ON outcomes(supersedes_id) WHERE supersedes_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_outcomes_subject
+    ON outcomes(subject_type, subject_id);
+CREATE INDEX IF NOT EXISTS idx_outcomes_state ON outcomes(state);
+CREATE INDEX IF NOT EXISTS idx_outcomes_episode ON outcomes(episode_id);
+
+-- Immutability by database, not by convention (§9: "Label corrections append
+-- revisions; later knowledge must not alter what an earlier learning run could
+-- access"). A revised label is a new row naming the one it supersedes.
+CREATE TRIGGER IF NOT EXISTS outcomes_no_update
+BEFORE UPDATE ON outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'outcomes is append-only; append a revision instead');
+END;
+
+CREATE TRIGGER IF NOT EXISTS outcomes_no_delete
+BEFORE DELETE ON outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'outcomes is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

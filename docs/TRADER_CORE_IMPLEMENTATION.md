@@ -1,12 +1,14 @@
-# Trader Core Implementation: Phase 1–2 实际状态
+# Trader Core Implementation: Phase 1–3 实际状态
 
-- 记录日期：2026-09-11（第四轮补记 Phase 2，同日）。
+- 记录日期：2026-09-12（第五轮补记 Phase 3 的 T1）。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
+  [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)、
   [设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
-- 第 1–6 节描述 Phase 1 的交付；Phase 2 的逐项交付见第 10 节，未实现项一律留在第 7 节。
+- 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付。
+  **Phase 3 尚在进行中**：T1 已交付，T2–T4 未开始，未实现项一律留在第 7 节。
 
 ## 1. 现金反映累计结果
 
@@ -99,8 +101,18 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 
 **后续阶段**
 
-- **结果生命周期的完整状态机**（Phase 3）。§9 的 `pending / matured / censored / revised` 尚未落到独立状态列；当前只能从 `hit` 是否为 NULL 与 `scored_at` 推断，未成交、删失、修订三种情况无法区分。
-- **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。`policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
+- **结果生命周期的状态机**（Phase 3 的 T2，**未开始**）。`outcomes` 表已建（第三次建表时一并落地），
+  但**没有任何写入路径**：`kind='forecast' / 'trade' / 'process'` 三个标签的评估器都还没写，
+  `predictions.horizon_days` / `deadline` 两列也还没加。§9 的
+  `pending / matured / censored / revised` 目前仍只能从 `hit` 是否为 NULL 与 `scored_at` 推断，
+  未成交、删失、修订三种情况无法区分。
+- **候选证据的结构化与生命周期**（Phase 3 的 T3，**未开始**）。`learning_candidates` 仍缺
+  `claim` / `applicable_context` / `proposed_behavior_delta` / `evidence_episode_ids` 四列，
+  状态列仍被 `CHECK(status = 'candidate')` 钉死成单值。
+- **已批准知识快照**（Phase 3 的 T4，**未开始**）。无 `knowledge_snapshots`，
+  于是「保留」与「生效」之间仍没有可审计的关口。
+- **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。
+  `policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -109,9 +121,26 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 - **`rejected` / `cancel_pending` 两个订单状态**。`order_state.py` 声明了状态集与合法迁移，但这两个状态**尚未被任何写入路径产生** —— 它们是设计 §6 的目标态，当前只在状态机里被允许，未在业务里出现。
 - **global 事件日志**。无跨表统一事件流。
 
-**Phase 2 只做到一半**
+**Phase 2 / Phase 3 只做到一半**
 
 - **信息边界的强制校验**。现在**有消费者了**（第四轮新增）：`attribution.freeze` 拒绝晚于内核时钟的边界，成交时 `clock.guard_fill` 校验「下单决策的 `information_cutoff` 不得晚于成交日」。但设计 §15 的完整合同「Every actionable input satisfies the availability cutoff」**仍未成立**：只有这两处，校验的是**声明的边界本身**是不是未来，而不是「这次决策引用的每一个输入都落在边界内」。当前强制的仍然是「边界不可事后改写」（触发器 + 哈希）与「边界不得是未来」；**不是**「每个输入都被逐一验证过」。
+- **挂单有效期是死代码**（T1 期间查出来的第三例「字段只写不读」）。`PENDING_EXPIRE_DAYS` 被写进每个订单行，
+  `check_pending_orders` 每次都算 `days_pending`，**两者都没有任何读者**：有主线的挂单跟随主线生命周期，
+  无主线的挂单在更早的一行就被当作「无关联主线」撤掉了，固定期限永远走不到。因此
+  `episode_events.kind` 里**没有 `expire`** —— 声明一个没有写入路径的状态，正是本仓库已经犯过两次的
+  「承诺无可调用入口」。该结论由
+  `tests/test_episodes.py::TestEveryDeclaredKindHasAWriter::test_the_pending_order_expiry_is_still_dead_code`
+  机械钉住。
+- **平仓/减仓的 episode 事件只指向持仓，不指向账本腿**。`episode_events.ref_id` 对 `close` / `trim`
+  记的是 `virtual_portfolio.id`；设计想要的那条「事件 → 账本行」的边**没有建立**，因为
+  `portfolio_exit._close_position_impl` 的返回契约是 `bool`（S5 定下、有测试钉住），
+  加宽它不属于 T1。要从事件找回当次腿，只能按 `position_id` + 日期在 `position_exits` 里查 ——
+  同一天减两次仓就无法区分。**这是已知缺口，不是设计**；补法是让 `_close_position_impl` 返回 `exit_id`。
+- **`episodes` / `outcomes` 的生产读者还很薄**。`episodes` 有一个只读入口
+  （`scripts/episode_coverage.py`，读 `episodes.coverage` / `open_episodes`）与
+  `episodes.get_episode` / `events_for`；它**不进 prompt、不进检索、不进决策上下文** ——
+  这是刻意的（§10 说验证不等于授权）。`outcomes` 目前**一个读者都没有**，因为它一个写者都没有，
+  T2 落地时两者会同时出现。**T1 不接线任何生效路径。**
 
 ## 8. 行为契约变更（供 review 对照）
 
@@ -140,6 +169,11 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 | 加仓规则自带一份 sizing 并直接 `UPDATE`（绕过 T+1） | 规则只决定是否触发，写入交给 `add_to_position(recalc_stop=True)` |
 | 内核的「今天」= 机器当天 | `clock.today()`：重放时取重放时刻，前视被 `LookAheadError` 拒绝 |
 | `information_cutoff` 只写不读 | `attribution.freeze` 与 `clock.guard_fill` 都会真的读它并拒绝未来边界 |
+| 学习单元 = 走完的盈利仓位（`thesis → order → exits` 只能表达成交过的决策） | 每个决策一个 `episodes` 行，**被拒 / 撤单 / 形状不合法的意图同样是一个 episode**；「决定了多少次、成了多少次」可机器统计 |
+| 一次决策的经过只散落在各表里 | `episode_events`（append-only）按发生顺序记 `intent / order / fill / add / trim / close / cancel`，事件只引用行号，不复制金额 |
+| 撤单是日志里的一行 | 撤单在 `_cancel_order_unlocked` 这个唯一落点记事件并结束 episode —— 含成交路径内部发起的两次撤单（回撤闸门、资金不足） |
+| 「某个标签是哪版规则算的」只能靠 `scored_at` 猜 | `episodes` 挂在冻结的 `decision_snapshots.id` 上，边界只写一次、不可改指 |
+| 覆盖度（决定数 vs 成交数）无法回答 | `episodes.coverage()` + `scripts/episode_coverage.py`：decisions / verdicts / refused / cancelled / traded / fill_rate |
 
 ## 9. 验证记录
 
@@ -223,6 +257,50 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 而不是「设计里提到的每一件事都做了」：费用引擎、部分成交模拟器、global 事件日志是
 **明确定的非目标**，`information_cutoff` 的完整 §15 合同是**只做到一半并已如实标注**的一项。
 
+### 第五轮（Phase 3 的 T1：决策 episode）
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1401 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（147 个文件），存量 47 条待偿还 |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_episodes.py`（28 个用例），分五组：非成交决策的覆盖、一次决策一个 episode、
+声明的诚实性、不可改写、读侧。
+
+**计划里写下的验收条目，逐条对照**：
+
+- 被拒绝的意图留下完整 episode（有 event、状态可知）→ `TestANonTradeIsStillADecision` 三条用例
+  （重复建单被拒 / 形状不合法 / 撤单），外加一条**绕开意图门的撤单**（成交路径内部的资金不足撤单）。
+- 同一 order 的 fill/add/trim/close 归到同一个 episode → `test_a_whole_trade_is_one_episode`
+  用真实重放日期跑完 `open → fill → add → trim → close`，断言事件序列恰好是
+  `intent, order, fill, intent, add, intent, trim, intent, close`。
+- 两个 trader 同日推荐同一 code 是**两个** episode → `test_two_traders_on_one_stock_are_two_episodes`。
+- 对 `outcomes` 行直接 UPDATE/DELETE 被触发器拒绝 → **未做**，`outcomes` 无写者，属 T2。
+
+**本轮的四个变异探针**（先证明测试会红，再复原）：
+
+| 探针 | 结果 |
+|---|---|
+| 门不再开 episode（`_start_episode` 直接 `return None`） | 21 failed / 7 passed |
+| 成交不再记事件（注释掉 `episodes.note_fill`） | 4 failed / 24 passed |
+| `episode_events` 的 append-only 触发器失效（`RAISE(ABORT)` → `SELECT 1`） | 1 failed / 27 passed |
+| `link_snapshot` 不再 write-once（去掉 `IS NULL` 守卫） | 1 failed / 27 passed |
+
+**本轮查出的「承诺超过代码」三例**，均已在 §7 如实标注，未靠改文档蒙过去：
+
+1. 计划里点名的 `expire` 事件类型**没有写入路径**（挂单有效期是死代码），因此**没有**写进
+   `episode_events.kind` 的 `CHECK`；用一条静态断言把「它仍然是死代码」钉住，
+   这样将来真做有效期的人必须先删掉那条测试、再加事件类型。
+2. 计划里点名的 `hold` / abstention 同样没有写入路径，理由是「本仓库没有任何地方**决定过**
+   『今天不买』」，造一个空调用点就是本文件反复在抓的那类缺陷。
+3. `close` / `trim` 的事件只能指向持仓行，**指不到账本腿**，因为
+   `_close_position_impl` 的返回契约是 `bool`。按「不重建归属」的既有约定，
+   这里没有用「同持仓最近一条腿」去凑，而是作为已知缺口写进 §7。
+
+**`portfolio.py` 1197 行**（上限 1200），已是本阶段最紧的一处。T1 只往里加了 2 个调用点与 2 行注释；
+下一次需要改动该文件前应先把「资金与主线敞口」那一组读函数拆出去，不要靠压缩注释换行数。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -251,3 +329,36 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   `today_str` 与下单选单日、`morning_scan` 的下单选单日）也改取该时钟。
   不覆盖 `tools` / `evolution` / `memory_store` 统计查询 / `pipeline` 的 review、scheduler ——
   它们问的是「现在」，不是「模拟到哪一天」。
+
+## 11. Phase 3 逐项交付（T1–T4，进行中）
+
+计划见 [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)。本阶段有一句硬约束：
+**不新增任何生效路径** —— 候选、快照都不进 prompt / 检索 / 决策上下文（§10：验证不等于授权）。
+
+| 切片 | 状态 | 交付 |
+|---|---|---|
+| T1 episode 关联 | ✅ 已交付（第五轮） | `episodes` / `episode_events` 两表 + `alpha_agents/data/episodes.py`；门在 `intent.submit_intent`，成交/撤单两个钩子在 `portfolio`；只读入口 `scripts/episode_coverage.py` |
+| T2 三种结果的生命周期 | ⬜ 未开始 | `outcomes` 表已在 T1 建好（无写者），其余未做 |
+| T3 候选证据与生命周期 | ⬜ 未开始 | 四列与状态迁移均未做 |
+| T4 已批准知识快照 | ⬜ 未开始 | `knowledge_snapshots` 未建 |
+
+### T1 的边界，逐条说清
+
+- **一个决策一个 episode**，在**业务规则跑之前**落库。因此「一个被拒绝的意图」「一个撤单」
+  「一个形状不合法的意图」都留下完整的 episode，而「进程死在动作中间」表现为
+  episode 的 `intent` 事件指向一行状态仍是 `submitted` 的意图 —— 这是可查的，不是空白。
+- **归属用列不用重推**（沿用 Phase 1 的约定）：episode 存 `order_id` / `position_id`，
+  事件存 `ref_id`。`order_id` 与 `position_id` 是同一张 `virtual_portfolio` 行的同一个 id
+  （成交是原地 UPDATE，不是插新行），**但它们是两个不同的断言**：
+  `position_id IS NOT NULL` 才等于「这次决策成交了」。
+- **事件只引用行号，不复制金额**。`detail_json` 只在撤单时放一句原因（截断 200 字），
+  金额一律留在 `position_exits` / `virtual_portfolio`。第二份 P&L 就是第二份真相。
+- **不可变性交给数据库**：`episode_events` 的 `BEFORE UPDATE` / `BEFORE DELETE` 触发器 `RAISE(ABORT)`；
+  `episodes` 的 `trader_id` / `code` / `opened_at` / `closed_at` / `decision_snapshot_id` 一经写入不可改，
+  已关闭的 episode 不可重开。事后把学习单元改指到另一个决策，是每一种事后归因偏差的形状。
+- **`episodes.code` 可为 NULL**，用于「这个决策没点名任何标的」（形状不合法的意图，
+  或对一个不存在的持仓下动作）。丢掉这些行等于把不合格的决策从分母里删掉 —— 正是这张表要消除的偏差。
+- **两个钩子是尽力而为**：`episodes.note_fill` / `note_cancel` 失败只记 warning，不阻断成交或撤单。
+  「审计写不下」不能变成「交易没发生」，但必须留痕 —— 与 `attribution.freeze` 在其调用点的姿态一致。
+  两者**都不取 `_write_lock`**：调用方已经在临界区里，而该锁不可重入。
+

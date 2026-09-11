@@ -15,7 +15,8 @@ import re
 from datetime import datetime
 
 from alpha_agents.data import (
-    attribution, clock, order_state, reservations, settlement, trade_ledger,
+    attribution, clock, episodes, order_state, reservations, settlement,
+    trade_ledger,
 )
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
@@ -807,6 +808,8 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             conn, position_id=order["id"], trader_id=trader_id,
             code=code, shares=shares, open_date=fill_date,
             open_price=fill_price, source="initial")
+        # The decision's learning unit gained its outcome: this one traded.
+        episodes.note_fill(conn, order["id"], fill_date)
         conn.commit()
 
     # Bind the thesis to the position it just became. Until the fill the
@@ -885,6 +888,10 @@ def _cancel_order_unlocked(order_id: int, reason: str) -> None:
     # cancel-pending rows reach this point (the earlier guard
     # short-circuits everything else), so the reservation is held and
     # this is a release, not a refund of an already-consumed one.
+    # Recorded here rather than at the intent door because two of the cancels
+    # — the drawdown gate and the unaffordable lot in _fill_order — never pass
+    # through it, and closing the episode says this decision never traded.
+    episodes.note_cancel(conn, order_id, reason)
     reservations.release_reservation(conn, order_id=order_id, reason=reason)
     conn.commit()
     logger.info("Cancelled order #%d: %s", order_id, reason)

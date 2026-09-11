@@ -269,18 +269,37 @@ class TestTheBoundaryIsFrozen:
         conn = _conn()
         sa, sb = A.snapshot_for_order(conn, a), A.snapshot_for_order(conn, b)
         assert sa["content_hash"] != sb["content_hash"]
-        # Recomputing from the stored fields reproduces the stored hash, so
-        # a rewritten snapshot is detectable even if a trigger were dropped.
-        recomputed = A._hash({
-            "trader_id": sa["trader_id"], "code": sa["code"],
-            "information_cutoff": sa["information_cutoff"],
-            "decided_at": sa["decided_at"], "thesis_id": sa["thesis_id"],
-            "order_id": sa["order_id"], "prediction_id": sa["prediction_id"],
-            "policy_ref": sa["policy_ref"], "model_ref": sa["model_ref"],
-            "sources": sa["sources"], "payload": sa["payload"],
-            "supersedes_id": sa["supersedes_id"],
-        })
-        assert recomputed == sa["content_hash"]
+        # The stored boundary recomputes to the stored hash, so a rewritten
+        # snapshot is detectable even if a trigger were dropped.
+        assert A.verify_snapshot(conn, sa["id"])
+        assert A.verify_snapshot(conn, sb["id"])
+
+    def test_a_rewrite_that_gets_past_the_trigger_is_still_detectable(
+            self, store, traders_dir, theme):
+        """The hash is the second lock, and it has to work with the first gone.
+
+        Dropping the trigger is how a restore-from-backup or a hand-edited
+        file arrives, and that is the only way a snapshot changes at all.
+        """
+        write(traders_dir, "slow", SLOW)
+        oid = P.create_pending_order(code="600000", name="A", theme="t",
+                                     order_date="2026-01-05",
+                                     entry_low=9.0, entry_high=11.0,
+                                     trader_id="slow")
+        conn = _conn()
+        snap = A.snapshot_for_order(conn, oid)
+        assert A.verify_snapshot(conn, snap["id"])
+
+        conn.execute("DROP TRIGGER decision_snapshots_no_update")
+        conn.execute("UPDATE decision_snapshots SET payload_json = ? "
+                     "WHERE id = ?", ('{"entry_low": 1.0}', snap["id"]))
+
+        assert not A.verify_snapshot(conn, snap["id"]), \
+            "a boundary edited behind the trigger's back must not verify"
+
+    def test_an_unknown_snapshot_id_is_not_trusted(self, store):
+        """Absent and tampered are both 'do not trust it'."""
+        assert not A.verify_snapshot(_conn(), 999_999)
 
     def test_a_superseding_snapshot_leaves_the_original_readable(
             self, store, traders_dir, theme):

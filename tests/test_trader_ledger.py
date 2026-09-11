@@ -145,6 +145,26 @@ def test_an_exact_retry_of_an_exit_has_one_effect(conn):
     assert len(_exits(conn)) == 1
 
 
+def test_the_same_command_id_with_different_arguments_is_refused(conn):
+    """Idempotency covers the instruction, not merely its key.
+
+    Returning the earlier row for a changed retry would quietly book a
+    different sale under the first one's identity, which is how a
+    fat-fingered re-send turns into a phantom fill.
+    """
+    fields = dict(position_id=1, trader_id=DEFAULT_TRADER, code="300475",
+                  exit_date="2026-04-09", price=110.0, shares=100,
+                  cost_basis=10_050.0, gross_amount=1_000.0, costs=50.0,
+                  net_amount=950.0, return_pct=9.45, reason="减仓")
+    trade_ledger.record_exit(conn, command_id="sale-1", **fields)
+
+    with pytest.raises(ValueError):
+        trade_ledger.record_exit(conn, command_id="sale-1",
+                                 **{**fields, "shares": 200})
+
+    assert len(_exits(conn)) == 1, "a rejected retry books nothing"
+
+
 def test_the_ledger_refuses_a_sale_with_no_price(conn):
     with pytest.raises(ValueError):
         trade_ledger.record_exit(

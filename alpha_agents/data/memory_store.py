@@ -289,6 +289,39 @@ CREATE TABLE IF NOT EXISTS reservations (
 CREATE INDEX IF NOT EXISTS idx_reservations_state ON reservations(state);
 CREATE INDEX IF NOT EXISTS idx_reservations_trader ON reservations(trader_id);
 
+-- Audit log of every cross-table invariant check. Reconciliation reads
+-- the production tables (virtual_portfolio, position_exits, reservations)
+-- and writes only to these two: the run records when the check happened
+-- and what the derived totals were, and the diffs record each
+-- discrepancy with severity so a fix can be prioritised. No FK is
+-- declared because the audit log is meant to outlive the production
+-- tables — a table dropped in a refactor should not erase the history
+-- of finding it inconsistent.
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
+    id INTEGER PRIMARY KEY,
+    run_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    status TEXT NOT NULL CHECK(status IN ('clean','dirty','error')),
+    diff_count INTEGER NOT NULL DEFAULT 0,
+    trader_count INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    finished_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS reconciliation_diffs (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    invariant TEXT NOT NULL,            -- e.g. 'orphan_exit', 'consumed_amount_mismatch'
+    severity TEXT NOT NULL CHECK(severity IN ('critical','major','minor')),
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    position_id INTEGER,
+    reservation_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_recon_diffs_run ON reconciliation_diffs(run_id);
+CREATE INDEX IF NOT EXISTS idx_recon_diffs_trader ON reconciliation_diffs(trader_id);
+CREATE INDEX IF NOT EXISTS idx_recon_diffs_severity ON reconciliation_diffs(severity);
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

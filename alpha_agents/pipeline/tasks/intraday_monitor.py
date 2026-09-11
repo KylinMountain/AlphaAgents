@@ -37,6 +37,9 @@ from alpha_agents.pipeline.tasks.anomaly_scan import (
     _detect_anomalies, _detect_style_rotation, _news_for_sectors,
     _refresh_theme_strengths,
 )
+from alpha_agents.pipeline.tasks.session_memory import (
+    note_decline, recall_decline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -875,74 +878,52 @@ def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
 
 
 
-# How long a trader's "no" stays valid for the same stock. One intraday
-# cycle is five minutes; a stock's position in its 20-day range does not
-# change in that time, and neither does the answer. Long enough to stop
-# re-asking every cycle, short enough that a real move gets a fresh look.
-_DECLINE_TTL_MINUTES = 45
-
-# ...unless the price itself moved this far, which is a different stock
-# than the one that was declined.
-_DECLINE_PRICE_TOLERANCE = 0.03
-
-# Declines, in memory: {(code, price_at_decline): datetime}. Process-local
-# on purpose — it is a cost optimisation, not state anyone should reason
-# about, and a restart getting one extra look is the right failure.
-_declined: dict[str, tuple[float, "datetime"]] = {}
-
-
-def note_decline(code: str, price: float) -> None:
-    """Remember that a trader looked at this and said no."""
-    _declined[code] = (price, datetime.now())
-
-
-def _recently_declined(code: str, price: float) -> bool:
-    prev = _declined.get(code)
-    if not prev:
-        return False
-    old_price, when = prev
-    if (datetime.now() - when).total_seconds() > _DECLINE_TTL_MINUTES * 60:
-        return False
-    if not old_price or not price:
-        return True
-    return abs(price - old_price) / old_price <= _DECLINE_PRICE_TOLERANCE
-
-
 def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
-    """Drop the candidates a model cannot help with.
+    """Drop only what no judgement can rescue, and remember the rest.
 
-    Three filters, all free:
+    Two filters remain, and both are about orders that *cannot be placed*
+    rather than about ideas that are probably bad:
 
-      * the theme is not one the system tracks — the order would be
-        refused at creation, so the pricing that precedes it is spent on
-        a position that could never open;
-      * the theme is too weak to carry a position — same, one check later;
-      * a trader already declined this stock at about this price a few
-        minutes ago, and the reasons it gave (position in the 20-day
-        range, distance to support) do not change in five minutes.
+      * the theme is not one the system tracks — order creation refuses it
+      * the theme is below MIN_THEME_STRENGTH — order creation refuses it
+
+    Pricing a candidate whose order would be rejected is not a judgement
+    call being taken away; it is work with no possible outcome. 博敏电子
+    was priced twice today on 存储芯片 and 先进封装, and both orders died
+    at creation for an untracked theme.
+
+    **A recent decline is no longer a filter.** It travels with the
+    candidate as ``prior_view`` instead, because the problem it was
+    solving was never too much freedom — it was no memory. See
+    ``recall_decline``.
     """
     from alpha_agents.data.portfolio import _theme_too_weak, resolve_theme
 
-    out, dropped = [], []
+    out, dropped, recalled = [], [], 0
     for r in recs:
         code = r["code"]
         theme = r.get("theme", "")
         resolved = resolve_theme(theme)
         if resolved is None:
-            dropped.append(f"{code}(主线'{theme}'不在跟踪列表)")
+            dropped.append(f"{code}(主线'{theme}'不在跟踪列表，下单必被拒)")
             continue
         weak = _theme_too_weak(resolved)
         if weak:
             dropped.append(f"{code}({weak})")
             continue
-        if _recently_declined(code, prices.get(code) or 0):
-            dropped.append(f"{code}(刚被否过)")
-            continue
-        out.append({**r, "theme": resolved})
+        item = {**r, "theme": resolved}
+        prior = recall_decline(code, prices.get(code) or 0)
+        if prior:
+            item["prior_view"] = prior
+            recalled += 1
+        out.append(item)
 
     if dropped:
-        logger.info("定价前过滤掉 %d 个候选（不花模型）: %s",
+        logger.info("定价前剔除 %d 个（订单必被拒，不是判断问题）: %s",
                     len(dropped), ", ".join(dropped[:6]))
+    if recalled:
+        logger.info("%d 个候选带上了今天早些时候的判断，交回给交易员复核",
+                    recalled)
     return out
 
 
@@ -1042,12 +1023,16 @@ async def _save_intraday_recommendations(report: str) -> None:
         for r in buys:
             code = r["code"]
             decision = decisions.get(code)
-            if decision is None:
-                # Priced out, skipped, or the model never answered. All
-                # three mean no order — the fallback constant this
-                # replaced is exactly what must not come back. Remember it
-                # so the next cycle does not buy the same answer again.
-                note_decline(code, prices.get(code) or 0)
+            if decision is None or decision.get("action") != "buy":
+                # Three different things, one outcome: no order. The
+                # fallback constant this replaced is exactly what must not
+                # come back. But a considered "no" and silence are not the
+                # same, and only the first is worth handing back next
+                # cycle — so keep the trader's own words when there are
+                # any, and say plainly when there are none.
+                note_decline(code, prices.get(code) or 0,
+                             (decision or {}).get("reason", "")
+                             or "模型没有给出结论")
                 continue
             if _record_intraday_pick(trader, {**r, **_order_fields(decision)},
                                      code, today, "intraday",

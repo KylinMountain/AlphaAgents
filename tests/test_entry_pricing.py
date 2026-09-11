@@ -200,3 +200,73 @@ class TestEntrySideIsMeasuredNotEnforced:
         from alpha_agents.data.portfolio_risk import inject_entry_side
         self._order(store, "600001", 9.0, 9.7, 10.0)
         assert inject_entry_side(trader_id="t1") == ""
+
+
+class TestDeclineBecomesMemory:
+    """A "no" is experience, not a wall.
+
+    301511 was priced nineteen times in one intraday session and declined
+    nineteen times in almost the same sentence. The first fix was a filter:
+    decline it once, stop asking for 45 minutes. That bought back the
+    tokens and cost the thing the tokens were for — the trader could no
+    longer notice that the stock it refused at 12.40 was now 13.60.
+
+    So the decline travels back to it as context instead. These tests pin
+    the two halves: the reason has to survive the round trip, and the
+    filter must not come back.
+    """
+
+    def test_a_skip_carries_its_reason_out(self):
+        skips = EP.parse_skips(block([
+            {"code": "301511", "action": "skip",
+             "reason": "position_pct=100，距支撑仅2.2%"},
+            BUY,
+        ]))
+        assert skips == {"301511": "position_pct=100，距支撑仅2.2%"}
+
+    def test_a_skip_without_words_is_still_a_skip(self):
+        assert EP.parse_skips(block([
+            {"code": "301511", "action": "skip"}]))["301511"]
+
+    def test_prior_view_reaches_the_prompt(self):
+        class T:
+            id = "t1"
+            max_position_pct = 0.15
+        ctx = EP.build_context([{
+            "code": "301511", "name": "德福科技", "price": 13.6,
+            "change_pct": 9.7, "theme": "固态电池",
+            "prior_view": "35 分钟前你看过这只票并决定不买，当时 12.40，"
+                          "理由：position_pct=100。现在 13.60（+9.7%）。",
+        }], T())
+        assert "12.40" in ctx and "position_pct=100" in ctx
+
+    def test_recall_reads_back_what_was_decided(self):
+        from alpha_agents.pipeline.tasks import session_memory as IM
+        IM._declined.clear()
+        IM.note_decline("301511", 12.40, "position_pct=100，距支撑仅2.2%")
+        recalled = IM.recall_decline("301511", 13.60)
+        assert "12.40" in recalled and "13.60" in recalled
+        assert "+9.7%" in recalled and "position_pct=100" in recalled
+
+    def test_a_declined_stock_is_still_asked_about(self, monkeypatch):
+        """The filter is gone. This is the whole point of the change."""
+        from alpha_agents.data import portfolio
+        from alpha_agents.pipeline.tasks import intraday_monitor as MON
+        from alpha_agents.pipeline.tasks import session_memory as IM
+        monkeypatch.setattr(portfolio, "resolve_theme", lambda t: t)
+        monkeypatch.setattr(portfolio, "_theme_too_weak", lambda t: None)
+        IM._declined.clear()
+        IM.note_decline("301511", 12.40, "位置太高")
+        out = MON._worth_asking(
+            [{"code": "301511", "theme": "固态电池"}], {"301511": 13.60})
+        assert len(out) == 1, "被否过的票必须还能再被问一次"
+        assert "位置太高" in out[0]["prior_view"]
+
+    def test_yesterdays_no_is_not_todays_context(self):
+        from datetime import datetime, timedelta
+
+        from alpha_agents.pipeline.tasks import session_memory as IM
+        IM._declined.clear()
+        IM._declined["301511"] = (
+            12.40, datetime.now() - timedelta(minutes=200), "位置太高")
+        assert IM.recall_decline("301511", 13.60) is None

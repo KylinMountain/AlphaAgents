@@ -14,7 +14,7 @@ import os
 import re
 from datetime import datetime
 
-from alpha_agents.data import attribution, trade_ledger
+from alpha_agents.data import attribution, order_state, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
 from alpha_agents.data.trader import DEFAULT_TRADER
 # The exit slice lives in portfolio_exit: the friction model, the append-only
@@ -739,11 +739,46 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         cost = shares * fill_price
 
         conn = _get_conn()
+        cur = conn.execute(
+            "SELECT status FROM virtual_portfolio WHERE id = ?",
+            (order["id"],),
+        ).fetchone()
+        if not cur:
+            logger.info("Order #%s disappeared before fill; no-op",
+                        order["id"])
+            return None
+        # _fill_order is the pending-order → position path. The state
+        # machine permits open → open (a partial exit through
+        # close_position), but that is a different operation with a
+        # different UPDATE; running it here would silently overwrite an
+        # open position's open_date, open_price and shares. Domain guard
+        # first, state machine as the backstop.
+        if cur["status"] != order_state.PENDING:
+            logger.info("Order #%s no longer pending (%s), fill rejected",
+                        order["id"], cur["status"])
+            return {
+                "type": "cancelled", "code": code, "name": name,
+                "reason": f"fill rejected: row is {cur['status']}, not pending",
+            }
+        try:
+            target = order_state.assert_transition(cur["status"],
+                                                  order_state.OPEN)
+        except order_state.IllegalTransition as e:
+            # Defensive backstop: the domain guard above already passed,
+            # so this would only trigger if a new state were added that
+            # is not PENDING but still allows → OPEN. Honour the refusal
+            # rather than write on top of whoever finished the row first.
+            logger.info("Order #%s no longer fillable (%s): %s",
+                        order["id"], cur["status"], e)
+            return {
+                "type": "cancelled", "code": code, "name": name,
+                "reason": f"fill rejected: row already {cur['status']}",
+            }
         conn.execute(
             "UPDATE virtual_portfolio SET "
-            "status = 'open', open_date = ?, open_price = ?, shares = ? "
+            "status = ?, open_date = ?, open_price = ?, shares = ? "
             "WHERE id = ?",
-            (fill_date, fill_price, shares, order["id"]),
+            (target, fill_date, fill_price, shares, order["id"]),
         )
         conn.commit()
 
@@ -793,11 +828,31 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
 
 
 def _cancel_order_unlocked(order_id: int, reason: str) -> None:
-    """Cancel a pending order. Caller must already hold _write_lock."""
+    """Cancel a pending order. Caller must already hold _write_lock.
+
+    A cancel request is meaningful only while the row is still pending (or
+    a cancellation is in flight). Once the row has been filled or already
+    finished some other way, the first finisher owns its history and a
+    later cancel is a logged no-op — overwriting a closed row's record
+    would be the silent history edit the state machine exists to stop.
+    """
     conn = _get_conn()
+    current = conn.execute(
+        "SELECT status FROM virtual_portfolio WHERE id = ?", (order_id,),
+    ).fetchone()
+    if not current:
+        logger.warning("Cancel requested for unknown order #%d", order_id)
+        return
+    current_status = current["status"]
+    if current_status not in (order_state.PENDING, order_state.CANCEL_PENDING):
+        logger.info("Order #%d no longer pending (%s), cancel ignored",
+                    order_id, current_status)
+        return
+    target = order_state.assert_transition(current_status,
+                                          order_state.CANCELLED)
     conn.execute(
-        "UPDATE virtual_portfolio SET status = 'cancelled', close_reason = ? WHERE id = ?",
-        (reason, order_id),
+        "UPDATE virtual_portfolio SET status = ?, close_reason = ? WHERE id = ?",
+        (target, reason, order_id),
     )
     conn.commit()
     logger.info("Cancelled order #%d: %s", order_id, reason)

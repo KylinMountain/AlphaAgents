@@ -1,4 +1,4 @@
-"""L2 Lessons — extract structured lessons from review report, consolidate into principles."""
+"""L2 Lessons — extract observations and quarantine principle proposals."""
 
 from __future__ import annotations
 
@@ -10,10 +10,9 @@ from alpha_agents.data.memory_store import (
     insert_daily_lesson,
     get_recent_daily_lessons,
     get_all_principles_including_weakened,
-    create_trading_principle,
-    reinforce_trading_principle,
-    set_principle_status,
+    get_all_playbooks,
 )
+from alpha_agents.data.learning_candidates import record_observation, save_candidate
 from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
@@ -66,24 +65,25 @@ def extract_daily_lessons(report: str, today: str) -> int:
     return count
 
 
-_CONSOLIDATION_SYSTEM_PROMPT = """你是交易经验沉淀师。
-读今天新增的 daily_lessons（实盘观察）+ 已有 trading_principles（历史沉淀的量价经验，风格类似 Anna Coulling《量价分析》的法则），判断是否：
-- CREATE: 今天的 lesson 揭示了新的可复用模式，创建新 principle（必须带具体 pattern_description + action_guidance + 至少1条 evidence）
-- REINFORCE: 今天的 lesson 是已有 principle 的新一个佐证案例
+_CONSOLIDATION_SYSTEM_PROMPT = """Extract candidate trading lessons, not approved rules.
+Read today's daily_lessons (observations) and existing trading_principles.
+Propose CREATE for a reusable pattern or REINFORCE for a new cited case.
+All proposals are quarantined. Neither this response nor historical outcome
+measurements authorize creating, reactivating, weakening or retiring live rules.
+A candidate-bound forward version gate is not implemented in this phase.
 
-输出**只能**是这个 JSON（不要其他内容）：
+Return only JSON in this shape:
 {"operations": [
   {"op": "create", "principle": "...", "pattern_description": "...", "category": "vpa_signal|theme_timing|entry|exit|risk", "action_guidance": "...", "evidence": [{"code":"...", "date":"...", "outcome":"..."}]},
   {"op": "reinforce", "principle_id": 123, "new_case": {"code":"...", "date":"...", "outcome":"..."}}
 ]}
 
-原则:
-- principle 要具体到**量价形态+位置+量能配合**，不要空话
-- **evidence 里的 code/date 必须是真实的历史推荐**，系统会用当时的行情
-  数据给它打分（Brier + 因子残差），principle 的存废由这个分数决定
-- 不要评判已有 principle 的好坏，也不要请求删除或削弱它们：那由市场
-  数据判定，不由你判定
-- 若今天没值得沉淀的东西，输出 {"operations": []}"""
+Requirements:
+- Describe a specific price/volume pattern, its location and volume context.
+- CREATE requires pattern_description, action_guidance and at least one cited case.
+- Cite only historical recommendations supplied in the inputs; never invent evidence.
+- Do not judge existing rules or request deletion, weakening or approval.
+- If there is nothing worth proposing, return {"operations": []}."""
 
 
 def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict:
@@ -123,204 +123,214 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
         if m:
             try:
                 return json.loads(m.group(0))
-            except Exception:
-                pass
-        _log_consolidation_failure("解析失败", content)
+            except json.JSONDecodeError as e:
+                logger.debug("Consolidation JSON recovery failed: %s", e)
+        _log_consolidation_failure("Invalid JSON", content)
         logger.warning("Consolidation LLM returned unparseable content: %s",
                        content[:200])
         return {"operations": []}
 
 
 def _log_consolidation_failure(kind: str, detail: str) -> None:
-    """Record that lessons did not become principles, and why.
-
-    This is the only path from a day's observations into long-term memory.
-    When it produces nothing the system does not degrade visibly — it just
-    keeps its one-week window forever, and nobody notices for weeks.
-    """
+    """Record missing research proposals without implying rule promotion."""
     try:
         from alpha_agents.data.activity_log import log_activity
         log_activity("learning_stalled", task="consolidate_principles",
                      status="degraded",
-                     message=f"教训未能转化为原则（{kind}）：{detail[:300]}",
+                     message="No learning candidates (%s): %s" % (kind, detail[:300]),
                      detail={"kind": kind})
     except Exception as e:
         logger.debug("Could not log consolidation failure: %s", e)
 
 
 def consolidate_principles(today: str) -> dict:
-    """Daily consolidation. The LLM may propose; only the market judges.
+    """Persist create/reinforce proposals without changing existing principles.
 
-    G3: `weaken` used to be an LLM verdict on its own past output — the
-    Echo Gap, where a model accepts its own wrong memories 31-54% of the
-    time, and which a stronger judge model provably does not fix
-    (residual error correlation stays >= +0.30 without
-    error-independence). Retirement now comes solely from
-    principle_scoring.rescore_all_principles, which reads graded
-    predictions.
-
-    What the LLM is still allowed to do is *propose* a principle and
-    attach evidence to an existing one. Both are claims to be tested, not
-    verdicts: a created principle starts unproven and earns or loses its
-    place on the (code, date) cases it cites.
-
-    Returns dict {created, reinforced, weakened} counts; `weakened` stays
-    0 here and is reported by the scoring pass instead.
+    The legacy mutation counts remain zero. `candidates` counts persisted
+    proposals (including exact retries), not approvals; `failed` is explicit.
+    Raw proposals and their lesson inputs are retained for later inspection.
     """
-    lessons = get_recent_daily_lessons(days=1)  # only today's
+    counts = {"created": 0, "reinforced": 0, "weakened": 0,
+              "candidates": 0, "failed": 0}
+    # Input ordering is not new evidence and must not produce new candidates,
+    # so the payload is sorted into a canonical order. Rows without an id are
+    # ordered first rather than raising: a malformed row must not be able to
+    # abort the day's consolidation for every other lesson.
+    lessons = sorted(
+        (lesson for lesson in get_recent_daily_lessons(days=1)
+         if lesson.get("date") == today),
+        key=lambda lesson: lesson.get("id") or 0,
+    )
     if not lessons:
-        return {"created": 0, "reinforced": 0, "weakened": 0}
+        return counts
 
     principles = get_all_principles_including_weakened()
-
     try:
         result = _call_consolidation_llm(lessons, principles)
     except Exception as e:
         logger.warning("Consolidation LLM call failed: %s", e)
-        return {"created": 0, "reinforced": 0, "weakened": 0}
+        counts["failed"] += 1
+        return counts
 
-    ops = result.get("operations", []) if isinstance(result, dict) else []
+    ops = result.get("operations") if isinstance(result, dict) else None
+    if not isinstance(ops, list):
+        logger.warning("Consolidation operations must be a list: %s", result)
+        counts["failed"] += 1
+        return counts
     if not ops:
-        # Silence here is how this path stayed broken. A run that proposes
-        # nothing logged nothing at all, so "lessons never became
-        # principles" looked identical to "the consolidation never ran" —
-        # and trading_principles sat at 0 with no trace of why.
         _log_consolidation_failure(
-            "模型未提出任何原则",
-            f"输入 {len(lessons)} 条教训、{len(principles)} 条已有原则")
-    counts = {"created": 0, "reinforced": 0, "weakened": 0}
+            "No proposals", "Input: %d lessons, %d existing principles" %
+            (len(lessons), len(principles)))
     for op in ops:
         if not isinstance(op, dict):
+            logger.warning("Invalid consolidation operation: %s", op)
+            counts["failed"] += 1
             continue
         kind = op.get("op")
+        if kind not in ("create", "reinforce"):
+            logger.info("Ignoring unsupported consolidation operation: %s", op)
+            continue
         try:
-            if kind == "create":
-                create_trading_principle(
-                    principle=op["principle"],
-                    pattern_description=op["pattern_description"],
-                    category=op.get("category", "insight"),
-                    action_guidance=op["action_guidance"],
-                    evidence=op.get("evidence", []),
-                    today=today,
-                )
-                counts["created"] += 1
-            elif kind == "reinforce":
-                reinforce_trading_principle(
-                    op["principle_id"], today=today,
-                    new_case=op.get("new_case"),
-                )
-                counts["reinforced"] += 1
-            elif kind == "weaken":
-                # Ignored by design — see the docstring. Logged so a model
-                # that keeps asking is visible rather than silently denied.
-                logger.info(
-                    "Ignoring LLM weaken request for principle #%s (%s): "
-                    "retirement is decided by market scoring, not by the "
-                    "model that wrote it",
-                    op.get("principle_id"), op.get("reason", "")[:80],
-                )
+            target_id = op.get("principle_id") if kind == "reinforce" else None
+            if kind == "reinforce" and (type(target_id) is not int or target_id <= 0):
+                raise ValueError("Reinforcement requires a positive integer principle_id")
+            candidate_id = save_candidate(
+                entity_type="principle", operation=kind, target_id=target_id,
+                source="consolidate_principles", source_date=today,
+                payload={"proposal": op, "lessons": lessons},
+            )
+            counts["candidates"] += 1
+            logger.info("Quarantined principle %s candidate #%d", kind, candidate_id)
         except Exception as e:
-            logger.warning("Consolidation op %s failed: %s", op, e)
+            counts["failed"] += 1
+            logger.warning("Consolidation candidate %s failed: %s", op, e)
+    return counts
+
+
+def _measure_principles(today: str) -> int:
+    """Store descriptive scores separately, without invoking lifecycle rescoring.
+
+    score_principle only reads cited prediction outcomes. Its retirement hint
+    is an observation, not forward validation or permission to change a rule.
+    """
+    from datetime import datetime
+    from alpha_agents.evolution.principle_scoring import score_principle
+
+    as_of = datetime.strptime(today, "%Y-%m-%d")
+    measured = 0
+    for principle in get_all_principles_including_weakened():
+        result = score_principle(principle, as_of)
+        record_observation(
+            entity_type="principle", target_id=principle["id"],
+            source="post_review", source_date=today,
+            payload={**result, "evidence": principle.get("evidence"), "as_of": today},
+        )
+        measured += 1
+    return measured
+
+
+def _collect_playbook_candidates(today: str) -> dict:
+    """Reuse discovery heuristics without invoking any active lifecycle API.
+
+    Cluster counts are research inputs, not holdout evidence. Active capacity
+    does not constrain quarantine, and no slot is freed or weight assigned.
+    """
+    from alpha_agents.evolution.playbook import (
+        _AUTO_CREATE_LOOKBACK_DAYS, _AUTO_CREATE_MIN_TOTAL,
+        _pattern_from_cluster, _pattern_signature, _query_hit_clusters,
+    )
+
+    clusters = _query_hit_clusters()
+    counts = {"candidates": 0, "failed": 0}
+    if not clusters:
+        return counts
+    existing_sigs = {_pattern_signature(pb.get("pattern_json", "{}"))
+                     for pb in get_all_playbooks()}
+    for cluster in clusters:
+        try:
+            if cluster["total"] < _AUTO_CREATE_MIN_TOTAL:
+                continue
+            pattern = _pattern_from_cluster(cluster)
+            sig = _pattern_signature(json.dumps(pattern))
+            if not sig or sig in existing_sigs:
+                continue
+            name_parts = [str(cluster[key]) for key in ("theme", "vpa_verdict")
+                          if cluster.get(key)]
+            if cluster.get("institutional_present"):
+                name_parts.append("institutional")
+            candidate_id = save_candidate(
+                entity_type="playbook", operation="create",
+                source="post_review", source_date=today,
+                payload={"name": "Auto: " + "-".join(name_parts),
+                         "pattern_json": pattern, "cluster": cluster,
+                         "lookback_days": _AUTO_CREATE_LOOKBACK_DAYS},
+            )
+            existing_sigs.add(sig)
+            counts["candidates"] += 1
+            logger.info("Quarantined playbook pattern candidate #%d", candidate_id)
+        except Exception as e:
+            counts["failed"] += 1
+            logger.warning("Playbook pattern candidate %s failed: %s", cluster, e)
     return counts
 
 
 async def post_review(today: str, review_report: str) -> str:
-    """Phase 2+3 entry point: extract lessons, consolidate into principles, update playbooks.
+    """Extract lessons, quarantine proposals, and measure; never promote.
 
-    Called from review.py after the review report is generated. Returns a
-    short summary string to append to the report (or empty string if nothing
-    happened).
+    There is no candidate-bound forward validation protocol in phase one.
+    Running a generic daily gate would imply approval evidence we do not have.
     """
     import asyncio
 
-    # Phase 2: lessons + principles
     lesson_count = await asyncio.to_thread(extract_daily_lessons, review_report, today)
+    counts = {"candidates": 0, "failed": 0}
     if lesson_count > 0:
         counts = await asyncio.to_thread(consolidate_principles, today)
-    else:
-        counts = {"created": 0, "reinforced": 0, "weakened": 0}
 
-    # G2: run the held-out gate before anything is promoted. The gate
-    # abstains until there is enough validation data, which is the correct
-    # behaviour for a system with no track record.
+    scored = 0
+    failures = counts["failed"]
     try:
-        from alpha_agents.evolution.holdout_gate import run_gate
-        # Validation accrues after the candidate existed; a candidate
-        # created today has none yet, and the gate will abstain.
-        gate = await asyncio.to_thread(run_gate, "daily_playbook", today, today)
+        scored = await asyncio.to_thread(_measure_principles, today)
     except Exception as e:
-        logger.warning("Holdout gate failed: %s", e)
-        gate = {}
+        logger.warning("Principle observation failed: %s", e)
+        failures += 1
 
-    # G3: the market, not the model, decides which principles survive.
-    # Runs unconditionally — principles age out on evidence even on a day
-    # that produced no new lessons.
+    # Do not call lifecycle APIs, even if another caller has quarantined them.
+    # This scheduled path must remain safe with their original mutating behavior.
+    playbook_counts = {"candidates": 0, "failed": 0}
     try:
-        from alpha_agents.evolution.principle_scoring import rescore_all_principles
-        health = await asyncio.to_thread(rescore_all_principles)
-        counts["weakened"] = health.get("retired", 0)
-        counts["rescored"] = health.get("scored", 0)
+        playbook_counts = await asyncio.to_thread(_collect_playbook_candidates, today)
     except Exception as e:
-        logger.warning("Principle rescoring failed: %s", e)
+        logger.warning("Playbook discovery failed: %s", e)
+        failures += 1
+    failures += playbook_counts["failed"]
 
-    # Phase 3: playbook daily lifecycle
-    from alpha_agents.evolution.playbook import (
-        update_playbook_stats, scan_and_auto_create, enforce_capacity,
-    )
-    try:
-        playbook_ops = await asyncio.to_thread(update_playbook_stats, today)
-    except Exception as e:
-        logger.warning("Playbook stats update failed: %s", e)
-        playbook_ops = []
-    try:
-        created_ids = await asyncio.to_thread(scan_and_auto_create, today)
-    except Exception as e:
-        logger.warning("Playbook auto-create failed: %s", e)
-        created_ids = []
-
-    # G4: enforce the cap unconditionally. scan_and_auto_create only runs
-    # it when there are new clusters, so without this an over-capacity set
-    # could sit unpruned indefinitely on quiet days.
-    try:
-        evicted = await asyncio.to_thread(enforce_capacity, today)
-    except Exception as e:
-        logger.warning("Playbook capacity enforcement failed: %s", e)
-        evicted = []
-
-    # Phase 4: daily metrics snapshot — always computed (self-measurement)
     try:
         from alpha_agents.evolution.metrics import compute_evolution_metrics
         metrics = await asyncio.to_thread(compute_evolution_metrics, today)
     except Exception as e:
         logger.warning("Evolution metrics computation failed: %s", e)
         metrics = None
+        failures += 1
 
-    # Assemble report
-    nothing = (lesson_count == 0 and sum(counts.values()) == 0
-               and not playbook_ops and not created_ids)
-    if nothing:
+    if not (lesson_count or counts["candidates"] or scored
+            or playbook_counts["candidates"] or failures):
         return ""
 
-    lines = ["【经验沉淀】"]
-    if lesson_count > 0:
-        lines.append(f"• 今日提取 {lesson_count} 条 lessons")
-    if counts["created"]:
-        lines.append(f"• 新增 {counts['created']} 条 principles")
-    if counts["reinforced"]:
-        lines.append(f"• 强化 {counts['reinforced']} 条 principles")
-    if counts["weakened"]:
-        lines.append(f"• 减弱 {counts['weakened']} 条 principles")
-    if playbook_ops:
-        lines.append("【Playbook 变化】")
-        for op in playbook_ops[:5]:
-            lines.append(f"• {op}")
-    if created_ids:
-        lines.append(f"• 自动发现 {len(created_ids)} 条新 Playbook（id={created_ids}）")
+    lines = ["[Learning candidates — not approved; existing rules unchanged]"]
+    if lesson_count:
+        lines.append(f"- Extracted {lesson_count} lessons")
+    if counts["candidates"]:
+        lines.append(f"- Stored {counts['candidates']} principle candidates")
+    if scored:
+        lines.append(f"- Recorded {scored} principle measurements (no rule updates)")
+    if playbook_counts["candidates"]:
+        lines.append(f"- Stored {playbook_counts['candidates']} playbook pattern candidates")
+    if failures:
+        lines.append(f"- Learning/measurement failures: {failures}; inspect warning logs")
     if metrics:
         lines.append(
-            f"【进化自评】7d胜率{metrics['intraday_hit_rate_7d']*100:.0f}% | "
-            f"Playbook匹配{metrics['matched_count_7d']}笔胜率{metrics['matched_hit_rate_7d']*100:.0f}% | "
-            f"原则{metrics['active_principles']}活+{metrics['weakened_principles']}弱 | "
-            f"Playbook{metrics['active_playbooks']}活+{metrics['degraded_playbooks']}弱"
+            f"[Observations] 7d hit rate {metrics['intraday_hit_rate_7d']:.0%}; "
+            f"matched {metrics['matched_count_7d']} / {metrics['matched_hit_rate_7d']:.0%}"
         )
     return "\n".join(lines)

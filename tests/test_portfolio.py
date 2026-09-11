@@ -113,8 +113,13 @@ def test_no_duplicate_open_position():
 def test_close_position():
     from alpha_agents.data.portfolio import open_position, close_position, get_open_positions
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
+    # The close path lives in portfolio_exit since the split. It binds
+    # _get_conn from memory_store itself, so it needs its own patch — the
+    # portfolio one only redirects the order side.
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_exit._get_conn") as mock_e:
         mock.return_value = _make_test_conn()
+        mock_e.return_value = mock.return_value
         pos_id = open_position(code="300475", name="香农芯创", theme="芯片",
                                open_date="2026-04-08", open_price=140.0,
                                source="morning", reason="test")
@@ -129,8 +134,10 @@ def test_check_positions_stop_loss():
 
     conn = _make_test_conn()
     with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_exit._get_conn") as mock_e, \
          patch("alpha_agents.data.position_monitor._get_conn") as mock_m:
         mock.return_value = conn
+        mock_e.return_value = conn
         mock_m.return_value = conn
         open_position(code="300475", name="香农芯创", theme="芯片",
                       open_date="2026-04-08", open_price=147.0,
@@ -152,8 +159,10 @@ def test_check_positions_t1_skip():
     conn = _make_test_conn()
 
     with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_exit._get_conn") as mock_e, \
          patch("alpha_agents.data.position_monitor._get_conn") as mock_m:
         mock.return_value = conn
+        mock_e.return_value = conn
         mock_m.return_value = conn
         open_position(code="300475", name="香农芯创", theme="芯片",
                       open_date="2026-04-09", open_price=147.0,
@@ -169,13 +178,15 @@ def test_check_positions_t1_skip():
 def test_get_portfolio_stats():
     from alpha_agents.data.portfolio import open_position, close_position, get_portfolio_stats
 
-    # Writes go through portfolio, the read goes through portfolio_report
-    # since the split — both bind _get_conn from memory_store, so both
-    # names need the same test connection.
+    # Writes go through portfolio, the close through portfolio_exit, and the
+    # read through portfolio_report since those splits — each binds _get_conn
+    # from memory_store, so every name needs the same test connection.
     conn = _make_test_conn()
     with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_exit._get_conn") as mock_e, \
          patch("alpha_agents.data.portfolio_report._get_conn") as mock_r:
         mock.return_value = conn
+        mock_e.return_value = conn
         mock_r.return_value = conn
         id1 = open_position(code="300475", name="A", theme="芯片",
                             open_date="2026-04-07", open_price=100.0,

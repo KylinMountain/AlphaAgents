@@ -401,12 +401,14 @@ def _prev_trading_day(as_of: str, db_path: str | None = None, code: str | None =
     returns None on ``sqlite3.OperationalError`` (locked DB, missing file,
     schema drift) instead of bubbling up — callers treat the cold-start
     None and the transient-failure None identically.
+
+    With no explicit ``db_path`` the configured market-history location is
+    used, resolved at call time rather than baked from ``__file__`` — the
+    hardcoded path ignored every data-dir override (deploys, tests).
     """
     if db_path is None:
-        from pathlib import Path
-        db_path = str(
-            Path(__file__).resolve().parent.parent.parent.parent / "data" / "market_history.db"
-        )
+        from alpha_agents.data import market_history
+        db_path = str(market_history.DB_PATH)
     import sqlite3
     try:
         conn = sqlite3.connect(db_path)

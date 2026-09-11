@@ -183,8 +183,8 @@ def test_inject_recent_lessons_formats():
     with patch("alpha_agents.evolution.feedback.get_recent_daily_lessons",
                return_value=fake):
         from alpha_agents.evolution.feedback import inject_recent_lessons
-        result = inject_recent_lessons()
-    assert "【近期教训】" in result or "【近期经验】" in result
+        result = inject_recent_lessons(purpose="research")
+    assert "unverified research material" in result
     assert "04-17" in result or "2026-04-17" in result
     assert "东方国信" in result
     assert "协创数据" in result
@@ -198,6 +198,13 @@ def test_inject_recent_lessons_empty():
 
 
 def test_inject_playbooks_formats_active_and_degraded():
+    """The prompt states the rule, never its own scorecard.
+
+    hit_rate / wins / total_trades are mutable outcome measurements. Feeding
+    them back to the model lets it reason from feedback it produced, which is
+    exactly what the golden principles forbid — so they must not leak into
+    the injected text even when the row carries them.
+    """
     fake = [
         {"name": "CPO突破+机构", "status": "active", "weight": 1.5,
          "hit_rate": 0.8, "total_trades": 10, "wins": 8, "annotation": ""},
@@ -210,9 +217,14 @@ def test_inject_playbooks_formats_active_and_degraded():
         from alpha_agents.evolution.feedback import inject_playbooks
         result = inject_playbooks()
     assert "Playbook" in result or "playbook" in result
-    assert "CPO突破+机构" in result and "80%" in result
-    assert "数据中心追强" in result and ("⚠️" in result or "degraded" in result.lower())
+    assert "CPO突破+机构" in result
+    assert "数据中心追强" in result
+    assert "status=degraded" in result
     assert "主线资金退潮" in result
+    # No outcome measurements reach the model.
+    assert "80%" not in result
+    assert "1.5" in result  # weight is a rule field, not a measurement
+    assert "8/10" not in result and "0.8" not in result
 
 
 def test_inject_playbooks_empty():

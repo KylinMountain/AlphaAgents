@@ -61,7 +61,13 @@ def test_consolidate_principles_no_new_lessons_noop():
     assert result["weakened"] == 0
 
 
-def test_consolidate_principles_creates_new():
+def test_consolidate_principles_quarantines_a_new_proposal():
+    """A proposed principle is stored as a candidate, never written live.
+
+    The model may describe a pattern; that description is a hypothesis. It
+    reaches decision prompts only through an approved policy snapshot, which
+    phase one does not have — so `created` stays zero by construction.
+    """
     lessons = [{"id": 1, "date": "2026-04-17", "lesson_type": "success",
                 "theme": "CPO", "content": "协创数据+9.4%", "relevance_tags": "CPO,机构买入"}]
     fake_llm_response = {
@@ -80,15 +86,23 @@ def test_consolidate_principles_creates_new():
                return_value=[]), \
          patch("alpha_agents.evolution.lessons._call_consolidation_llm",
                return_value=fake_llm_response), \
-         patch("alpha_agents.evolution.lessons.create_trading_principle",
-               return_value=1) as m_create:
+         patch("alpha_agents.evolution.lessons.save_candidate",
+               return_value=11) as m_save:
         from alpha_agents.evolution.lessons import consolidate_principles
         result = consolidate_principles("2026-04-17")
-    assert result["created"] == 1
-    m_create.assert_called_once()
+
+    assert result["candidates"] == 1
+    assert result["created"] == 0          # nothing entered active knowledge
+    assert m_save.call_count == 1
+    kwargs = m_save.call_args.kwargs
+    assert kwargs["entity_type"] == "principle"
+    assert kwargs["operation"] == "create"
+    assert kwargs["target_id"] is None
+    assert kwargs["source_date"] == "2026-04-17"
 
 
-def test_consolidate_principles_reinforces_existing():
+def test_consolidate_principles_quarantines_a_reinforcement():
+    """Reinforcing cites an existing rule; it does not edit it."""
     lessons = [{"id": 2, "date": "2026-04-17", "lesson_type": "success",
                 "theme": "CPO", "content": "另一只CPO命中", "relevance_tags": ""}]
     existing = [{"id": 7, "principle": "CPO+机构买入 = 高胜率模式",
@@ -103,11 +117,15 @@ def test_consolidate_principles_reinforces_existing():
                return_value=existing), \
          patch("alpha_agents.evolution.lessons._call_consolidation_llm",
                return_value=fake_llm), \
-         patch("alpha_agents.evolution.lessons.reinforce_trading_principle") as m_reinf:
+         patch("alpha_agents.evolution.lessons.save_candidate",
+               return_value=12) as m_save:
         from alpha_agents.evolution.lessons import consolidate_principles
         result = consolidate_principles("2026-04-17")
-    assert result["reinforced"] == 1
-    m_reinf.assert_called_once()
+
+    assert result["candidates"] == 1
+    assert result["reinforced"] == 0       # the live rule is untouched
+    assert m_save.call_args.kwargs["operation"] == "reinforce"
+    assert m_save.call_args.kwargs["target_id"] == 7
 
 
 def test_consolidate_principles_ignores_llm_weaken_requests():
@@ -117,6 +135,10 @@ def test_consolidate_principles_ignores_llm_weaken_requests():
     accept their own wrong memories 31-54% of the time, and a stronger
     judge model provably does not fix it. Retirement moved to
     principle_scoring, which reads graded predictions.
+
+    Phase one goes further than the original rule: even a market-derived
+    retirement is a behavior change, so it needs a candidate version too.
+    A `weaken` op is dropped outright — it is neither applied nor queued.
     """
     lessons = [{"id": 3, "date": "2026-04-17", "lesson_type": "failure",
                 "theme": "数据中心", "content": "数据中心再次失败", "relevance_tags": ""}]
@@ -132,8 +154,27 @@ def test_consolidate_principles_ignores_llm_weaken_requests():
                return_value=existing), \
          patch("alpha_agents.evolution.lessons._call_consolidation_llm",
                return_value=fake_llm), \
-         patch("alpha_agents.evolution.lessons.set_principle_status") as m_status:
+         patch("alpha_agents.evolution.lessons.save_candidate") as m_save:
         from alpha_agents.evolution.lessons import consolidate_principles
         result = consolidate_principles("2026-04-17")
+
     assert result["weakened"] == 0
-    m_status.assert_not_called()
+    assert result["candidates"] == 0
+    m_save.assert_not_called()
+
+
+def test_consolidate_principles_survives_a_row_without_an_id():
+    """A malformed lesson row must not abort the whole day's consolidation."""
+    lessons = [{"date": "2026-04-17", "lesson_type": "failure",
+                "content": "没有 id 的行", "relevance_tags": ""}]
+    with patch("alpha_agents.evolution.lessons.get_recent_daily_lessons",
+               return_value=lessons), \
+         patch("alpha_agents.evolution.lessons.get_all_principles_including_weakened",
+               return_value=[]), \
+         patch("alpha_agents.evolution.lessons._call_consolidation_llm",
+               return_value={"operations": []}):
+        from alpha_agents.evolution.lessons import consolidate_principles
+        result = consolidate_principles("2026-04-17")
+
+    assert result["candidates"] == 0
+    assert result["failed"] == 0

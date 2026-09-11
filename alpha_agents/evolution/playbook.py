@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from alpha_agents.data.memory_store import (
     get_active_playbooks,
     get_all_playbooks,
-    update_playbook_status,
-    set_playbook_annotation,
-    create_playbook,
+)
+from alpha_agents.data.learning_candidates import (
+    save_candidate,
 )
 from alpha_agents.data.token_usage import instrument
 
@@ -66,13 +66,13 @@ def _matches_all(candidate: dict, conditions: list[dict]) -> bool:
 
 
 def match_playbook(candidate: dict) -> dict | None:
-    """Return the first matching playbook (by weight DESC) or None.
+    """Match existing active knowledge by weight DESC, then stable ID.
 
-    Regime-change fallback: if fewer than 2 active playbooks exist, skip
-    matching entirely (return None). Prevents ranking on a broken model
-    during market regime transitions.
+    Observed hit rates must not silently re-rank equal-weight rules. The
+    existing fewer-than-two-active fallback is unchanged.
     """
-    playbooks = get_active_playbooks()
+    playbooks = sorted(get_active_playbooks(),
+                       key=lambda pb: (-pb.get("weight", 1.0), pb["id"]))
     if len(playbooks) < _MIN_ACTIVE_FOR_MATCHING:
         return None
     for pb in playbooks:
@@ -158,58 +158,53 @@ def annotate_degraded(playbook: dict) -> str:
 
 
 def update_playbook_stats(today: str) -> list[str]:
-    """Daily rule engine. Returns list of human-readable operation strings.
+    """Inspect trade statistics and quarantine lifecycle proposals only.
 
-    Rule priority (each playbook hits at most one rule per day):
-      1. active, hit_rate<0.4 with >=5 trades → degraded + weight=0.5 + LLM annotate
-      2. degraded, recent_hit_rate>=0.6 with >=5 trades → active + weight=1.0
-      3. degraded, days_since_last_update>14 → deprecated + weight=0.0
-      4. active, hit_rate>=0.7 with >=10 trades → weight 1.0→1.5
+    Outcome counting stays in record_playbook_trade. The old thresholds are
+    proposal heuristics, not validation: no weights, statuses, annotations or
+    version history are changed, including when this function is called alone.
     """
     ops: list[str] = []
-    playbooks = get_all_playbooks()
-    for pb in playbooks:
+    for pb in get_all_playbooks():
         pid = pb["id"]
-        name = pb["name"]
         status = pb["status"]
         total = pb["total_trades"]
         hr = pb["hit_rate"] or 0.0
+        proposal = None
+        recent = None
 
         if status == "active" and total >= _DEGRADE_MIN_TRADES and hr < _DEGRADE_HIT_THRESHOLD:
-            annotation = annotate_degraded(pb)
-            update_playbook_status(pid, status="degraded", weight=0.5,
-                                   reason=f"hit_rate={hr:.2f} < {_DEGRADE_HIT_THRESHOLD}",
-                                   hit_rate_at_change=hr, today=today)
-            set_playbook_annotation(pid, annotation=annotation, today=today)
-            ops.append(f"{name}: active→degraded ({hr:.1%}) — {annotation}")
-            continue
-
-        if status == "degraded":
+            proposal = {"status": "degraded", "weight": 0.5,
+                        "reason": f"hit_rate={hr:.2f} < {_DEGRADE_HIT_THRESHOLD}"}
+        elif status == "degraded":
             rec_hr, rec_n = _recent_hit_rate(pid, days=7)
+            recent = {"hit_rate": rec_hr, "total": rec_n}
             if rec_n >= _RESTORE_MIN_TRADES and rec_hr >= _RESTORE_HIT_THRESHOLD:
-                update_playbook_status(pid, status="active", weight=1.0,
-                                       reason=f"recent hit_rate={rec_hr:.2f} >= {_RESTORE_HIT_THRESHOLD}",
-                                       hit_rate_at_change=rec_hr, today=today)
-                ops.append(f"{name}: degraded→active (近7天 {rec_hr:.1%})")
-                continue
-            try:
-                last = datetime.strptime(pb["last_updated"], "%Y-%m-%d")
-                today_dt = datetime.strptime(today, "%Y-%m-%d")
-                if (today_dt - last).days > _DEPRECATE_DAYS:
-                    update_playbook_status(pid, status="deprecated", weight=0.0,
-                                           reason="degraded超过14天未恢复",
-                                           hit_rate_at_change=hr, today=today)
-                    ops.append(f"{name}: degraded→deprecated (超时)")
-                    continue
-            except (ValueError, TypeError):
-                pass
-
-        if (status == "active" and total >= _BOOST_MIN_TRADES
+                proposal = {"status": "active", "weight": 1.0,
+                            "reason": f"recent hit_rate={rec_hr:.2f} >= {_RESTORE_HIT_THRESHOLD}"}
+            else:
+                try:
+                    last = datetime.strptime(pb["last_updated"], "%Y-%m-%d")
+                    today_dt = datetime.strptime(today, "%Y-%m-%d")
+                    if (today_dt - last).days > _DEPRECATE_DAYS:
+                        proposal = {"status": "deprecated", "weight": 0.0,
+                                    "reason": "Degraded for more than 14 days"}
+                except (ValueError, TypeError) as e:
+                    logger.warning("Invalid lifecycle date for playbook #%s: %s", pid, e)
+        elif (status == "active" and total >= _BOOST_MIN_TRADES
                 and hr >= _BOOST_HIT_THRESHOLD and pb.get("weight", 1.0) < 1.5):
-            update_playbook_status(pid, status="active", weight=1.5,
-                                   reason=f"hit_rate={hr:.2f} >= {_BOOST_HIT_THRESHOLD} boost",
-                                   hit_rate_at_change=hr, today=today)
-            ops.append(f"{name}: weight 1.0→1.5 (boost, {hr:.1%})")
+            proposal = {"status": "active", "weight": 1.5,
+                        "reason": f"hit_rate={hr:.2f} >= {_BOOST_HIT_THRESHOLD} boost"}
+
+        if proposal is not None:
+            candidate_id = save_candidate(
+                entity_type="playbook", operation="update", target_id=pid,
+                source="update_playbook_stats", source_date=today,
+                payload={"proposal": proposal, "playbook": pb, "recent": recent},
+            )
+            ops.append(f"{pb['name']}: candidate #{candidate_id} "
+                       f"({proposal['reason']}; not applied)")
+            logger.info("Quarantined lifecycle candidate #%d for playbook #%d", candidate_id, pid)
     return ops
 
 
@@ -283,11 +278,8 @@ def _pattern_signature(pattern_json_str: str) -> frozenset:
     )
 
 
-# Hard ceiling on active playbooks. Self-improvement preserves PAC
-# learnability only when the policy-reachable model capacity is uniformly
-# bounded (arXiv:2510.04399); an ever-growing playbook is the standard
-# counterexample, and it is also how a context window fills with noise.
-# When full, the weakest earns its way out before a new one comes in.
+# Capacity target for retirement proposals, not an automatic eviction rule.
+# Existing active sets are preserved; discoveries remain quarantined.
 MAX_ACTIVE_PLAYBOOKS = 12
 
 
@@ -308,82 +300,64 @@ def _playbook_utility(pb: dict) -> float:
 
 
 def enforce_capacity(today: str) -> list[int]:
-    """Retire the weakest playbooks once the active set exceeds the cap.
+    """Record retirement candidates for excess capacity, without evicting.
 
-    Returns the ids retired. Deprecating rather than deleting keeps the
-    audit trail — a pattern that was tried and failed is worth knowing.
+    Returns candidate IDs, never retired playbook IDs. Legacy over-capacity
+    sets remain intact; discovery cannot enlarge the active set in phase one.
     """
-    from alpha_agents.data.memory_store import update_playbook_status
-
     active = [pb for pb in get_all_playbooks() if pb.get("status") == "active"]
     if len(active) <= MAX_ACTIVE_PLAYBOOKS:
         return []
 
-    ranked = sorted(active, key=_playbook_utility)
-    doomed = ranked[:len(active) - MAX_ACTIVE_PLAYBOOKS]
-    retired = []
-    for pb in doomed:
-        update_playbook_status(
-            pb["id"], status="deprecated", weight=0.0,
-            reason=(f"容量上限 {MAX_ACTIVE_PLAYBOOKS}，效用最低 "
-                    f"(hit_rate={pb.get('hit_rate', 0) or 0:.2f}, "
-                    f"trades={pb.get('total_trades', 0) or 0})"),
-            hit_rate_at_change=pb.get("hit_rate", 0.0) or 0.0,
-            today=today,
+    ranked = sorted(active, key=lambda pb: (_playbook_utility(pb), pb["id"]))
+    candidates = []
+    for pb in ranked[:len(active) - MAX_ACTIVE_PLAYBOOKS]:
+        candidate_id = save_candidate(
+            entity_type="playbook", operation="retire", target_id=pb["id"],
+            source="enforce_capacity", source_date=today,
+            payload={"playbook": pb, "capacity": MAX_ACTIVE_PLAYBOOKS,
+                     "active_count": len(active), "utility": _playbook_utility(pb),
+                     "proposal": {"status": "deprecated", "weight": 0.0}},
         )
-        retired.append(pb["id"])
-        logger.info(
-            "Retired playbook #%d '%s' on capacity: utility=%.3f "
-            "(hit_rate=%.2f, trades=%d)",
-            pb["id"], pb.get("name", ""), _playbook_utility(pb),
-            pb.get("hit_rate", 0) or 0, pb.get("total_trades", 0) or 0,
-        )
-    return retired
+        candidates.append(candidate_id)
+        logger.info("Quarantined capacity candidate #%d for playbook #%d (utility=%.3f)",
+                    candidate_id, pb["id"], _playbook_utility(pb))
+    return candidates
 
 
 def scan_and_auto_create(today: str) -> list[int]:
-    """Scan hit clusters and create a new playbook for each novel pattern.
-    Returns list of newly-created playbook IDs."""
+    """Quarantine novel cluster proposals; return candidate IDs, not playbooks.
+
+    Discovery does not enforce active capacity or assign live weights. Raw
+    cluster statistics are retained as observations, not holdout evidence.
+    """
     clusters = _query_hit_clusters()
     if not clusters:
         return []
 
-    # Make room first, so a genuinely new pattern is not rejected merely
-    # because a stale one is occupying the last slot.
-    enforce_capacity(today)
-
-    existing = get_all_playbooks()
     existing_sigs = {_pattern_signature(pb.get("pattern_json", "{}"))
-                     for pb in existing}
-    active_count = sum(1 for pb in existing if pb.get("status") == "active")
-
-    created = []
-    for c in clusters:
-        if c["total"] < _AUTO_CREATE_MIN_TOTAL:
+                     for pb in get_all_playbooks()}
+    candidates = []
+    for cluster in clusters:
+        if cluster["total"] < _AUTO_CREATE_MIN_TOTAL:
             continue
-        pattern = _pattern_from_cluster(c)
-        sig = frozenset(
-            (cond["field"], cond["op"], str(cond["value"]))
-            for cond in pattern["conditions"]
-        )
-        if sig in existing_sigs:
+        pattern = _pattern_from_cluster(cluster)
+        sig = _pattern_signature(json.dumps(pattern))
+        if not sig or sig in existing_sigs:
             continue
-        name_parts = []
-        if c.get("theme"):
-            name_parts.append(str(c["theme"]))
-        if c.get("vpa_verdict"):
-            name_parts.append(str(c["vpa_verdict"]))
-        if c.get("institutional_present"):
-            name_parts.append("机构")
+        name_parts = [str(cluster[key]) for key in ("theme", "vpa_verdict")
+                      if cluster.get(key)]
+        if cluster.get("institutional_present"):
+            name_parts.append("institutional")
         name = f"Auto: {'-'.join(name_parts)}"
-        if active_count >= MAX_ACTIVE_PLAYBOOKS:
-            logger.info("Playbook capacity %d reached — skipping '%s'",
-                        MAX_ACTIVE_PLAYBOOKS, name)
-            break
-        pid = create_playbook(name=name, pattern_json=pattern, today=today)
-        active_count += 1
+        candidate_id = save_candidate(
+            entity_type="playbook", operation="create", source="scan_and_auto_create",
+            source_date=today,
+            payload={"name": name, "pattern_json": pattern, "cluster": cluster,
+                     "lookback_days": _AUTO_CREATE_LOOKBACK_DAYS},
+        )
         existing_sigs.add(sig)
-        created.append(pid)
-        logger.info("Auto-created playbook #%d: %s (hits=%d/%d)",
-                    pid, name, c["hits"], c["total"])
-    return created
+        candidates.append(candidate_id)
+        logger.info("Quarantined discovery candidate #%d: %s (hits=%d/%d)",
+                    candidate_id, name, cluster["hits"], cluster["total"])
+    return candidates

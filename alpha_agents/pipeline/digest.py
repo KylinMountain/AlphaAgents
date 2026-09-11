@@ -49,11 +49,21 @@ MODEL_CONTEXT_WINDOW = int(os.environ.get("DIGEST_CONTEXT_WINDOW", "32768"))
 DIGEST_TIMEOUT = int(os.environ.get("DIGEST_TIMEOUT", "240"))
 MAX_INPUT_TOKENS = MODEL_CONTEXT_WINDOW - _RESERVED_TOKENS
 
-_encoder = tiktoken.get_encoding("cl100k_base")
+_encoder = None
 
 
 def _count_tokens(text: str) -> int:
-    """Count tokens using tiktoken (fast, local)."""
+    """Count tokens using tiktoken (fast, local).
+
+    The encoder is built on first use rather than at import. tiktoken
+    fetches its vocabulary on first use, so building it at module level
+    made merely *importing* this module require the network — which is
+    both a surprise for callers and, once the test suite audits network
+    access, a collection error for every module that reaches this one.
+    """
+    global _encoder
+    if _encoder is None:
+        _encoder = tiktoken.get_encoding("cl100k_base")
     return len(_encoder.encode(text))
 
 SYSTEM_PROMPT = """\

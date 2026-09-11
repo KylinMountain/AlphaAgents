@@ -158,10 +158,108 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     -- the traders exist for, since two strategies drawing from one pot
     -- measure ordering rather than skill.
     trader_id TEXT DEFAULT 'default',
+    -- The prediction that produced this order, recorded at creation time.
+    -- The closing path used to re-derive this by matching stock plus a
+    -- nearby date, which could hand one trader's realised result to
+    -- another trader's prediction. NULL means unknown, and unknown stays
+    -- unknown: it is never filled in by a later guess.
+    prediction_id INTEGER,
+    legacy_realized_amount REAL,
+    -- The thesis this order serves. Design §4 makes the execution chain
+    -- explicit (thesis_id → order_id → fill_id → ledger_entry_id); this
+    -- column is the order end of it. Before it existed the link lived
+    -- only on theses.position_id, which meant "given an order, which idea
+    -- is it for" was answerable only by scanning live theses for the
+    -- same stock — and a scan is not an ownership relation.
+    thesis_id INTEGER,
     created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_status ON virtual_portfolio(status);
 CREATE INDEX IF NOT EXISTS idx_portfolio_date ON virtual_portfolio(open_date);
+
+-- Every realised exit, one row per leg. virtual_portfolio.return_amount is
+-- a display total that the final exit used to overwrite; this table is the
+-- record the totals are derived from, so a trimmed position's realised P&L
+-- is summed rather than lost. Append-only: see alpha_agents/data/trade_ledger.py.
+CREATE TABLE IF NOT EXISTS position_exits (
+    id INTEGER PRIMARY KEY,
+    position_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    exit_date TEXT NOT NULL,
+    price REAL NOT NULL,
+    shares INTEGER NOT NULL,
+    cost_basis REAL NOT NULL,
+    gross_amount REAL NOT NULL,
+    costs REAL NOT NULL,
+    net_amount REAL NOT NULL,
+    return_pct REAL NOT NULL,
+    reason TEXT,
+    command_id TEXT,
+    request_json TEXT,
+    -- Denormalised from the position so a realised leg answers "which
+    -- thesis paid for this" without a join through a row that may have
+    -- been re-opened. Attribution has to survive the position.
+    thesis_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (position_id, command_id)
+);
+CREATE INDEX IF NOT EXISTS idx_exits_trader ON position_exits(trader_id);
+CREATE INDEX IF NOT EXISTS idx_exits_position ON position_exits(position_id);
+-- idx_exits_thesis is created after the migrations, not here: this script
+-- runs before them, and a pre-thesis_id database would fail on the missing
+-- column before the ALTER ever got a chance to add it.
+
+-- The information boundary of one decision, frozen when it is made.
+--
+-- Invariant 4: a decision may use only what was available at decision
+-- time, and later corrections must not rewrite that boundary. That is
+-- only true if the boundary is written down at the moment of deciding —
+-- so this table is append-only, and the triggers below make it so rather
+-- than trusting every future caller to remember. Nothing updates a
+-- snapshot; a revised view is a new row that names the one it supersedes.
+CREATE TABLE IF NOT EXISTS decision_snapshots (
+    id INTEGER PRIMARY KEY,
+    thesis_id INTEGER,
+    order_id INTEGER,
+    prediction_id INTEGER,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    -- The latest instant whose information the decision was allowed to
+    -- use. Not when it ran: a 09:00 scan may legitimately read
+    -- yesterday's close and nothing after.
+    information_cutoff TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    -- Declared decision inputs, as the agent stated them. Frozen verbatim
+    -- so a later edit to the thesis cannot retcon what was decided.
+    payload_json TEXT NOT NULL,
+    -- Provenance of the producers whose output fed this decision.
+    policy_ref TEXT,
+    model_ref TEXT,
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    -- sha256 over the frozen fields. A consumer can detect that a
+    -- snapshot was rewritten after the fact, which the triggers should
+    -- already prevent — belt and braces, because the invariant is load
+    -- bearing for every downstream evaluation.
+    content_hash TEXT NOT NULL,
+    supersedes_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_thesis ON decision_snapshots(thesis_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_order ON decision_snapshots(order_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_trader ON decision_snapshots(trader_id);
+
+CREATE TRIGGER IF NOT EXISTS decision_snapshots_no_update
+BEFORE UPDATE ON decision_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'decision_snapshots is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS decision_snapshots_no_delete
+BEFORE DELETE ON decision_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'decision_snapshots is append-only');
+END;
 
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
@@ -370,11 +468,26 @@ def _get_conn() -> sqlite3.Connection:
         for migration in (
             "ALTER TABLE vpa_analysis_history ADD COLUMN target_low REAL",
             "ALTER TABLE vpa_analysis_history ADD COLUMN target_high REAL",
+            # Phase 1 attribution: an order names the prediction it came from,
+            # instead of the close path guessing it by stock and date.
+            "ALTER TABLE virtual_portfolio ADD COLUMN prediction_id INTEGER",
+            "ALTER TABLE virtual_portfolio ADD COLUMN legacy_realized_amount REAL",
+            # Phase 1 attribution chain: the order names its thesis, and each
+            # realised exit leg carries it too, so "which idea earned this"
+            # survives both a re-opened position and a rewritten thesis.
+            "ALTER TABLE virtual_portfolio ADD COLUMN thesis_id INTEGER",
+            "ALTER TABLE position_exits ADD COLUMN thesis_id INTEGER",
         ):
             try:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        # After the columns exist, not before — see the note in the schema.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_exits_thesis "
+            "ON position_exits(thesis_id)"
+        )
+        conn.commit()
         # Phase 1 migration: add features_json to predictions (idempotent).
         # Used by Playbook clustering (Phase 3) to group predictions by decision features
         # (vpa_verdict, theme_strength, institutional, score, etc.).

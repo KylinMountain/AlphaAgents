@@ -644,7 +644,7 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
         if not re.match(r"^\d{6}$", code):
             continue
         try:
-            save_prediction(
+            pred_id = save_prediction(
                 date=today,
                 report_type="morning",
                 code=code,
@@ -702,8 +702,8 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
                 # evaluates it every cycle. Written first so the fill can
                 # bind to it, and so a recommendation that cannot state
                 # what would prove it wrong is visible as such.
-                from_recommendation(r, code, created_by="morning",
-                                    trader_id=trader.id)
+                thesis_id = from_recommendation(r, code, created_by="morning",
+                                               trader_id=trader.id)
                 create_pending_order(
                     code=code,
                     name=r.get("name", ""),
@@ -715,6 +715,15 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
                     source="morning",
                     reason=r.get("reason", "")[:100],
                     trader_id=trader.id,
+                    # The order names its own forecast. Without this the
+                    # close path has no ownership link, and the realised
+                    # result cannot be attributed without guessing.
+                    prediction_id=pred_id,
+                    # The idea the order serves. The monitor evaluates this
+                    # thesis every cycle, and the trade result is attributed
+                    # to it rather than to "the nearest live idea on this
+                    # stock".
+                    thesis_id=thesis_id,
                 )
             except Exception as e:
                 logger.debug("Failed to create pending order for %s: %s", code, e)

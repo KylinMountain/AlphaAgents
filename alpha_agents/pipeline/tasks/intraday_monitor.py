@@ -1104,7 +1104,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             "rec_type": rec_type,  # 'signal' vs 'actionable'
             "trader": trader_id,
         }, ctx)
-        save_prediction(
+        pred_id = save_prediction(
             date=today,
             report_type=report_type,
             code=code,
@@ -1150,7 +1150,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         # a scoring function but the *price* came from the trader, so its
         # reason is on record and from_recommendation derives the exit
         # conditions from the signals that selected the stock.
-        from_recommendation(
+        thesis_id = from_recommendation(
             {**r, "stop_loss": stop_loss_val, "horizon_days": 3},
             code, created_by="intraday", trader_id=trader.id)
         create_pending_order(
@@ -1164,6 +1164,13 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             source="intraday",
             reason=r.get("reason", "")[:100],
             trader_id=trader.id,
+            # Names its own forecast, same as the morning path: the close
+            # cannot attribute a result without an explicit link.
+            prediction_id=pred_id,
+            # And names the idea, for the same reason: the monitor has to
+            # know which thesis this fill belongs to, and the result has to
+            # land on that thesis rather than on whichever one is nearest.
+            thesis_id=thesis_id,
         )
     except Exception as e:
         logger.debug("Failed to create pending order for %s: %s", code, e)

@@ -138,7 +138,7 @@
 00:00–08:00 之间差一天，导致看板「今日」读成 0。已把四处查询改为
 `date('now','localtime',...)`。独立提交，便于单独回退。
 
-### S5 统一执行路径
+### S5 统一执行路径 ✅
 
 - 引入 `TradeIntent`（action/evidence/cutoff/price-size 约束/expiry/owning policy），
   建仓、加仓、减仓、平仓、自动保护动作全部经同一个 `submit_intent` 入口。
@@ -147,6 +147,63 @@
   保留为兼容包装，内部改走意图入口。
 
 **改动面最大的一块**，放在储备金与状态机稳定之后，避免在流沙上重构。
+
+**实际产出**：
+
+- 新表 `intents`：`(action, status CHECK submitted/accepted/rejected, trader_id, code,
+  position_id, order_id, information_cutoff, policy_ref, evidence_json, reject_reason,
+  result_json, created_at, decided_at)` + 四个索引。**无外键**——一次拒绝（重复单、主线太弱）
+  发生在任何持仓行存在之前，审计必须记得「尝试过」，而不只是成功的那部分。
+  `status` 用 `CHECK` 约束钉死三态。
+- `alpha_agents/data/intent.py`（435 行）：六个 action（`open` / `open_now` / `add` /
+  `trim` / `close` / `cancel`）、意图自身的状态机（`assert_intent_transition`，与
+  `order_state` 同一姿态：声明状态与合法迁移，写入时断言）、`TradeIntent` 数据类
+  （无行为——会跑代码的契约就是把规则写两遍）、`_reject_reason` 形状校验、
+  `_dispatch` 分派表、`submit_intent` 唯一入口，以及读侧 `never_decided` / `history`。
+- **`submit_intent` 不吞异常**：`_dispatch` 抛出的异常先记为 `rejected`（留下痕迹）
+  再 `raise`。一笔被数据库拒绝的卖出是系统故障，不是「业务上不卖」——把它降级成
+  `rejected` 就是本仓库明令禁止的静默吞异常。
+- `alpha_agents/data/portfolio_intent.py`（140 行）：四个兼容包装。
+  **连接由调用方解析并显式下传**（订单/加仓取 `portfolio._get_conn()`，平仓取
+  `portfolio_exit._get_conn()`）。否则审计行会写在 `intent` 碰巧绑定的那个连接上，
+  而指向另一个库的调用方（或测试）会得到「动作在一个连接、记录在另一个连接」。
+- 实现改名 `_*_impl`（`_create_pending_order_impl` / `_open_position_impl` /
+  `_add_to_position_impl` / `_close_position_impl` / `_cancel_order_impl`），
+  公开名一律变成包装。静态核对：五个 `_impl` **只被 `intent._dispatch` 调用**，
+  没有任何旁路。
+- **修掉一个真实 bug**：`_check_add_position`（回调补仓规则）此前自带一份 sizing，
+  并直接 `UPDATE virtual_portfolio`——第二条加仓路径，绕过意图层、绕过 `settlement_lots`，
+  于是规则加的仓位**当天就可卖**（T+1 被绕开），也绕过主题/集中度/情绪上限。
+  现在只决定「规则是否触发」，写入交给 `add_to_position(..., recalc_stop=True)`。
+  `recalc_stop` 是**规则的**策略而非 agent 的：规则补仓时停损保持相对新均价的同一百分比，
+  不让摊平偷偷放大每股风险；agent 主动加仓则不动停损。
+- `portfolio.py` 1169 行（在 1200 上限内）：S5 包装一度把它顶到 1296 行，
+  因此按职责再切一刀——sizing 助手移入 `portfolio_sizing.py`，包装移入 `portfolio_intent.py`。
+- 文件底部导入顺序改为**依赖顺序**（`portfolio_intent` 在 `position_monitor` 之前）：
+  `position_monitor` 会从 `portfolio` 的命名空间里读回 `add_to_position`，而那是文件**末尾**
+  才注入的，于是导入顺序变成了承重结构。同时 `position_monitor` 改从**属主模块**直接导入
+  `add_to_position`（`portfolio_intent`）与 `close_position`（`portfolio_exit`）——
+  拆包的收益就是从属主导入，而不是绕一层转发。
+- 顺手清掉 `position_monitor.py` 的 6 个死导入（HEAD 上就在、我这次让它们更刺眼），
+  现在 0 个。
+- `tests/test_intent.py`：27 用例。生命周期（畸形意图也是「被记录的拒绝」而非异常、
+  没有任何行会停在 `submitted`、证据冻结在行上）、迁移图、六个 action 的包装各自留下
+  一条意图行、以及**护栏**：`virtual_portfolio.status` 只允许 `portfolio.py`（成交/撤单）
+  与 `portfolio_exit.py`（平仓）写，且两者都必须含 `order_state.assert_transition`；
+  `intent.py` 不得出现 `UPDATE/INSERT INTO virtual_portfolio`；
+  `pipeline` / `agents` / `server` / `tools` 不得直接写持仓。
+- 全量 **1352 passed, 18 skipped**（1325 + 27）；lint_harness **145 文件**（+3 新模块，
+  存量 47 条未扩充）；lint_docs clean。
+- **测试强度自查**：原先那条「六个 action 都有分派分支」是静态 grep，而
+  `OPEN = "open"` 这行常量定义本身就满足它——**永远不会失败**。已改成行为测试：
+  每个 action 提交一个形状合法的意图，断言唯一的阻挡只能来自业务规则、
+  绝不能是 `no dispatch for action`。并用变异探针验证过：注释掉 `CANCEL` 分支后
+  该用例确实变红（`ValueError: no dispatch for action 'cancel'`），随后复原。
+- **已知遗留（非本切片引入）**：`import position_monitor` **先于** `portfolio` 仍会失败，
+  因为 `portfolio` 末尾反向导入 `position_monitor` 的名字。已用 `git worktree` 在 HEAD
+  上验证这是**既有**结构（不是我引入的回归，HEAD 同样失败）。当前所有调用方与测试都先
+  导入 `portfolio`，故不影响运行；彻底修需把 `portfolio` 末尾的转发改成惰性
+  （PEP 562 模块 `__getattr__`），是独立的一小件事，不塞进 S5。
 
 ### S6 交易内核的时间边界
 

@@ -378,6 +378,41 @@ CREATE INDEX IF NOT EXISTS idx_pending_settle_released
 CREATE INDEX IF NOT EXISTS idx_pending_settle_settle
     ON pending_settlements(settle_date);
 
+-- Every business action that changes the book goes through one entry
+-- point, and this table is the record that it did. Before S5 the four
+-- write paths (create_pending_order / open_position / add_to_position /
+-- close_position, plus the cancel path) were reachable independently,
+-- so "what did the system decide to do, and was it accepted?" had no
+-- single answer — it was scattered across the resulting rows. A row
+-- here is written *before* the action runs (status='submitted'), then
+-- flipped to 'accepted' or 'rejected' with the reason. A row left at
+-- 'submitted' means the process died mid-action, which is itself worth
+-- finding.
+--
+-- No FK to virtual_portfolio: an intent may be rejected before any
+-- position row exists (a duplicate, a theorem-weakness refusal), and
+-- the audit must record the attempt, not only the successes.
+CREATE TABLE IF NOT EXISTS intents (
+    id INTEGER PRIMARY KEY,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('submitted','accepted','rejected')),
+    trader_id TEXT NOT NULL,
+    code TEXT,
+    position_id INTEGER,
+    order_id INTEGER,
+    information_cutoff TEXT,
+    policy_ref TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    reject_reason TEXT,
+    result_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status);
+CREATE INDEX IF NOT EXISTS idx_intents_trader ON intents(trader_id);
+CREATE INDEX IF NOT EXISTS idx_intents_action ON intents(action);
+CREATE INDEX IF NOT EXISTS idx_intents_cutoff ON intents(information_cutoff);
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

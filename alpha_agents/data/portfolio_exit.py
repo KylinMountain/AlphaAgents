@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from alpha_agents.data import order_state, settlement, trade_ledger
+from alpha_agents.data import intent, order_state, settlement, trade_ledger
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -101,6 +101,31 @@ def _status_from_reason(reason: str) -> str:
 
 
 def close_position(
+    position_id: int, *, close_price: float, close_reason: str,
+    shares: int | None = None, command_id: str | None = None,
+) -> bool:
+    """Sell part or all of a position. Compatibility wrapper over the
+    intent path.
+
+    Same signature and return value as before S5 — ``True`` when the
+    exit booked, ``False`` when it was refused. ``shares=None`` means
+    sell the whole position and becomes a ``close`` intent; a partial
+    quantity becomes a ``trim``. The refusal is recorded as an intent
+    row, so "why did nothing sell" is answerable from the book.
+
+    ``command_id`` stays on this signature: it is the retry key the
+    ledger matches on, and it is the caller's, not the intent's.
+    """
+    action = intent.CLOSE if shares is None else intent.TRIM
+    result = intent.submit_intent(
+        intent.TradeIntent(
+            action=action, position_id=position_id, price=close_price,
+            reason=close_reason, shares=shares, command_id=command_id),
+        conn=_get_conn())
+    return bool(result.result)
+
+
+def _close_position_impl(
     position_id: int, *, close_price: float, close_reason: str,
     shares: int | None = None, command_id: str | None = None,
 ) -> bool:

@@ -30,14 +30,35 @@ nothing about what the trader does. Even installing a pointer only *names*
 which version is in force; making retrieval read that name is a separate
 slice with its own argument to make. There is no ``apply_policy`` here.
 
-Two writes, and they are not the same act:
+Three writes, and they are not the same act:
 
 * :func:`freeze` records a version. Idempotent per content — freezing the
   same configuration twice is one version, because a version identifies
   behaviour, not the act of recording it.
-* :func:`install` sets the pointer for a policy that has none. It refuses
-  once a pointer exists; from then on only promotion or rollback may move
-  it, and those are the audited entry point.
+* :func:`approve` records that a person authorised a version for promotion,
+  citing the gate verdict that justifies it. It moves no pointer.
+* :func:`install` / :func:`promote` / :func:`rollback` move the pointer. They
+  are the audited entry point, and all three go through one private
+  statement (:func:`_write_pointer`) so "who may move what is in force" is a
+  single place to read rather than a property of remembering to add a guard.
+
+**Promotion is a claim about improvement; rollback is a claim about
+restoration.** They are deliberately not the same operation:
+
+* :func:`promote` needs an eligible gate verdict *and* a recorded human
+  approval *and* a live configuration that still hashes to the version. §11:
+  a successful automatic evaluation is not a licence to promote, and no LLM
+  may approve its own candidate — so the approval is a separate record made
+  by a separate act, and promotion refuses without one.
+* :func:`rollback` needs the target to have been in force before, which is a
+  fact in the transition trail rather than a new piece of state. It does not
+  need a verdict, because restoring a version is not a claim that it is
+  better than the incumbent — it is a claim that the incumbent is worse.
+  It deletes nothing: fills, ledger and outcomes are untouched, and only the
+  pointer moves.
+
+Both are atomic compare-and-swap on ``active_policy.version_seq``: a change
+that raced another loses without writing, rather than overwriting it.
 """
 
 from __future__ import annotations
@@ -120,16 +141,39 @@ CREATE TABLE IF NOT EXISTS policy_transitions (
 )
 """
 
+# A person's authorisation for a version, kept apart from the pointer move for
+# §11's reason: a successful automatic evaluation is not a licence to promote.
+# The row binds the authorisation to the *content hash*, not just the id, so an
+# approval cannot outlive the configuration it was given for.
+_APPROVALS = """
+CREATE TABLE IF NOT EXISTS policy_approvals (
+    id INTEGER PRIMARY KEY,
+    policy_key TEXT NOT NULL,
+    version_id INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    gate_decision_id INTEGER,
+    approved_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)
+"""
+
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_policy_versions_key "
     "ON policy_versions(policy_key)",
     "CREATE INDEX IF NOT EXISTS idx_policy_transitions_key "
     "ON policy_transitions(policy_key)",
+    "CREATE INDEX IF NOT EXISTS idx_policy_approvals_version "
+    "ON policy_approvals(policy_key, version_id)",
 )
 
 # A version is a fact about a configuration, and a transition is a fact about
 # who moved the pointer. Neither may be rewritten afterwards — the pointer is
 # the only mutable row, which is exactly why it needs an append-only trail.
+# An approval is a fact about what a person authorised, so it is append-only
+# for the same reason: an approval that can be edited afterwards is not a
+# record of an approval.
 _GUARDS = (
     "CREATE TRIGGER IF NOT EXISTS policy_versions_no_update "
     "BEFORE UPDATE ON policy_versions BEGIN "
@@ -143,6 +187,12 @@ _GUARDS = (
     "CREATE TRIGGER IF NOT EXISTS policy_transitions_no_delete "
     "BEFORE DELETE ON policy_transitions BEGIN "
     "SELECT RAISE(ABORT, 'policy_transitions is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS policy_approvals_no_update "
+    "BEFORE UPDATE ON policy_approvals BEGIN "
+    "SELECT RAISE(ABORT, 'policy_approvals is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS policy_approvals_no_delete "
+    "BEFORE DELETE ON policy_approvals BEGIN "
+    "SELECT RAISE(ABORT, 'policy_approvals is append-only'); END",
 )
 
 
@@ -157,6 +207,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_VERSIONS)
     conn.execute(_POINTER)
     conn.execute(_TRANSITIONS)
+    conn.execute(_APPROVALS)
     for statement in _INDEXES:
         conn.execute(statement)
     for guard in _GUARDS:
@@ -381,6 +432,219 @@ def transitions_for(policy_key: str = POLICY_KEY_DEFAULT,
     return [dict(row) for row in rows]
 
 
+def approvals_for(policy_key: str = POLICY_KEY_DEFAULT,
+                  *, limit: int = 200) -> list[dict]:
+    """Every recorded approval for a policy, oldest first."""
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    rows = conn.execute(
+        "SELECT * FROM policy_approvals WHERE policy_key = ? "
+        "ORDER BY id LIMIT ?", (policy_key, limit)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def approval_for(version_id: int,
+                 policy_key: str = POLICY_KEY_DEFAULT) -> dict | None:
+    """The newest approval authorising a version, or None.
+
+    Matched on the version's *current* content hash, so an approval given for
+    a configuration that has since been re-frozen is not silently reused for
+    the new one.
+    """
+    version = get_version(version_id)
+    if version is None:
+        return None
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    row = conn.execute(
+        "SELECT * FROM policy_approvals WHERE policy_key = ? AND version_id = ? "
+        "AND content_hash = ? ORDER BY id DESC LIMIT 1",
+        (policy_key, version_id, version["content_hash"])).fetchone()
+    return dict(row) if row else None
+
+
+# ── The single writer ──────────────────────────────────────────────────
+
+
+def _write_pointer(conn: sqlite3.Connection, *, policy_key: str,
+                   version_id: int, version_seq: int, actor: str,
+                   reason: str, at: str, expected_seq: int) -> int:
+    """The only statement in the repository that writes ``active_policy``.
+
+    One function, so that "who may move what is in force" is a single place to
+    read. Insert and compare-and-swap are the same statement: on a policy with
+    no pointer the row is created, and on one that already has a pointer the
+    update applies *only* when ``version_seq`` still equals ``expected_seq``.
+    A change that raced another therefore changes no rows at all instead of
+    overwriting it.
+
+    Returns rows changed: 1 if the write landed, 0 if the swap lost.
+    ``install`` passes ``expected_seq=0``, which no real pointer can hold, so
+    "refuse if one already exists" is the same code path rather than a
+    separate check that could drift away from it.
+    """
+    cursor = conn.execute(
+        "INSERT INTO active_policy "
+        "(policy_key, version_id, version_seq, changed_by, reason, changed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(policy_key) DO UPDATE SET "
+        "  version_id = excluded.version_id, "
+        "  version_seq = excluded.version_seq, "
+        "  changed_by = excluded.changed_by, "
+        "  reason = excluded.reason, "
+        "  changed_at = excluded.changed_at "
+        "WHERE active_policy.version_seq = ?",
+        (policy_key, version_id, version_seq, actor, reason, at, expected_seq))
+    return cursor.rowcount
+
+
+def _record_transition(conn: sqlite3.Connection, *, policy_key: str,
+                       from_version_id: int | None, to_version_id: int,
+                       version_seq: int, kind: str, actor: str, reason: str,
+                       evidence: dict | None, at: str) -> None:
+    """Append the audit step that explains a pointer move."""
+    conn.execute(
+        "INSERT INTO policy_transitions "
+        "(policy_key, from_version_id, to_version_id, version_seq, kind, "
+        " actor, reason, evidence_json, at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (policy_key, from_version_id, to_version_id, version_seq, kind, actor,
+         reason, json.dumps(evidence or {}, ensure_ascii=False), at))
+
+
+def _problems_for(policy_key: str) -> list[str]:
+    """Structural complaints about one policy's record, or an empty list.
+
+    Split out of :func:`integrity` so the promotion path can ask the same
+    question without filtering formatted strings. Moving a pointer on top of a
+    trail with a hole in it deepens the hole, and "未决问题已解决" has to mean
+    something checkable rather than something a reviewer nods at.
+    """
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    problems: list[str] = []
+    pointer = conn.execute("SELECT * FROM active_policy WHERE policy_key = ?",
+                           (policy_key,)).fetchone()
+    if pointer is not None:
+        version = conn.execute(
+            "SELECT policy_key FROM policy_versions WHERE id = ?",
+            (pointer["version_id"],)).fetchone()
+        if version is None:
+            problems.append(
+                f"policy {policy_key!r} is in force at version "
+                f"#{pointer['version_id']}, which does not exist")
+        elif version["policy_key"] != policy_key:
+            problems.append(
+                f"policy {policy_key!r} points at version "
+                f"#{pointer['version_id']}, which belongs to "
+                f"{version['policy_key']!r}")
+        trail = transitions_for(policy_key)
+        if not trail:
+            problems.append(
+                f"policy {policy_key!r} is in force with no transition "
+                "recorded: the pointer moved without a trail")
+        else:
+            if trail[-1]["version_seq"] != pointer["version_seq"]:
+                problems.append(
+                    f"policy {policy_key!r} is at seq {pointer['version_seq']} "
+                    f"but its last transition is "
+                    f"{trail[-1]['version_seq']}: the pointer moved unrecorded")
+            for position, step in enumerate(trail, start=1):
+                if step["version_seq"] != position:
+                    problems.append(
+                        f"policy {policy_key!r} has a gap in its transition "
+                        f"trail at position {position} (seq "
+                        f"{step['version_seq']})")
+                    break
+    for step in conn.execute(
+            "SELECT * FROM policy_transitions WHERE policy_key = ?",
+            (policy_key,)).fetchall():
+        if conn.execute("SELECT 1 FROM policy_versions WHERE id = ?",
+                        (step["to_version_id"],)).fetchone() is None:
+            problems.append(
+                f"policy transition #{step['id']} names version "
+                f"#{step['to_version_id']}, which does not exist")
+    return problems
+
+
+def _require_eligible_gate(gate_decision, version_id: int) -> dict:
+    """The gate verdict a promotion is allowed to cite, or a refusal.
+
+    Structural, and deliberately checked here rather than in the CLI: a
+    promotion service that trusts its caller to have checked is a promotion
+    service with no rule in it. The caller supplies the row (``evolution``
+    owns producing it) and this layer decides whether it is sufficient.
+    """
+    if not isinstance(gate_decision, dict):
+        raise PolicyError(
+            "A promotion must cite a gate verdict. §11 makes the evidence the "
+            "reason a pointer may move, so a promotion without one is a "
+            "preference.")
+    if gate_decision.get("policy_version_id") != version_id:
+        raise PolicyError(
+            f"The cited verdict is about policy version "
+            f"#{gate_decision.get('policy_version_id')}, not #{version_id}. "
+            "Evidence for one policy is not evidence for another.")
+    if gate_decision.get("outcome") != "promote":
+        raise PolicyError(
+            f"The cited verdict is {gate_decision.get('outcome')!r}, not "
+            "'promote'. A rejection and an abstention are both real verdicts, "
+            "and neither is a licence to promote.")
+    if gate_decision.get("abstained"):
+        raise PolicyError(
+            "The cited verdict abstained: there was too little forward "
+            "evidence to compare, which is not the same as evidence of "
+            "improvement.")
+    if not (gate_decision.get("validation_days") or 0) > 0:
+        raise PolicyError(
+            "The cited verdict rests on zero days of paired evidence. D7 is "
+            "exactly the record of a gate that recorded rows like that while "
+            "appearing to govern.")
+    return gate_decision
+
+
+def _require_matches_live(version: dict, sources, what: str) -> None:
+    """Refuse unless the live configuration still hashes to this version.
+
+    The registry's whole claim is that a version names the configuration that
+    is *running*, not a copy someone stored. An approval or a pointer move
+    against a version the live config has drifted away from would put a name
+    on behaviour nobody froze — and would do it silently, since the pointer
+    would look perfectly valid afterwards.
+    """
+    if sources is None:
+        raise PolicyError(
+            f"{what} needs the live configuration to check for drift. "
+            "Recomputing the hash is the point: a version that can be named "
+            "without checking is a stored copy, not a record of what runs.")
+    if content_hash_for(sources) != version["content_hash"]:
+        raise PolicyError(
+            f"Policy version #{version['id']} no longer describes the live "
+            "configuration: a prompt, model, retrieval budget or rule has "
+            "been edited without opening a new version. Restore the "
+            "configuration, or freeze the current one as a new version — "
+            f"{what} against a version that is not what runs would name "
+            "behaviour nobody froze.")
+
+
+def _resolve_version(conn: sqlite3.Connection, version_id: int,
+                     policy_key: str) -> dict:
+    version = conn.execute("SELECT * FROM policy_versions WHERE id = ?",
+                           (version_id,)).fetchone()
+    if version is None:
+        raise PolicyError(
+            f"No policy version #{version_id}: a pointer has to name a "
+            "version that exists.")
+    if version["policy_key"] != policy_key:
+        raise PolicyError(
+            f"Policy version #{version_id} belongs to "
+            f"{version['policy_key']!r}, not {policy_key!r}.")
+    return dict(version)
+
+
+# ── Moving the pointer ─────────────────────────────────────────────────
+
+
 def install(*, version_id: int, actor: str, reason: str,
             policy_key: str = POLICY_KEY_DEFAULT,
             evidence: dict | None = None, at: str | None = None) -> int:
@@ -402,43 +666,236 @@ def install(*, version_id: int, actor: str, reason: str,
         conn = memory_store._get_conn()
         init_schema(conn)
         with conn:
-            version = conn.execute(
-                "SELECT policy_key FROM policy_versions WHERE id = ?",
-                (version_id,)).fetchone()
-            if version is None:
-                raise PolicyError(
-                    f"No policy version #{version_id} to install: the pointer "
-                    "has to name a version that exists.")
-            if version["policy_key"] != policy_key:
-                raise PolicyError(
-                    f"Policy version #{version_id} belongs to "
-                    f"{version['policy_key']!r}, not {policy_key!r}.")
-            if conn.execute("SELECT 1 FROM active_policy WHERE policy_key = ?",
-                            (policy_key,)).fetchone():
+            _resolve_version(conn, version_id, policy_key)
+            if _write_pointer(conn, policy_key=policy_key,
+                              version_id=version_id, version_seq=1,
+                              actor=actor, reason=reason, at=when,
+                              expected_seq=0) != 1:
+                # expected_seq=0 cannot match a real pointer, so reaching here
+                # means one already existed.
                 raise PolicyError(
                     f"Policy {policy_key!r} already has a version in force. "
                     "Moving it is a promotion or a rollback, both of which "
                     "require evidence — installing again would bypass them.")
-            conn.execute(
-                "INSERT INTO active_policy "
-                "(policy_key, version_id, version_seq, changed_by, reason, "
-                " changed_at) VALUES (?, ?, 1, ?, ?, ?)",
-                (policy_key, version_id, actor, reason, when))
-            conn.execute(
-                "INSERT INTO policy_transitions "
-                "(policy_key, from_version_id, to_version_id, version_seq, "
-                " kind, actor, reason, evidence_json, at) "
-                "VALUES (?, NULL, ?, 1, 'install', ?, ?, ?, ?)",
-                (policy_key, version_id, actor, reason,
-                 json.dumps(evidence or {}, ensure_ascii=False), when))
+            _record_transition(conn, policy_key=policy_key, from_version_id=None,
+                               to_version_id=version_id, version_seq=1,
+                               kind="install", actor=actor, reason=reason,
+                               evidence=evidence, at=when)
     return 1
+
+
+def approve(*, version_id: int, approved_by: str, reason: str,
+            gate_decision, sources, policy_key: str = POLICY_KEY_DEFAULT,
+            at: str | None = None) -> int:
+    """Record a person's authorisation for a version. Returns the approval id.
+
+    Writes one row and moves nothing. §11 is explicit that the approval
+    boundary is a human one and that a successful automatic evaluation is not
+    a licence to promote, so this is a separate act from :func:`promote` and
+    leaves a separate record — an approval that could be inferred from the
+    gate verdict would not be an approval.
+
+    ``gate_decision`` is the ``gate_decisions`` row being cited;
+    ``sources`` is the live configuration, collected by the caller
+    (``evolution.policy_sources.collect()``), because this layer may not
+    import the layer that reads it.
+    """
+    approved_by = _text(approved_by, "approved_by")
+    reason = _text(reason, "reason")
+    _positive_id(version_id, "version_id")
+    when = _text(at, "at") if at else clock.today()
+
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        init_schema(conn)
+        with conn:
+            version = _resolve_version(conn, version_id, policy_key)
+            _require_eligible_gate(gate_decision, version_id)
+            _require_matches_live(version, sources, "Approving a version")
+            cursor = conn.execute(
+                "INSERT INTO policy_approvals "
+                "(policy_key, version_id, content_hash, gate_decision_id, "
+                " approved_by, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (policy_key, version_id, version["content_hash"],
+                 gate_decision.get("id"), approved_by, reason, when))
+    return int(cursor.lastrowid)
+
+
+def promote(*, version_id: int, actor: str, reason: str, sources,
+            expected_seq: int | None = None,
+            policy_key: str = POLICY_KEY_DEFAULT,
+            at: str | None = None) -> int:
+    """Move the pointer to a version, if the evidence and a person allow it.
+
+    Four things must hold at once, and each refusal names the one that failed:
+
+    1. the policy has a pointer already — there is an incumbent to improve on;
+    2. a person has approved this version at this content hash
+       (:func:`approve`), because §11 does not let an evaluation promote;
+    3. the live configuration still hashes to the version, so the pointer
+       names what actually runs;
+    4. the policy's record is structurally sound, so the move does not land
+       on top of a trail with a hole in it.
+
+    The move itself is a compare-and-swap on ``version_seq``. Pass
+    ``expected_seq`` to make the swap conditional on a value read earlier —
+    that is the form two concurrent promotions take, and exactly one of them
+    writes. Omitting it means "the sequence as I just read it", which is still
+    atomic because the read and the write share one transaction.
+    """
+    actor = _text(actor, "actor")
+    reason = _text(reason, "reason")
+    _positive_id(version_id, "version_id")
+    when = _text(at, "at") if at else clock.today()
+
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        init_schema(conn)
+        with conn:
+            version = _resolve_version(conn, version_id, policy_key)
+            pointer = conn.execute(
+                "SELECT * FROM active_policy WHERE policy_key = ?",
+                (policy_key,)).fetchone()
+            if pointer is None:
+                raise PolicyError(
+                    f"Policy {policy_key!r} has nothing in force, so there is "
+                    "nothing to promote past. The first version is installed: "
+                    "promotion is a claim about improvement, and there is no "
+                    "incumbent to improve on.")
+            if pointer["version_id"] == version_id:
+                raise PolicyError(
+                    f"Policy version #{version_id} is already in force; a "
+                    "promotion has to name a different version.")
+            approval = approval_for(version_id, policy_key)
+            if approval is None:
+                raise PolicyError(
+                    f"Policy version #{version_id} has not been approved by a "
+                    "person. §11: a successful evaluation is not a licence to "
+                    "promote, and no model may approve its own candidate — "
+                    "record the approval first.")
+            _require_matches_live(version, sources, "Promoting a version")
+            problems = _problems_for(policy_key)
+            if problems:
+                raise PolicyError(
+                    "The policy record is not sound, so the pointer will not "
+                    "be moved onto it: " + "; ".join(problems))
+            expected = (pointer["version_seq"] if expected_seq is None
+                        else expected_seq)
+            if expected != pointer["version_seq"]:
+                raise PolicyError(
+                    f"The pointer is at seq {pointer['version_seq']}, not "
+                    f"{expected_seq}: it moved since this promotion was "
+                    "prepared. Re-read it and decide again.")
+            next_seq = pointer["version_seq"] + 1
+            if _write_pointer(conn, policy_key=policy_key,
+                              version_id=version_id, version_seq=next_seq,
+                              actor=actor, reason=reason, at=when,
+                              expected_seq=expected) != 1:
+                raise PolicyError(
+                    "Another change moved the pointer first; this promotion "
+                    "changed nothing.")
+            _record_transition(
+                conn, policy_key=policy_key,
+                from_version_id=pointer["version_id"], to_version_id=version_id,
+                version_seq=next_seq, kind="promote", actor=actor,
+                reason=reason, at=when,
+                evidence={"approval_id": approval["id"],
+                          "gate_decision_id": approval["gate_decision_id"],
+                          "content_hash": version["content_hash"]})
+    return next_seq
+
+
+def rollback(*, to_version_id: int, actor: str, reason: str, sources,
+             expected_seq: int | None = None,
+             policy_key: str = POLICY_KEY_DEFAULT,
+             at: str | None = None) -> int:
+    """Restore a version that was in force before. Returns the new seq.
+
+    Deliberately not a promotion run backwards. A promotion claims a version
+    is *better* and has to be paid for with forward evidence; a rollback
+    claims the incumbent is worse, and the evidence for that is that the
+    target was already in force once — a fact in the transition trail rather
+    than a new piece of state to keep in sync.
+
+    It requires no gate verdict, and that is not a loophole: the trail entry
+    it rests on was itself only created by an install, a promotion or an
+    earlier rollback, so a version cannot be reached this way unless the
+    audited entry point put it in force once.
+
+    **It deletes nothing.** Fills, ledger rows and outcomes are untouched;
+    only the pointer moves. A rollback that tidied up after the version it
+    replaced would destroy the evidence that the version was ever tried.
+
+    The drift check applies here too. If the live configuration has moved away
+    from the target, moving the pointer would name behaviour nobody froze —
+    and it would not actually restore anything, because the prompts and rules
+    the target was frozen from are the parts that drifted.
+    """
+    actor = _text(actor, "actor")
+    reason = _text(reason, "reason")
+    _positive_id(to_version_id, "to_version_id")
+    when = _text(at, "at") if at else clock.today()
+
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        init_schema(conn)
+        with conn:
+            version = _resolve_version(conn, to_version_id, policy_key)
+            pointer = conn.execute(
+                "SELECT * FROM active_policy WHERE policy_key = ?",
+                (policy_key,)).fetchone()
+            if pointer is None:
+                raise PolicyError(
+                    f"Policy {policy_key!r} has nothing in force, so there is "
+                    "nothing to roll back from.")
+            if pointer["version_id"] == to_version_id:
+                raise PolicyError(
+                    f"Policy version #{to_version_id} is already in force; a "
+                    "rollback has to name a version that is not.")
+            trail = transitions_for(policy_key)
+            if not any(step["to_version_id"] == to_version_id for step in trail):
+                raise PolicyError(
+                    f"Policy version #{to_version_id} was never in force, so "
+                    "there is nothing to restore. A rollback restores a "
+                    "version the audited entry point already put in force; "
+                    "choosing a version that has never run is a promotion, "
+                    "and a promotion needs forward evidence.")
+            _require_matches_live(version, sources, "Rolling back to a version")
+            problems = _problems_for(policy_key)
+            if problems:
+                raise PolicyError(
+                    "The policy record is not sound, so the pointer will not "
+                    "be moved onto it: " + "; ".join(problems))
+            expected = (pointer["version_seq"] if expected_seq is None
+                        else expected_seq)
+            if expected != pointer["version_seq"]:
+                raise PolicyError(
+                    f"The pointer is at seq {pointer['version_seq']}, not "
+                    f"{expected_seq}: it moved since this rollback was "
+                    "prepared. Re-read it and decide again.")
+            next_seq = pointer["version_seq"] + 1
+            if _write_pointer(conn, policy_key=policy_key,
+                              version_id=to_version_id, version_seq=next_seq,
+                              actor=actor, reason=reason, at=when,
+                              expected_seq=expected) != 1:
+                raise PolicyError(
+                    "Another change moved the pointer first; this rollback "
+                    "changed nothing.")
+            _record_transition(
+                conn, policy_key=policy_key,
+                from_version_id=pointer["version_id"], to_version_id=to_version_id,
+                version_seq=next_seq, kind="rollback", actor=actor,
+                reason=reason, at=when,
+                evidence={"restored_from_seq": pointer["version_seq"],
+                          "content_hash": version["content_hash"]})
+    return next_seq
 
 
 # ── Reporting ──────────────────────────────────────────────────────────
 
 
 def counts() -> dict:
-    """Versions, transitions, and how many policies have one in force."""
+    """Versions, transitions, approvals, and policies with one in force."""
     conn = memory_store._get_conn()
     init_schema(conn)
     return {
@@ -446,6 +903,8 @@ def counts() -> dict:
             "SELECT COUNT(*) n FROM policy_versions").fetchone()["n"]),
         "transitions": int(conn.execute(
             "SELECT COUNT(*) n FROM policy_transitions").fetchone()["n"]),
+        "approvals": int(conn.execute(
+            "SELECT COUNT(*) n FROM policy_approvals").fetchone()["n"]),
         "active": int(conn.execute(
             "SELECT COUNT(*) n FROM active_policy").fetchone()["n"]),
     }
@@ -456,58 +915,27 @@ def integrity() -> list[str]:
 
     Reports rather than repairs, the posture ``reconciliation``,
     ``outcomes.integrity``, ``learning_candidates.integrity`` and
-    ``knowledge_snapshots.integrity`` all take. Four things the write
-    boundary cannot enforce afterwards:
+    ``knowledge_snapshots.integrity`` all take. The per-policy checks live in
+    :func:`_problems_for` because the promotion path asks the same question;
+    on top of those, this adds the two cross-policy ones:
 
-    * a pointer naming a version that does not exist, or one belonging to
-      another policy — the trader would be running something unnamed;
-    * a transition naming a version that does not exist;
-    * a ``version_seq`` sequence that does not start at 1 and rise by one,
-      which would mean a transition was lost and the audit trail has a hole;
-    * a pointer whose ``version_seq`` disagrees with the last transition,
-      which would mean the pointer moved without leaving a record.
+    * a pointer at a version that no install put in force and no person
+      approved — the trader would be running something nobody authorised;
+    * a transition naming a version that does not exist.
     """
     conn = memory_store._get_conn()
     init_schema(conn)
     problems: list[str] = []
-
     for pointer in conn.execute("SELECT * FROM active_policy").fetchall():
-        version = conn.execute(
-            "SELECT policy_key FROM policy_versions WHERE id = ?",
-            (pointer["version_id"],)).fetchone()
-        if version is None:
+        key = pointer["policy_key"]
+        problems.extend(_problems_for(key))
+        trail = transitions_for(key)
+        installed = any(step["to_version_id"] == pointer["version_id"]
+                        and step["kind"] == "install" for step in trail)
+        if not installed and approval_for(pointer["version_id"], key) is None:
             problems.append(
-                f"policy {pointer['policy_key']!r} is in force at version "
-                f"#{pointer['version_id']}, which does not exist")
-            continue
-        if version["policy_key"] != pointer["policy_key"]:
-            problems.append(
-                f"policy {pointer['policy_key']!r} points at version "
-                f"#{pointer['version_id']}, which belongs to "
-                f"{version['policy_key']!r}")
-        trail = transitions_for(pointer["policy_key"])
-        if not trail:
-            problems.append(
-                f"policy {pointer['policy_key']!r} is in force with no "
-                "transition recorded: the pointer moved without a trail")
-            continue
-        if trail[-1]["version_seq"] != pointer["version_seq"]:
-            problems.append(
-                f"policy {pointer['policy_key']!r} is at seq "
-                f"{pointer['version_seq']} but its last transition is "
-                f"{trail[-1]['version_seq']}: the pointer moved unrecorded")
-        for position, step in enumerate(trail, start=1):
-            if step["version_seq"] != position:
-                problems.append(
-                    f"policy {pointer['policy_key']!r} has a gap in its "
-                    f"transition trail at position {position} "
-                    f"(seq {step['version_seq']})")
-                break
-
-    for step in conn.execute("SELECT * FROM policy_transitions").fetchall():
-        if conn.execute("SELECT 1 FROM policy_versions WHERE id = ?",
-                        (step["to_version_id"],)).fetchone() is None:
-            problems.append(
-                f"policy transition #{step['id']} names version "
-                f"#{step['to_version_id']}, which does not exist")
+                f"policy {key!r} is in force at version "
+                f"#{pointer['version_id']}, which no install put in force and "
+                "no person approved: the pointer names behaviour nobody "
+                "authorised")
     return problems

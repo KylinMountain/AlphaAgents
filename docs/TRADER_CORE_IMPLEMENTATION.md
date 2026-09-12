@@ -1,14 +1,15 @@
 # Trader Core Implementation: Phase 1–3 实际状态
 
-- 记录日期：2026-09-12（第七轮补记 Phase 3 的 T3）。
+- 记录日期：2026-09-12（第八轮补记 Phase 3 的 T4；Phase 3 至此全部交付）。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
-  [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)、
+  [Phase 3 计划](exec-plans/completed/2026-09-12-trader-core-phase3.md)、
   [设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
 - 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付。
-  **Phase 3 尚在进行中**：T1–T3 已交付，T4 未开始，未实现项一律留在第 7 节。
+  **Phase 3 的四个切片（T1–T4）已全部交付**；未实现项一律留在第 7 节，交付不等于
+  「设计里提到的每一件事都做了」。
 
 ## 1. 现金反映累计结果
 
@@ -111,8 +112,17 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
     **刻意**不被任何管线调用，于是 `hypothesis` / `testing` / `validated` / `retired`
     在生产数据里不会自然出现，只能由人或脚本显式推进。它可达、有测试钉住，
     但**不是被业务驱动的** —— 这是「验证不等于授权」的代价，不是遗漏。
-- **已批准知识快照**（Phase 3 的 T4，**未开始**）。无 `knowledge_snapshots`，
-  于是「保留」与「生效」之间仍没有可审计的关口。
+- **已批准知识快照**（Phase 3 的 T4）**已交付**：`knowledge_snapshots` /
+  `knowledge_snapshot_items` 两表与 `alpha_agents/data/knowledge_snapshots.py` 都已存在
+  （交付明细见 §11 与第九节第八轮）。「保留」与「生效」之间现在有一道可审计的关口。
+  它剩下两个边界：
+  - **快照不进任何生效路径。** 模块里没有 `apply_snapshot`，没有 prompt、检索权重、
+    或任何 `_get_*` 的返回值读它。`approve()` 的唯一调用者是运维脚本
+    `scripts/approve_knowledge.py`（即「人的动作」），所以「已批准」现在是
+    **可查的事实**，不是**已生效的行为** —— 这正是 §10 要的形状，不是遗漏。
+  - **读侧只有运维脚本与测试在读。** `candidate_is_approved` / `entity_is_approved` /
+    `drifted` 的消费者是 `scripts/episode_coverage.py` 与测试，没有任何决策路径读它。
+    与候选区一样：是**有能力**，不是**有数据**。
 - **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。
   `policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
 
@@ -153,6 +163,14 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   （`ALTER TABLE` 加四列 + 重建表以放开 `CHECK`）。迁移幂等且保行
   （`test_migrating_twice_is_a_no_op` 钉住），但「报告脚本会改 schema」这件事必须写下来，
   否则它本身就是一句「承诺超过代码」。
+- **快照是记录，不是检索闸门**（T4 的边界，容易被误读为「已实现授权」）。
+  `inject_playbooks`（`alpha_agents/evolution/feedback.py`）仍按 `playbooks.status` 选行，
+  **不读任何快照**。于是「一条知识进不进 prompt」目前由知识行自己的状态决定，
+  而不是由「它是否被批准过」决定。§10 的「未批准不得进入生产决策检索」对**候选**成立
+  （候选区确实无人读），但**对 playbook / principle 行不成立**：一条 active 的规则行
+  即使从未进过任何快照，也照样被渲染进提示词。批准因此是**事后可查的存证**，
+  不是**事前生效的开关**。要让「未批准即不生效」成立，必须把检索侧改成读快照 ——
+  那是 Phase 4 的工作，不在本阶段，本阶段只负责把边界记下来。
 - **`outcomes` 的标签不与 `predictions.hit` 对账**。T2 新增的三条标签链是**增量**的：
   `predictions.hit` / `scored_at` 仍是原路径，写标签时**不校验两者一致**。
   两套记录目前可以互相矛盾而无人发现 —— 合并它们属于后续阶段。
@@ -206,6 +224,13 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 | 候选是否「已生效」只能靠约定 | `validated` **不激活任何东西** —— 没有快照、没有生效路径，`advance_candidate` 不被任何管线调用 |
 | T3 之前写入的候选没有提案字段 | 迁移**不回填**：旧行四列为 NULL，由 `integrity()` 报「predates the proposal fields and was never enriched」 |
 | 运维报告脚本不碰 schema | `scripts/episode_coverage.py` 读候选区时会触发该模块的 schema 初始化 / 迁移（幂等、保行，见 §7） |
+| 「保留」与「生效」之间没有边界：候选走到 `validated` 就等于生效 | `knowledge_snapshots` 把「哪个版本的哪条知识、被谁、在何时、因为什么放进生效状态」记成不可变的一行；`validated` 本身仍然**不激活任何东西** |
+| 「我们批准的是哪一版」答不出来（计数器一动版本就变） | 每条 item 存 `version_hash`，只覆盖声明的规则字段，**刻意不含** `win_rate` / `evidence_count` / `total_trades` / `hit_rate` / 各日期 |
+| 快照是否被事后改写只能靠信任 | `content_hash` 覆盖声明字段**加上整个 item 集合**，`verify_snapshot` 独立重算；两条 `RAISE(ABORT)` 触发器把不可变性交给数据库 |
+| 版本哈希由调用方给出（可以声称一个从未存在过的版本） | `version_hash` 由写入方从知识行现算，`approve` 不接受调用方传入；知识行或候选不存在即拒绝 |
+| 「已批准的知识行后来变了」无人知道 | `drifted()` 列出「已批准、但当前内容已不是那一版」的条目；drift **不算** `integrity()` 的问题 —— 知识本就该继续演进 |
+| 批准是文档里的一句约定，没有可调用入口 | `scripts/approve_knowledge.py`：唯一写入口，带 `--dry-run`，并**先打印目标数据库路径**（`MEMORY_DB_PATH` 是固定路径、不读 `TMPDIR`） |
+| 「批准不会改变任何行为」只能靠声称 | `TestApprovingActivatesNothing` 把**整库所有表**在批准前后逐行对比，断言发生变化的表**恰好只有**两张新表 |
 
 ## 9. 验证记录
 
@@ -460,6 +485,63 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 §8 均已更正。本次的冒烟验证是**先把 `memory_store.MEMORY_DB_PATH` 指向临时目录**再跑的
 （沿用第六轮记下的那条操作风险），未触碰开发者本地 `data/memory.db`。
 
+### 第八轮（Phase 3 的 T4：已批准知识快照）
+
+2026-09-12：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1553 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（150 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_knowledge_snapshots.py`（53 个用例），分八组：批准是一行记录、
+记录由数据库保证只增不改、哈希可独立复算、什么不能被批准、版本是内容、读侧、
+完整性与 drift、以及「批准不激活任何东西」。
+
+**计划里写下的验收条目，逐条对照**：
+
+- 快照 `content_hash` 可独立重算并通过、篡改一行后校验失败 → `TestTheHashIsVerifiable`：
+  新快照通过；未知 ID 返回 `False`（「不存在」与「被改写」同样不可信）；
+  绕过触发器改写快照行或 item 都被检出；而知识行**随后**变动**不影响**快照自身的校验
+  —— 这正是「批准记录的是当时那一版」与「知识可以继续演进」两件事各自成立。
+- 「这条候选 / 这条知识现在是否在某个已批准快照里」有机器形式（§10 的那句话）→
+  `TestTheReadSide::test_the_question_section_ten_asks` 与 `test_is_this_knowledge_in_force`；
+  未知实体类型**拒绝回答**而不是返回 `False`。
+- 四个新列有值、`validated` 不产生任何行为变化 → `TestApprovingActivatesNothing`：
+  逐表对比整库前后，断言变化的表**恰好只有**两张新表；候选行逐字段不变且
+  `transitions_for` 仍为空；`memory_store.get_active_principles` /
+  `get_active_playbooks` 的产出不移动。
+
+**本轮的四个变异探针**（先证明测试会红，再复原；探针脚本先记基线哈希，复原后再哈希校验）：
+
+| 探针 | 结果 |
+|---|---|
+| 快照哈希不再覆盖 item 集合（`_frozen` 的 items 置空） | 1 failed / 52 passed |
+| `knowledge_snapshots` 的 append-only 触发器失效（`RAISE(ABORT)` → `SELECT 1`） | 1 failed / 52 passed |
+| `version_hash` 改为哈希整行（连带 `evidence_count` / `win_rate` / `last_reinforced`） | 1 failed / 52 passed |
+| `_resolve` 不再拒绝「批准一条不存在的知识」 | 2 failed / 51 passed |
+
+**一处必须如实记下的探针事故（是我的探针错了，不是代码）**：第三个探针第一次跑出的是
+**53 passed**，看上去像「测试没钉住这个属性」。原因是那次变异只把返回值换成 `dict(row)`，
+而 `version_hash_for` 的 `SELECT` 本来就**只投影声明字段**，`dict(row)` 与投影逐字段相同 ——
+**变异是个空操作**。把 `SELECT` 一并放宽成 `SELECT *` 之后，测试如期变红（1 failed）。
+记在这里，是因为「探针没红」有两种可能，而先入为主地判成「测试有洞」正是本文件在防的那类错误；
+同理，本文件里任何「测试钉住了 X」的说法都应当能被一条会红的探针支持。
+
+**一处覆盖度观察**：`version_hash` 不含计数器这条属性（本切片的核心设计）**只有一个用例钉住**
+（`test_running_counts_are_not_part_of_the_version`）。它是真的，但只有一根钉子 ——
+将来改动 `_KNOWLEDGE_FIELDS` 的人应当先看到这一行。
+
+**一处操作风险（沿用第六轮那条）**：`scripts/approve_knowledge.py` 是**会写库的**运维脚本，
+而 `MEMORY_DB_PATH` 不读 `TMPDIR`。因此它**先打印目标数据库路径**再落盘，
+`--dry-run` 走 `plan` 只校验不写。本轮验证全程把 `memory_store.MEMORY_DB_PATH`
+指向临时目录，未触碰开发者本地 `data/memory.db`。
+
+**Phase 3 判定为已完成**，依据是设计 §14 的范围定义与计划里的「非目标」，
+而不是「设计里提到的每一件事都做了」：候选与快照都**不进任何生效路径**是本阶段的硬约束，
+而「未批准即不生效」的检索侧强制（§7 记下的那条边界）属于 Phase 4。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -489,9 +571,9 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   不覆盖 `tools` / `evolution` / `memory_store` 统计查询 / `pipeline` 的 review、scheduler ——
   它们问的是「现在」，不是「模拟到哪一天」。
 
-## 11. Phase 3 逐项交付（T1–T4，进行中）
+## 11. Phase 3 逐项交付（T1–T4，已全部交付）
 
-计划见 [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)。本阶段有一句硬约束：
+计划见 [Phase 3 计划](exec-plans/completed/2026-09-12-trader-core-phase3.md)。本阶段有一句硬约束：
 **不新增任何生效路径** —— 候选、快照都不进 prompt / 检索 / 决策上下文（§10：验证不等于授权）。
 
 | 切片 | 状态 | 交付 |
@@ -499,7 +581,13 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 | T1 episode 关联 | ✅ 已交付（第五轮） | `episodes` / `episode_events` 两表 + `alpha_agents/data/episodes.py`；门在 `intent.submit_intent`，成交/撤单两个钩子在 `portfolio`；只读入口 `scripts/episode_coverage.py` |
 | T2 三种结果的生命周期 | ✅ 已交付（第六轮） | `outcomes` 状态机 + `alpha_agents/data/outcomes.py` 写读；三个标签生产者在 `evolution/outcome_labels.py`；写入者在 `pipeline/tasks/review.py::_label_outcomes`；`predictions.horizon_days` / `deadline` 两列 |
 | T3 候选证据与生命周期 | ✅ 已交付（第七轮） | `learning_candidates` 四列 + 五态生命周期 + `candidate_transitions`（append-only）；写入口 `save_candidate`（四字段必填）/ `advance_candidate`（`status` 唯一写者），读侧 `counts` / `candidates_by_status` / `transitions_for` / `candidates_citing` / `integrity`；只读入口仍为 `scripts/episode_coverage.py`（扩了候选段） |
-| T4 已批准知识快照 | ⬜ 未开始 | `knowledge_snapshots` 未建 |
+| T4 已批准知识快照 | ✅ 已交付（第八轮） | `knowledge_snapshots` / `knowledge_snapshot_items` 两表 + `alpha_agents/data/knowledge_snapshots.py`；写入口 `approve`（版本哈希由写入方现算）/ 只校验的 `plan` / 复算的 `verify_snapshot`，读侧 `candidate_is_approved` / `entity_is_approved` / `approved_entities` / `counts` / `drifted` / `integrity`；运维写入口 `scripts/approve_knowledge.py`，只读入口仍为 `scripts/episode_coverage.py`（扩了「已批准知识」段） |
+
+### T3 / T4 的边界，逐条说清
+
+这两个切片的边界**不在本节重复**，因为它们的边界全是「没有生效路径」这一类，已逐条写在
+§7（`evidence_episode_ids` 在生产里恒为空、生命周期无业务驱动方、快照不是检索闸门、
+读侧只有运维脚本与测试）与 §9 第七、八轮（两处「承诺超过代码」）。本节只记交付物本身。
 
 ### T1 的边界，逐条说清
 

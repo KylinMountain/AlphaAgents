@@ -1,6 +1,6 @@
 # Trade Learn Evolve：第三阶段 episode learning
 
-状态：active。负责人：本次开发会话。创建：2026-09-12。
+状态：已完成（T1–T4 全部交付）。负责人：本次开发会话。创建：2026-09-12；完成：2026-09-12。
 
 ## 目标
 
@@ -35,7 +35,7 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
 | T1 episode 关联 | ✅ 已交付 2026-09-12（`tests/test_episodes.py`，28 用例；四个变异探针全红） |
 | T2 三种结果的生命周期 | ✅ 已交付 2026-09-12（`tests/test_outcomes.py`，40 用例；六个变异探针全红） |
 | T3 候选证据结构化与生命周期 | ✅ 已交付 2026-09-12（`tests/test_learning_lifecycle.py`，59 用例；四个变异探针全红） |
-| T4 已批准知识快照 | ⬜ 未开始 |
+| T4 已批准知识快照 | ✅ 已交付 2026-09-12（`tests/test_knowledge_snapshots.py`，53 用例；四个变异探针全红） |
 
 ### T1 episode 关联（学习单元）✅
 
@@ -171,6 +171,44 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
   这是 §10「必须留在生产决策检索之外」的机器形式。
 - **本切片不接线任何生效路径**：不改变 prompt 内容、不改变检索权重、
   不改变任何 `_get_*` 的返回。快照是记录，批准是人的动作，代码只负责存证。
+
+**实际结果（2026-09-12）**
+
+- 两张新表进 `memory_store._SCHEMA`（与 `episodes` / `outcomes` 同处，不另起 schema 所有权）：
+  `knowledge_snapshots` 与 `knowledge_snapshot_items`，四只 `BEFORE UPDATE` / `BEFORE DELETE`
+  触发器 `RAISE(ABORT)`，三个索引；`UNIQUE(snapshot_id, entity_type, entity_id)` 让
+  「同一快照里同一行是哪个版本」只有一个答案。
+- 新模块 `alpha_agents/data/knowledge_snapshots.py`（400 行）：写入口 `approve`、
+  只校验不写的 `plan`（供 dry run 复用同一条规则，避免第二份会走样的规则）、
+  复算入口 `verify_snapshot`；读侧 `get_snapshot` / `items_for` / `all_snapshots` /
+  `snapshots_for_candidate` / `candidate_is_approved` / `entity_is_approved` /
+  `approved_entities` / `counts`，外加 `drifted` 与 `integrity`。
+- **两个哈希回答两个不同的问题**（本切片的核心设计）：
+  - `version_hash`（每条 item）是**内容**哈希，按每种实体声明一份字段元组
+    （principle：`principle` / `pattern_description` / `category` / `action_guidance` / `status`；
+    playbook：`name` / `pattern_json` / `status` / `weight` / `annotation`）。
+    **刻意不含计数器**（`win_rate` / `evidence_count` / `total_trades` / `hit_rate` / 各日期）：
+    计数一变就换版本的话，「我们批准的是哪一版」就永远答不出来。
+  - `content_hash`（每个快照）覆盖声明的四个字段 **加上整个 item 集合**；
+    写入与校验共用 `_frozen`，item 先按 `(entity_type, entity_id)` 排序，
+    因此调用方列举顺序不影响哈希。
+- **`version_hash` 由写入方计算，不接受调用方传入**：一条声称某版本、
+  而该版本从未存在过的批准记录，作为证据毫无价值。
+- **新增 `drifted()`**（计划未要求）：列出「已批准、但知识行后来变了」的条目。
+  这不是缺陷（知识本就该继续演进），而是这张表存在的**唯一**理由所能回答的问题。
+  `integrity()` 因此只报结构性问题，不把 drift 算作问题。
+- 写入口 `scripts/approve_knowledge.py`（103 行）；只读入口
+  `scripts/episode_coverage.py` 扩了「已批准知识」段（`counts` / `integrity` / `drifted`，
+  加 `--approvals` / `--is-approved`）。
+- **与计划的偏差（一处，且是增补不是削减）**：计划写「批准是人的动作，代码只负责存证」，
+  但没给「人」任何入口 —— 照字面做，`approve()` 会是一个**无人调用**的函数，
+  正是本仓库反复在抓的「承诺无可调用入口」。因此加了 `scripts/approve_knowledge.py`：
+  唯一写入口，带 `--dry-run`（先把解析出的版本哈希给你看，再决定落不落），
+  并**先打印目标数据库路径**（因为 `MEMORY_DB_PATH` 是固定路径、不读 `TMPDIR`）。
+  它**不是生效路径**：不改 prompt、不改检索、不改任何 `_get_*` 的返回。
+- **「不生效」是被断言出来的，不是被声称的**：`TestApprovingActivatesNothing` 把
+  **整库所有表**在批准前后逐行对比，断言发生变化的表**恰好只有**两张新表 ——
+  而不是挑一张表看看有没有变。
 
 ## 非目标
 

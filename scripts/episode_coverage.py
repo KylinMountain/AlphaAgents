@@ -19,11 +19,16 @@ figure would hide exactly that.
 *Candidates.* The quarantine: how many proposals sit in each lifecycle
 state, which ones are not statements §10 could evaluate, and which cite an
 experience that does not exist. ``validated`` is printed beside the other
-states and means no more than they do — reaching it activates nothing, and
-only inclusion in an approved snapshot would, which is T4 and does not
-exist yet. The supporting/opposing split is shown per candidate because a
-proposal citing only the cases that agree with it is the failure §10 names,
-and it is invisible in a single count.
+states and means no more than they do — reaching it activates nothing. The
+supporting/opposing split is shown per candidate because a proposal citing
+only the cases that agree with it is the failure §10 names, and it is
+invisible in a single count.
+
+*Approvals.* The other half of §10's line: which knowledge a person has
+actually put in force, and whether the version they approved is still the
+version on disk. Drift is reported, never treated as a fault — knowledge is
+expected to keep moving — but "we approved this and it has since changed"
+is the one thing an approval record exists to be able to say.
 
 It reads. It writes nothing, and it has no exit-code contract: this is a
 report an operator reads, not a gate a cron pages on (for that, see
@@ -42,6 +47,8 @@ row; it is not a data write, but it is not a pure read either.
     uv run python scripts/episode_coverage.py --status testing
     uv run python scripts/episode_coverage.py --history 3
     uv run python scripts/episode_coverage.py --cites 12
+    uv run python scripts/episode_coverage.py --approvals
+    uv run python scripts/episode_coverage.py --is-approved 7
     uv run python scripts/episode_coverage.py --json
 """
 
@@ -56,6 +63,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from alpha_agents.data import episodes, memory_store  # noqa: E402
+from alpha_agents.data import knowledge_snapshots as approvals  # noqa: E402
 from alpha_agents.data import learning_candidates as candidates  # noqa: E402
 from alpha_agents.data import outcomes  # noqa: E402
 
@@ -106,13 +114,18 @@ def _candidate_rows(rows: list[dict]) -> list[dict]:
 
 def _report(conn, trader_id: str | None, limit: int, *,
             list_candidates: bool = False, status: str | None = None,
-            history_id: int | None = None, cites: int | None = None) -> dict:
+            history_id: int | None = None, cites: int | None = None,
+            list_approvals: bool = False,
+            is_approved: int | None = None) -> dict:
     out = {"coverage": episodes.coverage(conn, trader_id=trader_id),
            "outcomes": outcomes.counts(conn),
            "awaiting_result": len(outcomes.pending_labels(conn)),
            "complaints": outcomes.integrity(conn),
            "candidates": candidates.counts(),
            "candidate_complaints": candidates.integrity(),
+           "approvals": approvals.counts(),
+           "approval_complaints": approvals.integrity(),
+           "approval_drift": approvals.drifted(),
            "open_episodes": []}
     for ep in episodes.open_episodes(conn, trader_id=trader_id, limit=limit):
         kinds = [e["kind"] for e in episodes.events_for(conn, ep["id"])]
@@ -135,6 +148,20 @@ def _report(conn, trader_id: str | None, limit: int, *,
                 {"id": c["id"], "status": c["status"], "claim": c["claim"],
                  "cited_as": c["cited_as"]}
                 for c in candidates.candidates_citing(cites)],
+        }
+    if list_approvals:
+        out["approval_list"] = [
+            {"id": s["id"], "approved_by": s["approved_by"],
+             "approved_at": s["approved_at"], "reason": s["reason"],
+             "notes": s["notes"], "verifies": approvals.verify_snapshot(s["id"]),
+             "items": approvals.items_for(s["id"])}
+            for s in approvals.all_snapshots()]
+    if is_approved is not None:
+        found = approvals.snapshots_for_candidate(is_approved)
+        out["is_approved"] = {
+            "candidate_id": is_approved,
+            "approved": bool(found),
+            "snapshot_ids": [s["id"] for s in found],
         }
     return out
 
@@ -222,6 +249,53 @@ def _render(data: dict) -> str:
         for c in cited["candidates"]:
             lines.append(f"  #{c['id']:<5} {c['status']:<{width}} "
                          f"as {'+'.join(c['cited_as'])}  {_short(c['claim'])}")
+
+    lines.append("")
+    lines.append("Approved knowledge — what a person put in force")
+    record = data["approvals"]
+    lines.append(f"  snapshots   {record['snapshots']}   "
+                 f"items {record['items']}")
+    drift = data["approval_drift"]
+    if drift:
+        lines.append(f"  drift       {len(drift)} approved item(s) changed "
+                     "since approval:")
+        for d in drift:
+            lines.append(
+                f"    - {d['entity_type']} #{d['entity_id']} "
+                f"(approved {d['version_hash'][:12]}, now "
+                f"{(d['current_version_hash'] or 'gone')[:12]})")
+    else:
+        lines.append("  drift       none — every approved version is current")
+    problems = data["approval_complaints"]
+    if problems:
+        lines.append(f"  integrity   {len(problems)} problem(s):")
+        for p in problems:
+            lines.append(f"    - {p}")
+    else:
+        lines.append("  integrity   clean")
+
+    for snap in data.get("approval_list", []):
+        lines.append(
+            f"  #{snap['id']:<5} {snap['approved_at']}  "
+            f"by {snap['approved_by']}  "
+            f"{'verified' if snap['verifies'] else 'HASH MISMATCH'}  "
+            f"{_short(snap['reason'])}")
+        for item in snap["items"]:
+            cited = (f" from candidate #{item['candidate_id']}"
+                     if item["candidate_id"] else "")
+            lines.append(f"        {item['entity_type']} #{item['entity_id']}"
+                         f"{cited}  version {item['version_hash'][:12]}")
+
+    verdict = data.get("is_approved")
+    if verdict is not None:
+        lines.append("")
+        if verdict["approved"]:
+            ids = ", ".join(f"#{i}" for i in verdict["snapshot_ids"])
+            lines.append(f"Candidate #{verdict['candidate_id']} is in an "
+                         f"approved snapshot ({ids})")
+        else:
+            lines.append(f"Candidate #{verdict['candidate_id']} is in no "
+                         "approved snapshot")
     return "\n".join(lines)
 
 
@@ -240,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the lifecycle moves of one candidate.")
     p.add_argument("--cites", type=int, default=None, metavar="EPISODE_ID",
                    help="list candidates that cite this episode.")
+    p.add_argument("--approvals", action="store_true",
+                   help="list approved knowledge snapshots.")
+    p.add_argument("--is-approved", type=int, default=None,
+                   dest="is_approved", metavar="CANDIDATE_ID",
+                   help="is this candidate inside an approved snapshot?")
     p.add_argument("--json", action="store_true",
                    help="machine-readable output.")
     args = p.parse_args(argv)
@@ -247,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     data = _report(
         memory_store._get_conn(), args.trader, args.open_limit,
         list_candidates=args.candidates or args.status is not None,
-        status=args.status, history_id=args.history_id, cites=args.cites)
+        status=args.status, history_id=args.history_id, cites=args.cites,
+        list_approvals=args.approvals, is_approved=args.is_approved)
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:

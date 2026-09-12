@@ -569,6 +569,87 @@ BEGIN
     SELECT RAISE(ABORT, 'outcomes is append-only');
 END;
 
+-- An approval, recorded. §10: "validation does not itself activate
+-- knowledge", and a candidate "must stay outside production decision
+-- retrieval until it is included in an approved policy snapshot". These
+-- two tables are the machine form of that sentence — and only that. A
+-- snapshot is the record of a human decision, not a switch: nothing reads
+-- them to change what the system does (see §7).
+--
+-- content_hash covers the declared fields *and* the item set, so a
+-- consumer can recompute it (knowledge_snapshots.verify_snapshot) and
+-- detect a snapshot rewritten after the fact. The triggers below should
+-- already prevent that; this is the second lock on the same door, for the
+-- same reason decision_snapshots has one.
+CREATE TABLE IF NOT EXISTS knowledge_snapshots (
+    id INTEGER PRIMARY KEY,
+    -- Who approved it. A snapshot with no named approver is an anonymous
+    -- assertion, which is the thing this table exists to prevent.
+    approved_by TEXT NOT NULL,
+    -- The instant the approval is dated, as declared by the approver.
+    -- Part of the hash.
+    approved_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    notes TEXT,
+    content_hash TEXT NOT NULL,
+    -- When this row was written, from the kernel clock. Deliberately not
+    -- part of the hash: it is a write-time fact like created_at, not a
+    -- declaration. Under replay it differs from approved_at, which is why
+    -- both are kept.
+    frozen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Which knowledge versions the snapshot contains. version_hash is the hash
+-- of the *knowledge row* as projected through a declared per-entity field
+-- tuple, computed by the writer and never supplied by the caller: "which
+-- version did we approve" has to be answerable from the record alone.
+CREATE TABLE IF NOT EXISTS knowledge_snapshot_items (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL,
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('principle', 'playbook')),
+    entity_id INTEGER NOT NULL,
+    -- The candidate this approval came from, when there was one. Not
+    -- required: a person may approve something the learner never proposed.
+    candidate_id INTEGER,
+    version_hash TEXT NOT NULL,
+    -- One entry per knowledge row per snapshot. Two rows for the same
+    -- entity inside one snapshot would make "which version is approved"
+    -- a question with two answers.
+    UNIQUE(snapshot_id, entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ksnap_items_snapshot
+    ON knowledge_snapshot_items(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_ksnap_items_candidate
+    ON knowledge_snapshot_items(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_ksnap_items_entity
+    ON knowledge_snapshot_items(entity_type, entity_id);
+
+CREATE TRIGGER IF NOT EXISTS knowledge_snapshots_no_update
+BEFORE UPDATE ON knowledge_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge_snapshots is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS knowledge_snapshots_no_delete
+BEFORE DELETE ON knowledge_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge_snapshots is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS knowledge_snapshot_items_no_update
+BEFORE UPDATE ON knowledge_snapshot_items
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge_snapshot_items is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS knowledge_snapshot_items_no_delete
+BEFORE DELETE ON knowledge_snapshot_items
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge_snapshot_items is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS custom_tasks (
     id INTEGER PRIMARY KEY,
     prompt TEXT NOT NULL,

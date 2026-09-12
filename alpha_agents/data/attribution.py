@@ -43,7 +43,7 @@ import json
 import logging
 import sqlite3
 
-from alpha_agents.data import clock
+from alpha_agents.data import clock, policy_registry
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,13 @@ def freeze(conn: sqlite3.Connection, *, trader_id: str, code: str,
     clock.assert_not_from_the_future(decided_at, what="decision decided_at")
     if not isinstance(payload, dict):
         raise ValueError("A decision snapshot payload must be an object")
+    # ``policy_ref`` was reserved in Phase 1 and never written — there was no
+    # registry to reference. Defaulted here rather than demanded of every
+    # caller so the boundary names the policy in force by default; an explicit
+    # value still wins, so a replay can freeze a decision under the policy it
+    # actually ran. It is part of the hash below: which policy decided is part
+    # of the boundary, not metadata about it.
+    policy_ref = policy_ref or policy_registry.active_ref()
     sources = list(sources or [])
     # Projected through _frozen so writer and verifier cannot disagree
     # about which fields the hash covers.

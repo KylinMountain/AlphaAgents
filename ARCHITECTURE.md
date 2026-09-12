@@ -14,7 +14,7 @@ data → sources → tools → evolution → pipeline → agents → server
 | Layer | Owns | Does not |
 |---|---|---|
 | `data/` | SQLite schemas and access, scoring, decision context, the trader book (orders, exits, theses, decision snapshots), attribution | Call the network |
-| `sources/` | 13 news feeds, each normalising to one shape | Decide anything |
+| `sources/` | 13 news feeds (`NEWS_SOURCES` in `pipeline/monitor.py`), each normalising to one shape | Decide anything |
 | `tools/` | Market queries the agents can call — quotes, fund flow, breadth, exit signals | Hold state |
 | `evolution/` | Memory utility, principles, playbooks, the holdout gate | Talk to an LLM to decide |
 | `pipeline/` | The scheduler and its tasks; the news ingest loop | Contain strategy rules |
@@ -68,11 +68,18 @@ review (T+5)
         └─ brier     = (prob − outcome)²
         ▼
   principle_scoring   principles inherit the scores of what they cited
-  holdout_gate        candidates promoted only if forward validation holds
+  holdout_gate        exists and is tested, but is NOT called: the daily gate
+                      ran with a zero-length validation window and abstained
+                      every time, so Phase 1 disconnected it rather than leave
+                      a gate that could never fire. Reconnecting it needs a
+                      candidate-bound forward protocol (Phase 4).
 ```
 
 Nothing in that chain asks a model whether it did well. See
 `docs/GOLDEN_PRINCIPLES.md`.
+
+Promotion is the one link with no writer today. Phase 4 of
+`docs/TRADER_CORE_DESIGN.md` §14 is what supplies it.
 
 ## The trader book
 

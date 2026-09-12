@@ -20,8 +20,11 @@ the errors stay correlated. Only verification grounded in something
 outside the model breaks the loop.
 
 **Enforced by.** `lint_harness.py` flags any call that feeds an LLM
-response into a status/weight/score write. `principle_scoring.py` and
-`scoring.py` are the only sanctioned graders.
+response into a status/weight/score write, inside `evolution/` — the layer
+where memory utility is decided. Two modules are exempt there:
+`evolution/principle_scoring.py` and `evolution/holdout_gate.py`, because both
+grade from market data rather than from a model. `data/scoring.py` computes the
+scores themselves (excess, residual, Brier) and sits outside that check's scope.
 
 **Corollary.** Where a model must assess something, it states its own
 answer first, then compares. See `evolution/two_stage_judge.py`.

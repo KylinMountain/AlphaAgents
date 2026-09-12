@@ -3,6 +3,19 @@
 > 写给外部评审者。文档日期 **2026-09-11**。所有数字来自当天的真实数据库查询，
 > 不是设计意图，也不是估算。有多少写多少，包括难看的部分。
 
+> **2026-09-12 状态：这是一份时间点快照，不是活文档。** 读它之前先分清两类内容：
+>
+> - **§7「当前真实状态」已过期。** 它是 2026-09-11 的查询结果，而 Phase 1–3
+>   （见 [`TRADER_CORE_DESIGN.md`](TRADER_CORE_DESIGN.md) §14）在那之后交付，
+>   新增了 `position_exits` / `intents` / `decision_snapshots` / `reservations` /
+>   `settlement_lots` / `episodes` / `outcomes` / `learning_candidates` 等表。
+>   现在是什么状态，读 [`TRADER_CORE_IMPLEMENTATION.md`](TRADER_CORE_IMPLEMENTATION.md)。
+> - **§6 的实测负面结果、§8.1–8.3 的缺陷形态、§8.8 的样本期缺陷仍然成立** ——
+>   它们是研究结论，不随代码变动而失效。
+> - **§8.5「校准曲线还是空的」仍然成立。** 2026-09-12 复查：`predictions` 202 行，
+>   `brier` 全为 NULL。卡点依然是样本量，不是代码。
+> - 本文在文档体系里的位置见 [`README.md`](README.md) 的 Research inputs 一节。
+
 ---
 
 ## 0. 我们想要评审什么

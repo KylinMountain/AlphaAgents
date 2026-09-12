@@ -6,11 +6,19 @@ crowds out the code you came to change.
 
 ## What this is
 
-A-share analysis run as scheduled tasks: overnight scan → intraday
-attribution → post-market review → weekly. Recommendations are
-probabilistic and graded against market data, not against opinion.
+A simulated A-share trader: it trades, and it learns from its own results.
 
-Start with `ARCHITECTURE.md` for the domain map and layering.
+The delivery order is **trustworthy trading facts → attributable learning →
+verifiable evolution**, and it is not reorderable — a system that learns from
+results it cannot account for learns its own bugs. More reports, or more
+agents, cannot substitute for that order.
+
+The scheduled tasks are the trader's day, not the point of the system. Its
+recommendations are graded against market data, never against a model's
+opinion of itself.
+
+Start with `docs/README.md` for which document is authoritative for what, and
+`ARCHITECTURE.md` for the domain map and layering.
 
 ## Non-negotiable invariants
 
@@ -34,10 +42,12 @@ one fails the build; the error message tells you how to fix it.
 
 | Question | File |
 |---|---|
+| **Which document is authoritative for what?** | `docs/README.md` |
 | How is the code laid out? | `ARCHITECTURE.md` |
 | What rules keep it coherent? | `docs/GOLDEN_PRINCIPLES.md` |
 | What is the strategy, and does it work? | `docs/strategy_evaluation_2026-09.md` |
 | What is being built next, and why? | `docs/self_improvement_roadmap.md` |
+| **What phase are we in, and what does each phase mean?** | `docs/TRADER_CORE_DESIGN.md` §14 |
 | What is the trader core, and what of it exists? | `docs/TRADER_CORE_DESIGN.md` (target) · `docs/TRADER_CORE_IMPLEMENTATION.md` (built) |
 | What is in flight? | `docs/exec-plans/active/` |
 | What was decided and shipped? | `docs/exec-plans/completed/` |

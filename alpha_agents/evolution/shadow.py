@@ -249,6 +249,24 @@ def open_run_for(policy_version_id: int,
     return dict(row) if row else None
 
 
+def latest_run_for(policy_version_id: int,
+                   report_type: str = "morning") -> dict | None:
+    """The most recent run for a version, open or closed.
+
+    A closed run is still the challenger's record. Closing means "stop
+    forecasting", not "unmeasure what was forecast": a version promoted on the
+    strength of a run must still be evaluable afterwards, or the evidence a
+    promotion cited becomes unreadable the moment it is acted on.
+    """
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    row = conn.execute(
+        "SELECT * FROM shadow_runs WHERE policy_version_id = ? "
+        "AND report_type = ? ORDER BY id DESC LIMIT 1",
+        (policy_version_id, report_type)).fetchone()
+    return dict(row) if row else None
+
+
 # ── The producer ───────────────────────────────────────────────────────
 
 
@@ -407,16 +425,32 @@ def paired_count(run_id: int) -> int:
     share no date and code with the champion has an n of zero — and reporting
     the raw forecast count instead would make an experiment look far closer to
     a verdict than it is.
+
+    Counted with the *same* filters the gate compares under — the run's own
+    ``report_type`` and the forward window after the policy freeze. A progress
+    meter that counts a wider set than the verdict will is worse than no meter:
+    it reaches ``needed`` and then the verdict comes back ``insufficient``, and
+    the operator is left guessing which of the two numbers lied.
     """
+    run = get_run(run_id)
+    if run is None:
+        return 0
+    frozen_at = ""
+    version = policy_registry.get_version(run["policy_version_id"])
+    if version is not None:
+        frozen_at = str(version["frozen_at"])[:10]
+
     conn = memory_store._get_conn()
     init_schema(conn)
     row = conn.execute(
         "SELECT COUNT(*) n FROM shadow_predictions s "
         "WHERE s.run_id = ? AND s.scored_at IS NOT NULL AND s.brier IS NOT NULL "
+        "AND s.date > ? "
         "AND EXISTS (SELECT 1 FROM predictions p WHERE p.date = s.date "
-        "  AND p.code = s.code AND p.scored_at IS NOT NULL "
+        "  AND p.code = s.code AND p.report_type = ? "
+        "  AND p.scored_at IS NOT NULL "
         "  AND p.brier IS NOT NULL)",
-        (run_id,)).fetchone()
+        (run_id, frozen_at, run["report_type"])).fetchone()
     return int(row["n"])
 
 

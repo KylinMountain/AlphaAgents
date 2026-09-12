@@ -124,6 +124,21 @@ def _rows(conn, table):
     return [dict(row) for row in conn.execute(f'SELECT * FROM {table} ORDER BY id')]
 
 
+def _claim_fields(**over):
+    """The four proposal fields design §10 requires of every candidate.
+
+    Kept in one place so a test that is about envelope validation, not
+    about the proposal, can spread it into its kwargs and stay about the
+    envelope.
+    """
+    base = dict(claim='Synthetic claim about a recurring pattern',
+                applicable_context='synthetic test context',
+                proposed_behavior_delta={'create_principle': 'Synthetic'},
+                evidence_episode_ids={'supporting': [], 'opposing': []})
+    base.update(over)
+    return base
+
+
 def _knowledge(conn):
     return {table: _rows(conn, table) for table in ('trading_principles', 'playbooks')}
 
@@ -201,7 +216,7 @@ def test_consolidation_direct_call_quarantines_create_and_reinforce(scratch_stor
     assert _knowledge(conn) == before
     candidates = _rows(conn, 'learning_candidates')
     assert [row['operation'] for row in candidates] == ['create', 'reinforce']
-    assert all(row['status'] == 'candidate' for row in candidates)
+    assert all(row['status'] == 'observation' for row in candidates)
     assert [json.loads(row['payload_json'])['proposal'] for row in candidates] == operations
     assert json.loads(candidates[0]['payload_json'])['lessons'][0]['content'] == 'Synthetic observation'
     assert candidates[1]['target_id'] == pid
@@ -344,12 +359,13 @@ def test_store_initializes_itself_and_persists_across_reopen(scratch_store, toda
     store.init_schema(conn)
     store.init_schema(conn)
     kwargs = dict(entity_type='principle', operation='create', source='test',
-                  source_date=today, payload={'proposal': {'principle': 'Synthetic'}})
+                  source_date=today, payload={'proposal': {'principle': 'Synthetic'}},
+                  **_claim_fields())
     cid = store.save_candidate(**kwargs)
     assert store.save_candidate(**kwargs) == cid
     with sqlite3.connect(ms.MEMORY_DB_PATH) as reader:
         row = reader.execute('SELECT status, payload_json FROM learning_candidates').fetchone()
-    assert row[0] == 'candidate'
+    assert row[0] == 'observation'
     assert json.loads(row[1]) == kwargs['payload']
     assert not _rows(conn, 'trading_principles')
 
@@ -368,7 +384,8 @@ def test_candidate_storage_failure_is_visible_and_never_falls_back(scratch_store
     before = _knowledge(conn)
     with pytest.raises(sqlite3.IntegrityError, match='synthetic write failure'):
         store.save_candidate(entity_type='playbook', operation='create', source='test',
-                             source_date=today, payload={'name': 'Synthetic'})
+                             source_date=today, payload={'name': 'Synthetic'},
+                             **_claim_fields())
     counts = lessons.consolidate_principles(today)
     assert counts['failed'] == 2
     assert counts['candidates'] == 0
@@ -443,7 +460,8 @@ def test_store_canonical_retry_concurrency_and_changed_evidence(scratch_store, t
     from alpha_agents.data import learning_candidates as store
 
     _, conn = scratch_store
-    kwargs = dict(entity_type='principle', operation='create', source='test', source_date=today)
+    kwargs = dict(entity_type='principle', operation='create', source='test',
+                  source_date=today, **_claim_fields())
     first_payload = {'proposal': {'principle': 'Synthetic', 'category': 'entry'}, 'cases': [1]}
     reordered = {'cases': [1], 'proposal': {'category': 'entry', 'principle': 'Synthetic'}}
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -457,7 +475,7 @@ def test_store_canonical_retry_concurrency_and_changed_evidence(scratch_store, t
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE learning_candidates SET status = 'active' WHERE id = ?", (ids[0],))
     conn.rollback()
-    assert all(row['status'] == 'candidate' for row in _rows(conn, 'learning_candidates'))
+    assert all(row['status'] == 'observation' for row in _rows(conn, 'learning_candidates'))
 
 
 @pytest.mark.parametrize('changes', [
@@ -472,7 +490,8 @@ def test_store_rejects_invalid_candidate_envelopes(scratch_store, today, changes
 
     _, conn = scratch_store
     kwargs = dict(entity_type='principle', operation='create', source='test',
-                  source_date=today, payload={'proposal': 'Synthetic'})
+                  source_date=today, payload={'proposal': 'Synthetic'},
+                  **_claim_fields())
     with pytest.raises(ValueError):
         store.save_candidate(**{**kwargs, **changes})
     assert not _rows(conn, 'trading_principles')

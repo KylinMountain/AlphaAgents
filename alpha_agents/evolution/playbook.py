@@ -201,6 +201,18 @@ def update_playbook_stats(today: str) -> list[str]:
                 entity_type="playbook", operation="update", target_id=pid,
                 source="update_playbook_stats", source_date=today,
                 payload={"proposal": proposal, "playbook": pb, "recent": recent},
+                claim=(f"Playbook #{pid} ({pb['name']}) should move to "
+                       f"{proposal['status']}: {proposal['reason']}"),
+                applicable_context=(f"playbook #{pid} ({pb['name']}) sits at "
+                                    f"{status} after {total} trades "
+                                    f"(hit_rate={hr:.2f})"),
+                proposed_behavior_delta={"status": proposal["status"],
+                                         "weight": proposal["weight"]},
+                # Playbook statistics are counts of finished trades, not
+                # decisions, so there is no episode to cite. Stated as an
+                # empty pair rather than omitted: the candidate is not
+                # evidence-linked, and that is worth being able to see.
+                evidence_episode_ids={"supporting": [], "opposing": []},
             )
             ops.append(f"{pb['name']}: candidate #{candidate_id} "
                        f"({proposal['reason']}; not applied)")
@@ -318,6 +330,14 @@ def enforce_capacity(today: str) -> list[int]:
             payload={"playbook": pb, "capacity": MAX_ACTIVE_PLAYBOOKS,
                      "active_count": len(active), "utility": _playbook_utility(pb),
                      "proposal": {"status": "deprecated", "weight": 0.0}},
+            claim=(f"Playbook #{pb['id']} ({pb['name']}) is the weakest of "
+                   f"{len(active)} active playbooks (utility "
+                   f"{_playbook_utility(pb):.3f}) and should be retired to "
+                   f"hold the cap at {MAX_ACTIVE_PLAYBOOKS}"),
+            applicable_context=(f"{len(active)} active playbooks exceeds "
+                                f"MAX_ACTIVE_PLAYBOOKS={MAX_ACTIVE_PLAYBOOKS}"),
+            proposed_behavior_delta={"status": "deprecated", "weight": 0.0},
+            evidence_episode_ids={"supporting": [], "opposing": []},
         )
         candidates.append(candidate_id)
         logger.info("Quarantined capacity candidate #%d for playbook #%d (utility=%.3f)",
@@ -355,6 +375,16 @@ def scan_and_auto_create(today: str) -> list[int]:
             source_date=today,
             payload={"name": name, "pattern_json": pattern, "cluster": cluster,
                      "lookback_days": _AUTO_CREATE_LOOKBACK_DAYS},
+            claim=(f"Cluster {name!r} recurs {cluster['hits']}/{cluster['total']} "
+                   f"times over {_AUTO_CREATE_LOOKBACK_DAYS} days and no "
+                   f"existing playbook covers its pattern"),
+            applicable_context=json.dumps(pattern, ensure_ascii=False,
+                                          sort_keys=True),
+            proposed_behavior_delta={"create_playbook": name,
+                                     "pattern_json": pattern},
+            # Cluster statistics are aggregate counts over a lookback
+            # window; they name no single decision to cite.
+            evidence_episode_ids={"supporting": [], "opposing": []},
         )
         existing_sigs.add(sig)
         candidates.append(candidate_id)

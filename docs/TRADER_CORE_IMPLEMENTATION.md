@@ -1,6 +1,6 @@
 # Trader Core Implementation: Phase 1–3 实际状态
 
-- 记录日期：2026-09-12（第六轮补记 Phase 3 的 T2）。
+- 记录日期：2026-09-12（第七轮补记 Phase 3 的 T3）。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
   [Phase 3 计划](exec-plans/active/2026-09-12-trader-core-phase3.md)、
@@ -8,7 +8,7 @@
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
 - 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付。
-  **Phase 3 尚在进行中**：T1、T2 已交付，T3–T4 未开始，未实现项一律留在第 7 节。
+  **Phase 3 尚在进行中**：T1–T3 已交付，T4 未开始，未实现项一律留在第 7 节。
 
 ## 1. 现金反映累计结果
 
@@ -101,9 +101,16 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 
 **后续阶段**
 
-- **候选证据的结构化与生命周期**（Phase 3 的 T3，**未开始**）。`learning_candidates` 仍缺
-  `claim` / `applicable_context` / `proposed_behavior_delta` / `evidence_episode_ids` 四列，
-  状态列仍被 `CHECK(status = 'candidate')` 钉死成单值。
+- **候选证据的结构化与生命周期**（Phase 3 的 T3）**已交付**：四列与五态生命周期都已存在
+  （交付明细见 §11 与第九节第七轮）。它剩下两个边界：
+  - **`evidence_episode_ids` 在生产里恒为空。** 五个生产调用点全部传
+    `{"supporting": [], "opposing": []}` —— 它们拿到的是散文式教训与聚合计数，
+    **没有一个能指名 T1 的决策行**。字段是必填的、结构化的、可枚举的，但
+    `candidates_citing` 目前**只有测试在走**：这条链是**有能力**，不是**有数据**。
+  - **生命周期没有业务驱动方。** `advance_candidate` 是 `status` 的唯一写者，且按 §10
+    **刻意**不被任何管线调用，于是 `hypothesis` / `testing` / `validated` / `retired`
+    在生产数据里不会自然出现，只能由人或脚本显式推进。它可达、有测试钉住，
+    但**不是被业务驱动的** —— 这是「验证不等于授权」的代价，不是遗漏。
 - **已批准知识快照**（Phase 3 的 T4，**未开始**）。无 `knowledge_snapshots`，
   于是「保留」与「生效」之间仍没有可审计的关口。
 - **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。
@@ -131,13 +138,21 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   `portfolio_exit._close_position_impl` 的返回契约是 `bool`（S5 定下、有测试钉住），
   加宽它不属于 T1。要从事件找回当次腿，只能按 `position_id` + 日期在 `position_exits` 里查 ——
   同一天减两次仓就无法区分。**这是已知缺口，不是设计**；补法是让 `_close_position_impl` 返回 `exit_id`。
-- **`episodes` / `outcomes` 的生产读者还很薄**。`episodes` 有一个只读入口
+- **`episodes` / `outcomes` / `learning_candidates` 的生产读者还很薄**。`episodes` 有一个只读入口
   （`scripts/episode_coverage.py`，读 `episodes.coverage` / `open_episodes`）与
   `episodes.get_episode` / `events_for`；它**不进 prompt、不进检索、不进决策上下文** ——
   这是刻意的（§10 说验证不等于授权）。T2 给了 `outcomes` 一个真实的写者
   （`pipeline/tasks/review.py` 的 `_label_outcomes`）与一个只读入口
   （同一个运维脚本，读 `outcomes.counts` / `pending_labels` / `integrity`），
   但**标签同样不进任何决策上下文**，也没有任何按 label 过滤/加权的读路径。
+  T3 把同一脚本再扩一段读候选区（`counts` / `integrity` / `candidates_by_status` /
+  `transitions_for` / `candidates_citing`）。于是四个提案列的读侧**有入口、无消费者**：
+  没有任何 prompt、检索或决策路径读它。
+- **`scripts/episode_coverage.py` 不再自称「纯只读」**（第七轮更正）。`learning_candidates`
+  的读函数每次进入都 `init_schema`，所以**对 T3 之前的库跑该脚本会触发一次表重建迁移**
+  （`ALTER TABLE` 加四列 + 重建表以放开 `CHECK`）。迁移幂等且保行
+  （`test_migrating_twice_is_a_no_op` 钉住），但「报告脚本会改 schema」这件事必须写下来，
+  否则它本身就是一句「承诺超过代码」。
 - **`outcomes` 的标签不与 `predictions.hit` 对账**。T2 新增的三条标签链是**增量**的：
   `predictions.hit` / `scored_at` 仍是原路径，写标签时**不校验两者一致**。
   两套记录目前可以互相矛盾而无人发现 —— 合并它们属于后续阶段。
@@ -184,6 +199,13 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 | 程序违规可以因为这笔赚了而被放过 | `assert_no_pnl_in_process` 拒绝 process 标签携带 `return_pct` / `pnl` / `profit` / `win` 等任一字段，抛错不 warning |
 | 预测的评估窗口是一刀切的默认天数 | `predictions.horizon_days` / `deadline` 由写预测时**声明**；未声明的历史行在标签 evidence 里标 `legacy_horizon`，**不回填**一个它没做过的声明 |
 | 撤单且从未成交的挂单会被当成一笔「打平的交易」 | `sweep_trade_labels` 直接跳过（无 exit 腿即无标签）；这次决策的痕迹留在 episode 里 |
+| 候选知识只有一段 `payload_json`，没有可证伪的陈述 | 四列必填：`claim` / `applicable_context` / `proposed_behavior_delta` / `evidence_episode_ids`；supporting 与 opposing 两个桶都必须显式给出，空也要写出来 |
+| 候选状态被 `CHECK(status = 'candidate')` 钉死成单值 | 五态 `observation → hypothesis → testing → validated → retired`；`retired` 可从任一状态到达且不可回退，非法迁移抛 `IllegalCandidateTransition` 且不落任何行 |
+| 「这条候选被谁在何时因为什么推进过」无处可查 | `candidate_transitions` 记 `actor` / `reason` / `at`，装 `RAISE(ABORT)` 触发器，append-only |
+| 「某条候选引用了哪些经验」只能翻 JSON | `evidence_episode_ids` 结构化（两桶），`candidates_citing(episode_id)` 可反查并给出 `cited_as` |
+| 候选是否「已生效」只能靠约定 | `validated` **不激活任何东西** —— 没有快照、没有生效路径，`advance_candidate` 不被任何管线调用 |
+| T3 之前写入的候选没有提案字段 | 迁移**不回填**：旧行四列为 NULL，由 `integrity()` 报「predates the proposal fields and was never enriched」 |
+| 运维报告脚本不碰 schema | `scripts/episode_coverage.py` 读候选区时会触发该模块的 schema 初始化 / 迁移（幂等、保行，见 §7） |
 
 ## 9. 验证记录
 
@@ -372,10 +394,71 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 
 **一处操作风险（非代码缺陷，但值得记下）**：`alpha_agents.config.MEMORY_DB_PATH` 是**固定路径**，
 不读 `TMPDIR`，测试靠 `conftest.py` 的 monkeypatch 才重定向。因此**临时脚本 / 冒烟脚本
-默认会写进开发者本地的 `data/memory.db`**。T1 的 `scripts/episode_coverage.py` 是纯只读的所以没事；
+默认会写进开发者本地的 `data/memory.db`**。T1 的 `scripts/episode_coverage.py` 当时是纯只读的所以没事
+（**第七轮起不再如此**：该脚本会读 `learning_candidates`，而那个模块的读函数会 `init_schema`，
+对 T3 之前的库等于一次迁移 —— 见 §7）；
 本轮一次冒烟写入误加了 2 行 `predictions` + 1 行 `theses` + 50 行 `outcomes`，
 已按时间戳逐行核对后清除、并验证 append-only 触发器复原。
 **写临时脚本时先把 `memory_store.MEMORY_DB_PATH` 指到临时目录**（README 无此提示，故记在这里）。
+
+### 第七轮（Phase 3 的 T3：候选知识的提案与生命周期）
+
+2026-09-12：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | 1500 passed, 18 skipped |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（149 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_learning_lifecycle.py`（59 个用例），分六组：提案必填、生命周期、
+每次迁移记名、旧表单值状态的迁移、指纹仍只认证据、读侧。
+
+**计划里写下的验收条目，逐条对照**：
+
+- 四个新列有值，且**在写入口就是必填** → `TestACandidateMustStateItsProposal`：
+  `save_candidate` 缺任一关键字参数直接 `TypeError`，空串 / 非字符串 `ValueError`，
+  两个证据桶缺一即拒（「我们找过、没找到」必须写出来，不能靠省略表达）。
+- 状态迁移走状态机 → `TestTheCandidateLifecycle`：一次只能走一步、跳步与回退被拒、
+  `retired` 可从任一状态到达且无出口、未知状态按名报错。
+- 每次迁移记 actor / time / reason 且**不可编辑** → `TestEveryMoveNamesItsActor`，
+  含对 `candidate_transitions` 直接 UPDATE / DELETE 被触发器拒绝。
+- 旧表迁移保住既有行 → `TestTheOldTableMigrates`：`candidate` → `observation`、
+  `fingerprint` 与 `created_at` 保留、迁移两次是 no-op、四列**不被回填**、
+  旧 `CHECK` 仍然拒绝生命周期之外的字符串。
+- `fingerprint UNIQUE` 语义不变 → `TestTheFingerprintIsStillAboutEvidence`：
+  改写 claim 不产生新候选，证据变了才是新候选，已写下的 claim 不被覆盖。
+- `validated` 不生效 → `test_validated_is_not_activation`。
+- 读侧 → `TestTheReadSide`：`counts` 含零值、按状态过滤、按 episode 反查 `cited_as`、
+  引用不存在的 episode 被 `integrity` 报出、健康的候选区 `integrity` 静默。
+
+**本轮的四个变异探针**（先证明测试会红，再复原；探针脚本先记基线哈希，复原后再哈希校验）：
+
+| 探针 | 结果 |
+|---|---|
+| 状态机不再拒绝非法迁移（`if target not in allowed` → `if False`） | 7 failed / 52 passed |
+| 写入口不再要求陈述（`_statement` 去掉校验直接返回） | 10 failed / 49 passed |
+| `candidate_transitions` 的 append-only 触发器失效（`init_schema` 不再装守卫） | 1 failed / 58 passed |
+| `integrity` 不再检查引用的 episode 是否存在 | 1 failed / 58 passed |
+
+**本轮查出并修掉的一个真缺陷 —— 在测试自己身上**：
+`test_a_legacy_row_is_enriched_once_and_then_left_alone` 断言 `integrity() == []`，
+但它用的 `_save()` 默认 `evidence_episode_ids={"supporting": [1], "opposing": [2]}`
+引用了两个不存在的 episode，于是新的完整性检查如实报出两条。**是 fixture 自相矛盾，
+不是校验有错** —— 断言的方向对，前提是错的，属于「测试写成了恒假的形状」的近亲。
+已改为显式传空引用，并保留 `integrity()` 本身不动。
+
+**两处「承诺超过代码」，已在 §7 如实标注**：
+
+1. `evidence_episode_ids` 在**生产里恒为空** —— 五个生产调用点全部传两个空桶。
+   四列是必填的、可枚举的，但「候选引用经验」这条链**只有测试在走**。
+2. 生命周期**没有业务驱动方** —— `advance_candidate` 按 §10 刻意不被任何管线调用，
+   后四个状态在生产数据里不会自然出现。
+
+**一处口径更正**：`scripts/episode_coverage.py` 自称「writes nothing」，但读候选区会触发
+`learning_candidates.init_schema`，对 T3 之前的库等于一次表重建迁移。脚本 docstring、§7、
+§8 均已更正。本次的冒烟验证是**先把 `memory_store.MEMORY_DB_PATH` 指向临时目录**再跑的
+（沿用第六轮记下的那条操作风险），未触碰开发者本地 `data/memory.db`。
 
 ## 10. Phase 2 逐项交付（S1–S6）
 
@@ -415,7 +498,7 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 |---|---|---|
 | T1 episode 关联 | ✅ 已交付（第五轮） | `episodes` / `episode_events` 两表 + `alpha_agents/data/episodes.py`；门在 `intent.submit_intent`，成交/撤单两个钩子在 `portfolio`；只读入口 `scripts/episode_coverage.py` |
 | T2 三种结果的生命周期 | ✅ 已交付（第六轮） | `outcomes` 状态机 + `alpha_agents/data/outcomes.py` 写读；三个标签生产者在 `evolution/outcome_labels.py`；写入者在 `pipeline/tasks/review.py::_label_outcomes`；`predictions.horizon_days` / `deadline` 两列 |
-| T3 候选证据与生命周期 | ⬜ 未开始 | 四列与状态迁移均未做 |
+| T3 候选证据与生命周期 | ✅ 已交付（第七轮） | `learning_candidates` 四列 + 五态生命周期 + `candidate_transitions`（append-only）；写入口 `save_candidate`（四字段必填）/ `advance_candidate`（`status` 唯一写者），读侧 `counts` / `candidates_by_status` / `transitions_for` / `candidates_citing` / `integrity`；只读入口仍为 `scripts/episode_coverage.py`（扩了候选段） |
 | T4 已批准知识快照 | ⬜ 未开始 | `knowledge_snapshots` 未建 |
 
 ### T1 的边界，逐条说清

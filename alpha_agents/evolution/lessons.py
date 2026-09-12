@@ -194,10 +194,30 @@ def consolidate_principles(today: str) -> dict:
             target_id = op.get("principle_id") if kind == "reinforce" else None
             if kind == "reinforce" and (type(target_id) is not int or target_id <= 0):
                 raise ValueError("Reinforcement requires a positive integer principle_id")
+            # A proposal has to restate itself as a claim about the world
+            # before it is worth storing. If the model did not name what it
+            # is proposing, the operation is a failure rather than a
+            # candidate with a blank claim.
+            if kind == "create":
+                claim = op.get("principle") or op.get("pattern_description")
+                context = op.get("pattern_description")
+                delta = {"create_principle": op.get("principle"),
+                         "action_guidance": op.get("action_guidance"),
+                         "category": op.get("category")}
+            else:
+                claim = (f"Principle #{target_id} gains a further case: "
+                         f"{json.dumps(op.get('new_case'), ensure_ascii=False, sort_keys=True)}")
+                context = f"existing principle #{target_id} under consolidation"
+                delta = {"reinforce_principle": target_id}
             candidate_id = save_candidate(
                 entity_type="principle", operation=kind, target_id=target_id,
                 source="consolidate_principles", source_date=today,
                 payload={"proposal": op, "lessons": lessons},
+                claim=claim, applicable_context=context,
+                proposed_behavior_delta=delta,
+                # Today's lessons are prose, not T1 episodes: nothing here
+                # can name a decision. Recorded empty, not omitted.
+                evidence_episode_ids={"supporting": [], "opposing": []},
             )
             counts["candidates"] += 1
             logger.info("Quarantined principle %s candidate #%d", kind, candidate_id)
@@ -258,12 +278,22 @@ def _collect_playbook_candidates(today: str) -> dict:
                           if cluster.get(key)]
             if cluster.get("institutional_present"):
                 name_parts.append("institutional")
+            name = "Auto: " + "-".join(name_parts)
             candidate_id = save_candidate(
                 entity_type="playbook", operation="create",
                 source="post_review", source_date=today,
-                payload={"name": "Auto: " + "-".join(name_parts),
+                payload={"name": name,
                          "pattern_json": pattern, "cluster": cluster,
                          "lookback_days": _AUTO_CREATE_LOOKBACK_DAYS},
+                claim=(f"Pattern {name!r} recurs {cluster['hits']}/"
+                       f"{cluster['total']} times over "
+                       f"{_AUTO_CREATE_LOOKBACK_DAYS} days and no existing "
+                       f"playbook covers it"),
+                applicable_context=json.dumps(pattern, ensure_ascii=False,
+                                              sort_keys=True),
+                proposed_behavior_delta={"create_playbook": name,
+                                         "pattern_json": pattern},
+                evidence_episode_ids={"supporting": [], "opposing": []},
             )
             existing_sigs.add(sig)
             counts["candidates"] += 1

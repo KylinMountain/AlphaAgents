@@ -34,7 +34,7 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
 |---|---|
 | T1 episode 关联 | ✅ 已交付 2026-09-12（`tests/test_episodes.py`，28 用例；四个变异探针全红） |
 | T2 三种结果的生命周期 | ✅ 已交付 2026-09-12（`tests/test_outcomes.py`，40 用例；六个变异探针全红） |
-| T3 候选证据结构化与生命周期 | ⬜ 未开始 |
+| T3 候选证据结构化与生命周期 | ✅ 已交付 2026-09-12（`tests/test_learning_lifecycle.py`，59 用例；四个变异探针全红） |
 | T4 已批准知识快照 | ⬜ 未开始 |
 
 ### T1 episode 关联（学习单元）✅
@@ -128,6 +128,36 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了（下单即冻结�
 - 状态迁移走状态机 + `assert_transition`（沿用 Phase 2 §S1 的姿态），
   每次迁移记录 actor / time / reason。
 - 保留原有的「同一证据指纹只存一份」语义（`fingerprint UNIQUE`）。
+
+**实际结果（2026-09-12）**
+
+- `learning_candidates` 补上四列，并把状态从单值 `candidate` 放开为五态
+  `observation → hypothesis → testing → validated → retired`。SQLite 不能 `ALTER` 一个 `CHECK`，
+  所以迁移是**重建表**（建新表 → 复制 → 删旧 → 改名），保住 `id` / `fingerprint` / `created_at`
+  与全部旧列；旧值 `candidate` 映射为 `observation`。
+- 新表 `candidate_transitions`：`(candidate_id, from_status, to_status, actor, reason, at)`，
+  装 `BEFORE UPDATE` / `BEFORE DELETE` 触发器 `RAISE(ABORT)`。
+- 写入口：`save_candidate`（四字段**必填**，签名因此变宽）、`advance_candidate`
+  （`learning_candidates.status` 的唯一写者）。读侧：`counts` / `candidates_by_status` /
+  `transitions_for` / `candidates_citing` / `integrity`。
+- 五个生产调用点补齐四字段：`lessons.consolidate_principles`、
+  `lessons._collect_playbook_candidates`、`playbook.update_playbook_stats`、
+  `playbook.enforce_capacity`、`playbook.scan_and_auto_create`。
+- 只读入口：`scripts/episode_coverage.py` 扩了候选段
+  （`counts` / `integrity`，加 `--candidates` / `--status` / `--history` / `--cites`）。
+- **与计划的偏差（两处，均已写进实现文档 §7）**：
+  1. **`evidence_episode_ids` 在生产里恒为空。** 五个生产调用点全部传
+     `{"supporting": [], "opposing": []}` —— 它们拿到的是散文式教训与聚合计数，
+     **没有任何一个能指名 T1 的决策行**。字段必填且结构化，但「候选引用经验」这条链
+     目前**只有测试在走**：计划写的是「指向 T1 的 episode」，实际是「有能力指向，但无人指向」。
+  2. **生命周期没有业务驱动方。** `advance_candidate` 按 §10 刻意不被任何管线调用，
+     于是 `hypothesis` / `testing` / `validated` / `retired` 在生产数据里不会自然出现。
+     生命周期是**可达且被测试钉住**的，不是**被业务驱动**的。计划只要求「迁移走状态机」，
+     未要求驱动方，故不算违约 —— 但「有状态机、无推进者」值得记下来。
+- **一处口径更正**：`scripts/episode_coverage.py` 自称「writes nothing」，但
+  `learning_candidates` 的读函数每次进入都 `init_schema`，所以**对 T3 之前的库跑该脚本会触发
+  一次表重建迁移**（幂等、保行，已由 `test_migrating_twice_is_a_no_op` 钉住）。
+  已在脚本 docstring 与实现文档 §7 如实标注，不再称它「纯只读」。
 
 ### T4 已批准知识快照
 

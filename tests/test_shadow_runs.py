@@ -29,7 +29,7 @@ The tests are in eight groups:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -417,19 +417,46 @@ class TestCoverage:
             self, store, version, monkeypatch):
         # The honest progress number: a challenger with many forecasts that
         # share no (date, code) with the champion has an n of zero.
+        #
+        # Dated after the version's freeze, because a pair before it is not
+        # forward evidence and counting it would let the meter reach ``needed``
+        # while the gate still abstains.
+        monkeypatch.setattr(scoring, "score_prediction", _fake_score())
+        day = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        later = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        _champion(store, day, "600000")
+        store.execute("UPDATE predictions SET scored_at = ?, brier = 0.3 "
+                      "WHERE date = ?", (later, day))
+        store.commit()
+        run = _open(version)
+        SH.emit_for_date(run, day, panel=["600000", "000001"],
+                         horizon_days=5)
+        SH.score_due(as_of=later)
+        row = SH.coverage(run)["runs"][0]
+        assert row["scored"] == 2          # both forecasts were graded
+        assert row["paired"] == 1          # only one has a champion counterpart
+        assert row["remaining"] == holdout_gate.MIN_VALIDATION_SAMPLES - 1
+
+    def test_paired_ignores_a_pair_from_before_the_freeze(
+            self, store, version, monkeypatch):
+        """The meter must count the same set the verdict will.
+
+        A pair that exists but predates the freeze can never be evidence for
+        this version, so it must not advance ``paired``. Counting it would
+        make ``remaining`` reach zero and then produce an ``insufficient``
+        verdict — the operator left guessing which of the two numbers lied.
+        """
         monkeypatch.setattr(scoring, "score_prediction", _fake_score())
         _champion(store, "2026-01-05", "600000")
         store.execute("UPDATE predictions SET scored_at = '2026-02-01', "
                       "brier = 0.3 WHERE date = '2026-01-05'")
         store.commit()
         run = _open(version)
-        SH.emit_for_date(run, "2026-01-05", panel=["600000", "000001"],
-                         horizon_days=5)
+        SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         SH.score_due(as_of="2026-06-01")
         row = SH.coverage(run)["runs"][0]
-        assert row["scored"] == 2          # both forecasts were graded
-        assert row["paired"] == 1          # only one has a champion counterpart
-        assert row["remaining"] == holdout_gate.MIN_VALIDATION_SAMPLES - 1
+        assert row["scored"] == 1
+        assert row["paired"] == 0
 
     def test_coverage_reports_every_run(self, store, version):
         first = _open(version)

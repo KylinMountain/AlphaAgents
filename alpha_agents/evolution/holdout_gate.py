@@ -23,11 +23,23 @@ The cost is that a new candidate has no validation data on the day it is
 created, so the gate abstains and the champion stands. That is the
 intended behaviour: a system with no track record should not promote.
 
+**Phase 4 / U3 makes the window underived-from-a-parameter.** The gate was
+called once as ``run_gate("daily_playbook", today, today)`` — a zero-length
+validation window, written by hand, which abstained every time and looked
+like governance for four days. The fix is not "remember to pass the right
+date": :func:`run_gate` now takes a *policy version* and derives the window
+from that version's own ``frozen_at``, and it **raises** when the window
+cannot contain forward evidence. A caller can no longer express the old
+bug, and an impossible window is an error rather than an abstention —
+"insufficient" for a window that could never have held anything is a
+verdict-shaped way of saying nothing happened.
+
 See docs/self_improvement_roadmap.md G2.
 """
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -40,23 +52,55 @@ MIN_VALIDATION_SAMPLES = 20
 # should not be blocked by rounding.
 BRIER_TOLERANCE = 0.005
 
+# The floor on how far back the champion's graded forecasts are read. The
+# comparison itself is over the forward window; this bound exists so the scan
+# does not grow with the database forever, and it is raised when a version is
+# old enough that the window would otherwise be truncated. See
+# :func:`_lookback_days`.
+GATE_LOOKBACK_DAYS = 180
 
-def split_train_validation(rows: list[dict],
-                           created_date: str,
-                           ) -> tuple[list[dict], list[dict]]:
-    """Split scored predictions around a candidate's creation date.
 
-    Validation is everything published *after* the candidate existed —
-    forward validation, not a proportional slice of history. The
-    proportional split is tempting and wrong here: a candidate is derived
-    from reflection on recent days, so the recent slice is exactly what it
-    was tuned on. Reflection cannot reach forward in time, which is what
-    makes this boundary leak-proof rather than merely tidy.
+class GateError(ValueError):
+    """A gate call that cannot produce evidence, or names nothing to compare.
+
+    Distinct from an abstention on purpose. An abstention is a *verdict*:
+    there was a real window and too little in it. This is raised when the
+    question itself is malformed — no such policy version, no shadow run, or
+    a window that ends before it starts.
     """
-    dated = [r for r in rows if r.get("date")]
-    train = [r for r in dated if r["date"] <= created_date]
-    validation = [r for r in dated if r["date"] > created_date]
-    return train, validation
+
+
+def forward_window(rows: list[dict], frozen_at: str) -> list[dict]:
+    """The rows strictly after a freeze — the only days that can be evidence.
+
+    The single definition of the boundary. §11's "validation is forward" is
+    enforced by routing every caller through this function rather than by
+    each of them comparing dates: a second comparison is a second chance to
+    get the direction or the strictness wrong, and the failure is silent —
+    the gate simply abstains.
+    """
+    cutoff = str(frozen_at)[:10]
+    return [r for r in rows if r.get("date") and str(r["date"])[:10] > cutoff]
+
+
+def _lookback_days(frozen_at: str, when: str) -> int:
+    """How far back to read the champion so the forward window is not truncated.
+
+    ``get_scored_predictions`` can only express its floor as "N days ago", and
+    ``forward_window`` then cuts to dates after the freeze. A fixed N would
+    silently drop the *oldest* days of a long-running version's forward window
+    — evidence that exists in the database and that the gate would report as
+    never having been collected. The bound is kept (an unbounded scan grows
+    with the database forever) but it is derived, not chosen.
+    """
+    try:
+        age = (datetime.strptime(when, "%Y-%m-%d")
+               - datetime.strptime(frozen_at, "%Y-%m-%d")).days
+    except ValueError:
+        # Unparseable dates are not this function's error to report; the
+        # window check in run_gate owns that. Read the bounded default.
+        return GATE_LOOKBACK_DAYS
+    return max(GATE_LOOKBACK_DAYS, age + 2)
 
 
 def paired_brier_test(champion: list[float], challenger: list[float]) -> dict:
@@ -86,20 +130,40 @@ def paired_brier_test(champion: list[float], challenger: list[float]) -> dict:
             "t_stat": round(mean_diff / se, 4) if se else None}
 
 
+def paired_keys(champion_scores: list[dict],
+                challenger_scores: list[dict]) -> set:
+    """The (date, code) pairs both sides scored — the comparison's denominator.
+
+    Declared once and used by both the verdict and the audit record, because
+    "how many pairs was this based on" answered two ways is worse than not
+    answered: the verdict would say ``insufficient`` while the recorded
+    denominator said something else.
+    """
+    champ = {(r.get("date"), r.get("code")) for r in champion_scores}
+    chall = {(r.get("date"), r.get("code")) for r in challenger_scores}
+    return champ & chall
+
+
 def evaluate_candidate(champion_scores: list[dict],
                        challenger_scores: list[dict]) -> dict:
     """Decide whether a challenger may be promoted.
 
     Both inputs are graded predictions keyed by (date, code), so the
     comparison is paired over the predictions both scored.
+
+    ``outcome`` names the verdict in one word — ``insufficient``, ``reject``
+    or ``promote`` — because the two booleans it summarises (``promote``,
+    ``abstained``) are easy to read backwards, and the audit row is the thing
+    a person actually reads months later.
     """
     champ_by_key = {(r.get("date"), r.get("code")): r for r in champion_scores}
     chall_by_key = {(r.get("date"), r.get("code")): r for r in challenger_scores}
-    shared = sorted(set(champ_by_key) & set(chall_by_key))
+    shared = sorted(paired_keys(champion_scores, challenger_scores))
 
     if len(shared) < MIN_VALIDATION_SAMPLES:
         return {
             "promote": False,
+            "outcome": "insufficient",
             "reason": (f"验证样本 {len(shared)} < {MIN_VALIDATION_SAMPLES}，"
                        "维持 champion"),
             "n": len(shared),
@@ -111,8 +175,8 @@ def evaluate_candidate(champion_scores: list[dict],
     test = paired_brier_test(champ, chall)
 
     if test["mean_diff"] is None:
-        return {"promote": False, "reason": "无可比样本", "n": test["n"],
-                "abstained": True}
+        return {"promote": False, "outcome": "insufficient",
+                "reason": "无可比样本", "n": test["n"], "abstained": True}
 
     degraded = test["mean_diff"] > BRIER_TOLERANCE
     promote = not degraded
@@ -123,8 +187,57 @@ def evaluate_candidate(champion_scores: list[dict],
         reason = (f"Brier {test['mean_diff']:+.4f} 不退化 "
                   f"(t={test['t_stat']}, n={test['n']}) — 通过")
 
-    return {"promote": promote, "reason": reason, "abstained": False,
-            **test}
+    return {"promote": promote,
+            "outcome": "promote" if promote else "reject",
+            "reason": reason, "abstained": False, **test}
+
+
+_GATE_TABLE = """
+CREATE TABLE IF NOT EXISTS gate_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    candidate TEXT NOT NULL,
+    policy_version_id INTEGER,
+    promoted INTEGER NOT NULL,
+    abstained INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT,
+    n INTEGER,
+    validation_days INTEGER,
+    mean_diff REAL,
+    t_stat REAL,
+    reason TEXT,
+    detail_json TEXT
+)
+"""
+
+# For databases created before these columns existed. ``validation_days`` in
+# particular: it used to live only inside ``detail_json``, which made
+# tech-debt D7's own "recognise it is fixed" criterion — "a gate_decisions row
+# whose validation_days is not 0" — uncheckable by SQL.
+#
+# ``policy_version_id`` is here so eligibility is keyed on the version rather
+# than on the ``candidate`` label. The label is prose; a promotion that joins
+# itself to its evidence by parsing prose gets an empty list the moment the
+# label changes, and an empty eligibility list reads as "not eligible" — the
+# safe-looking answer, and the same shape as the defect this phase fixes.
+_GATE_MIGRATIONS = (
+    "ALTER TABLE gate_decisions ADD COLUMN outcome TEXT",
+    "ALTER TABLE gate_decisions ADD COLUMN validation_days INTEGER",
+    "ALTER TABLE gate_decisions ADD COLUMN policy_version_id INTEGER",
+)
+
+
+def _ensure_gate_table(conn: sqlite3.Connection) -> None:
+    conn.execute(_GATE_TABLE)
+    for statement in _GATE_MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            # Only the re-run case is expected. A bare pass here would also
+            # swallow a locked database and leave the gate reading a column
+            # that does not exist.
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def record_gate_decision(candidate_name: str, decision: dict,
@@ -133,6 +246,16 @@ def record_gate_decision(candidate_name: str, decision: dict,
 
     A rejected candidate that leaves no trace will be proposed again next
     week and rejected again; the record is what makes that visible.
+
+    ``validation_days`` is the number of distinct days the paired comparison
+    actually rested on — not the length of the window. A window of thirty
+    days on which the two sides never graded the same stock on the same day
+    has zero days of evidence, and reporting the window length would make
+    that look like a month of it.
+
+    The version id is read from ``decision`` rather than passed alongside the
+    name, so the row cannot record a name that says one version and a column
+    that says another.
     """
     from alpha_agents.data.memory_store import _get_conn, _write_lock
 
@@ -140,32 +263,27 @@ def record_gate_decision(candidate_name: str, decision: dict,
     try:
         with _write_lock:
             conn = _get_conn()
+            _ensure_gate_table(conn)
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS gate_decisions ("
-                "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                "  date TEXT NOT NULL,"
-                "  candidate TEXT NOT NULL,"
-                "  promoted INTEGER NOT NULL,"
-                "  abstained INTEGER NOT NULL DEFAULT 0,"
-                "  n INTEGER,"
-                "  mean_diff REAL,"
-                "  t_stat REAL,"
-                "  reason TEXT,"
-                "  detail_json TEXT)"
-            )
-            conn.execute(
-                "INSERT INTO gate_decisions (date, candidate, promoted, "
-                "abstained, n, mean_diff, t_stat, reason, detail_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (today, candidate_name, 1 if decision.get("promote") else 0,
-                 1 if decision.get("abstained") else 0, decision.get("n"),
-                 decision.get("mean_diff"), decision.get("t_stat"),
-                 decision.get("reason", ""),
+                "INSERT INTO gate_decisions (date, candidate, "
+                "policy_version_id, promoted, abstained, outcome, n, "
+                "validation_days, mean_diff, t_stat, reason, detail_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (today, candidate_name, decision.get("policy_version_id"),
+                 1 if decision.get("promote") else 0,
+                 1 if decision.get("abstained") else 0,
+                 decision.get("outcome"), decision.get("n"),
+                 decision.get("validation_days"), decision.get("mean_diff"),
+                 decision.get("t_stat"), decision.get("reason", ""),
                  json.dumps(decision, ensure_ascii=False)),
             )
             conn.commit()
     except Exception as e:
-        logger.debug("Gate decision not recorded: %s", e)
+        # The review must not fail because the audit did. Logged at warning
+        # rather than debug: a verdict that leaves no record is the gap this
+        # table exists to close, and a silent one is indistinguishable from
+        # the gate never having run.
+        logger.warning("Gate decision not recorded: %s", e)
 
 
 def get_gate_history(days: int = 30) -> list[dict]:
@@ -184,31 +302,124 @@ def get_gate_history(days: int = 30) -> list[dict]:
         return []
 
 
-def run_gate(candidate_name: str, created_date: str,
+def run_gate(policy_version_id: int, *, report_type: str = "morning",
              today: str | None = None) -> dict:
-    """Score a shadow challenger against the champion on the held-out slice.
+    """Score a frozen version's challenger against the champion, and record it.
 
-    The challenger runs in shadow: its picks are recorded and scored but
-    never drive a decision until it passes here. Validation is the days
-    *after* ``created_date``, so it accumulates as the system runs and the
-    gate abstains until there is enough of it — which is the correct
-    behaviour for a system with no track record, and means a freshly
-    installed system holds its champion rather than promoting on noise.
+    **The window comes from the version, not from the caller.** There is no
+    ``created_date`` parameter to pass and no default that can produce an
+    empty window: the validation slice is the days strictly after the
+    version's own ``frozen_at``. The bug this replaces was
+    ``run_gate("daily_playbook", today, today)`` — a window the caller wrote
+    by hand, which was zero days long, so the gate abstained on every run
+    while appearing to govern. Removing the parameter removes the bug, and
+    removing it is not the same as documenting it.
+
+    A window that cannot contain evidence is refused rather than abstained
+    on. Asking on the freeze day itself means "no day after the freeze has
+    happened yet", which is a malformed question, not a verdict of
+    insufficient evidence — and answering it ``insufficient`` would put a
+    verdict-shaped row in the audit for a window that could never have held
+    anything.
+
+    The champion is the graded forecasts of the same ``report_type``; the
+    challenger is the shadow run bound to this version. Both are cut to the
+    forward window, and the comparison is paired on (date, code).
     """
+    from alpha_agents.data import clock, policy_registry
     from alpha_agents.data.memory_store import get_scored_predictions
+    from alpha_agents.evolution import shadow
 
-    today = today or datetime.now().strftime("%Y-%m-%d")
-    scored = get_scored_predictions(days=180)
-    _train, validation = split_train_validation(scored, created_date)
+    version = policy_registry.get_version(policy_version_id)
+    if version is None:
+        raise GateError(
+            f"No policy version #{policy_version_id} to evaluate. A verdict "
+            "has to name the policy it is about, or it cannot be acted on.")
+    when = str(today or clock.today())[:10]
+    frozen_at = str(version["frozen_at"])[:10]
+    if frozen_at >= when:
+        raise GateError(
+            f"Policy version #{policy_version_id} was frozen on {frozen_at} "
+            f"and the gate is being asked on {when}. Validation is forward: "
+            "nothing dated at or before the freeze can be evidence for it, so "
+            "this window cannot contain any. This is refused rather than "
+            "recorded as insufficient — a window that could never hold "
+            "evidence must not leave a verdict-shaped row behind.")
 
-    champion = [r for r in validation
-                if not (r.get("report_type") or "").endswith("_shadow")]
-    challenger = [r for r in validation
-                  if (r.get("report_type") or "").endswith("_shadow")]
+    run = (shadow.open_run_for(policy_version_id, report_type)
+           or shadow.latest_run_for(policy_version_id, report_type))
+    if run is None:
+        raise GateError(
+            f"No shadow run measures policy version #{policy_version_id} on "
+            f"{report_type!r}. There is nothing on the challenger side of the "
+            "comparison, and a comparison against nothing is not a verdict.")
+
+    champion = forward_window(
+        get_scored_predictions(days=_lookback_days(frozen_at, when),
+                               report_type=report_type),
+        frozen_at)
+    challenger = forward_window(shadow.scored_for(run["id"]), frozen_at)
 
     decision = evaluate_candidate(champion, challenger)
-    decision["validation_days"] = len({r["date"] for r in validation})
-    record_gate_decision(candidate_name, decision, today)
+    decision["validation_days"] = len(
+        {day for day, _code in paired_keys(champion, challenger)})
+    decision["policy_version_id"] = policy_version_id
+    decision["run_id"] = run["id"]
 
-    logger.info("Gate '%s': %s", candidate_name, decision["reason"])
+    name = f"{version['policy_key']}#{policy_version_id}"
+    record_gate_decision(name, decision, when)
+    logger.info("Gate '%s': %s", name, decision["reason"])
     return decision
+
+
+def get_gate_decisions(*, policy_version_id: int | None = None,
+                       limit: int = 200) -> list[dict]:
+    """Recent verdicts, newest first, optionally for one policy version.
+
+    Read side for the audit. ``get_gate_history`` answers "what has the gate
+    said lately"; this answers "what has it said about *this* version", which
+    is the question a promotion eligibility check asks.
+
+    The filter is an equality on the stored id rather than a ``LIKE`` on the
+    composed ``candidate`` label. Not because ``LIKE '%#12'`` would match
+    ``#120`` — it would not, ``LIKE`` being anchored at the end — but because
+    the label is prose: a promotion joined to its evidence by parsing prose
+    returns an empty list the moment the label changes, and an empty
+    eligibility list reads as "not eligible".
+    """
+    from alpha_agents.data.memory_store import _get_conn
+
+    conn = _get_conn()
+    _ensure_gate_table(conn)
+    if policy_version_id is None:
+        rows = conn.execute(
+            "SELECT * FROM gate_decisions ORDER BY id DESC LIMIT ?",
+            (limit,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM gate_decisions WHERE policy_version_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (policy_version_id, limit)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def eligible_decisions(policy_version_id: int) -> list[dict]:
+    """Verdicts for this version that could support a promotion.
+
+    A promotion needs a verdict that said *promote* — not merely one that
+    compared something. The tempting predicate is "not abstained, and resting
+    on at least one day of paired evidence", but a **rejection** satisfies
+    both: it is a real verdict over a real window that says the challenger
+    degrades the champion. Promoting on one of those would invert the
+    decision the gate exists to make.
+
+    This is also the machine form of D7's own acceptance criterion — "a
+    ``gate_decisions`` row whose ``validation_days`` is not 0" — and it exists
+    so the promotion service does not have to re-derive eligibility from
+    ``detail_json``.
+    """
+    return [row for row in get_gate_decisions(
+                policy_version_id=policy_version_id)
+            if row["outcome"] == "promote"
+            and not row["abstained"]
+            and (row["validation_days"] or 0) > 0]

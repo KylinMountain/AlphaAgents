@@ -39,7 +39,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from alpha_agents.data import episodes
+from alpha_agents.data import episodes, policy_registry
 from alpha_agents.data.memory_store import _get_conn, _write_lock
 from alpha_agents.data.trader import DEFAULT_TRADER
 
@@ -543,6 +543,14 @@ def _note_outcome(conn: sqlite3.Connection, episode_id: int | None,
 
 def _record_submitted(conn: sqlite3.Connection,
                       intent: TradeIntent) -> int:
+    # ``policy_ref`` was reserved in Phase 1 and never written, because there
+    # was no registry to reference — this repository's recurring defect. It is
+    # filled here, at the single write point for intents, rather than by each
+    # of the four wrappers: a caller that forgets it would silently leave the
+    # column empty again, and "which policy produced this decision" would go
+    # back to being unanswerable. An explicit value still wins, so a test or a
+    # replay can name a policy other than the one in force.
+    ref = intent.policy_ref or policy_registry.active_ref()
     with _write_lock:
         cur = conn.execute(
             "INSERT INTO intents "
@@ -550,7 +558,7 @@ def _record_submitted(conn: sqlite3.Connection,
             " information_cutoff, policy_ref, evidence_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (intent.action, SUBMITTED, intent.trader_id, intent.code or None,
-             intent.position_id, intent.information_cutoff, intent.policy_ref,
+             intent.position_id, intent.information_cutoff, ref,
              json.dumps(intent.evidence(), ensure_ascii=False)))
         conn.commit()
     return int(cur.lastrowid)

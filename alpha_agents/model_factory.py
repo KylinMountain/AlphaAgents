@@ -53,6 +53,27 @@ def _fallback_models() -> list[str]:
     return [m for m in _OPENROUTER_FALLBACKS if m != primary]
 
 
+def model_identity() -> dict:
+    """The declared model identity, as a fingerprintable dict.
+
+    Read by ``evolution.policy_sources``: which model answers is behaviour, so
+    a policy version has to name it. Assembled here rather than by the reader
+    so that adding a field to the model configuration is a change in one
+    place — a reader that reached into this module's constants would keep
+    reporting the old set after the next one is added.
+
+    The fallback chain is part of the identity, not a detail: under load the
+    primary is bypassed and a different model answers, which is a different
+    trader.
+    """
+    return {
+        "agent_model": AGENT_MODEL or DEFAULT_MODEL,
+        "agent_base_url": AGENT_BASE_URL,
+        "default_model": DEFAULT_MODEL,
+        "fallbacks": _fallback_models(),
+    }
+
+
 def create_model() -> OpenAIChatCompletionsModel:
     """The chat model every agent runs on."""
     # Not instrumented for usage: this client is handed to an Agent, and

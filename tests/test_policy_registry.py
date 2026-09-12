@@ -472,16 +472,20 @@ class TestIntegrity:
 
     def test_counts_reports_versions_transitions_and_pointers(self, store):
         _install(_freeze())
-        assert PR.counts() == {"versions": 1, "transitions": 1, "active": 1}
+        assert PR.counts() == {"versions": 1, "transitions": 1, "active": 1,
+                               "approvals": 0}
 
 
 # ── 9. Installing activates nothing ────────────────────────────────────
 
 
 class TestInstallingActivatesNothing:
-    def test_only_the_three_new_tables_grow(self, store):
+    def test_only_the_three_tables_an_install_touches_grow(self, store):
         # The T4 posture: rather than spot-check a table, dump every user
         # table and assert the changed set is exactly the permitted one.
+        # ``policy_approvals`` is deliberately absent from the permitted set:
+        # an install has no incumbent to be measured against, so there is
+        # nothing to approve and nothing that may be written there.
         PR.init_schema(store)  # warm up: the tables exist before the dump
         before = _dump(store)
         _install(_freeze())
@@ -492,6 +496,7 @@ class TestInstallingActivatesNothing:
                            "policy_transitions"}, (
             f"the registry changed {sorted(changed)}; it is a record, and "
             "recording a policy must not move anything else")
+        assert after["policy_approvals"] == []
 
     def test_the_reflective_writers_now_name_a_policy(self, store):
         # The reserved columns from Phase 1: this is the slice that fills

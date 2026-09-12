@@ -1,7 +1,9 @@
 # Trader Core Design: Trade, Learn, Evolve
 
 - Design date: 2026-09-11.
-- Status: authorized target architecture; implementation has only begun Phase 1.
+- Status: authorized target architecture. Phases 1–3 delivered and Phase 4 not begun
+  (as of 2026-09-12); what actually exists is recorded in the
+  [implementation status](TRADER_CORE_IMPLEMENTATION.md), not here.
 - Scope: a persistent simulated trader, trustworthy execution facts, attributable learning, and controlled policy evolution.
 - This is a normative design, not a release checklist or evidence that the complete architecture exists.
 - “Must” states a target invariant; proposed components below are responsibilities, not claims of existing modules.
@@ -252,13 +254,19 @@ A future lowest-level contracts package requires an explicit architectural decis
 
 | Phase | Target boundary | Completion meaning |
 |---|---|---|
-| 1 — trustworthy minimum slice; begun, not declared complete | Cash and cumulative exit accounting, auditable per-trade records, explicit trader/source binding, separate trade outcomes, candidate-only learning boundary | A narrow trustworthy foundation, not a full ledger/broker/runtime/experiment system |
-| 2 — complete trading kernel | Full fill/cash ledger, reservations, settlement lots, unified intents, runtime clocks, reconciliation, and replay | All trading paths share enforceable execution and accounting contracts |
-| 3 — episode learning | Episode association, three outcome lifecycles, candidate evidence, and approved knowledge snapshots | Learning is attributable without changing active behavior implicitly |
-| 4 — controlled evolution | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
+| 1 — trustworthy minimum slice ✅ delivered 2026-09-11 | Cash and cumulative exit accounting, auditable per-trade records, explicit trader/source binding, separate trade outcomes, candidate-only learning boundary | A narrow trustworthy foundation, not a full ledger/broker/runtime/experiment system |
+| 2 — complete trading kernel ✅ delivered 2026-09-11 | Full fill/cash ledger, reservations, settlement lots, unified intents, runtime clocks, reconciliation, and replay | All trading paths share enforceable execution and accounting contracts |
+| 3 — episode learning ✅ delivered 2026-09-12 | Episode association, three outcome lifecycles, candidate evidence, and approved knowledge snapshots | Learning is attributable without changing active behavior implicitly |
+| 4 — controlled evolution ⬅ **current, not begun** | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
 | 5 — product consolidation | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts |
 
-Phase 1 follows the active plan; full reservations, securities settlement, global event history, and forward version experiments are expressly later work.
+The ✅ marks are a pointer to the [implementation status](TRADER_CORE_IMPLEMENTATION.md)
+and its per-round verification records; they are not evidence in themselves.
+Delivery state changes there first.
+
+Reservations and securities settlement, expressly later work when this document
+was written, were delivered in Phase 2. Global event history remains a
+[non-goal](#16-non-goals); forward version experiments are Phase 4.
 Implementation completion and actual verification results belong in execution records, not assertions inferred from this target document.
 Migrate incrementally around existing responsibilities; establish and reconcile new projections before changing readers, without permanent competing sources of truth.
 Reconstruct history only when actual source records support it; never invent missing fills, fees, provenance IDs, approvals, or policy versions.

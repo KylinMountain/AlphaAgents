@@ -8,6 +8,18 @@
 检验 —— 选择那一半是有的。但挑战者从哪来？`scan_and_auto_create` 从
 **已经成功的交易里**挖模式。也就是说，所有候选变异都是过去分布的产物。
 
+> **2026-09-12 更正：** 上面那句「选择那一半是有的」现在**不成立**。
+> `holdout_gate` 确实被 `lessons.post_review` 每天调用过，但它拿到的是
+> `run_gate("daily_playbook", today, today)` —— 留出窗口长度为 0，
+> 于是三次运行（`gate_decisions` 表里 09-08 / 09-09 / 09-11 各一行）
+> 全部以 `validation_days: 0` 弃权，一次都不可能晋升。Phase 1 因此**主动
+> 断开了这个调用**，理由写在 `lessons.post_review` 的 docstring 里：
+> 「Running a generic daily gate would imply approval evidence we do not have.」
+> 把它接回来需要**候选绑定**的前向协议，那是 Phase 4
+> （`docs/TRADER_CORE_DESIGN.md` §14 的 controlled evolution）。
+> 所以本文「变异那一半」的论证仍然成立，但「选择那一半已经有了」要改成
+> **「选择那一半还没有接线」**。
+
 只从自己的成功里学习的系统，最后会收敛到自己身上。它可以把现有打法
 打磨得更好，但永远不会问「如果反过来做会怎样」。
 

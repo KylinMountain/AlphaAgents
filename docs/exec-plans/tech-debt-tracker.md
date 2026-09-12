@@ -8,15 +8,16 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-## Open
+_Last updated 2026-09-12. Four baseline lines had become dead — the code was
+fixed but the exemption was never removed — and were deleted on that date.
+Deleting a line is the point: the exemption existed to keep CI honest while the
+code was broken, and once it is fixed the line is a lie about the repo._
 
-### D1 — `data/portfolio.py` is service code in the storage layer
-**Cost.** 3 layering violations. It imports `tools.exit_signals` and
-`tools.fund_flow` because it holds the position lifecycle — stop-loss,
-holding caps, bearish signals. That is business logic, not storage.
-**Fix.** Move the lifecycle to a service module that both `data` and
-`pipeline` may call; leave the SQLite access behind in `data`.
-**Recognise.** `lint_harness.py` stops reporting `portfolio.py::layering`.
+**Current baseline: 26 entries covering 47 violations.** `lint_harness.py`
+prints the 47, not the 26, because one entry can cover several occurrences in
+one file.
+
+## Open
 
 ### D2 — `data/daily_archive.py` orchestrates fetches
 **Cost.** 4 layering violations. It pulls from four `tools/` modules to
@@ -25,7 +26,7 @@ module's name.
 **Fix.** Move to `pipeline/tasks/`.
 **Recognise.** `daily_archive.py::layering` gone from the baseline.
 
-### D3 — 29 silent `except ... : pass`
+### D3 — 26 silent `except ... : pass`
 **Cost.** The PBOC parser returned rows whose every headline was the
 literal string `"true"` for months, because nothing on that path was
 allowed to complain. Every silent handler is a place that can happen
@@ -34,13 +35,18 @@ again.
 comment above the `pass` explaining why the failure is genuinely
 ignorable.
 **Recognise.** `silent-except` count in the baseline falls.
+**Progress.** 29 → 26. `data/embeddings.py`, `evolution/lessons.py` and
+`evolution/playbook.py` were cleared; their baseline lines were removed.
 
-### D4 — 5 files over 1200 lines
-`tools/vpa/data.py` (1408), `tools/vpa/llm.py` (1264), and three others.
+### D4 — 4 files over 1200 lines
+`data/memory_store.py` (2145), `tools/vpa/data.py` (1410),
+`data/snapshot_store.py` (1339), `tools/vpa/llm.py` (1244).
 **Cost.** A file an agent cannot hold in context gets edited blindly, and
 blind edits are where duplication starts.
 **Fix.** Split by responsibility, not by line count.
 **Recognise.** `file-size` gone from the baseline.
+**Note.** Was 5 files; the count moves as the code does, so check it rather
+than trusting this line.
 
 ### D5 — Playbook clustering lost a dimension
 **Cost.** Removing `vpa_verdict` from recorded features collapsed
@@ -58,9 +64,30 @@ replay, so no one can say whether news-driven picks beat the market.
 **Fix.** Accumulate. Needs weeks of live running, not a code change.
 **Recognise.** `replay_day` returns `replayable: true` for a month of
 trading days.
+**Status 2026-09-12.** Still open, and now measurable: `predictions` holds
+202 rows with `brier` NULL on every one. The blocker is sample, not code.
+
+### D7 — The champion/challenger gate has no caller
+**Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but
+nothing calls it. It *was* called — `lessons.post_review` ran it daily — with
+`run_gate("daily_playbook", today, today)`, a zero-length validation window, so
+all 3 recorded runs abstained (`gate_decisions`, every row
+`validation_days: 0`). A gate that can never fire is worse than no gate: it
+looks like governance. Phase 1 removed the call rather than leave it.
+**Fix.** Candidate-bound forward validation, frozen policy registry, promotion
+and rollback — i.e. Phase 4 of `docs/TRADER_CORE_DESIGN.md` §14.
+**Recognise.** A promotion that changes the active policy pointer, with a
+`gate_decisions` row whose `validation_days` is not 0.
+**Note.** This is the one debt item that is scheduled work rather than
+housekeeping; it is listed here so it cannot be mistaken for "already handled"
+by anyone reading the old claim that selection "早就有了".
 
 ## Paid
 
+- `data/portfolio.py` had 3 layering violations — service code (stop-loss,
+  holding caps, bearish signals) sitting in the storage layer. It no longer
+  imports `tools/` at all, and the exit slice moved to `portfolio_exit.py` in
+  Phase 1. **The baseline line is gone** (checked 2026-09-12: 0 violations).
 - News feeds consumed as snapshots rather than streams — a 06:30 scan saw
   one hour of the fifteen since the previous close. Fixed by
   `pipeline/tasks/news_ingest.py` plus windowed reads.

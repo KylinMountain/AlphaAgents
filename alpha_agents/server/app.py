@@ -169,121 +169,42 @@ async def get_usage_api(days: int = 7):
 async def get_portfolio_api():
     """Virtual portfolio: what the picks turned into.
 
-    The intraday and morning tasks create a pending order per pick, with an
-    entry zone and a stop. Those rows existed with no way to see them — the
-    dashboard showed the recommendation and nothing about what happened to
-    it next, which is the half that decides whether any of this works.
+    Delegates to the trade read model instead of assembling its own copy.
+    The dashboard and the trade workspace show the same book, so the
+    projection needs one definition — two assemblies over the same tables
+    drift, and then "what do I hold" has two answers.
     """
-    from alpha_agents.data.portfolio import (
-        account_capital, get_closed_positions, get_open_positions,
-        get_pending_orders, get_portfolio_stats,
-    )
-    pending = await asyncio.to_thread(get_pending_orders)
-    positions = await asyncio.to_thread(get_open_positions)
-    closed = await asyncio.to_thread(get_closed_positions, 50)
-    stats = await asyncio.to_thread(get_portfolio_stats, 30)
-    total = await asyncio.to_thread(account_capital)
-    invested = sum((p["open_price"] or 0) * (p["shares"] or 0)
-                   for p in positions)
-    available = total - invested
-
-    # Per trader, so the dashboard can show which book is which. The
-    # comparison is the entire reason several traders exist, and a
-    # single pooled line would hide it.
-    traders = await asyncio.to_thread(_trader_books)
-
-    # A position without its thesis is a row of numbers. The thesis is why
-    # it is held and what would end it, so it travels attached rather than
-    # as a separate list the UI would have to join by hand.
-    positions = await asyncio.to_thread(_attach_theses, positions)
-
-    return JSONResponse({
-        "pending": pending,
-        "positions": positions,
-        "closed": closed,
-        "stats": stats,
-        "theses": await asyncio.to_thread(_closed_theses),
-        "capital": {"total": total, "available": available,
-                    "invested": invested},
-        "traders": traders,
-    })
+    from alpha_agents.server.readmodels import trade
+    return JSONResponse(await asyncio.to_thread(trade.book))
 
 
-def _trader_books() -> list[dict]:
-    """One row per trader: its money, its book, its curve.
+# --- Phase 5 read models ---
+#
+# Three workspaces over facts the kernel already records. Each section names
+# its single source and reports three states, not two: ``unavailable`` when
+# the tables it declares are missing or older than the code, ``empty`` when
+# they exist and hold nothing, ``present`` when they hold something. A page
+# that renders all three the same way turns "never wired" into "no news".
 
-    Returned even in the single-trader case so the UI has one shape to
-    render; it can collapse the section when the list has one entry.
-    """
-    from alpha_agents.data.portfolio import (
-        get_available_capital, get_open_positions, get_pending_orders,
-        trader_capital,
-    )
-    from alpha_agents.data.portfolio_risk import current_drawdown
-    from alpha_agents.data.trader import load_traders
-
-    out = []
-    for t in load_traders():
-        try:
-            positions = get_open_positions(t.id)
-            capital = trader_capital(t.id)
-            dd = current_drawdown(t.id) or {}
-            out.append({
-                "id": t.id, "name": t.name,
-                "legacy": t.legacy,
-                "note": t.note,
-                "capital": capital,
-                "available": get_available_capital(t.id),
-                "positions": len(positions),
-                "pending": len(get_pending_orders(t.id)),
-                "drawdown_pct": dd.get("drawdown_pct"),
-                "blocked": bool(dd.get("blocked")),
-            })
-        except Exception as e:
-            logger.warning("Trader %s book unavailable: %s", t.id, e)
-    return out
+@app.get("/api/trade-workspace")
+async def get_trade_workspace():
+    """Trade workspace: the book, its attribution chain, the intent trail."""
+    from alpha_agents.server.readmodels import trade
+    return JSONResponse(await asyncio.to_thread(trade.snapshot))
 
 
-def _thesis_dict(th) -> dict:
-    from alpha_agents.data.thesis import describe
-    return {
-        "id": th.id, "code": th.code, "name": th.name, "theme": th.theme,
-        "claim": th.claim, "horizon_days": th.horizon_days,
-        "prob": th.prob, "conviction": th.conviction, "status": th.status,
-        "created_at": th.created_at, "closed_at": th.closed_at,
-        "close_kind": th.close_kind, "close_note": th.close_note,
-        "checkpoints": th.checkpoints,
-        # Rendered server-side from the same table the evaluator reads, so
-        # the page cannot describe a condition differently from the code
-        # that fires it.
-        "conditions": [{"kind": c.kind, "value": c.value, "note": c.note,
-                        "text": describe(c)} for c in th.conditions],
-    }
+@app.get("/api/learn-journal")
+async def get_learn_journal():
+    """Learn journal: decisions, the three label kinds, candidates, forecasts."""
+    from alpha_agents.server.readmodels import learn
+    return JSONResponse(await asyncio.to_thread(learn.snapshot))
 
 
-def _attach_theses(positions: list[dict]) -> list[dict]:
-    try:
-        from alpha_agents.data.thesis import get_by_position
-    except Exception:
-        return positions
-    for pos in positions:
-        try:
-            th = get_by_position(pos["id"])
-            pos["thesis"] = _thesis_dict(th) if th else None
-        except Exception as e:
-            logger.debug("Thesis lookup failed for position %s: %s",
-                         pos.get("id"), e)
-            pos["thesis"] = None
-    return positions
-
-
-def _closed_theses(days: int = 30) -> list[dict]:
-    try:
-        from alpha_agents.data.thesis import get_closed
-        return [_thesis_dict(t) for t in get_closed(days=days)]
-    except Exception as e:
-        logger.debug("Closed thesis read failed: %s", e)
-        return []
+@app.get("/api/evolve-lab")
+async def get_evolve_lab():
+    """Evolve laboratory: what is in force, what is under test, what was decided."""
+    from alpha_agents.server.readmodels import evolve
+    return JSONResponse(await asyncio.to_thread(evolve.snapshot))
 
 
 # Recorded once, at import. A long-running process keeps the code it

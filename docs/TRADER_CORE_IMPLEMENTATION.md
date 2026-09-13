@@ -1,4 +1,4 @@
-# Trader Core Implementation: Phase 1–4 实际状态
+# Trader Core Implementation: Phase 1–5 实际状态
 
 - 记录日期：2026-09-13（补记第九轮：Phase 4 的 U1–U5）。
   **机制已交付 ≠ 已经在跑** —— 见 §7 与 §12。
@@ -134,6 +134,13 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   `baseline_only`，而 `policy_registry._require_eligible_gate` 只接受
   `candidate_policy`。于是 `gate_decisions` 里**不存在任何非 abstain 的生产行**；
   这不是遗漏，是一次刻意的拒绝。
+- **产品整合**（Phase 5）—— **2026-09-13 的 V1 不再是「未实现」，见 §13**。
+  三个读模型与三个端点已存在，`/api/portfolio` 已改为委托同一个投影。
+  但它**只完成了「贯通 API」这一半**：前端三个工作台尚未接，
+  所以设计 §14 的完成含义 *"expose the same facts"* 对界面尚不成立。
+  另外三个工作台在生产库上处于**三种不同的状态**（`policy_*` / `shadow_*` 表不存在、
+  `gate_decisions` 与 `learning_candidates` 缺列、`episodes` / `outcomes` 0 行），
+  这些状态由读模型自己报出来，不靠人去比对文档。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -710,4 +717,74 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 - **已批准快照的 `detail_json` 与列并存。** `evidence_scope` 已提为列但仍在
   `detail_json` 里保留一份；读侧只读列，写入侧两份都写。冗余是有意的
   （历史行的 payload 不可改），但它意味着两者将来可能不一致，需要时各自说明。
+
+## 13. Phase 5 逐项交付（V1：三个读模型 + API）
+
+记录日期：2026-09-13。计划见
+[Phase 5 计划](exec-plans/active/2026-09-13-trader-core-phase5.md)。
+
+### 交付了什么
+
+`alpha_agents/server/readmodels/`，按 §13 把「projections」放在 `server/` 层，不新建层、
+不动 lint 豁免基线：
+
+| 模块 | 端点 | sections |
+|---|---|---|
+| `readmodels/__init__.py` | — | 契约：`Need` / `Section` / 三态探针 / `workspace()` |
+| `readmodels/trade.py` | `/api/trade-workspace` | `book`、`attribution`、`intents`、`settlement` |
+| `readmodels/learn.py` | `/api/learn-journal` | `episodes`、`outcomes`、`candidates`、`forecasts` |
+| `readmodels/evolve.py` | `/api/evolve-lab` | `pointer`、`shadow`、`gates`、`knowledge` + `code` |
+
+三条设计决定，都是「不做」而不是「做」：
+
+1. **读模型不建表。** 每个数据模块的读函数进入时都 `init_schema`（`episode_coverage.py`
+   的第七轮更正记过同一件事：一个自称只读的报告脚本会改 schema）。所以 `section()`
+   先做只读探针（`sqlite_master` + `PRAGMA table_info`），探针不通过就**不调用**读函数，
+   把缺的表与列**点名**放进 `missing`。机械判据：
+   `tests/test_readmodels.py::TestAReadModelDoesNotMigrate`，断言调用三个 `snapshot()`
+   前后表集合完全相同，且五个「读者会建」的表仍然不存在。
+2. **三态正交**：`schema`（`complete` / `partial` / `absent`）与 `state`
+   （`unavailable` / `empty` / `present`）是两个字段。`partial` 不是理论情形 ——
+   生产库今天就命中两处（`gate_decisions` 缺 `evidence_scope` / `validation_days`；
+   `learning_candidates` 缺 `evidence_episode_ids` 且 `candidate_transitions` 整张表不在）。
+   section 自己的说明在 `note`，`status_note` 说明**为什么读不到** —— 两个字段，
+   因为让前者覆盖后者会把「本库 schema 落后于代码」埋进一句业务散文里。
+3. **一个事实一个来源。** `/api/portfolio` 改为委托 `readmodels.trade.book()`，
+   不再自己拼一份持仓。两个对同一批表的组装会漂移，然后「我持有什么」就有两个答案。
+   机械判据：
+   `tests/test_readmodels.py::TestPortfolioIsTheTradeBook::test_the_route_is_a_delegation_not_a_second_assembly`
+   扫 `get_portfolio_api` 的源码，出现 `trade.book` 且不得再出现 `get_closed_positions`。
+
+### 生产库（副本）上的真实读数
+
+| 工作台 | section | schema | state |
+|---|---|---|---|
+| trade | `book` | complete | **present（52 行）** |
+| trade | `attribution` / `intents` / `settlement` | complete | empty |
+| learn | `episodes` / `outcomes` | complete | empty |
+| learn | `candidates` | **partial** | unavailable |
+| learn | `forecasts` | complete | **present（202 行）** |
+| evolve | `pointer` / `shadow` | **absent** | unavailable |
+| evolve | `gates` | **partial** | unavailable |
+| evolve | `knowledge` | complete | empty |
+
+`evolve.code` 报出 `producers=['constant_0.5']` / `candidate_producers=[]` /
+`reachable=False` —— Phase 4 那句「本构建产不出可晋升的裁决」因此成为一个**页面可读的事实**。
+读完之后**没有任何表被新建**。
+
+**验证用的是副本。** `memory_store._get_conn()` 首次连接时会执行自己的 `_SCHEMA`，
+所以打开 `data/memory.db` 本身就会补上 `knowledge_snapshots` / `_items`。那是共享连接的
+行为、不是读模型的决定，但它是一次对生产文件的写 —— 本阶段没有这项授权，用副本取同样的证据。
+
+### 明确未实现（Phase 5 的边界，别读成已完成）
+
+- **前端三个工作台尚未接。** `web/src/views/` 只有既有的 `PortfolioView`；
+  Learn / Evolve 两个视图不存在，导航里也没有入口。完成含义里的
+  *"expose the same facts"* 目前只对 **API** 成立，对**界面**不成立。
+- **`/api/portfolio` 与 `trade.book` 现在同源，但两者都还没接归因链。**
+  `attribution` / `intents` / `settlement` 三个 section 有数据形状、有端点，
+  但没有任何界面渲染它们。
+- **本阶段没有任何写入路径被修改。** 三个读模型全部只读，不新增写者。
+- **生产库仍落后于代码。** 上面两个 `partial` 要消失，得让当前代码的进程连一次库
+  （或跑一次明确的迁移），那是运维动作，不是本阶段做的。
 

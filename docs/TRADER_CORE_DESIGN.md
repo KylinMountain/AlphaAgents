@@ -258,8 +258,8 @@ A future lowest-level contracts package requires an explicit architectural decis
 | 1 — trustworthy minimum slice ✅ delivered 2026-09-11 | Cash and cumulative exit accounting, auditable per-trade records, explicit trader/source binding, separate trade outcomes, candidate-only learning boundary | A narrow trustworthy foundation, not a full ledger/broker/runtime/experiment system |
 | 2 — complete trading kernel ✅ delivered 2026-09-11 | Full fill/cash ledger, reservations, settlement lots, unified intents, runtime clocks, reconciliation, and replay | All trading paths share enforceable execution and accounting contracts |
 | 3 — episode learning ✅ delivered 2026-09-12 | Episode association, three outcome lifecycles, candidate evidence, and approved knowledge snapshots | Learning is attributable without changing active behavior implicitly |
-| 4 — controlled evolution ⬅ **current, in progress** | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
-| 5 — product consolidation | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts |
+| 4 — controlled evolution ✅ delivered 2026-09-13 | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
+| 5 — product consolidation ⬅ **current, API half delivered** | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts |
 
 The ✅ marks are a pointer to the [implementation status](TRADER_CORE_IMPLEMENTATION.md)
 and its per-round verification records; they are not evidence in themselves.

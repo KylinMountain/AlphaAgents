@@ -1,10 +1,16 @@
 # Trade Learn Evolve：第四阶段 受控进化
 
-状态：**实施中**。U1–U4 已提交（`83fbdfa` / `5f8b0a4` / `a5f288a` / `f23bca6`），
-U5 与晋升证据校验已实现并通过全量回归，待收尾提交。负责人：本次开发会话。
-创建：2026-09-12。**更新：2026-09-13**（U5 实现 + 证据校验补强 + 三处判据缺陷修复）。
+状态：**已完成（已归档）**。U1–U5 全部提交（`83fbdfa` / `5f8b0a4` / `a5f288a` /
+`f23bca6` / `71ae0a4`）；全量回归 **1800 passed, 18 skipped**，`lint_harness` / `lint_docs`
+均通过，四个变异探针全部被对应用例捕获。负责人：本次开发会话。
+创建：2026-09-12。**更新：2026-09-13**（U5 实现 + 证据校验补强 + 三处判据缺陷修复）。**归档：2026-09-13**。
 
-> 完成后按 AGENTS.md 的约定移入 `docs/exec-plans/completed/`。
+> **归档口径：本阶段交付的是机制，不是已跑起来的闭环。** U1–U5 每一片都可调用、有测试、
+> 有生产入口定义，但 `PRODUCERS` 目前只登记恒 0.5 的基线，**生产里尚未发生一次真实晋升**。
+> 这一条是「候选策略是什么」的设计决定（设计文档只指定了 baseline），不是代码缺口；
+> 在补上它之前不要声称「交易 → 学习 → 进化的受控闭环已完整交付」。
+> 逐项已实现 / 未实现以 `docs/TRADER_CORE_IMPLEMENTATION.md` §7 与 §12 为准。
+>
 > 本阶段的范围由设计 §14 界定：frozen policy registry、forward shadow accounts、
 > fair evaluation、authorized promotion、rollback。完成含义原文是
 > **"Evidence controls future policy changes through one audited entry point."**

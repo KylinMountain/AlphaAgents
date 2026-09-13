@@ -660,8 +660,8 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 记录日期：2026-09-13。全量口径 `.venv/bin/python -m pytest tests/ -q`（不加 `--ignore`）
 **1800 passed, 18 skipped**；`scripts/lint_harness.py` 通过（153 个文件，存量 47 条，
 **未扩充 baseline**）；`scripts/lint_docs.py` 通过。四处关键判据做了变异探针，
-四个全部被对应用例捕获（明细见
-[Phase 4 计划](exec-plans/active/2026-09-12-trader-core-phase4.md)）。
+四个全部被对应用例捕获（明细见已归档的
+[Phase 4 计划](exec-plans/completed/2026-09-12-trader-core-phase4.md)）。
 
 | 切片 | 提交 | 内容 |
 |---|---|---|

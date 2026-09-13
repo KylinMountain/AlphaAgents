@@ -11,7 +11,13 @@ const ENDPOINTS = {
   signals: '/api/intraday-signals',
   market: '/api/market-overview',
   graph: '/api/event-graph',
-  portfolio: '/api/portfolio',
+  // Phase 5: the page reads the workspace read models rather than assembling
+  // the same numbers itself. /api/portfolio still exists and delegates to the
+  // same projection, but nothing here uses it — two routes showing one book
+  // is how "what do I hold" ends up with two answers.
+  trade: '/api/trade-workspace',
+  learn: '/api/learn-journal',
+  evolve: '/api/evolve-lab',
   calibration: '/api/calibration',
   version: '/api/version',
   usage: '/api/usage?days=14',
@@ -33,7 +39,8 @@ export function useDashboard(intervalMs = 20000) {
   const [data, setData] = useState({
     reports: [], reviews: [], sources: [], activity: [], news: [],
     themes: [], stats: null, signals: [], market: null, graph: null,
-    portfolio: null, calibration: null, version: null, usage: null,
+    trade: null, learn: null, evolve: null,
+    calibration: null, version: null, usage: null,
   })
   const [failed, setFailed] = useState([])
   const [loading, setLoading] = useState(true)

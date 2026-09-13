@@ -33,6 +33,27 @@ EvoAgentBench 结论是"没有任何现有自动方法能在所有设置下维�
 **验收**：`predictions` 表有 `prob` 与 `brier`、`residual_alpha` 三列并被
 填充；命中率报表改为报 Brier 与残差，而非绝对涨跌。
 
+**状态（2026-09-13）：机制已交付并在跑，验收的「被填充」还差样本。**
+
+- 三列都在（另有 `log_score` / `excess_return`），`predictions` 共 202 行。
+- 链路是通的：`pipeline/tasks/review.py::_score_due_predictions`（其 docstring 自述
+  *"This is the G1 signal"*）→ `data/scoring.py::score_prediction` →
+  `residual_alpha`（对风格暴露回归取残差）→ `brier_score`。它挂在每日 15:30 的
+  `review` 任务上，**不是待接的代码**。
+- 生产库实测：`prob` 已填 **47 / 202** 行（最早 2026-09-08），
+  `brier` 与 `residual_alpha` 均 **0 行** —— 因为**还没有一笔预测到期**。
+  最早一批按 `date(date, '+5 days')` 兜底恰好在 **2026-09-13** 成熟。
+  所以这一条现在的形状是「等日历」，不是「写代码」。
+- **不要据此认为验收已完成**：应当在下一次 review 跑过之后复核 `brier` 是否真的变非空。
+  若那时仍为 0，才是真问题（最可能的两个原因：`market_history.db` 不覆盖该窗口，
+  于是 `score_prediction` 返回 `None` 并写成分级为「已截断」的标签；或到期判定没生效）。
+- **附带发现**：`predictions.horizon_days` / `deadline` 机制完整（`_deadline_for` 在
+  未声明时拒绝替调用方假设，due 查询把 `deadline IS NULL` 报成 `legacy_horizon`），
+  但两处生产调用（`morning_scan.py` / `intraday_monitor.py`）都传了 `prob` 却
+  **都没传 `horizon_days`**，所以 202 行全走全局 5 天兜底。
+  这是「有能力、无生产用户」，不是 bug；**不要顺手补 `horizon_days=5`**。
+  详见 `docs/TRADER_CORE_IMPLEMENTATION.md` §7。
+
 ## G2 — playbook 变更加留出集 keep-better 门
 
 **为什么**：这是把 (a) 变成 (b) 的最短路径，也是单点收益最大的改动。

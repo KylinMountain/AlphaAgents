@@ -8,10 +8,16 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-12. Four baseline lines had become dead — the code was
-fixed but the exemption was never removed — and were deleted on that date.
+_Last updated 2026-09-13. On 2026-09-12 four baseline lines had become dead —
+the code was fixed but the exemption was never removed — and were deleted.
 Deleting a line is the point: the exemption existed to keep CI honest while the
 code was broken, and once it is fixed the line is a lie about the repo._
+
+_Also on 2026-09-13: D6's recogniser became narrower and checkable (the
+scoring path is wired; `brier` is NULL on a calendar, not on a missing call),
+which is the difference between "wait" and "go look". D8 and D9 were added the
+same day — a column with no writer, and a check that only runs when someone
+remembers._
 
 **Current baseline: 26 entries covering 47 violations.** `lint_harness.py`
 prints the 47, not the 26, because one entry can cover several occurrences in
@@ -64,8 +70,19 @@ replay, so no one can say whether news-driven picks beat the market.
 **Fix.** Accumulate. Needs weeks of live running, not a code change.
 **Recognise.** `replay_day` returns `replayable: true` for a month of
 trading days.
-**Status 2026-09-12.** Still open, and now measurable: `predictions` holds
-202 rows with `brier` NULL on every one. The blocker is sample, not code.
+**Status 2026-09-13.** Still open, and the blocker is *now* provably sample
+rather than code — which is a narrower claim than the 2026-09-12 one. The
+scoring path is wired and running: `review.py::_score_due_predictions` (whose
+docstring names itself the G1 signal) calls `scoring.score_prediction`, which
+regresses out style exposure and computes Brier, on the daily 15:30 review.
+`prob` is filled on **47 of 202** rows, earliest 2026-09-08. `brier` is NULL
+on all 202 because **no forecast had matured yet**: with no declared horizon
+the due date is `date + 5 days`, so the first batch matures **2026-09-13**.
+**Recognise (narrower, check this before writing any scoring code).** Run the
+review task once after 2026-09-13 and confirm `SUM(brier IS NOT NULL) > 0`.
+If it is still 0, this becomes a code bug in one of two places — the market
+window not covering the horizon (so `score_prediction` returns `None` and the
+row is labelled censored) or the due-date filter — and no longer a sample.
 
 ### D7 — The champion/challenger gate has no caller
 **Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but
@@ -100,6 +117,42 @@ still not "running in production".
 **Note.** This is the one debt item that is scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".
+
+### D8 — A capability with no production user: per-forecast maturity
+**Cost.** `predictions.horizon_days` and `predictions.deadline` are the T2
+mechanism for letting each forecast declare how long it gave itself to be
+right — the breakout book a 3-day horizon, the pullback book a 5-day one.
+The mechanism is complete and tested at every layer: `_deadline_for` refuses
+to assume a horizon the caller did not state, `save_prediction` writes both
+columns on insert and update, the due query falls back to `date + 5 days`
+while reporting `legacy_horizon`, and `outcome_labels` carries that
+distinction into the label. **The callers never use it.** Both production
+call sites (`morning_scan.py`, `intraday_monitor.py`) pass `prob` and do not
+pass `horizon_days`, so all 202 rows have NULL in both columns, every row is
+graded on the global 5-day fallback, and every row is labelled undeclared.
+Nothing is broken — 5 days is what those two callers want — but the column
+reads as "declared per book" to anyone who does not check the data. This is
+the fourth class this repo keeps finding (a column that exists and is never
+written; `intents.order_id` was the third, fixed in S6).
+**Fix.** Nothing, until a second trader actually runs a different horizon.
+**Do not** pass `horizon_days=5` at the call sites to make the column
+non-empty: that is precisely the substitution `_deadline_for` exists to
+refuse, and it would forge a declaration on the caller's behalf.
+**Recognise.** A production row with a non-NULL `deadline`, written by a
+caller that stated its own horizon.
+
+### D9 — The frontend render check runs locally only
+**Cost.** `cd web && npm run check:render` is the only thing that can catch a
+workspace page rendering "never wired" as "no news" — `npm run lint` and
+`npm run build` both pass on it, and it is invisible in a screenshot. It
+caught three such bugs on the day it was written. It runs only when someone
+remembers, because `harness.yml` has no node environment; the same is true of
+`tests/test_report_markdown.mjs`, the existing frontend test.
+**Fix.** A node step in CI (setup-node + `npm ci` in `web/`) covering both
+frontend checks. Deliberately deferred in Phase 5 rather than smuggled in with
+the page work.
+**Recognise.** `harness.yml` has a job that runs `npm run check:render` and
+`node --test tests/test_report_markdown.mjs`.
 
 ## Paid
 

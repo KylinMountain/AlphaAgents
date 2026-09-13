@@ -1,15 +1,17 @@
-# Trader Core Implementation: Phase 1–3 实际状态
+# Trader Core Implementation: Phase 1–4 实际状态
 
-- 记录日期：2026-09-12（第八轮补记 Phase 3 的 T4；Phase 3 至此全部交付）。
+- 记录日期：2026-09-13（补记第九轮：Phase 4 的 U1–U5）。
+  **机制已交付 ≠ 已经在跑** —— 见 §7 与 §12。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
   [Phase 3 计划](exec-plans/completed/2026-09-12-trader-core-phase3.md)、
   [设计文档](TRADER_CORE_DESIGN.md)、[架构图](../ARCHITECTURE.md)、[金律](GOLDEN_PRINCIPLES.md)。
 - 本文件只记录**代码里已经存在的行为**。每一项标注已实现或未实现，未实现项不因本文件存在而被视为完成。
 - 代码是唯一事实来源；本文件与代码冲突时，以代码为准并修正本文件。
-- 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付。
-  **Phase 3 的四个切片（T1–T4）已全部交付**；未实现项一律留在第 7 节，交付不等于
-  「设计里提到的每一件事都做了」。
+- 第 1–6 节描述 Phase 1 的交付；第 10 节是 Phase 2 的逐项交付；第 11 节是 Phase 3 的逐项交付；
+  第 12 节是 Phase 4 的逐项交付。**Phase 3 的四个切片（T1–T4）已全部交付**；
+  Phase 4 的五个切片（U1–U5）**机制已交付，且生产里尚未发生一次真实晋升**。
+  未实现项一律留在第 7 节，交付不等于「设计里提到的每一件事都做了」。
 
 ## 1. 现金反映累计结果
 
@@ -123,8 +125,15 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   - **读侧只有运维脚本与测试在读。** `candidate_is_approved` / `entity_is_approved` /
     `drifted` 的消费者是 `scripts/episode_coverage.py` 与测试，没有任何决策路径读它。
     与候选区一样：是**有能力**，不是**有数据**。
-- **策略版本注册与前向影子实验**（Phase 4）。无 frozen policy、无独立前向评估闸门、无批准的晋升路径。
-  `policy_ref` / `model_ref` 字段已预留但当前写入为空 —— 没有注册表可引用。
+- **策略版本注册与前向影子实验**（Phase 4）—— **2026-09-13 已不再是「未实现」，见 §12**。
+  但两件事必须分开写：**机制已交付 ≠ 已经在跑**。U1–U5 的机制存在
+  （冻结策略注册表、前向影子评估、候选绑定闸门、人工晋升与回滚、检索闸门），
+  **而生产里尚未发生一次真实晋升**。原因有两个：其一是样本不是代码
+  （生产库 `predictions.brier` 仍全为空）；其二是**当前没有候选生产者** ——
+  `shadow.PRODUCERS` 只登记了恒 0.5 的基线，所以这个构建能产出的每一份裁决都是
+  `baseline_only`，而 `policy_registry._require_eligible_gate` 只接受
+  `candidate_policy`。于是 `gate_decisions` 里**不存在任何非 abstain 的生产行**；
+  这不是遗漏，是一次刻意的拒绝。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -163,14 +172,17 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   （`ALTER TABLE` 加四列 + 重建表以放开 `CHECK`）。迁移幂等且保行
   （`test_migrating_twice_is_a_no_op` 钉住），但「报告脚本会改 schema」这件事必须写下来，
   否则它本身就是一句「承诺超过代码」。
-- **快照是记录，不是检索闸门**（T4 的边界，容易被误读为「已实现授权」）。
-  `inject_playbooks`（`alpha_agents/evolution/feedback.py`）仍按 `playbooks.status` 选行，
-  **不读任何快照**。于是「一条知识进不进 prompt」目前由知识行自己的状态决定，
-  而不是由「它是否被批准过」决定。§10 的「未批准不得进入生产决策检索」对**候选**成立
-  （候选区确实无人读），但**对 playbook / principle 行不成立**：一条 active 的规则行
-  即使从未进过任何快照，也照样被渲染进提示词。批准因此是**事后可查的存证**，
-  不是**事前生效的开关**。要让「未批准即不生效」成立，必须把检索侧改成读快照 ——
-  那是 Phase 4 的工作，不在本阶段，本阶段只负责把边界记下来。
+- **快照是记录，不是检索闸门** —— **该边界已于 2026-09-13 由 U5 关闭，见 §12**。
+  `inject_playbooks` / `inject_principles`（`alpha_agents/evolution/feedback.py`）现在按
+  **当前生效策略所指向的已批准快照**选行（`in_force_snapshot_id` →
+  `knowledge_snapshots.verified_rows`），不再读 `playbooks.status`。于是：
+  一条 `active` 但从未进过任何已批准快照的规则行**不再**进入提示词；
+  规则内容在批准之后被改动、行被删除、或快照校验失败时**明确阻断**，
+  渲染一行「（未生效…）」标记，而不是静默渲染或静默为空。
+  **范围限定**：关掉的是 `inject_playbooks` / `inject_principles` 这两条路径，
+  **不是** §10 的全部 —— 检索权重、校准器、退役决定仍会改变行为，仍属后续工作。
+  另：`in_force_snapshot_id` 读的是**指针**，不是「最近一次批准的快照」；
+  后者会制造第二个「什么在生效」的真相来源，正是 §14 结尾禁止的形态。
 - **`outcomes` 的标签不与 `predictions.hit` 对账**。T2 新增的三条标签链是**增量**的：
   `predictions.hit` / `scored_at` 仍是原路径，写标签时**不校验两者一致**。
   两套记录目前可以互相矛盾而无人发现 —— 合并它们属于后续阶段。
@@ -642,4 +654,60 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   「多少条什么都不需要做」无法回答。
 - **标签**不进**任何决策上下文。** T2 只写标签、只读标签；`hit` 的旧路径保持不变，
   两者尚未对账（见 §7）。
+
+## 12. Phase 4 逐项交付（U1–U5）
+
+记录日期：2026-09-13。全量口径 `.venv/bin/python -m pytest tests/ -q`（不加 `--ignore`）
+**1800 passed, 18 skipped**；`scripts/lint_harness.py` 通过（153 个文件，存量 47 条，
+**未扩充 baseline**）；`scripts/lint_docs.py` 通过。四处关键判据做了变异探针，
+四个全部被对应用例捕获（明细见
+[Phase 4 计划](exec-plans/active/2026-09-12-trader-core-phase4.md)）。
+
+| 切片 | 提交 | 内容 |
+|---|---|---|
+| U1 冻结策略注册表 | `83fbdfa` | `policy_versions` / `active_policy` / `policy_approvals`；哈希从**活的配置源**重算，漂移是变红的断言；`policy_ref` 写进新产生的 `intents` / `decision_snapshots` |
+| U2 影子预测与隔离 | `5f8b0a4` | `shadow_runs` / `shadow_predictions` 独立表；影子不进主账户、不进冠军知识命名空间。**生产者目前只有基线，见下** |
+| U3 候选绑定评估 | `a5f288a` | `run_gate(policy_version_id)`：验证窗口由冻结时间派生，「今天 vs 今天」构造不出来；`validation_days` 提升为列 |
+| U4 晋升与回滚 | `f23bca6` | 晋升 = 对指针的一次原子 CAS；人工批准不可变；回滚与晋升同片交付且不删任何成交/账本/结果；`scripts/policy.py` 是唯一写入口 |
+| U5 检索闸门 | 本轮 | `inject_playbooks` / `inject_principles` 改为按**当前生效策略指向的已批准快照**选行；fail-closed |
+
+### 本轮修掉的三处判据缺陷
+
+1. **证据等级曾由调用方传入的标签决定。** 旧写法
+   `... if run.get("baseline") == shadow.BASELINE_NAME else "candidate_policy"`，
+   而 `baseline` 是 `open_run(baseline=...)` 的自由文本、`emit_for_date` 恒写 0.5 ——
+   把 run 换个名字，基线证据就变成 `candidate_policy` 级。现在 `baseline` 列更名为
+   `producer`，`open_run` 只接受 `shadow.PRODUCERS` 里登记的名字，等级由该名字的
+   `kind` 推出（`shadow.scope_for`）。
+2. **从 `detail_json` 读 scope 是 fail-open 的。** 键缺失时 `detail.get(...)` 得到
+   `None`，而判据是「等于 `baseline_only` 才拒」，于是「什么都没记录」被读成
+   「可以晋升」。现在 `evidence_scope` 是 `gate_decisions` 的列，判据改为
+   `scope != SCOPE_CANDIDATE` 即拒，缺失落进同一拒绝分支。
+3. **同版本多个开启的 shadow run 会让闸门静默挑错。** `run_gate` 曾用
+   `open_run_for`（`ORDER BY id LIMIT 1`）取 run，第二个生产者一登记就会去评基线那个 run，
+   产出一份看起来合规、答的却是另一个问题的裁决。现在 `shadow.open_runs_for`
+   列出全部开启 run，多于一个即拒绝并点名。
+
+### 明确未实现（Phase 4 的边界，别读成已完成）
+
+- **没有候选生产者。** `shadow.PRODUCERS` 只有 `constant_0.5` 一条，其 `forecast`
+  恒返回 0.5。设计 §11 要的三个角色（champion / challenger / baseline）里，
+  challenger 与 baseline 目前是同一个东西。补它要先回答「候选策略是什么」——
+  设计文档只指定了 baseline，这是一个新的设计决定，不该由实现者替设计者定。
+  机械判据：`tests/test_gate_candidate_bound.py::
+  TestTheScopeBelongsToTheProducer::test_the_shipped_registry_holds_no_candidate`。
+- **生产里没有发生过晋升。** `gate_decisions` 里没有非 abstain 的生产行。
+  「晋升路径可达」由测试证明（测试临时登记一个候选生产者驱动全路径），
+  它证明的是**机制通**，不是**生产里跑过**。
+- **影子跑没有生产入口。** `scripts/policy.py` 只有 `status` / `approve` / `promote` /
+  `rollback` 四个子命令，没有开启或推进影子跑的入口；`emit_for_date` 的调用者只有测试。
+- **闸门没有生产调用者，所以 D7 的标题仍然成立。** `run_gate` 的调用者只有测试；
+  `alpha_agents/pipeline/` 与 `alpha_agents/server/` 都不引用 `holdout_gate`。
+  闸门从「永远触发不了」变成了「正确、可绑定候选、但没人调」—— 这是进步，
+  也仍然不是「生产里在跑」。补法是给影子推进与评估各加一个调度入口。
+- **晋升与检索的其余路径未收口。** 检索权重、校准器、退役决定仍能改变模型看到什么；
+  §10 的「未批准即不生效」目前只对 `inject_playbooks` / `inject_principles` 成立。
+- **已批准快照的 `detail_json` 与列并存。** `evidence_scope` 已提为列但仍在
+  `detail_json` 里保留一份；读侧只读列，写入侧两份都写。冗余是有意的
+  （历史行的 payload 不可改），但它意味着两者将来可能不一致，需要时各自说明。
 

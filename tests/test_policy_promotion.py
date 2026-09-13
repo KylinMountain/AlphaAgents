@@ -58,10 +58,27 @@ def _sources(tag: str) -> dict:
 
 
 def _verdict(version_id: int, *, outcome="promote", abstained=0, days=7,
-             decision_id=1) -> dict:
+             decision_id=1, n=25) -> dict:
     return {"id": decision_id, "policy_version_id": version_id,
             "outcome": outcome, "abstained": abstained, "validation_days": days,
-            "n": 25, "reason": f"{outcome} over {days} day(s)"}
+            "n": n, "reason": f"{outcome} over {days} day(s)"}
+
+
+def _persist_verdict(conn, verdict: dict) -> dict:
+    """Seed a shaped synthetic audit row; never treat its metrics as real.
+
+    The scope is written by hand here deliberately: these tests are about what
+    a promotion does with a verdict, not about how a verdict earns its scope.
+    That a real candidate run produces this value — and that nothing in the
+    build produces it today — is asserted in ``test_gate_candidate_bound.py``.
+    """
+    from alpha_agents.evolution import holdout_gate as HG
+    decision = {**verdict, "promote": verdict["outcome"] == "promote",
+                "evidence_scope": PR.SCOPE_CANDIDATE}
+    HG.record_gate_decision(f"trader#{verdict['policy_version_id']}", decision,
+                            today=FROZEN_3)
+    return HG.get_gate_decisions(
+        policy_version_id=verdict["policy_version_id"])[0]
 
 
 @pytest.fixture()
@@ -124,8 +141,11 @@ def frozen(store) -> dict:
 
 
 def _approve(ids, tag, **over):
+    claim = over.pop("gate_decision", None)
+    if claim is None:
+        claim = _persist_verdict(memory_store._get_conn(), _verdict(ids[tag]))
     kwargs = dict(version_id=ids[tag], approved_by="kylin",
-                  reason="beat the baseline", gate_decision=_verdict(ids[tag]),
+                  reason="beat the baseline", gate_decision=claim,
                   sources=ids["_sources"][tag], at=FROZEN_3)
     kwargs.update(over)
     return PR.approve(**kwargs)
@@ -179,9 +199,10 @@ class TestThePointerHasExactlyOneWriter:
 
 class TestApprovingIsNotPromoting:
     def test_approving_writes_one_table_and_moves_no_pointer(self, store, frozen):
+        verdict = _persist_verdict(store, _verdict(frozen["v2"]))
         before = _nonempty(store)
         pointer_before = PR.active()
-        _approve(frozen, "v2")
+        _approve(frozen, "v2", gate_decision=verdict)
         after = _nonempty(store)
         assert set(after) - set(before) == {"policy_approvals"}
         assert PR.active() == pointer_before
@@ -224,9 +245,11 @@ class TestAnApprovalRequiresAVerdictThatSaysPromote:
     """Every refusal is structural, checked in the registry, not the CLI."""
 
     def _refused(self, store, frozen, verdict, **over):
+        claim = (_persist_verdict(store, verdict)
+                 if isinstance(verdict, dict) and verdict.get("id") else verdict)
         before = _nonempty(store)
         with pytest.raises(PR.PolicyError) as exc:
-            _approve(frozen, "v2", gate_decision=verdict, **over)
+            _approve(frozen, "v2", gate_decision=claim, **over)
         assert _nonempty(store) == before
         return str(exc.value)
 
@@ -251,8 +274,13 @@ class TestAnApprovalRequiresAVerdictThatSaysPromote:
         assert "not #" in message or "Evidence for one policy" in message
 
     def test_no_verdict_at_all_is_refused(self, store, frozen):
-        message = self._refused(store, frozen, None)
-        assert "must cite a gate verdict" in message
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError) as exc:
+            PR.approve(version_id=frozen["v2"], approved_by="kylin",
+                       reason="r", gate_decision=None,
+                       sources=frozen["_sources"]["v2"])
+        assert "must cite a gate verdict" in str(exc.value)
+        assert _nonempty(store) == before
 
     def test_a_drifted_configuration_is_refused(self, store, frozen):
         message = self._refused(store, frozen, _verdict(frozen["v2"]),
@@ -265,6 +293,54 @@ class TestAnApprovalRequiresAVerdictThatSaysPromote:
                                 sources=None)
         assert "needs the live configuration" in message
 
+    def test_caller_cannot_forge_a_verdict_dict(self, store, frozen):
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError, match="No persisted gate verdict"):
+            _approve(frozen, "v2", gate_decision={
+                "id": 9999, "policy_version_id": frozen["v2"],
+                "outcome": "promote", "abstained": 0,
+                "validation_days": 99, "n": 999})
+        assert _nonempty(store) == before
+
+    def test_persisted_sample_floor_is_enforced(self, store, frozen):
+        claim = _persist_verdict(store, _verdict(frozen["v2"], n=19))
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError, match="insufficient paired samples"):
+            _approve(frozen, "v2", gate_decision=claim)
+        assert _nonempty(store) == before
+
+    def test_caller_cannot_overwrite_persisted_fields(self, store, frozen):
+        stored = _persist_verdict(
+            store, _verdict(frozen["v2"], outcome="reject"))
+        forged = {**stored, "outcome": "promote", "promoted": 1}
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError, match="does not match"):
+            _approve(frozen, "v2", gate_decision=forged)
+        assert _nonempty(store) == before
+
+    def test_a_verdict_with_no_scope_is_refused(self, store, frozen):
+        """Fail closed on the absent case — which is the case that used to pass.
+
+        The scope lived inside ``detail_json`` and was read with
+        ``detail.get("evidence_scope")``, where an absent key is simply not
+        ``"baseline_only"``, so a verdict carrying no scope at all read as
+        promotable. A guard whose missing case is the permissive one is the
+        shape of a guard that is not doing anything.
+        """
+        from alpha_agents.evolution import holdout_gate as HG
+        claim = _persist_verdict(store, _verdict(frozen["v2"]))
+        store.execute(
+            "UPDATE gate_decisions SET evidence_scope = NULL WHERE id = ?",
+            (claim["id"],))
+        store.commit()
+        blank = HG.get_gate_decisions(policy_version_id=frozen["v2"])[0]
+        assert blank["evidence_scope"] is None
+
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError, match="evidence scope is None"):
+            _approve(frozen, "v2", gate_decision=blank)
+        assert _nonempty(store) == before
+
 
 # ── 3. Promotion needs everything at once ──────────────────────────────
 
@@ -276,6 +352,30 @@ class TestPromotionRequiresEveryCondition:
         assert seq == 2
         assert PR.active()["version_id"] == frozen["v2"]
         assert PR.active()["version_seq"] == 2
+
+    def test_evidence_changed_after_approval_blocks_promotion(self, store, frozen):
+        _approve(frozen, "v2")
+        # The production table is append-oriented but legacy schema has no
+        # trigger; fail closed even if maintenance or corruption edits a row.
+        store.execute("UPDATE gate_decisions SET n = 999 WHERE policy_version_id = ?",
+                      (frozen["v2"],))
+        store.commit()
+        before = _nonempty(store)
+        with pytest.raises(PR.PolicyError, match="changed after approval"):
+            _promote(frozen, "v2")
+        assert _nonempty(store) == before
+        assert PR.active()["version_id"] == frozen["v1"]
+
+    def test_legacy_approval_without_evidence_hash_fails_closed(self, store, frozen):
+        verdict = _persist_verdict(store, _verdict(frozen["v2"]))
+        store.execute(
+            "INSERT INTO policy_approvals (policy_key, version_id, content_hash, "
+            "gate_decision_id, approved_by, reason, at) VALUES (?,?,?,?,?,?,?)",
+            ("trader", frozen["v2"], PR.get_version(frozen["v2"])["content_hash"],
+             verdict["id"], "legacy-human", "legacy", FROZEN_3))
+        store.commit()
+        with pytest.raises(PR.PolicyError, match="predates evidence binding"):
+            _promote(frozen, "v2")
 
     def test_the_transition_cites_the_approval_and_the_verdict(
             self, store, frozen):
@@ -319,8 +419,9 @@ class TestPromotionRequiresEveryCondition:
         """There is no incumbent, so there is nothing to improve on."""
         version = PR.freeze(sources=_sources("only"), created_by="kylin",
                             reason="only", frozen_at=FROZEN_1)
+        verdict = _persist_verdict(store, _verdict(version))
         PR.approve(version_id=version, approved_by="kylin", reason="r",
-                   gate_decision=_verdict(version), sources=_sources("only"))
+                   gate_decision=verdict, sources=_sources("only"))
         with pytest.raises(PR.PolicyError) as exc:
             PR.promote(version_id=version, actor="kylin", reason="r",
                        sources=_sources("only"))
@@ -630,8 +731,8 @@ class TestTheOperatorCLI:
         # Tests that move the live configuration set ``cli.LIVE`` first.
         # ``_load_cli`` builds a fresh module per test, so this does not leak.
         module.LIVE = {"sources": frozen["_sources"]["v2"]}
-        monkeypatch.setattr(module.policy_sources, "collect",
-                            lambda **kw: module.LIVE["sources"])
+        monkeypatch.setattr(module, "_sources",
+                            lambda version_id: module.LIVE["sources"])
         return module
 
     def test_status_changes_nothing(self, cli, store, frozen, capsys):
@@ -661,6 +762,7 @@ class TestTheOperatorCLI:
             "promote": True, "abstained": False, "outcome": "promote",
             "policy_version_id": frozen["v2"], "validation_days": 9, "n": 30,
             "reason": "beat the baseline",
+            "evidence_scope": PR.SCOPE_CANDIDATE,
         }, today=FROZEN_3)
 
         assert cli.main(["approve", "--version", str(frozen["v2"]),

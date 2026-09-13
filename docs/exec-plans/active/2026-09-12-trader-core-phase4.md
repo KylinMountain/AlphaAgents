@@ -1,6 +1,8 @@
 # Trade Learn Evolve：第四阶段 受控进化
 
-状态：**计划中（尚未开始）**。负责人：本次开发会话。创建：2026-09-12。
+状态：**实施中**。U1–U4 已提交（`83fbdfa` / `5f8b0a4` / `a5f288a` / `f23bca6`），
+U5 与晋升证据校验已实现并通过全量回归，待收尾提交。负责人：本次开发会话。
+创建：2026-09-12。**更新：2026-09-13**（U5 实现 + 证据校验补强 + 三处判据缺陷修复）。
 
 > 完成后按 AGENTS.md 的约定移入 `docs/exec-plans/completed/`。
 > 本阶段的范围由设计 §14 界定：frozen policy registry、forward shadow accounts、
@@ -65,11 +67,11 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了，Phase 3 让学�
 
 | 切片 | 状态 |
 |---|---|
-| U1 冻结的策略注册表 | ⬜ 未开始 |
-| U2 影子账户与 challenger 生产者 | ⬜ 未开始 |
-| U3 冻结证据上的公平评估 | ⬜ 未开始 |
-| U4 授权的晋升与回滚（唯一入口） | ⬜ 未开始 |
-| U5 检索闸门：批准从存证变成开关 | ⬜ 未开始 |
+| U1 冻结的策略注册表 | ✅ 已交付 `83fbdfa` |
+| U2 影子账户与 challenger 生产者 | ⚠️ **部分交付** `5f8b0a4` —— 生产者是基线，候选生产者不存在，见「U2 的缺口」 |
+| U3 冻结证据上的公平评估 | ✅ 已交付 `a5f288a` |
+| U4 授权的晋升与回滚（唯一入口） | ✅ 已交付 `f23bca6`；本轮补强证据校验 |
+| U5 检索闸门：批准从存证变成开关 | ✅ 已实现并通过全量回归，待提交 |
 
 ### U1 冻结的策略注册表
 
@@ -152,6 +154,51 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了，Phase 3 让学�
 - **验收方式**：先证明旧实现**泄漏**（一条 active 但从未被批准过的 playbook 会被渲染进提示词），
   再证明新实现不泄漏。先红后绿，不是只测新行为。
 
+### U2 的缺口：只有基线生产者，没有候选生产者
+
+2026-09-13 实测。U2 交付的是**基线**生产者，不是候选生产者：
+
+- `shadow.emit_for_date` 的分派走 `shadow.PRODUCERS`，而该表只有 `constant_0.5` 一条，
+  其 `forecast` 恒返回 `BASELINE_PROB = 0.5`。
+- 因此**生产里产不出可晋升的裁决**：每一份裁决的 `evidence_scope` 都是 `baseline_only`，
+  而 `policy_registry._require_eligible_gate` 只接受 `candidate_policy`。
+
+设计 §11 要的是三个角色（champion / challenger / baseline），当前 challenger 与 baseline
+合成了一体。补这个缺口要先回答「候选策略是什么」，而设计文档只指定了 baseline ——
+这是一个新的设计决定，**不在本轮范围内**，也不该由实现者替设计者决定。
+
+本轮做的是把缺口**做成不可绕过的**：证据等级不再由调用方传入的标签决定，而由产出手册
+（`PRODUCERS`）里登记的 `kind` 决定。于是「没有候选生产者」成为一个可被断言的事实
+（`test_the_shipped_registry_holds_no_candidate`），而不是文档里的一句免责声明。
+
+### 本轮发现的三处判据缺陷（均已修）
+
+1. **证据等级由标签决定，不由数据决定。** `run_gate` 曾这样定级：
+
+   ```python
+   decision["evidence_scope"] = (
+       shadow.BASELINE_ONLY_SCOPE
+       if run.get("baseline") == shadow.BASELINE_NAME else "candidate_policy")
+   ```
+
+   而 `baseline` 是 `open_run(baseline=...)` 传来的自由文本，`emit_for_date` 则恒写 0.5。
+   把 run 命名成 `constant_0.5` 以外的任意字符串，就得到 `candidate_policy` 级的证据，
+   而它仍是 0.5 基线 —— 本轮补强要堵的那件事，被一个字符串绕了过去。
+   修法：`baseline` 列更名为 `producer`，`open_run` 只接受 `PRODUCERS` 里登记的名字，
+   等级由该名字的 `kind` 推出（`shadow.scope_for`）。
+
+2. **从 `detail_json` 读 scope 是 fail-open 的。** 旧写法
+   `detail.get("evidence_scope") == "baseline_only"` 在键**缺失**时得到 `None`，
+   于是「什么都没记录」被读成「可以晋升」。修法：`evidence_scope` 提升为
+   `gate_decisions` 的列（沿用 U3 把 `validation_days` 提列的同一理由），判据改为
+   `scope != SCOPE_CANDIDATE` 即拒 —— 缺失落进同一拒绝分支。
+
+3. **同版本的多个开启 shadow run 会让闸门静默挑错。** `run_gate` 用
+   `open_run_for`（`ORDER BY id LIMIT 1`）取 run，所以第二个生产者一登记，闸门就会去评
+   基线那个 run 并输出一份 `baseline_only` 裁决 —— 看起来在治理，答的却是另一个问题，
+   与 D7 同形。修法：`shadow.open_runs_for` 列出全部开启 run，多于一个即拒绝并点名，
+   不静默择一。
+
 ## 非目标
 
 - **不做任何形式的自动晋升。** §11：初始批准边界是**人的授权**；
@@ -196,6 +243,11 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了，Phase 3 让学�
 13. **晋升路径可达**：一个用**合成但形状合法**的证据驱动的测试，能走完
     冻结 → 影子 → 评估（`validation_days > 0`）→ 批准 → 指针变更的全路径，
     并留下一条非 abstain 的 `gate_decisions` 记录。
+    **「形状合法」的确切含义（2026-09-13 补充）**：测试必须先在 `PRODUCERS` 里
+    **登记**一个候选生产者来驱动全路径（见
+    `test_from_a_candidate_run_to_a_moved_pointer`），而不是手写一行
+    `evidence_scope`。手写 scope 的测试只覆盖晋升机制，不覆盖「这份裁决凭什么
+    拿到这个 scope」—— 后者正是本轮修掉的缺陷。
 14. **生产库在样本不足时产出 `insufficient` 而不是晋升**：对当前生产库
     （`brier` 全空、无影子行）跑一次评估，结果必须是**被记录的** `insufficient`，
     且指针与全部哈希不变。
@@ -203,6 +255,41 @@ Phase 1 把账算对了，Phase 2 把交易内核补完整了，Phase 3 让学�
     即 U1–U5 的机制存在，但**生产里尚未发生一次真实晋升**，原因是样本不是代码。
     这一条本身是可检查的：文档里必须出现这句话，且 `gate_decisions` 里
     **不得**出现任何非 abstain 的生产行来支持相反的说法。
+
+### 实测结果（2026-09-13）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 全量回归 | `TMPDIR=… .venv/bin/python -m pytest tests/ -q`（不加 `--ignore`） | **1800 passed, 18 skipped**（120s） |
+| 架构不变量 | `scripts/lint_harness.py` | 通过，**153 个文件**，存量 47 条（未扩充 baseline） |
+| 文档新鲜度 | `scripts/lint_docs.py` | 通过 |
+| U5 / 闸门 / 晋升定向 | 7 个测试文件 | **289 passed** |
+
+（Phase 1 收口基线为 1373 passed；Phase 2–4 累计 +427，其中本轮新增 10 个用例。）
+
+逐条对应：
+
+- **A7**（检索闸门先红后绿）由 `tests/test_retrieval_gate.py` 覆盖：既有「旧实现会把
+  未批准行渲染进提示词」的断言，也有新实现在快照缺失 / 损坏 / 规则被改之后
+  fail-closed 的断言。
+- **A8**（唯一入口）由 `tests/test_policy_promotion.py::TestThePointerHasExactlyOneWriter`
+  用正则扫源码钉住。
+- **A10**（变异探针）见下。
+- **B13** 由 `test_from_a_candidate_run_to_a_moved_pointer` 覆盖。注意它证明的是
+  **路径可达**，不是「生产里发生过晋升」—— 后者需要先有候选生产者。
+- **B15**：实现文档 §7 已写明「机制已交付 ≠ 已经在跑」。
+
+### 变异探针（2026-09-13）
+
+四处关键判据，各做一遍「先让改动失效 → 确认对应用例变红 → 复原」。**四个全部被捕获**，
+说明这些用例真的在钉住行为，而不是在自证。
+
+| 探针 | 让什么失效 | 变红的用例 |
+|---|---|---|
+| P1 | `policy_registry` 的 `scope != SCOPE_CANDIDATE` 改回「等于 `baseline_only` 才拒」 | `test_a_verdict_with_no_scope_is_refused` |
+| P2 | `open_run` 去掉 `PRODUCERS` 成员检查 | `test_a_name_with_no_emitter_cannot_be_opened` |
+| P3 | `run_gate` 不再拒绝多个开启 run（回到静默取最早一条） | `test_two_open_shadows_of_one_version_are_refused` |
+| P4 | `scope_for` 的未知 `kind` 分支落到 `candidate_policy` | `test_a_kind_the_module_never_defined_is_not_a_candidate` |
 
 ## 风险
 

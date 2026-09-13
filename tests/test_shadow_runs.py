@@ -126,7 +126,7 @@ class TestARunIsBoundToAVersion:
         run = SH.get_run(_open(version))
         assert run["policy_version_id"] == version
         assert run["status"] == "open"
-        assert run["baseline"] == SH.BASELINE_NAME
+        assert run["producer"] == SH.BASELINE_NAME
 
     def test_an_unfrozen_version_is_refused(self, store):
         with pytest.raises(SH.ShadowError) as exc:

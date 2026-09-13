@@ -14,7 +14,7 @@ data yet. A grade can fall — see the note at the end._
 | Area | Grade | Basis | Gap |
 |---|---|---|---|
 | `data/scoring.py` | **A** | 27 tests; verified end to end on real history | — |
-| `evolution/holdout_gate.py` | **B** | 24 tests incl. leak boundary | **Not called.** Phase 1 disconnected it: the daily call passed a zero-length validation window, so it abstained on all 3 runs (`gate_decisions`, every row `validation_days: 0`). Reconnecting needs a candidate-bound protocol (Phase 4). |
+| `evolution/holdout_gate.py` | **B** | 24 tests, plus the candidate-bound and evidence-scope groups in `test_gate_candidate_bound.py` | **Still not called in production.** Phase 1 disconnected the daily call: it passed a zero-length validation window, so all 3 runs abstained (`gate_decisions`, every row `validation_days: 0`). Phase 4 made the gate candidate-bound and gave the verdict an evidence scope, but nothing in `pipeline/` or `server/` schedules it, and `shadow.PRODUCERS` registers no candidate producer — so no promotable verdict is reachable yet. |
 | `evolution/principle_scoring.py` | **A** | 16 tests incl. decay weighting | Needs graded predictions to act on |
 | `data/decision_context.py` | **A** | 19 tests; replay verified | No history to replay |
 | `tools/exit_signals.py` | **B** | 19 tests; regime rule forward-tested over 24 windows | Patterns kept for display are known-useless |
@@ -30,7 +30,10 @@ data yet. A grade can fall — see the note at the end._
 | `server/` | **D** | API returns verified by hand | No request tests |
 | Entry strategy | **F** | — | Never evaluated (D6) |
 
-## Trader core (Phase 1–3) — graded 2026-09-12
+## Trader core (Phase 1–3) — graded 2026-09-12, gate area re-checked 2026-09-13
+
+_Only the `evolution/holdout_gate.py` row was revisited, after Phase 4 delivered
+U1–U5. The rest of the grades are still 2026-09-12's and were not re-derived._
 
 **None of these can be A yet, and that is a statement about the sample, not
 the code.** Every area below is tested; none has been validated against data,

@@ -77,7 +77,26 @@ looks like governance. Phase 1 removed the call rather than leave it.
 **Fix.** Candidate-bound forward validation, frozen policy registry, promotion
 and rollback — i.e. Phase 4 of `docs/TRADER_CORE_DESIGN.md` §14.
 **Recognise.** A promotion that changes the active policy pointer, with a
-`gate_decisions` row whose `validation_days` is not 0.
+`gate_decisions` row whose `validation_days` is not 0 **and whose
+`evidence_scope` is `candidate_policy`**. The second half was added 2026-09-13:
+`validation_days > 0` alone is also satisfied by a comparison against the
+no-skill baseline, which says the champion has skill and says nothing about
+whether a policy is better.
+**Status 2026-09-13.** The mechanism is delivered (Phase 4, U1–U5) and this
+recogniser is still unmet: `gate_decisions` holds no non-abstain production
+row. The blocker has become two things, and only one of them is data:
+
+1. `predictions.brier` is still NULL on every row, so the champion half of any
+   comparison is empty.
+2. `shadow.PRODUCERS` registers the constant baseline only, so nothing in the
+   build emits candidate-grade evidence and every verdict is refused on
+   `evidence_scope` by design. Adding a candidate producer is a design
+   decision — what the challenger *is* — not a missing function.
+
+The original title still holds for a third reason: `run_gate` has no production
+caller. Nothing in `pipeline/` or `server/` schedules it, so the gate went from
+"can never fire" to "correct, candidate-bound and never asked" — progress, and
+still not "running in production".
 **Note.** This is the one debt item that is scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".

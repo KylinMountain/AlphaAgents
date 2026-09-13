@@ -2,6 +2,12 @@
 from unittest.mock import patch
 
 
+def approved_rows(*, return_value):
+    """Formatter-only seam. Real approval selection is tested in test_retrieval_gate."""
+    return patch("alpha_agents.evolution.feedback._approved_rows",
+                 return_value=(return_value, None))
+
+
 def test_inject_sentiment_returns_formatted_block():
     fake_cycle = {"phase": "升温", "confidence": 0.8,
                   "strategy": "可追强势，高beta优先"}
@@ -146,7 +152,7 @@ def test_inject_principles_formats_by_category():
          "action_guidance": "降级", "win_rate": 0.3, "evidence_count": 3,
          "status": "active"},
     ]
-    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+    with approved_rows(
                return_value=fake):
         from alpha_agents.evolution.feedback import inject_principles
         result = inject_principles()
@@ -156,7 +162,7 @@ def test_inject_principles_formats_by_category():
 
 
 def test_inject_principles_empty_returns_empty():
-    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+    with approved_rows(
                return_value=[]):
         from alpha_agents.evolution.feedback import inject_principles
         assert inject_principles() == ""
@@ -166,11 +172,11 @@ def test_inject_principles_marks_weakened():
     fake = [{"id": 1, "principle": "失效法则", "pattern_description": "x",
              "category": "insight", "action_guidance": "谨慎",
              "win_rate": 0.25, "evidence_count": 4, "status": "weakened"}]
-    with patch("alpha_agents.evolution.feedback.get_all_principles_including_weakened",
+    with approved_rows(
                return_value=fake):
         from alpha_agents.evolution.feedback import inject_principles
         result = inject_principles()
-    assert "⚠️" in result
+    assert "[weakened]" in result
 
 
 def test_inject_recent_lessons_formats():
@@ -212,7 +218,7 @@ def test_inject_playbooks_formats_active_and_degraded():
          "hit_rate": 0.3, "total_trades": 6, "wins": 2,
          "annotation": "主线资金退潮"},
     ]
-    with patch("alpha_agents.evolution.feedback.get_active_or_degraded_playbooks",
+    with approved_rows(
                return_value=fake):
         from alpha_agents.evolution.feedback import inject_playbooks
         result = inject_playbooks()
@@ -228,7 +234,7 @@ def test_inject_playbooks_formats_active_and_degraded():
 
 
 def test_inject_playbooks_empty():
-    with patch("alpha_agents.evolution.feedback.get_active_or_degraded_playbooks",
+    with approved_rows(
                return_value=[]):
         from alpha_agents.evolution.feedback import inject_playbooks
         assert inject_playbooks() == ""

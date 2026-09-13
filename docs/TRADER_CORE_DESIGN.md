@@ -1,8 +1,9 @@
 # Trader Core Design: Trade, Learn, Evolve
 
 - Design date: 2026-09-11.
-- Status: authorized target architecture. Phases 1–3 delivered and Phase 4 not begun
-  (as of 2026-09-12); what actually exists is recorded in the
+- Status: authorized target architecture. Phases 1–3 delivered; Phase 4's
+  mechanism is delivered and no promotion has run yet (as of 2026-09-13).
+  What actually exists is recorded in the
   [implementation status](TRADER_CORE_IMPLEMENTATION.md), not here.
 - Scope: a persistent simulated trader, trustworthy execution facts, attributable learning, and controlled policy evolution.
 - This is a normative design, not a release checklist or evidence that the complete architecture exists.
@@ -257,7 +258,7 @@ A future lowest-level contracts package requires an explicit architectural decis
 | 1 — trustworthy minimum slice ✅ delivered 2026-09-11 | Cash and cumulative exit accounting, auditable per-trade records, explicit trader/source binding, separate trade outcomes, candidate-only learning boundary | A narrow trustworthy foundation, not a full ledger/broker/runtime/experiment system |
 | 2 — complete trading kernel ✅ delivered 2026-09-11 | Full fill/cash ledger, reservations, settlement lots, unified intents, runtime clocks, reconciliation, and replay | All trading paths share enforceable execution and accounting contracts |
 | 3 — episode learning ✅ delivered 2026-09-12 | Episode association, three outcome lifecycles, candidate evidence, and approved knowledge snapshots | Learning is attributable without changing active behavior implicitly |
-| 4 — controlled evolution ⬅ **current, not begun** | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
+| 4 — controlled evolution ⬅ **current, in progress** | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
 | 5 — product consolidation | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts |
 
 The ✅ marks are a pointer to the [implementation status](TRADER_CORE_IMPLEMENTATION.md)

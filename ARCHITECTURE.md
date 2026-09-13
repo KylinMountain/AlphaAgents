@@ -68,18 +68,22 @@ review (T+5)
         └─ brier     = (prob − outcome)²
         ▼
   principle_scoring   principles inherit the scores of what they cited
-  holdout_gate        exists and is tested, but is NOT called: the daily gate
-                      ran with a zero-length validation window and abstained
-                      every time, so Phase 1 disconnected it rather than leave
-                      a gate that could never fire. Reconnecting it needs a
-                      candidate-bound forward protocol (Phase 4).
+  holdout_gate        candidate-bound since Phase 4 (U3): the window is derived
+                      from the frozen version, and a verdict carries an evidence
+                      scope, so only a candidate policy's comparison can promote.
+                      Still NOT called in production — Phase 1 cut the daily
+                      call that ran with a zero-length window, and no scheduler
+                      has been given one back.
 ```
 
 Nothing in that chain asks a model whether it did well. See
 `docs/GOLDEN_PRINCIPLES.md`.
 
-Promotion is the one link with no writer today. Phase 4 of
-`docs/TRADER_CORE_DESIGN.md` §14 is what supplies it.
+Promotion now has a writer: `scripts/policy.py`, the only one, moving
+`active_policy` through one atomic compare-and-swap after a person approves.
+What it does not have is evidence to act on — no candidate producer is
+registered, so every verdict the build can produce is baseline-scoped and
+refused. See `docs/TRADER_CORE_IMPLEMENTATION.md` §12.
 
 ## The trader book
 

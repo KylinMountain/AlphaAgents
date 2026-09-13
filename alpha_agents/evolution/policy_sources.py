@@ -114,29 +114,28 @@ def model_fingerprint() -> dict:
     return model_factory.model_identity()
 
 
-def knowledge_fingerprint(snapshot_id: int | None = None) -> dict:
-    """The approved knowledge this version carries.
+_ACTIVE_KNOWLEDGE = object()
 
-    Defaults to the newest approval on record. Note what that means for
-    drift: approving new knowledge moves this source, so the version in force
-    starts failing verification the moment an approval lands — which is the
-    honest reading. §10 says approval does not activate knowledge, and this is
-    the machine form of "it is approved and *not* in force": to put it in
-    force you freeze a version that names it and promote that, with evidence.
 
-    ``U5`` is where a specific snapshot becomes the one retrieval reads. Until
-    then this is a declaration carried by the version, not an authority.
+def knowledge_fingerprint(snapshot_id=_ACTIVE_KNOWLEDGE) -> dict:
+    """Default to the pointer, never to the newest unrelated approval.
+
+    Explicit None means no knowledge. Explicit ids stage a candidate without
+    activating it. Any referenced snapshot must be intact and every rule must
+    still match its approved content hash.
     """
-    if snapshot_id is None:
-        snapshots = knowledge_snapshots.all_snapshots()
-        snapshot_id = snapshots[-1]["id"] if snapshots else None
+    if snapshot_id is _ACTIVE_KNOWLEDGE:
+        snapshot_id = feedback.in_force_snapshot_id()
+    if snapshot_id is not None:
+        for kind in knowledge_snapshots.ENTITY_TYPES:
+            knowledge_snapshots.verified_rows(snapshot_id, kind)
     return {"snapshot_id": snapshot_id}
 
 
 # ── Collecting ─────────────────────────────────────────────────────────
 
 
-def collect(*, knowledge_snapshot_id: int | None = None) -> dict:
+def collect(*, knowledge_snapshot_id=_ACTIVE_KNOWLEDGE) -> dict:
     """Read the live configuration into the declared source tuple.
 
     The single definition of what a policy version covers: ``freeze`` and
@@ -158,7 +157,7 @@ def collect(*, knowledge_snapshot_id: int | None = None) -> dict:
 def freeze_live(*, created_by: str, reason: str,
                 policy_key: str = policy_registry.POLICY_KEY_DEFAULT,
                 parent_id: int | None = None,
-                knowledge_snapshot_id: int | None = None,
+                knowledge_snapshot_id=_ACTIVE_KNOWLEDGE,
                 frozen_at: str | None = None) -> int:
     """Freeze the configuration as it is right now."""
     return policy_registry.freeze(
@@ -168,8 +167,13 @@ def freeze_live(*, created_by: str, reason: str,
 
 
 def verify_live(version_id: int) -> bool:
-    """Does the configuration still match this version?"""
-    return policy_registry.verify_version(version_id, collect())
+    """Does live code plus the version's staged snapshot match it?"""
+    frozen = policy_registry.sources_of(version_id)
+    if frozen is None:
+        return False
+    return policy_registry.verify_version(
+        version_id,
+        collect(knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id")))
 
 
 def drifted(policy_key: str = policy_registry.POLICY_KEY_DEFAULT) -> list[dict]:
@@ -182,16 +186,22 @@ def drifted(policy_key: str = policy_registry.POLICY_KEY_DEFAULT) -> list[dict]:
     back to either, and a rollback that silently restored something the code
     no longer does would be worse than refusing.
     """
-    live = collect()
     out = []
     for version in policy_registry.versions_for(policy_key):
-        if not policy_registry.verify_version(version["id"], live):
+        frozen = policy_registry.sources_of(version["id"])
+        try:
+            live = collect(
+                knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id"))
+        except ValueError:
+            live = None
+        if live is None or not policy_registry.verify_version(version["id"], live):
             out.append({
                 "id": version["id"],
                 "policy_key": version["policy_key"],
                 "frozen_at": version["frozen_at"],
                 "content_hash": version["content_hash"],
-                "live_hash": policy_registry.content_hash_for(live),
+                "live_hash": (policy_registry.content_hash_for(live)
+                              if live is not None else None),
             })
     return out
 
@@ -207,7 +217,7 @@ def changed_sources(version_id: int) -> dict:
     if version is None:
         return {}
     frozen = json.loads(version["sources_json"])
-    live = collect()
+    live = collect(knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id"))
     return {name: {"frozen": frozen.get(name), "live": live.get(name)}
             for name in policy_registry.SOURCE_NAMES
             if frozen.get(name) != live.get(name)}

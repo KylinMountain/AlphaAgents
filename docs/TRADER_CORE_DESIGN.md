@@ -1,9 +1,10 @@
 # Trader Core Design: Trade, Learn, Evolve
 
 - Design date: 2026-09-11.
-- Status: authorized target architecture. Phases 1–3 delivered; Phase 4's
-  mechanism is delivered and no promotion has run yet (as of 2026-09-13).
-  What actually exists is recorded in the
+- Status: authorized target architecture. Phases 1–5 delivered; Phase 4's
+  mechanism is delivered and no promotion has run yet, and Phase 5's three
+  workspaces render facts that are mostly absent on the current database
+  (as of 2026-09-13). What actually exists is recorded in the
   [implementation status](TRADER_CORE_IMPLEMENTATION.md), not here.
 - Scope: a persistent simulated trader, trustworthy execution facts, attributable learning, and controlled policy evolution.
 - This is a normative design, not a release checklist or evidence that the complete architecture exists.
@@ -259,7 +260,7 @@ A future lowest-level contracts package requires an explicit architectural decis
 | 2 — complete trading kernel ✅ delivered 2026-09-11 | Full fill/cash ledger, reservations, settlement lots, unified intents, runtime clocks, reconciliation, and replay | All trading paths share enforceable execution and accounting contracts |
 | 3 — episode learning ✅ delivered 2026-09-12 | Episode association, three outcome lifecycles, candidate evidence, and approved knowledge snapshots | Learning is attributable without changing active behavior implicitly |
 | 4 — controlled evolution ✅ delivered 2026-09-13 | Frozen policy registry, forward shadow accounts, fair evaluation, authorized promotion, and rollback | Evidence controls future policy changes through one audited entry point |
-| 5 — product consolidation ⬅ **current, API half delivered** | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts |
+| 5 — product consolidation ✅ delivered 2026-09-13 | Trader, episode, and experiment read models across APIs and the existing [frontend](../web/src/) | Trade workspace, Learn journal, and Evolve laboratory expose the same facts. **Delivered as read models + API + three frontend workspaces; what those pages can *show* is limited by the three different schema states on the production database, which the read models report rather than hide — see §13 of the implementation status.** |
 
 The ✅ marks are a pointer to the [implementation status](TRADER_CORE_IMPLEMENTATION.md)
 and its per-round verification records; they are not evidence in themselves.

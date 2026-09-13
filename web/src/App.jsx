@@ -11,6 +11,8 @@ import GraphView from './views/GraphView'
 import ReportsView from './views/ReportsView'
 import MemoryView from './views/MemoryView'
 import PortfolioView from './views/PortfolioView'
+import LearnView from './views/LearnView'
+import EvolveView from './views/EvolveView'
 import SystemView from './views/SystemView'
 import UsageView from './views/UsageView'
 
@@ -20,8 +22,16 @@ const NAV = [
     { id: 'realtime', icon: '◉', label: '实时资讯', count: 'news' },
     { id: 'anomalies', icon: '⚡', label: '实时异动', count: 'signals' },
     { id: 'themes', icon: '⌁', label: '投资主线', count: 'themes' },
-    { id: 'portfolio', icon: '▦', label: '虚拟持仓', count: 'positions' },
     { id: 'graph', icon: '◇', label: '事件图谱' },
+  ] },
+  // The three workspaces of docs/TRADER_CORE_DESIGN.md §14, side by side so
+  // the same day can be read from all three. Each one is a read model with a
+  // named source per section, and each says plainly when a table is missing
+  // rather than rendering an empty list.
+  { group: 'Trader Core', items: [
+    { id: 'portfolio', icon: '▦', label: '交易工作台', count: 'positions' },
+    { id: 'learn', icon: '◫', label: '学习日志' },
+    { id: 'evolve', icon: '⚖', label: '进化实验台' },
   ] },
   { group: 'Research', items: [
     { id: 'reports', icon: '▤', label: '分析报告', count: 'reports' },
@@ -95,9 +105,12 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
+  // The book lives inside the trade workspace read model now. Read the badge
+  // from the same section the page renders: a count that disagrees with the
+  // page it opens is worse than no count at all.
+  const book = d.trade?.sections?.book?.value
   const counts = {
-    positions: (d.portfolio?.positions?.length || 0)
-      + (d.portfolio?.pending?.length || 0),
+    positions: (book?.positions?.length || 0) + (book?.pending?.length || 0),
     news: d.news.length,
     signals: d.signals.length,
     themes: d.themes.length,
@@ -205,8 +218,10 @@ export default function App() {
               {view === 'realtime' && <RealtimeView {...d} />}
               {view === 'anomalies' && <AnomaliesView {...d} />}
               {view === 'themes' && <ThemesView {...d} />}
-              {view === 'portfolio' && <PortfolioView {...d} />}
+              {view === 'portfolio' && <PortfolioView workspace={d.trade} />}
               {view === 'graph' && <GraphView {...d} />}
+              {view === 'learn' && <LearnView learn={d.learn} />}
+              {view === 'evolve' && <EvolveView evolve={d.evolve} />}
               {view === 'reports' && <ReportsView {...d} />}
               {view === 'memory' && <MemoryView {...d} />}
               {view === 'usage' && <UsageView {...d} />}

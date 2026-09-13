@@ -1,4 +1,6 @@
 import { DASH, fmtPct, trendClass } from '../lib/format'
+import { Blocked, SectionMeta, WorkspaceCard, WorkspaceHead }
+  from '../components/WorkspaceSection'
 
 /* The virtual portfolio, end to end.
  *
@@ -156,7 +158,20 @@ function PositionCard({ pos }) {
   )
 }
 
-export default function PortfolioView({ portfolio }) {
+/* The trade workspace. It reads the workspace read model, so the book, the
+ * attribution chain and the intent trail all come from one place — and when
+ * a section cannot be read, the reason is shown rather than an empty list. */
+export default function PortfolioView({ workspace }) {
+  const sections = workspace?.sections || {}
+  const book = sections.book
+  /* The book is not one card but five, and each of them would otherwise
+   * read "暂无持仓" for a table that is not there. So the whole group is
+   * gated once, and every "not yet" label says which of the two it is. */
+  const bookBlocked = book != null && book.state === 'unavailable'
+  const noBook = bookBlocked
+    ? `读不到 ${(book.missing || []).join('、') || book.source}`
+    : ''
+  const portfolio = sections.book?.value
   const pending = portfolio?.pending || []
   const positions = portfolio?.positions || []
   const closed = portfolio?.closed || []
@@ -170,44 +185,48 @@ export default function PortfolioView({ portfolio }) {
 
   return (
     <section className="view active">
-      <div className="page-head">
-        <div>
-          <h1>虚拟持仓</h1>
-          <p>
-            推荐之后发生了什么：挂单是否成交、持仓浮盈浮亏、因为什么理由卖出。
-            全部为模拟撮合，不连接任何券商，不产生真实委托。
-          </p>
-        </div>
-        <div className="date-note">
-          <b>{positions.length} 持仓 · {pending.length} 挂单</b>
-          已结束 {closed.length} 笔
-        </div>
-      </div>
+      <WorkspaceHead
+        title="交易工作台"
+        payload={workspace}
+        blurb="推荐之后发生了什么：挂单是否成交、持仓浮盈浮亏、因为什么理由卖出。
+               全部为模拟撮合，不连接任何券商，不产生真实委托。" />
 
       <div className="kpi-strip">
         <Kpi label="可用资金"
              value={capital ? money(capital.available) : DASH}
-             note={capital ? `总额 ${money(capital.total)}` : '暂无资金记录'} />
+             note={capital ? `总额 ${money(capital.total)}`
+               : (noBook || '暂无资金记录')} />
         <Kpi label="持仓市值"
              value={capital ? money(capital.invested) : DASH}
-             note={`${positions.length} 只标的`} />
+             note={noBook || `${positions.length} 只标的`} />
         <Kpi label="持仓浮动盈亏"
              value={positions.length ? money(floating) : DASH}
              valueClass={trendClass(floating)}
-             note={positions.length ? '按最近一次盘中检查' : '当前无持仓'} />
+             note={positions.length ? '按最近一次盘中检查'
+               : (noBook || '当前无持仓')} />
         <Kpi label="近 30 日胜率"
              value={stats?.total_closed ? `${stats.win_rate}%` : DASH}
              note={stats?.total_closed
                ? `${stats.wins} 胜 / ${stats.losses} 负`
-               : '尚无已平仓交易'} />
+               : (noBook || '尚无已平仓交易')} />
       </div>
 
-      <TraderBooks traders={traders} />
+      {bookBlocked ? (
+        <article className="card table-wrap" style={{ marginBottom: 14 }}>
+          <div className="card-title" style={{ padding: '14px 14px 0' }}>
+            <h3>持仓账本</h3>
+            <SectionMeta sec={book} />
+          </div>
+          <Blocked sec={book} />
+        </article>
+      ) : (
+        <>
+          <TraderBooks traders={traders} />
 
-      <article className="card table-wrap" style={{ marginBottom: 14 }}>
-        <div className="card-title" style={{ padding: '14px 14px 0' }}>
-          <h3>当前持仓</h3><span>{positions.length} 只</span>
-        </div>
+          <article className="card table-wrap" style={{ marginBottom: 14 }}>
+            <div className="card-title" style={{ padding: '14px 14px 0' }}>
+              <h3>当前持仓</h3><span>{positions.length} 只</span>
+            </div>
         {positions.length === 0 ? (
           <Empty>
             当前无持仓。挂单要等价格进入入场区间才会成交——这是设计如此，
@@ -315,6 +334,147 @@ export default function PortfolioView({ portfolio }) {
           </div>
         </article>
       )}
+
+        </>
+      )}
+
+      <WorkspaceCard title="归因链" sec={sections.attribution}
+                     subtitle="每一笔已实现收益都指得出是哪个论点赚的">
+        <Attribution sec={sections.attribution} />
+      </WorkspaceCard>
+
+      <WorkspaceCard title="改账审计" sec={sections.intents}
+                     subtitle="每一笔改账都过同一个入口，这里是它的痕迹">
+        <IntentTrail sec={sections.intents} />
+      </WorkspaceCard>
+
+      <WorkspaceCard title="资金与结算" sec={sections.settlement}
+                     subtitle="挂在活单上的现金，以及还在 T+1 里的股数">
+        <Settlement sec={sections.settlement} />
+      </WorkspaceCard>
     </section>
+  )
+}
+
+/* ── 归因链：thesis → order → exits ─────────────────────────────── */
+function Attribution({ sec }) {
+  const v = sec?.value || {}
+  const exits = v.exits || {}
+  const orders = v.orders || {}
+  return (
+    <div style={{ padding: '0 14px 14px' }}>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>论点</th><th>标的</th><th className="num">退出腿</th>
+            <th className="num">盈利腿</th><th className="num">已实现净额</th>
+            <th>结局</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(v.by_thesis || []).map((t) => (
+            <tr key={t.thesis_id}>
+              <td>#{t.thesis_id}</td>
+              <td>{t.code || DASH}</td>
+              <td className="num">{t.legs}</td>
+              <td className="num">{t.wins}</td>
+              <td className={`num ${trendClass(t.net)}`}>{Math.round(t.net)}</td>
+              <td>{t.thesis_status || DASH}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="soft">
+        订单 {orders.orders ?? 0} 笔，其中未挂论点 {orders.without_thesis ?? 0} 笔；
+        退出腿 {exits.legs ?? 0} 条，其中无法归因 {exits.unattributed ?? 0} 条。
+        「无法归因」不是舍入误差，是账本与想法之间的缺口，所以单独报出来而不是丢掉。
+      </p>
+    </div>
+  )
+}
+
+/* ── 改账审计：one door's trail ─────────────────────────────────── */
+function IntentTrail({ sec }) {
+  const v = sec?.value || {}
+  const never = v.never_decided || []
+  return (
+    <div style={{ padding: '0 14px 14px' }}>
+      <div className="health-group">
+        {Object.entries(v.by_status || {}).map(([status, n]) => (
+          <div className="health-source" key={status}>
+            <span className="name">{status}</span>
+            <span>{n}</span>
+          </div>
+        ))}
+      </div>
+      {never.length ? (
+        <div className="ws-integrity">
+          <b>已提交但未裁决 {never.length} 条</b>
+          <p className="soft">
+            这是唯一能证明某次写入在「决定」与「执行」之间崩过的证据，
+            账本里没有别的地方记它。
+          </p>
+        </div>
+      ) : null}
+      {v.recent?.length ? (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>#</th><th>动作</th><th>状态</th><th>标的</th>
+              <th>信息边界</th><th>拒绝原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {v.recent.slice(0, 20).map((r) => (
+              <tr key={r.id}>
+                <td>{r.id}</td>
+                <td>{r.action}</td>
+                <td>
+                  <span className={`stage-chip ${
+                    r.status === 'accepted' ? 'stage-main'
+                      : r.status === 'rejected' ? 'stage-fade' : 'stage-sprout'}`}>
+                    {r.status}
+                  </span>
+                </td>
+                <td>{r.code || DASH}</td>
+                <td>{r.information_cutoff || DASH}</td>
+                <td style={{ color: 'var(--text-2)' }}>{r.reject_reason || DASH}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </div>
+  )
+}
+
+/* ── 资金与结算：reservations + T+1 lots ────────────────────────── */
+function Settlement({ sec }) {
+  const v = sec?.value || {}
+  const lots = v.lots || {}
+  return (
+    <div style={{ padding: '0 14px 14px' }}>
+      <table className="table">
+        <thead>
+          <tr><th>预留状态</th><th className="num">笔数</th>
+            <th className="num">金额</th><th className="num">已消耗</th></tr>
+        </thead>
+        <tbody>
+          {(v.reservations || []).map((r) => (
+            <tr key={r.state}>
+              <td>{r.state}</td>
+              <td className="num">{r.n}</td>
+              <td className="num">{r.amount == null ? DASH : Math.round(r.amount)}</td>
+              <td className="num">{r.consumed == null ? DASH : Math.round(r.consumed)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="soft">
+        T+1 批次 {lots.lots ?? 0} 个，剩余 {lots.remaining ?? 0} 股
+        {lots.earliest ? `，最早解禁 ${lots.earliest}` : ''}
+        {lots.latest ? `，最晚解禁 ${lots.latest}` : ''}。
+      </p>
+    </div>
   )
 }

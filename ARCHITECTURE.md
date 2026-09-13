@@ -142,6 +142,16 @@ grading chain above: nothing asks a model to rate itself.
 stage and served by `server/app.py`. Styled to match TradingAgents-AShare
 so it can be embedded there.
 
+The three workspace views (`PortfolioView` / `LearnView` / `EvolveView`) do
+not decide what exists — they render the four states the read models report
+(`absent` / `partial` / `empty` / `present`, plus "the payload never arrived").
+That property is not observable in a screenshot: an `absent` table drawn as an
+empty list looks exactly like an empty table. So it is checked mechanically,
+by `cd web && npm run check:render` — a 3-state × 3-view render matrix where
+each case asserts both what must appear **and what must not**. `npm run lint`
+and `npm run build` pass on a page that renders "you hold nothing" for a table
+that is not there.
+
 ## Deployment
 
 Images are built by GitHub Actions and published to

@@ -134,13 +134,34 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   `baseline_only`，而 `policy_registry._require_eligible_gate` 只接受
   `candidate_policy`。于是 `gate_decisions` 里**不存在任何非 abstain 的生产行**；
   这不是遗漏，是一次刻意的拒绝。
-- **产品整合**（Phase 5）—— **2026-09-13 的 V1 不再是「未实现」，见 §13**。
-  三个读模型与三个端点已存在，`/api/portfolio` 已改为委托同一个投影。
-  但它**只完成了「贯通 API」这一半**：前端三个工作台尚未接，
-  所以设计 §14 的完成含义 *"expose the same facts"* 对界面尚不成立。
-  另外三个工作台在生产库上处于**三种不同的状态**（`policy_*` / `shadow_*` 表不存在、
-  `gate_decisions` 与 `learning_candidates` 缺列、`episodes` / `outcomes` 0 行），
-  这些状态由读模型自己报出来，不靠人去比对文档。
+- **产品整合**（Phase 5）—— **2026-09-13 已交付 V1 + V2 + V3，见 §13**。
+  三个读模型、三个端点、三个前端工作台都已存在，`/api/portfolio` 已改为委托同一个投影。
+  但**「页面能打开」不是「页面有事实」**：三个工作台在生产库上处于**三种不同的状态**
+  （`policy_*` / `shadow_*` 表不存在、`gate_decisions` 与 `learning_candidates` 缺列、
+  `episodes` / `outcomes` 0 行），这些状态由读模型自己报出来、由页面自己渲染出来，
+  不靠人去比对文档。**Learn 与 Evolve 两个页面今天显示的主要是「当前状态说明」，不是数据。**
+- **奖励信号（G1）的机制已在跑，缺的是样本不是代码。** `predictions` 表有
+  `prob` / `log_score` / `brier` / `excess_return` / `residual_alpha` 五列；
+  `review` 任务里的 `_score_due_predictions`（其 docstring 自述 *"This is the G1 signal"*）
+  调 `scoring.score_prediction`，后者做因子残差回归取残差再算 Brier —— 这条链
+  **已接、已在每日 15:30 的 review 里跑**。生产库实测：`prob` 已填 **47 / 202** 行
+  （最早 2026-09-08），而 `brier` / `residual_alpha` 都是 **0 行**，原因不是没接，
+  是**还没有一笔预测到期**：最早的一批按 `date + 5 天` 兜底恰好在 2026-09-13 到期。
+  所以 Learn 页面上那句「还没有评估货币」说的是**样本还没成熟**，读成「评分没实现」是错的。
+- **但 `horizon_days` / `deadline` 这两个列，生产里没有任何写入者。**
+  这是 G1 之外的另一件事，且是本仓库第四类缺陷（「列存在但从未被写入」，S6 抓到过
+  `intents.order_id` 同型）。T2 的「每笔预测自己声明多久到期」机制是完整的：
+  `_deadline_for()` 在未声明时**拒绝**替调用方假设（返回 `None` 而不是套用全局默认），
+  `save_prediction` 的 INSERT/UPDATE 都写这两列，`get_predictions_due_for_scoring`
+  用 `COALESCE(deadline, date(date, '+5 days'))` 兜底并把 `deadline IS NULL` 报成
+  `legacy_horizon`，`outcome_labels` 也照着这个区分打标签。**问题在调用方**：
+  `morning_scan.py` 与 `intraday_monitor.py` 两处生产调用都传了 `prob` 却**都没传
+  `horizon_days`**，所以 202 行的 `deadline` 与 `horizon_days` 全为 NULL，
+  **每一笔预测都在用全局 5 天兜底、并被标成 `legacy_horizon`**。
+  这不是 bug（5 天就是这两个调用方想要的），是**一条已建好、当前无生产用户在用的能力** ——
+  与 Phase 4 的三个「没人调」同形。**不要顺手在调用点上补 `horizon_days=5`**：
+  那正是 `_deadline_for` 拒绝做的事（把「调用方没说」写成「调用方说了五天」）。
+  要用它，得先有第二个真的用不同期限的交易员。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -718,10 +739,10 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   `detail_json` 里保留一份；读侧只读列，写入侧两份都写。冗余是有意的
   （历史行的 payload 不可改），但它意味着两者将来可能不一致，需要时各自说明。
 
-## 13. Phase 5 逐项交付（V1：三个读模型 + API）
+## 13. Phase 5 逐项交付（V1 读模型与 API + V2 前端 + V3 对账）
 
 记录日期：2026-09-13。计划见
-[Phase 5 计划](exec-plans/active/2026-09-13-trader-core-phase5.md)。
+[Phase 5 计划](exec-plans/completed/2026-09-13-trader-core-phase5.md)。
 
 ### 交付了什么
 
@@ -776,15 +797,60 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 所以打开 `data/memory.db` 本身就会补上 `knowledge_snapshots` / `_items`。那是共享连接的
 行为、不是读模型的决定，但它是一次对生产文件的写 —— 本阶段没有这项授权，用副本取同样的证据。
 
+### V2：三个前端工作台（2026-09-13 同日交付）
+
+V1 让事实可读，V2 让**三态可区分**。如果说 V1 的交付物是三个端点，V2 的交付物是一个
+命令：`cd web && npm run check:render`。
+
+| 文件 | 作用 |
+|---|---|
+| `web/src/components/WorkspaceSection.jsx` | `SectionMeta` / `Chip`（schema 与 state 两枚徽章各一）、`Blocked`（点名缺的表与列）、`WorkspaceCard`、`WorkspaceHead`、`CodeFact` |
+| `web/src/views/LearnView.jsx` | 决策覆盖 / 三类结果 / 候选知识（隔离区）/ 预测与评估货币 |
+| `web/src/views/EvolveView.jsx` | 晋升可达性横幅 + 什么在生效 / 影子实验 / 闸门裁决 / 已批准知识快照 |
+| `web/src/views/PortfolioView.jsx` | 接归因链、改账审计、资金与结算三节；持仓账本加闸门 |
+| `web/render-check.jsx` | 3 状态 × 3 视图的渲染矩阵，逐用例声明「必须出现」与「**不得**出现」 |
+
+前端把三态渲染成三种不同的东西：`absent` 与 `partial` **各有自己的说明文案**
+（「这些表在这个库里不存在」vs「表在，但这个库的 schema 落后于代码」），
+因为两者指向不同的修复动作；payload 整个没到是**第四态**，有自己的文案
+（「整个读模型没到」），且**不得**打印 `0 有数据 · 0 空 · 0 读不到` —— 那正是健康空页的样子。
+
+**`check:render` 首轮抓到的三件事，`npm run lint` 与 `npm run build` 对一个都不报错：**
+
+1. **两个新视图在 payload 为空时崩溃。** `LearnView` / `EvolveView` 里的
+   `Episodes` / `Outcomes` / `Pointer` / `Shadow` **在把 `sec` 交给 `WorkspaceCard` 之前**
+   就先读了 `sec.value`，所以 `WorkspaceCard` 里那句 `if (!sec) return null` 根本没机会执行。
+   `PortfolioView` 写的是 `sec?.value`，因此没崩 —— 同层的三个视图两种写法，
+   只有第三种状态把差别暴露出来。
+2. **`trade.book` 把「表读不到」渲染成「你没有持仓」。** 这一节不是一张卡，是五张手搭卡片
+   （持仓 / 挂单 / 已结束 / 按主线 / 分账本），没有一张能分辨「表不在」与「表里没行」。
+   修法：整组闸在 `book.state === 'unavailable'` 上，四个 KPI 的「暂无…」位置改放
+   `读不到 <缺失项>`。**这是本阶段最该出现的一类 bug，而它出现在最重要的页面的最重要一节。**
+3. **「整个读模型没到」原本与「四节都读不到」渲染成同一句话。**
+
+机械判据：`check:render` 的 7 个用例（3 状态 × 3 视图 + 3 个 payload-为-空）
+全部 `OK`，且**每个用例的「不得出现」列表为空**。变异探针 P6（把 `bookBlocked` 恒设为
+`false`）被 `trade · all absent` 捕获。
+
+### V3：口径对账
+
+README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 Phase 5 行、
+本文件 §7 与本节，都改成同一口径：**三个工作台已贯通 API 与前端，且它们在生产库上
+处于三种不同的 schema 状态**。「页面能打开」与「页面有事实」分开写。
+
 ### 明确未实现（Phase 5 的边界，别读成已完成）
 
-- **前端三个工作台尚未接。** `web/src/views/` 只有既有的 `PortfolioView`；
-  Learn / Evolve 两个视图不存在，导航里也没有入口。完成含义里的
-  *"expose the same facts"* 目前只对 **API** 成立，对**界面**不成立。
-- **`/api/portfolio` 与 `trade.book` 现在同源，但两者都还没接归因链。**
-  `attribution` / `intents` / `settlement` 三个 section 有数据形状、有端点，
-  但没有任何界面渲染它们。
+- **三个工作台里有两个今天没有可显示的事实，而这跟界面无关。**
+  `learn.episodes` / `outcomes` 是 0 行（表在、合法空态）；`evolve.pointer` / `shadow`
+  的表**根本不存在**。所以「学习日志」「进化实验台」这两个页面**已经上线**，
+  **但它们的页面内容大部分是当前状态的说明，而不是数据**。
+  任何「已上线 = 有内容」的读法都是错的。
+- **`evolve.candidates` 与 `evolve.gates` 会显示 `partial`。** 这要求运维动作
+  （让当前代码的进程连一次库，或显式迁移），不是前端能修的。页面只报状态。
 - **本阶段没有任何写入路径被修改。** 三个读模型全部只读，不新增写者。
-- **生产库仍落后于代码。** 上面两个 `partial` 要消失，得让当前代码的进程连一次库
-  （或跑一次明确的迁移），那是运维动作，不是本阶段做的。
+- **`check:render` 不进 CI。** `harness.yml` 里没有 node 环境，本仓库的前端逻辑测试
+  （`tests/test_report_markdown.mjs`）同样是本地命令。给前端单开 CI 是独立的一件事。
+- **G1（奖励改成 Brier + 因子残差 alpha）的机制已在跑，见 §7 对应条目。**
+  页面上的「还没有评估货币」说的是**样本还没成熟**，不是代码没接。
+
 

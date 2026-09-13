@@ -1,6 +1,6 @@
 # Trade Learn Evolve：第五阶段 产品整合
 
-状态：**实施中**。负责人：本次开发会话。创建：2026-09-13。
+状态：**已交付（V1 + V2 + V3）**。负责人：本次开发会话。创建：2026-09-13。
 
 > 范围由设计 §14 界定：Trader / episode / experiment 三个读模型贯通 API 与现有的
 > [`web/src/`](../../../web/src/) 前端。完成含义原文是
@@ -90,15 +90,27 @@ Phase 1–4 让四件事依次成立：账算对了（1）、交易路径统一�
 never accounting inputs」）在这里落成一条可检查的规矩：每个 section 必须声明
 `source`，且 `source` 里出现的表名必须是它真的查过的表。
 
+### D4 前端把「读不到」与「空」渲染成两件事，并且**可机械检查**
+
+V1 让事实可读；如果 V2 只做到「有页面」，三态就退化回一种灰字。
+所以 V2 的交付物不是一个页面，是**一条命令**：`npm run check:render`
+把 3 个状态 × 3 个视图的矩阵喂进**真实组件**，每个用例同时声明
+「必须出现什么」与「**不得**出现什么」。
+
+第二条比第一条重要：`partial` 与 `absent` 各有一句自己的说明文案，
+两者**不得同时出现**，因为它们指向完全不同的修复动作（重跑管线 vs 用当前代码重启）。
+同理「payload 整个没到」不得打印 `0 有数据 · 0 空 · 0 读不到` —— 那正是健康空页的样子。
+
 ## 切片
 
 | 切片 | 内容 | 交付判据 |
 |---|---|---|
-| **V1 三个读模型 + API** | `alpha_agents/server/readmodels/{__init__,trade,learn,evolve}.py`；三个只读端点 `/api/trade-workspace`、`/api/learn-journal`、`/api/evolve-lab` | 三个端点在空库上返回三态正确的 payload；**读它们不会新建任何表** |
-| **V2 三个前端工作台** | `web/src/views/` 新增 Learn / Evolve 两个视图，`PortfolioView` 接归因链；导航加分组 | 每个视图对 `unavailable` / `empty` / `present` 三态各有一处不同的渲染 |
-| **V3 对账与口径** | README / ARCHITECTURE / 实现文档写「读模型读到的是什么」，并把「生产库落后于代码」列为可查事实 | 文档里出现该口径；`lint_docs` 通过 |
+| **V1 三个读模型 + API** ✅ | `alpha_agents/server/readmodels/{__init__,trade,learn,evolve}.py`；三个只读端点 `/api/trade-workspace`、`/api/learn-journal`、`/api/evolve-lab` | 三个端点在空库上返回三态正确的 payload；**读它们不会新建任何表** |
+| **V2 三个前端工作台** ✅ | `web/src/views/` 新增 Learn / Evolve 两个视图，`PortfolioView` 接归因链、持仓账本加闸门；导航加分组；新增 `web/render-check.jsx` + `npm run check:render` | 每个视图对 `unavailable` / `empty` / `present` 三态各有一处不同的渲染，且由 `check:render` 断言 |
+| **V3 对账与口径** ✅ | README / ARCHITECTURE / 实现文档写「读模型读到的是什么」，并把「生产库落后于代码」列为可查事实 | 文档里出现该口径；`lint_docs` 通过 |
 
-本阶段先做 V1。V2 需要浏览器，V1 不需要 —— 先让**事实可读**，再让**界面好看**。
+顺序是 V1 → V2 → V3：先让**事实可读**，再让**界面好看**，最后对账。
+V2 的价值全在「三态可区分」上 —— 照抄设计文档的字面实现会得到三个永远空的页面。
 
 ## 非目标
 
@@ -108,10 +120,13 @@ never accounting inputs」）在这里落成一条可检查的规矩：每个 se
 - **不做费用引擎、部分成交模拟器、global 事件日志**（Phase 2 非目标，不因做界面而复活）。
 - **不迁移生产库。** 打开页面不建表（D1）；补 schema 是运维动作，要单独授权。
 - **不引入前端框架 / 状态库。** 沿用现有 React + `useDashboard` 轮询。
+- **不把 `check:render` 接进 CI。** 本仓库的前端逻辑测试（`tests/test_report_markdown.mjs`）
+  同样是本地命令、不进 CI，因为 `harness.yml` 里没有 node 环境。保持一致，
+  而不是顺手给前端单开一套 CI —— 那是独立的一件事。
 
 ## 验收（机器可检查）
 
-### A. V1 代码交付即可检查
+### A. 代码交付即可检查
 
 1. **三个读模型名与设计一致**：`readmodels.WORKSPACES == {"trade", "learn", "evolve"}`，
    且每个模块的 `snapshot()` 返回 `{"workspace", "generated_at", "sections"}`。
@@ -135,13 +150,18 @@ never accounting inputs」）在这里落成一条可检查的规矩：每个 se
    `knowledge_snapshots` 与 `_items`。那是共享连接的行为、不是读模型的决定，
    但它确实是一次对生产文件的写 —— 本阶段没有这项授权。副本给出同样的证据。
 7. 不扩充 lint baseline；单文件不超过 1200 行。
+8. **三态在前端可区分**（V2）：`npm run check:render` 必须对
+   3 个状态 × 3 个视图全部给出 `OK`，且每个用例的「不得出现」列表为空。
+   这一条不是为了覆盖率：`npm run lint` 与 `npm run build` 对一个
+   「把不存在的表渲染成『当前无持仓』」的页面**都是绿灯**。
 
 ### B. 依赖真实前向样本，本阶段只能报状态
 
-8. **不得把 `unavailable` / `empty` 渲染成「正常」**。验收方式与 Phase 4 的 B15 同构：
+9. **不得把 `unavailable` / `empty` 渲染成「正常」**。验收方式与 Phase 4 的 B15 同构：
    文档与本文件必须写明三个工作台当前各自的真实状态，且**不得**出现任何
    「学习日志已上线 / 进化实验台已可用」这类与 `episodes=0`、`policy_versions` 不存在
-   相矛盾的说法。
+   相矛盾的说法。**V2 之后这一条更紧了**：页面上有了真实文案，所以
+   「页面能打开」与「页面有事实」必须在文档里分开写。
 
 ## 实测结果（2026-09-13，V1）
 
@@ -180,7 +200,7 @@ never accounting inputs」）在这里落成一条可检查的规矩：每个 se
   「`knowledge_snapshots` 表不存在」是对**当前文件**的描述，一旦有当前代码的进程连上，
   它就会变成「表在、0 行」。两个状态都是真的，区别在谁先连过。
 
-### 变异探针
+### 变异探针（V1）
 
 | 探针 | 让什么失效 | 变红的用例 |
 |---|---|---|
@@ -192,6 +212,35 @@ never accounting inputs」）在这里落成一条可检查的规矩：每个 se
 
 P5 是**刻意的**：它的作用不是防回归，而是当有人补上候选生产者时让本文件的一句
 「本构建不可达」变红，逼着改文档而不是留下两份互相矛盾的说法。
+
+## 实测结果（2026-09-13，V2 + V3）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 前端 lint | `cd web && npm run lint` | 通过（`render-check.jsx` 单列 node globals） |
+| 前端构建 | `cd web && npm run build` | 通过，281 modules，`dist/assets/index-*.js` 432 kB |
+| **三态渲染矩阵** | `cd web && npm run check:render` | **7 / 7 OK** |
+| 变异探针 | 见下 | 被捕获 |
+
+`check:render` 首轮抓到的三件事 —— 三件都不是 `lint` / `build` 能发现的：
+
+1. **两个视图在 payload 为空时直接崩溃。** `LearnView` / `EvolveView` 里的
+   `Episodes` / `Outcomes` / `Pointer` / `Shadow` 等外层组件**在把 `sec` 传给
+   `WorkspaceCard` 之前**就先读了 `sec.value`，于是 `WorkspaceCard` 里那句
+   `if (!sec) return null` 根本没机会执行。`PortfolioView` 写的是 `sec?.value`，
+   所以它没崩 —— 同一层的三个视图，两种写法，只有第三种状态把它暴露出来。
+2. **`trade.book` 把「表读不到」渲染成「你没有持仓」。** 这一节不是一张卡，是五张
+   手搭卡片（持仓 / 挂单 / 已结束 / 按主线 / 分账本），没有任何一张能分辨
+   「表不在」与「表里没行」。修法是把它整个闸在 `book.state === 'unavailable'` 上，
+   并在四个 KPI 的「暂无…」文案位置放 `读不到 <缺失项>`。**这是本阶段最该出现的一类 bug，
+   而且它出现在最重要的页面的最重要一节。**
+3. **「整个读模型没到」与「四节都读不到」会渲染成同一句话。**
+   原实现会为 null payload 打印 `0 有数据 · 0 空 · 0 读不到` —— 那正是健康空页的样子。
+   现在它有自己的文案，`check:render` 断言它**不得**出现 `0 有数据` 或 `读不到` 字样。
+
+| 探针 | 让什么失效 | 变红的用例 |
+|---|---|---|
+| P6 | `PortfolioView` 的 `bookBlocked` 恒为 `false` | `trade · all absent`（缺 `virtual_portfolio` / `持仓账本`） |
 
 ## 风险
 
@@ -207,6 +256,10 @@ P5 是**刻意的**：它的作用不是防回归，而是当有人补上候选�
 - **第四个风险是 `partial` 被当成错误。** `gate_decisions` 缺列是**事实**，
   不是 bug：Phase 4 的 `ALTER TABLE` 会在下一次写入前由代码自己补上。
   读模型只报状态，不修 —— 修它是运维动作。**对策**：把这条写进 section 的 `note`。
+- **第五个风险（V2 新增）是「页面看起来对」比「接口返回对」更难证伪。**
+  一个把 `absent` 渲染成空列表的页面，截图和真页面的截图**长得一样**。
+  **对策**：`check:render` 的每个用例都必须声明「不得出现什么」，而不仅是
+  「必须出现什么」——「必须出现」会被恰好正确的别处文案满足，**「不得出现」不会**。
 
 ## 决策日志
 
@@ -215,3 +268,8 @@ P5 是**刻意的**：它的作用不是防回归，而是当有人补上候选�
   不新建层、不新增 lint 豁免。
 - 2026-09-13：确定 D1（不建 schema）、D2（三态正交）、D3（一个事实一个来源）。
 - 2026-09-13：V1 先于 V2 —— 事实可读先于界面好看。
+- 2026-09-13：V2 的交付物定为**一条命令**而不是三个页面。页面本身无法证伪
+  「三态渲染成一样」，`check:render` 可以。写它当场抓到三个问题（见上）。
+- 2026-09-13：`check:render` **不进 CI**，与 `tests/test_report_markdown.mjs` 一致
+  （`harness.yml` 里没有 node）。给前端单开 CI 是独立的一件事，不搭在本阶段顺风车上。
+- 2026-09-13：V3 对账完成，本文件移入 `completed/`。

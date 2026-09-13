@@ -216,23 +216,37 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
 | 2 完整交易内核 | ✅ 2026-09-11 | 订单状态机、资金预留、T+1 批次结算、统一意图路径、内核时钟、对账、重放 |
 | 3 可归因的学习 | ✅ 2026-09-12 | 决策 episode、三类结果的生命周期、候选知识的提案与五态生命周期、已批准知识快照 |
 | **4 受控演化** | ✅ 2026-09-13 | 冻结策略注册表、前向影子账户、公平评估、授权晋升与回滚、检索闸门。**但生产者只有基线、闸门无生产调用者，所以生产里尚未发生一次晋升** |
-| **5 产品整合** | ⬅ **当前，V1 已交付** | 交易 / 学习 / 实验三个读模型贯通 API。**前端三个工作台尚未接** |
+| **5 产品整合** | ✅ 2026-09-13 | 交易 / 学习 / 实验三个读模型贯通 API 与前端。**但「页面能打开」不是「页面有事实」：Learn 与 Evolve 两个页面今天显示的主要是「当前状态说明」，不是数据** |
 
 逐项明细、每条边界、以及每一轮跑了什么命令得到什么结果，在
 [`docs/TRADER_CORE_IMPLEMENTATION.md`](docs/TRADER_CORE_IMPLEMENTATION.md)。
 
 ### 机制已交付 ≠ 已经在跑
 
-Phase 1–4 的代码都有测试钉住（全量 **1828 passed, 18 skipped**），
+Phase 1–5 的代码都有测试钉住（全量 **1828 passed, 18 skipped**），
 但**生产库还是空的**：`position_exits` / `intents` / `decision_snapshots` /
 `episodes` / `outcomes` / `learning_candidates` 全是 0 行 —— 这些表落地之后还没跑过生产。
 `predictions` 202 行里 `brier` 全为 NULL，所以校准曲线仍然是空的。
 
-**卡点是样本，不是代码** —— 这是这个项目当前最诚实的一句话。Phase 4 补上了它的另一半：
-`gate_decisions` 里没有一条非 abstain 的生产行，因为**这个构建还没有候选生产者**
-（`shadow.PRODUCERS` 只登记了恒 0.5 的基线，所以每一份裁决都是 `baseline_only`，
-而晋升只接受 `candidate_policy`）。那不是「暂时没数据」，是**一次刻意的拒绝**。
-补它要先回答「候选策略是什么」，而设计文档只指定了基线 —— 那是设计决定，不是缺函数。
+**卡点是样本，不是代码** —— 这是这个项目当前最诚实的一句话，而且它有确切日期。
+G1 的评分链路（`_score_due_predictions` → `scoring.score_prediction`，做因子残差回归
+取残差再算 Brier）**已经在每日 15:30 的 review 里跑**，`prob` 也已经在 47 行上填了
+（最早 2026-09-08）；`brier` 为空的原因不是没接，是**最早的一批按 `date + 5 天`
+兜底恰好在 2026-09-13 到期**。所以「还没有评估货币」是一句关于日历的话，
+不是关于代码的话。
+
+Phase 4 补上了它的另一半：`gate_decisions` 里没有一条非 abstain 的生产行，
+因为**这个构建还没有候选生产者**（`shadow.PRODUCERS` 只登记了恒 0.5 的基线，
+所以每一份裁决都是 `baseline_only`，而晋升只接受 `candidate_policy`）。
+那不是「暂时没数据」，是**一次刻意的拒绝**。补它要先回答「候选策略是什么」，
+而设计文档只指定了基线 —— 那是设计决定，不是缺函数。
+
+同一形状的第四件：`predictions.horizon_days` / `deadline`（「这笔预测自己声明多久到期」）
+机制完整、有测试，但 `morning_scan` 与 `intraday_monitor` 两处生产调用**都没传
+`horizon_days`**，所以 202 行全靠全局 5 天兜底并被标成 `legacy_horizon`。
+这是**有能力、无生产用户**，不是 bug —— 也**不要顺手在调用点补 `horizon_days=5`**：
+那正是 `_deadline_for` 明确拒绝做的事（把「调用方没说」写成「调用方说了五天」）。
+
 
 ### 三个工作台：`unavailable` / `empty` / `present`
 
@@ -251,6 +265,18 @@ Phase 5 的读模型（`alpha_agents/server/readmodels/`）把上面这句话做
 探针不通过就不调用，并把缺的东西**点名报出来** —— 「表没建」和「暂时没数据」
 从此不是同一句话。三个端点是 `/api/trade-workspace`、`/api/learn-journal`、
 `/api/evolve-lab`；`/api/portfolio` 改为委托同一个投影，不再自己拼一份。
+
+前端三个工作台把上面四种状态渲染成**四种不同的东西**：`absent` 与 `partial` 各有自己的
+说明文案（「这些表在这个库里不存在」vs「表在，但这个库的 schema 落后于代码」），
+因为两者指向完全不同的修复动作；payload 整个没到是第四态，**不得**打印
+`0 有数据 · 0 空 · 0 读不到` —— 那正是健康空页的样子。这条性质由
+`cd web && npm run check:render` 机械检查（3 状态 × 3 视图，每个用例都声明
+「不得出现什么」）。它不进 CI：`harness.yml` 里没有 node，仓库的前端逻辑测试
+（`tests/test_report_markdown.mjs`）同样是本地命令。
+
+**它抓到过什么**（`npm run lint` 与 `npm run build` 对这三件事全是绿灯）：
+两个新视图在 payload 为空时崩溃（`sec.value` 少一个 `?`）；`trade.book` 把
+「表读不到」渲染成「你没有持仓」；「整个读模型没到」原本与「四节都读不到」同一句话。
 
 
 ---
@@ -271,7 +297,7 @@ data → sources → tools → evolution → pipeline → agents → server
 | `evolution/` | 记忆效用、原则、Playbook、前向闸门 | 不靠调 LLM 来决策 |
 | `pipeline/` | 调度器与它的任务、快讯摄入循环 | 不含策略规则 |
 | `agents/` | LLM 提示词，以及包在它们外面的 runner | 不直接写存储 |
-| `server/` | FastAPI、WebSocket、看板 | 不含值得测试的逻辑 |
+| `server/` | FastAPI、WebSocket、看板，以及三个工作台的读模型（只做投影） | 不重算下层已经算过的数 |
 
 一天是这样跑的：
 

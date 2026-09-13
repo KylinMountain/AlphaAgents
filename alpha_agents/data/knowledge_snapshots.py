@@ -337,6 +337,35 @@ def verify_snapshot(snapshot_id: int) -> bool:
     return _hash(_frozen(snapshot, items_for(snapshot_id))) == snapshot["content_hash"]
 
 
+def verified_rows(snapshot_id: int, entity_type: str) -> list[dict]:
+    """Read only the approved rule versions, never mutable score counters.
+
+    T4 snapshots contain hashes, not historical payloads. If an approved row
+    was edited or deleted, fail closed rather than rendering the new text as
+    though it had been approved. Hash and render the SAME fetched dictionary:
+    a second fetch after verification would reopen a check/use race.
+    """
+    if entity_type not in _KNOWLEDGE_FIELDS:
+        raise ValueError(f"Unknown knowledge entity type {entity_type!r}")
+    if not verify_snapshot(snapshot_id):
+        raise ValueError(f"Knowledge snapshot #{snapshot_id} is missing or corrupt")
+    conn = memory_store._get_conn()
+    fields = _KNOWLEDGE_FIELDS[entity_type]
+    rows = []
+    for item in items_for(snapshot_id):
+        if item["entity_type"] != entity_type:
+            continue
+        row = conn.execute(
+            f"SELECT {', '.join(fields)} FROM {_KNOWLEDGE_TABLES[entity_type]} "
+            "WHERE id = ?", (item["entity_id"],)).fetchone()
+        if row is None or _hash(dict(row)) != item["version_hash"]:
+            raise ValueError(
+                f"Approved {entity_type} #{item['entity_id']} drifted or is missing")
+        rows.append({"id": item["entity_id"], **dict(row)})
+    # Stable order cannot be affected by mutable evidence_count/win_rate.
+    return rows
+
+
 # ── Drift and integrity ────────────────────────────────────────────────
 
 

@@ -47,9 +47,18 @@ from alpha_agents.data import policy_registry as registry  # noqa: E402
 from alpha_agents.evolution import holdout_gate, policy_sources  # noqa: E402
 
 
-def _sources():
-    """The live configuration, collected by the layer that owns reading it."""
-    return policy_sources.collect()
+def _sources(version_id):
+    """Stage only the target snapshot; every non-knowledge source stays live.
+
+    Changing the pointer is what switches knowledge. Comparing a candidate
+    against the incumbent's snapshot (or the newest unrelated approval) would
+    make both promotion and rollback impossible for knowledge-only changes.
+    """
+    sources = registry.sources_of(version_id)
+    if sources is None:
+        raise ValueError(f"No policy version #{version_id}")
+    return policy_sources.collect(
+        knowledge_snapshot_id=sources["knowledge"].get("snapshot_id"))
 
 
 def _eligible_verdict(version_id: int, decision_id: int | None):
@@ -137,7 +146,7 @@ def _cmd_approve(args) -> int:
         return 0
     approval_id = registry.approve(
         version_id=args.version, approved_by=args.by, reason=args.reason,
-        gate_decision=verdict, sources=_sources(),
+        gate_decision=verdict, sources=_sources(args.version if args.verb != "rollback" else args.to_version),
         policy_key=args.policy_key, at=args.at)
     print(f"recorded approval #{approval_id}. The pointer did not move: "
           "promotion is a separate act.")
@@ -154,7 +163,7 @@ def _cmd_promote(args) -> int:
         return 0
     seq = registry.promote(
         version_id=args.version, actor=args.by, reason=args.reason,
-        sources=_sources(), expected_seq=args.expect_seq,
+        sources=_sources(args.version if args.verb != "rollback" else args.to_version), expected_seq=args.expect_seq,
         policy_key=args.policy_key, at=args.at)
     print(f"policy {args.policy_key!r} is now at version #{args.version}, "
           f"seq {seq}")
@@ -167,7 +176,7 @@ def _cmd_rollback(args) -> int:
         return 0
     seq = registry.rollback(
         to_version_id=args.to_version, actor=args.by, reason=args.reason,
-        sources=_sources(), expected_seq=args.expect_seq,
+        sources=_sources(args.version if args.verb != "rollback" else args.to_version), expected_seq=args.expect_seq,
         policy_key=args.policy_key, at=args.at)
     print(f"policy {args.policy_key!r} restored to version "
           f"#{args.to_version}, seq {seq}. Nothing was deleted.")

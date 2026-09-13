@@ -13,7 +13,7 @@ The fix is not "remember to pass the right date". It is that the window is now
 abstention is quiet: it writes a row that looks like a verdict about evidence
 that was never collected.
 
-The tests are in seven groups:
+The tests are in nine groups:
 
 1. The old bug is unrepresentable — no ``created_date`` parameter exists, and
    asking on or before the freeze day raises.
@@ -26,6 +26,14 @@ The tests are in seven groups:
 6. A real window with too little in it still abstains, and that abstention is
    recorded with ``outcome='insufficient'``.
 7. The lookback never truncates the forward window of an old version.
+8. A verdict's evidence scope comes from the registered producer that emitted
+   the forecasts, not from a free-text label on the run. It used to come from
+   the label, so naming a run anything but ``constant_0.5`` turned no-skill
+   baseline evidence into "candidate_policy" evidence — the promotion guard
+   satisfied by a word.
+9. The build ships no candidate producer, so nothing promotable is reachable;
+   and a version shadowed by two producers is refused rather than resolved
+   silently.
 """
 
 from __future__ import annotations
@@ -433,6 +441,7 @@ class TestAClosedRunIsStillEvaluable:
         got = _run(frozen)
         assert got["run_id"] == run_id
         assert got["outcome"] == "promote"
+        assert got["evidence_scope"] == "baseline_only"
 
 
 # ── 8. The lookback does not truncate an old version's window ──────────
@@ -487,3 +496,174 @@ class TestTheLookbackDoesNotTruncateTheWindow:
         old = (datetime.now() - timedelta(days=900)).strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y-%m-%d")
         assert HG._lookback_days(old, today) > HG.GATE_LOOKBACK_DAYS
+
+
+# ── 8. The evidence scope belongs to the producer, not to a label ──────
+
+
+CANDIDATE = "test_candidate_producer"
+
+
+def _sources(tag: str) -> dict:
+    """A configuration distinct per tag, so two versions can both be live."""
+    return {
+        "prompts": {"morning_scan.md": tag},
+        "model": {"agent_model": "qwen-plus"},
+        "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
+        "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
+        "knowledge": {"snapshot_id": None},
+    }
+
+
+@pytest.fixture()
+def bare(store) -> int:
+    """A frozen version with no shadow run — a test opens the run it means."""
+    return PR.freeze(sources=_sources("bare"), created_by="kylin",
+                     reason="frozen for the forward window",
+                     frozen_at=FROZEN_AT)
+
+
+@pytest.fixture()
+def candidate(monkeypatch) -> str:
+    """A registered candidate producer, for the duration of one test.
+
+    Registration is the act that makes a producer real, so a test that wants
+    candidate-grade evidence has to perform it. Nothing downstream writes a
+    scope by hand: ``run_gate`` reads this entry.
+    """
+    monkeypatch.setitem(SH.PRODUCERS, CANDIDATE, SH.Producer(
+        name=CANDIDATE, kind=SH.KIND_CANDIDATE,
+        forecast=lambda date, code: 0.30))
+    return CANDIDATE
+
+
+def _emit_and_grade(store, run_id: int, monkeypatch, *, days: int = 25):
+    """``days`` paired days of champion and challenger, then grade them."""
+    base = datetime.strptime(FROZEN_AT, "%Y-%m-%d")
+    for d in range(days):
+        day = (base + timedelta(days=d + 1)).strftime("%Y-%m-%d")
+        _champion(store, day, f"C{d}", 0.30)
+        SH.emit_for_date(run_id, day, panel=[f"C{d}"])
+    _grade_challenger(monkeypatch, 0.10)
+    SH.score_due(as_of=ASKED_ON)
+
+
+class TestTheScopeBelongsToTheProducer:
+    def test_the_shipped_registry_holds_no_candidate(self):
+        """The documentation's claim, as an assertion.
+
+        The docs say the mechanism is delivered and that no promotion has
+        happened. This is why: nothing in the build emits candidate-grade
+        forecasts, so ``run_gate`` cannot produce a promotable verdict. Adding
+        a candidate producer should fail here first, so that the documentation
+        and this refusal are revisited together rather than drifting apart.
+        """
+        assert [p.kind for p in SH.PRODUCERS.values()] == [SH.KIND_BASELINE]
+
+    def test_a_name_with_no_emitter_cannot_be_opened(self, store, bare):
+        """The bypass, as a refusal.
+
+        ``evidence_scope`` used to come from the run's free-text label, so
+        naming a run anything but ``constant_0.5`` minted "candidate_policy"
+        evidence out of the no-skill baseline while the emitted probability
+        stayed 0.5. The guard was satisfied by a word.
+        """
+        with pytest.raises(SH.ShadowError, match="No registered producer"):
+            SH.open_run(policy_version_id=bare, reason="rename to promote",
+                        report_type=REPORT, producer="definitely_a_candidate")
+        assert SH.runs() == []
+
+    def test_an_unregistered_producer_has_no_scope(self):
+        with pytest.raises(SH.ShadowError, match="not registered"):
+            SH.scope_for("nobody_emits_this")
+
+    def test_a_kind_the_module_never_defined_is_not_a_candidate(self,
+                                                                monkeypatch):
+        monkeypatch.setitem(SH.PRODUCERS, "mystery", SH.Producer(
+            name="mystery", kind="wishful", forecast=lambda date, code: 0.9))
+        with pytest.raises(SH.ShadowError, match="does not define"):
+            SH.scope_for("mystery")
+
+    def test_the_baseline_verdict_is_baseline_only(self, store, frozen,
+                                                   monkeypatch):
+        _emit_and_grade(store, SH.runs()[0]["id"], monkeypatch)
+        got = _run(frozen)
+        assert got["evidence_scope"] == SH.BASELINE_ONLY_SCOPE
+        stored = HG.get_gate_decisions(policy_version_id=frozen)[0]
+        assert stored["evidence_scope"] == SH.BASELINE_ONLY_SCOPE
+
+    def test_a_candidate_verdict_is_promotable_grade(self, store, bare,
+                                                     candidate, monkeypatch):
+        run_id = SH.open_run(policy_version_id=bare, reason="the candidate",
+                             report_type=REPORT, producer=candidate,
+                             opened_at=FROZEN_AT)
+        _emit_and_grade(store, run_id, monkeypatch)
+        got = _run(bare)
+        assert got["evidence_scope"] == PR.SCOPE_CANDIDATE
+        stored = HG.get_gate_decisions(policy_version_id=bare)[0]
+        assert stored["evidence_scope"] == PR.SCOPE_CANDIDATE
+
+
+class TestTheWholePathIsReachable:
+    """Acceptance B13 — and the boundary of what it proves.
+
+    The market data is synthetic: ``_grade_challenger`` stubs the grading, as
+    every test in this file does. The shape is not. A registered producer
+    emits real rows into ``shadow_predictions``, the gate computes the verdict
+    and its scope, a person approves, and the pointer moves.
+    """
+
+    def test_from_a_candidate_run_to_a_moved_pointer(self, store, candidate,
+                                                     monkeypatch):
+        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
+                              reason="the incumbent", frozen_at="2026-05-01")
+        target = PR.freeze(sources=_sources("candidate"), created_by="kylin",
+                           reason="the candidate", frozen_at=FROZEN_AT)
+        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+        assert PR.active()["version_id"] == incumbent
+
+        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
+                             report_type=REPORT, producer=candidate,
+                             opened_at=FROZEN_AT)
+        _emit_and_grade(store, run_id, monkeypatch)
+
+        verdict = _run(target)
+        assert verdict["outcome"] == "promote"
+        assert verdict["validation_days"] >= 20
+
+        stored = HG.get_gate_decisions(policy_version_id=target)[0]
+        assert stored["evidence_scope"] == PR.SCOPE_CANDIDATE
+        PR.approve(version_id=target, approved_by="a-person",
+                   reason="beat the champion on a paired panel",
+                   gate_decision=stored, sources=_sources("candidate"),
+                   at=ASKED_ON)
+        assert PR.active()["version_id"] == incumbent, "approval moved it"
+
+        PR.promote(version_id=target, actor="a-person", reason="approved",
+                   sources=_sources("candidate"), expected_seq=1)
+        assert PR.active()["version_id"] == target
+
+
+class TestAnAmbiguousGateQuestionIsRefused:
+    """The gate grades one challenger; two open runs is a question, not a run.
+
+    Latent while the baseline was the only producer, and reachable the moment
+    a second one is registered. Resolving it by taking the oldest would be
+    silent, and the verdict would describe a comparison the reader has no
+    reason to think was chosen — D7's shape, one level down. So it is refused.
+    """
+
+    def test_two_open_shadows_of_one_version_are_refused(self, store, bare,
+                                                         candidate):
+        SH.open_run(policy_version_id=bare, reason="a baseline reference",
+                    report_type=REPORT, opened_at=FROZEN_AT)
+        SH.open_run(policy_version_id=bare, reason="the candidate",
+                    report_type=REPORT, producer=candidate, opened_at=FROZEN_AT)
+        with pytest.raises(HG.GateError, match="shadow runs are open"):
+            _run(bare)
+
+    def test_one_open_shadow_is_answered_not_refused(self, store, bare):
+        SH.open_run(policy_version_id=bare, reason="the only one",
+                    report_type=REPORT, opened_at=FROZEN_AT)
+        got = _run(bare)
+        assert got["abstained"]

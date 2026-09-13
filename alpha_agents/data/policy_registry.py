@@ -92,6 +92,18 @@ SOURCE_NAMES = ("prompts", "model", "retrieval", "rules", "knowledge")
 
 TRANSITION_KINDS = ("install", "promote", "rollback")
 
+#: The only evidence scope a promotion may cite.
+#:
+#: A gate verdict records which kind of producer emitted the challenger's
+#: forecasts. Only a *candidate policy* comparison is evidence that a policy is
+#: better; a verdict against the no-skill baseline answers "does the champion
+#: have skill", which is a different question and has never been a reason to
+#: move the pointer. The vocabulary lives here because this is the layer that
+#: decides what evidence is sufficient — ``evolution`` produces the value, and
+#: ``data`` must not import it back (layering), so the accepted word is owned by
+#: the verifier.
+SCOPE_CANDIDATE = "candidate_policy"
+
 
 class PolicyError(ValueError):
     """A policy operation that would leave the record inconsistent."""
@@ -208,6 +220,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_POINTER)
     conn.execute(_TRANSITIONS)
     conn.execute(_APPROVALS)
+    if "gate_hash" not in {r[1] for r in conn.execute("PRAGMA table_info(policy_approvals)")}:
+        conn.execute("ALTER TABLE policy_approvals ADD COLUMN gate_hash TEXT")
     for statement in _INDEXES:
         conn.execute(statement)
     for guard in _GUARDS:
@@ -567,6 +581,24 @@ def _problems_for(policy_key: str) -> list[str]:
     return problems
 
 
+def _persisted_gate(claim) -> dict:
+    """Resolve the evidence by id; never let caller-provided fields invent it."""
+    if not isinstance(claim, dict) or type(claim.get("id")) is not int:
+        raise PolicyError("A promotion must cite a gate verdict persisted by id")
+    conn = memory_store._get_conn()
+    try:
+        row = conn.execute("SELECT * FROM gate_decisions WHERE id = ?",
+                           (claim["id"],)).fetchone()
+    except sqlite3.OperationalError as exc:
+        raise PolicyError("No persisted gate verdict is available") from exc
+    if row is None:
+        raise PolicyError(f"No persisted gate verdict #{claim['id']}")
+    stored = dict(row)
+    if any(k not in stored or stored[k] != value for k, value in claim.items()):
+        raise PolicyError("The supplied gate verdict does not match the persisted record")
+    return stored
+
+
 def _require_eligible_gate(gate_decision, version_id: int) -> dict:
     """The gate verdict a promotion is allowed to cite, or a refusal.
 
@@ -600,6 +632,21 @@ def _require_eligible_gate(gate_decision, version_id: int) -> dict:
             "The cited verdict rests on zero days of paired evidence. D7 is "
             "exactly the record of a gate that recorded rows like that while "
             "appearing to govern.")
+    frozen = sources_of(version_id) or {}
+    minimum = frozen.get("rules", {}).get("holdout_gate.MIN_VALIDATION_SAMPLES")
+    n = gate_decision.get("n")
+    if type(minimum) is not int or minimum <= 0 or type(n) is not int or n < minimum:
+        raise PolicyError("The persisted verdict has insufficient paired samples")
+    scope = gate_decision.get("evidence_scope")
+    if scope != SCOPE_CANDIDATE:
+        raise PolicyError(
+            f"The cited verdict's evidence scope is {scope!r}, not "
+            f"{SCOPE_CANDIDATE!r}. A comparison against a no-skill baseline "
+            "asks whether the champion has skill; it says nothing about "
+            "whether this policy is better, so it cannot move the pointer. A "
+            "verdict recording no scope falls to the same refusal: an absent "
+            "value is a fact nobody established, and reading it as promotable "
+            "is how a shut gate reopens.")
     return gate_decision
 
 
@@ -710,14 +757,15 @@ def approve(*, version_id: int, approved_by: str, reason: str,
         init_schema(conn)
         with conn:
             version = _resolve_version(conn, version_id, policy_key)
+            gate_decision = _persisted_gate(gate_decision)
             _require_eligible_gate(gate_decision, version_id)
             _require_matches_live(version, sources, "Approving a version")
             cursor = conn.execute(
                 "INSERT INTO policy_approvals "
                 "(policy_key, version_id, content_hash, gate_decision_id, "
-                " approved_by, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " approved_by, reason, at, gate_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (policy_key, version_id, version["content_hash"],
-                 gate_decision.get("id"), approved_by, reason, when))
+                 gate_decision["id"], approved_by, reason, when, _hash(gate_decision)))
     return int(cursor.lastrowid)
 
 
@@ -773,6 +821,12 @@ def promote(*, version_id: int, actor: str, reason: str, sources,
                     "person. §11: a successful evaluation is not a licence to "
                     "promote, and no model may approve its own candidate — "
                     "record the approval first.")
+            if not approval.get("gate_hash"):
+                raise PolicyError("The approval predates evidence binding; approve again")
+            gate = _persisted_gate({"id": approval["gate_decision_id"]})
+            _require_eligible_gate(gate, version_id)
+            if _hash(gate) != approval["gate_hash"]:
+                raise PolicyError("The gate evidence changed after approval")
             _require_matches_live(version, sources, "Promoting a version")
             problems = _problems_for(policy_key)
             if problems:

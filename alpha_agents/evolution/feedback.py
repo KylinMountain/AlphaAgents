@@ -1,14 +1,24 @@
-"""L1 Feedback — query-and-format helpers for data that exists but wasn't injected."""
+"""L1 Feedback — query-and-format helpers for data that exists but wasn't injected.
+
+What reaches the prompt is gated on approval, not on a row's ``status``. See
+:func:`in_force_snapshot_id` for the reason the gate reads the policy pointer
+rather than the newest approved snapshot.
+"""
 
 from __future__ import annotations
 
+import logging
+import sqlite3
+
+from alpha_agents.data import policy_registry
+from alpha_agents.data import knowledge_snapshots
 from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
 from alpha_agents.data.memory_store import (
     get_all_cognition_latest,
-    get_all_principles_including_weakened,
     get_recent_daily_lessons,
-    get_active_or_degraded_playbooks,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def inject_sentiment() -> str:
@@ -145,11 +155,61 @@ _CATEGORY_HEADERS = {
     "risk": "风控",
 }
 
+# Shown when the gate is off. Not an empty string: "" says "there is no
+# knowledge", and "nothing is in force" is a different statement that must not
+# wear the same shape. A silent degradation is the one thing this slice is
+# required not to have.
+_NOT_IN_FORCE = "（未生效：没有任何已批准的知识快照在生效）"
+
+
+def in_force_snapshot_id() -> int | None:
+    """The approved knowledge snapshot the policy in force names, or None.
+
+    Read from the **pointer** rather than from "the newest approved snapshot".
+    The second is the tempting implementation and it is the one §14 forbids:
+    it would be a second answer to "what is in force", and two answers become
+    two truths the moment they disagree. The policy version in force carries a
+    ``knowledge`` source naming exactly one snapshot; that is the answer, and
+    there is only one of it.
+    """
+    version = policy_registry.active_version()
+    if version is None:
+        return None
+    sources = policy_registry.sources_of(version["id"]) or {}
+    snapshot_id = (sources.get("knowledge") or {}).get("snapshot_id")
+    return int(snapshot_id) if snapshot_id else None
+
+
+def _approved_rows(entity_type: str) -> tuple[list[dict], str | None]:
+    """One pointer read, verified payloads, and an explicit fail-closed marker.
+
+    No snapshot, a corrupt snapshot or edited knowledge must not fall back to
+    status-based retrieval. Read once so a concurrent promotion cannot cause
+    the preliminary check and the actual selection to use different versions.
+    """
+    try:
+        snapshot_id = in_force_snapshot_id()
+        if snapshot_id is None:
+            raise ValueError("no approved knowledge snapshot is in force")
+        return knowledge_snapshots.verified_rows(snapshot_id, entity_type), None
+    except (ValueError, TypeError, KeyError, sqlite3.DatabaseError) as exc:
+        logger.warning("%s retrieval unavailable: %s", entity_type, exc)
+        return [], _NOT_IN_FORCE
+
 
 def inject_principles() -> str:
-    """Render active (and weakened) trading principles as an Anna-Coulling-style
-    manual, grouped by category. Budget: 800 chars."""
-    rows = get_all_principles_including_weakened()
+    """Render the principles that are in force as an Anna-Coulling-style
+    manual, grouped by category. Budget: 800 chars.
+
+    Selection is by **approval**, not by ``status``. §10's "must stay outside
+    production decision retrieval until approved" used to hold for candidates
+    and not for principle rows: an ``active`` row that had never been inside
+    any approved snapshot was rendered anyway, so approval was a record kept
+    afterwards rather than a switch thrown beforehand. This is the switch.
+    """
+    rows, marker = _approved_rows("principle")
+    if marker:
+        return f"【交易经验手册】{marker}"
     if not rows:
         return ""
     by_cat: dict[str, list[dict]] = {}
@@ -161,12 +221,10 @@ def inject_principles() -> str:
         header = _CATEGORY_HEADERS.get(cat, cat)
         lines.append(f"■ {header}")
         for r in items:
-            wr = r.get("win_rate")
-            ec = r.get("evidence_count", 0)
-            tag = "⚠️" if r.get("status") == "weakened" else ""
-            wr_str = f"胜率{wr*100:.0f}%" if wr is not None else ""
-            meta = f"（{wr_str}, {ec}例）" if wr_str else f"（{ec}例）"
-            line = f"• {tag}{r['principle']}{meta} → {r.get('action_guidance', '')}"
+            tag = "[weakened] " if r.get("status") == "weakened" else ""
+            # Counts and win rates are not approved rule fields. They must
+            # neither enter the prompt nor change budget-based truncation.
+            line = f"• {tag}{r['principle']} → {r.get('action_guidance', '')}"
             if sum(len(x) for x in lines) + len(line) > _PRINCIPLES_BUDGET:
                 return "\n".join(lines)
             lines.append(line)
@@ -245,8 +303,19 @@ _PLAYBOOKS_BUDGET = 400
 
 
 def inject_playbooks() -> str:
-    """Render existing rule fields, excluding mutable outcome measurements."""
-    rows = get_active_or_degraded_playbooks()
+    """Render the playbooks that are in force, as rule fields only.
+
+    Excluding mutable outcome measurements is Phase 1's boundary and still
+    holds: ``hit_rate`` / ``wins`` / ``total_trades`` are what the model
+    produced, and feeding them back lets it reason from feedback it generated.
+
+    Selection is by **approval**, not by ``status`` — an ``active`` row that
+    has never been inside an approved snapshot is not in force, and used to be
+    rendered anyway. Same gate as :func:`inject_principles`.
+    """
+    rows, marker = _approved_rows("playbook")
+    if marker:
+        return f"【活跃 Playbook】{marker}"
     if not rows:
         return ""
     lines = [f"【活跃 Playbook】（{len(rows)}条）"]

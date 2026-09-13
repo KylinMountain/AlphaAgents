@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     outcome TEXT,
     n INTEGER,
     validation_days INTEGER,
+    evidence_scope TEXT,
     mean_diff REAL,
     t_stat REAL,
     reason TEXT,
@@ -220,10 +221,18 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
 # itself to its evidence by parsing prose gets an empty list the moment the
 # label changes, and an empty eligibility list reads as "not eligible" — the
 # safe-looking answer, and the same shape as the defect this phase fixes.
+#
+# ``evidence_scope`` is here for that same reason. It records who emitted the
+# challenger's forecasts, and ``policy_registry`` refuses to promote on
+# anything that is not a candidate's. It used to live only inside
+# ``detail_json``, so reading it back meant parsing a payload — and there an
+# absent key reads as "not baseline-only", which is to say as promotable. A
+# guard whose missing case is the permissive one is not a guard.
 _GATE_MIGRATIONS = (
     "ALTER TABLE gate_decisions ADD COLUMN outcome TEXT",
     "ALTER TABLE gate_decisions ADD COLUMN validation_days INTEGER",
     "ALTER TABLE gate_decisions ADD COLUMN policy_version_id INTEGER",
+    "ALTER TABLE gate_decisions ADD COLUMN evidence_scope TEXT",
 )
 
 
@@ -255,7 +264,9 @@ def record_gate_decision(candidate_name: str, decision: dict,
 
     The version id is read from ``decision`` rather than passed alongside the
     name, so the row cannot record a name that says one version and a column
-    that says another.
+    that says another. ``evidence_scope`` is written as its own column for the
+    same reason ``validation_days`` is: it is the fact a promotion is refused
+    on, so it has to be readable without parsing the stored verdict.
     """
     from alpha_agents.data.memory_store import _get_conn, _write_lock
 
@@ -267,13 +278,14 @@ def record_gate_decision(candidate_name: str, decision: dict,
             conn.execute(
                 "INSERT INTO gate_decisions (date, candidate, "
                 "policy_version_id, promoted, abstained, outcome, n, "
-                "validation_days, mean_diff, t_stat, reason, detail_json) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "validation_days, evidence_scope, mean_diff, t_stat, reason, "
+                "detail_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (today, candidate_name, decision.get("policy_version_id"),
                  1 if decision.get("promote") else 0,
                  1 if decision.get("abstained") else 0,
                  decision.get("outcome"), decision.get("n"),
-                 decision.get("validation_days"), decision.get("mean_diff"),
+                 decision.get("validation_days"),
+                 decision.get("evidence_scope"), decision.get("mean_diff"),
                  decision.get("t_stat"), decision.get("reason", ""),
                  json.dumps(decision, ensure_ascii=False)),
             )
@@ -325,6 +337,19 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
     The champion is the graded forecasts of the same ``report_type``; the
     challenger is the shadow run bound to this version. Both are cut to the
     forward window, and the comparison is paired on (date, code).
+
+    The verdict also carries an ``evidence_scope``: which kind of producer
+    emitted the challenger's forecasts. A verdict against the no-skill
+    baseline says whether the champion has skill at all, and says nothing about
+    whether a *policy* is better, so ``policy_registry`` refuses to promote on
+    it. The scope is derived from ``shadow.PRODUCERS``, so it follows the code
+    that produced the forecasts rather than anything the caller named.
+
+    A version shadowed by more than one producer is refused rather than
+    resolved: the gate grades one challenger, and silently taking the oldest
+    run would make the verdict describe a comparison the reader has no reason
+    to think was chosen. Refusing is the same posture as the window check — an
+    ambiguous question is not answered quietly.
     """
     from alpha_agents.data import clock, policy_registry
     from alpha_agents.data.memory_store import get_scored_predictions
@@ -346,8 +371,18 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
             "recorded as insufficient — a window that could never hold "
             "evidence must not leave a verdict-shaped row behind.")
 
-    run = (shadow.open_run_for(policy_version_id, report_type)
-           or shadow.latest_run_for(policy_version_id, report_type))
+    open_runs = shadow.open_runs_for(policy_version_id, report_type)
+    if len(open_runs) > 1:
+        raise GateError(
+            f"{len(open_runs)} shadow runs are open on policy version "
+            f"#{policy_version_id} for {report_type!r}, by producers "
+            f"{sorted(r['producer'] for r in open_runs)}. The gate grades one "
+            "challenger, and picking one silently would let the verdict "
+            "describe whichever run happened to be opened first — the shape of "
+            "a gate that answers a question nobody asked. Close all but the "
+            "run being evaluated.")
+    run = (open_runs[0] if open_runs
+           else shadow.latest_run_for(policy_version_id, report_type))
     if run is None:
         raise GateError(
             f"No shadow run measures policy version #{policy_version_id} on "
@@ -365,6 +400,12 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
         {day for day, _code in paired_keys(champion, challenger)})
     decision["policy_version_id"] = policy_version_id
     decision["run_id"] = run["id"]
+    # Read from the producer that emitted the forecasts, never from a label on
+    # the run. A caller-supplied name decided this before: a run named anything
+    # other than "constant_0.5" carried candidate-grade evidence while its
+    # forecasts were the no-skill constant, so the promotion guard was
+    # satisfied by the label rather than by the evidence.
+    decision["evidence_scope"] = shadow.scope_for(run["producer"])
 
     name = f"{version['policy_key']}#{policy_version_id}"
     record_gate_decision(name, decision, when)

@@ -392,12 +392,9 @@ class TestDrift:
     def test_changed_sources_of_an_unknown_version_is_empty(self, store):
         assert PS.changed_sources(999) == {}
 
-    def test_an_approval_drifts_the_version_that_predates_it(self, store):
-        # §10's boundary made visible: approving knowledge does not put it in
-        # force, and this is how the system says so — the version in force was
-        # frozen before the approval, so it no longer describes the state of
-        # the world. Activating it means freezing a version that names the
-        # snapshot and promoting that, with evidence.
+    def test_an_unactivated_approval_does_not_drift_the_live_policy(self, store):
+        # Approval does not activate knowledge. Only the pointer decides what
+        # the live collector sees; unrelated new approvals cannot change it.
         from alpha_agents.data import knowledge_snapshots as KS
         version_id = PS.freeze_live(created_by="kylin", reason="initial")
         assert PS.verify_live(version_id) is True
@@ -408,8 +405,8 @@ class TestDrift:
         store.commit()
         KS.approve(approved_by="kylin", reason="reviewed",
                    items=[{"entity_type": "principle", "entity_id": 1}])
-        assert PS.verify_live(version_id) is False
-        assert "knowledge" in PS.changed_sources(version_id)
+        assert PS.verify_live(version_id) is True
+        assert "knowledge" not in PS.changed_sources(version_id)
 
     def test_an_older_drifted_version_is_reported_too(self, store, monkeypatch):
         # Every version is checked, not only the one in force: a version that

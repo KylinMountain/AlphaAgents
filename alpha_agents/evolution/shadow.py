@@ -1,4 +1,4 @@
-"""The challenger: a frozen baseline that forecasts and is graded, and nothing else.
+"""The challenger: a registered producer that forecasts and is graded, and nothing else.
 
 §11 requires the experiment to "begin with one champion, one challenger, and an
 appropriate frozen simple non-LLM baseline". ``holdout_gate`` has the decision
@@ -31,11 +31,22 @@ fills cannot reach the main account, and shadow-derived lessons cannot enter
 the champion's active knowledge" then holds by construction rather than by
 review.
 
-**The baseline.** A constant 0.5 — "permanently uncertain". ``brier_score``'s
-own docstring names 0.25 as "the line to beat", so this challenger asks the one
-question a first experiment should ask: does the champion beat no skill at all.
-It is non-LLM, deterministic, and has nothing to freeze beyond its own
-definition, which is what makes it a usable bound rather than a second opinion.
+**The baseline, and who is allowed to emit.** §11 names three roles, not two:
+a champion, a challenger, and "an appropriate frozen simple non-LLM baseline".
+The first producer here *is* the baseline — a constant 0.5, "permanently
+uncertain". ``brier_score``'s own docstring names 0.25 as "the line to beat", so
+it asks the one question a first experiment should ask: does the champion beat
+no skill at all. It is non-LLM, deterministic, and has nothing to freeze beyond
+its own definition, which is what makes it a usable bound rather than a second
+opinion.
+
+It is **not** a candidate policy, and that difference decides whether a verdict
+may promote: beating a no-skill bound answers "does the champion have skill",
+not "is this policy better". :data:`PRODUCERS` records each producer's *kind*,
+``holdout_gate`` writes the kind into the verdict as its evidence scope, and
+``policy_registry`` refuses to promote on anything that is not a candidate's.
+So the scope follows from the code that emitted the forecasts, never from a
+label the caller typed — see the note on :data:`PRODUCERS`.
 
 **The panel is shared; the forecast is not.** The challenger forecasts exactly
 the codes the champion forecast that day, because §12 requires prediction
@@ -52,7 +63,9 @@ if it had answered.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Callable
 
 from alpha_agents.data import memory_store, policy_registry, scoring
 from alpha_agents.evolution import holdout_gate
@@ -61,6 +74,11 @@ from alpha_agents.evolution import holdout_gate
 #: Brier is 0.25 — the line the champion has to beat.
 BASELINE_PROB = 0.5
 BASELINE_NAME = "constant_0.5"
+BASELINE_ONLY_SCOPE = "baseline_only"
+
+#: The kinds a producer may declare. Only a candidate's verdict may promote.
+KIND_BASELINE = "baseline"
+KIND_CANDIDATE = "candidate"
 
 #: Namespace prefix for a shadow book. §11 keeps the branches' cash, positions,
 #: orders, working memory and knowledge separate; a distinct ``trader_id`` is
@@ -74,6 +92,73 @@ class ShadowError(ValueError):
     """A shadow-run operation that would make the experiment unreadable."""
 
 
+# ── Producers ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Producer:
+    """Who emits a run's forecasts, and what its verdict may support.
+
+    ``forecast`` takes the date and the code and returns a probability. The
+    baseline ignores both arguments, which is the point of it; a candidate is
+    free to read the frozen policy version the run is bound to.
+    """
+
+    name: str
+    kind: str
+    forecast: Callable[[str, str], float]
+
+
+#: The producers a shadow run may name, by name.
+#:
+#: Registration is what makes a producer real, and it is deliberately the only
+#: route a name can take. A run used to record a free-text ``baseline`` label
+#: that decided the verdict's evidence scope while the emitter wrote a constant
+#: regardless of it: naming a run anything other than ``constant_0.5`` produced
+#: "candidate_policy" evidence out of the no-skill baseline, so the guard
+#: written to stop exactly that was satisfied by the label rather than by the
+#: data. The name has to resolve here now, which is what ties the scope to the
+#: emitter instead of to the caller.
+#:
+#: ``kind`` is fixed per name and must not be re-assigned: a verdict's scope is
+#: read back through this table, so changing a name's kind would silently
+#: reinterpret verdicts already in the audit.
+#:
+#: This table holds the baseline and nothing else. There is **no candidate
+#: producer yet**, so every verdict this build can produce is baseline-only and
+#: nothing is promotable — which is the honest state, and the reason a
+#: promotion is refused rather than the reason one is never asked for.
+PRODUCERS: dict[str, Producer] = {
+    BASELINE_NAME: Producer(name=BASELINE_NAME, kind=KIND_BASELINE,
+                            forecast=lambda date, code: BASELINE_PROB),
+}
+
+
+def scope_for(producer_name: str) -> str:
+    """The evidence scope a verdict from this producer is allowed to carry.
+
+    Both branches are spelled out rather than "baseline, else candidate". An
+    unregistered name, or a kind this module never defined, is a fact nobody
+    can justify; letting it fall through to the promotable scope is how a shut
+    gate reopens. Unknown fails closed, and loudly.
+    """
+    producer = PRODUCERS.get(producer_name)
+    if producer is None:
+        raise ShadowError(
+            f"Shadow run names producer {producer_name!r}, which is not "
+            "registered. Its forecasts exist but nothing says what produced "
+            "them, so a verdict on them would carry a scope nobody can "
+            "justify.")
+    if producer.kind == KIND_BASELINE:
+        return BASELINE_ONLY_SCOPE
+    if producer.kind == KIND_CANDIDATE:
+        return policy_registry.SCOPE_CANDIDATE
+    raise ShadowError(
+        f"Producer {producer_name!r} declares kind {producer.kind!r}, which "
+        "this module does not define. A kind nobody defined cannot be read as "
+        "either baseline or candidate.")
+
+
 # ── Schema, owned here ─────────────────────────────────────────────────
 
 _RUNS = """
@@ -82,7 +167,7 @@ CREATE TABLE IF NOT EXISTS shadow_runs (
     policy_version_id INTEGER NOT NULL,
     trader_id TEXT NOT NULL,
     report_type TEXT NOT NULL,
-    baseline TEXT NOT NULL,
+    producer TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('open', 'closed')),
     reason TEXT NOT NULL,
     opened_at TEXT NOT NULL,
@@ -120,10 +205,26 @@ _INDEXES = (
 )
 
 
+def _rename_legacy_producer_column(conn: sqlite3.Connection) -> None:
+    """``baseline`` was this column's name while the baseline was its only value.
+
+    It holds the name of the registered producer, and that name is what decides
+    a verdict's evidence scope — so once a second producer exists the old name
+    describes one case of a general thing and reads as though the column were
+    the comparison's baseline rather than its emitter. Renamed rather than
+    shadowed by a second column: two columns for one fact is how a row ends up
+    disagreeing with itself.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(shadow_runs)")}
+    if "baseline" in columns and "producer" not in columns:
+        conn.execute("ALTER TABLE shadow_runs RENAME COLUMN baseline TO producer")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create this module's tables on the supplied connection."""
     conn.execute(_RUNS)
     conn.execute(_PREDICTIONS)
+    _rename_legacy_producer_column(conn)
     for statement in _INDEXES:
         conn.execute(statement)
 
@@ -150,7 +251,7 @@ def _positive_id(value, field: str) -> int:
 
 def open_run(*, policy_version_id: int, reason: str,
              trader_id: str | None = None, report_type: str = "morning",
-             baseline: str = BASELINE_NAME,
+             producer: str = BASELINE_NAME,
              opened_at: str | None = None) -> int:
     """Open a shadow run of one frozen policy version. Returns its id.
 
@@ -160,14 +261,26 @@ def open_run(*, policy_version_id: int, reason: str,
     version is not on record is refused — it could never be promoted, and
     recording it would be a promise with nothing behind it.
 
-    Refuses a second *open* run for the same (version, report type, baseline):
+    The producer must be registered, and it is not a label. Its name is read
+    back to decide the verdict's evidence scope, so a name with no emitter
+    behind it would let a run claim a scope its forecasts never earned — the
+    same defect as a version that is not on record, one level down.
+
+    Refuses a second *open* run for the same (version, report type, producer):
     two shadows of one version would be counted twice by any later comparison,
     and the duplicate is silent.
     """
     _positive_id(policy_version_id, "policy_version_id")
     reason = _text(reason, "reason")
     report_type = _text(report_type, "report_type")
-    baseline = _text(baseline, "baseline")
+    producer = _text(producer, "producer")
+    if producer not in PRODUCERS:
+        raise ShadowError(
+            f"No registered producer named {producer!r}, so nothing would emit "
+            "this run's forecasts. A run may only name a producer that exists: "
+            "the name decides the verdict's evidence scope, and a scope nobody "
+            f"emitted is a promise with nothing behind it. Registered: "
+            f"{sorted(PRODUCERS)}.")
     when = _text(opened_at, "opened_at") if opened_at else _today()
     if policy_registry.get_version(policy_version_id) is None:
         raise ShadowError(
@@ -182,19 +295,19 @@ def open_run(*, policy_version_id: int, reason: str,
         with conn:
             existing = conn.execute(
                 "SELECT id FROM shadow_runs WHERE policy_version_id = ? "
-                "AND report_type = ? AND baseline = ? AND status = 'open'",
-                (policy_version_id, report_type, baseline)).fetchone()
+                "AND report_type = ? AND producer = ? AND status = 'open'",
+                (policy_version_id, report_type, producer)).fetchone()
             if existing:
                 raise ShadowError(
                     f"Policy version #{policy_version_id} already has an open "
-                    f"{report_type} shadow of {baseline} (run #{existing['id']}). "
+                    f"{report_type} shadow of {producer} (run #{existing['id']}). "
                     "Close it before opening another, or the two will be "
                     "counted as one experiment.")
             cursor = conn.execute(
                 "INSERT INTO shadow_runs (policy_version_id, trader_id, "
-                "report_type, baseline, status, reason, opened_at) "
+                "report_type, producer, status, reason, opened_at) "
                 "VALUES (?, ?, ?, ?, 'open', ?, ?)",
-                (policy_version_id, trader, report_type, baseline, reason, when))
+                (policy_version_id, trader, report_type, producer, reason, when))
     return int(cursor.lastrowid)
 
 
@@ -239,7 +352,12 @@ def runs(*, status: str | None = None, limit: int = 200) -> list[dict]:
 
 def open_run_for(policy_version_id: int,
                  report_type: str = "morning") -> dict | None:
-    """The open run shadowing a version, if there is one."""
+    """The open run shadowing a version, if there is one.
+
+    Ambiguous by construction once more than one producer shadows a version,
+    so callers should prefer :func:`open_runs_for` and say what they do about
+    the second one rather than take whichever is oldest.
+    """
     conn = memory_store._get_conn()
     init_schema(conn)
     row = conn.execute(
@@ -247,6 +365,25 @@ def open_run_for(policy_version_id: int,
         "AND report_type = ? AND status = 'open' ORDER BY id LIMIT 1",
         (policy_version_id, report_type)).fetchone()
     return dict(row) if row else None
+
+
+def open_runs_for(policy_version_id: int,
+                  report_type: str = "morning") -> list[dict]:
+    """Every open run shadowing a version, oldest first.
+
+    A version can carry one open run per producer — the baseline as a
+    calibration reference alongside the candidate under test. Anything that
+    grades "the challenger" therefore has to say what it does when there is
+    more than one, because the alternative is to pick one silently and let the
+    verdict describe a run the reader has no reason to think was chosen.
+    """
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    rows = conn.execute(
+        "SELECT * FROM shadow_runs WHERE policy_version_id = ? "
+        "AND report_type = ? AND status = 'open' ORDER BY id",
+        (policy_version_id, report_type)).fetchall()
+    return [dict(row) for row in rows]
 
 
 def latest_run_for(policy_version_id: int,
@@ -292,6 +429,11 @@ def emit_for_date(run_id: int, date: str, *,
                   horizon_days: int = DEFAULT_HORIZON_DAYS) -> list[int]:
     """Write the challenger's forecasts for one date. Returns their ids.
 
+    The forecast comes from the run's registered producer, looked up by the
+    name the run recorded. That lookup is the only place a probability is
+    decided, so "which producer emitted this" — the fact a verdict's evidence
+    scope is derived from — is answered by the same act that writes the row.
+
     Idempotent per (run, date, code): re-emitting a day updates the forecast
     rather than adding a second row for the same stock, because two rows would
     be two forecasts and the paired test would count the stock twice.
@@ -307,6 +449,13 @@ def emit_for_date(run_id: int, date: str, *,
             f"Shadow run #{run_id} is closed; a closed experiment must not "
             "keep producing forecasts, or its denominator would grow after "
             "the fact.")
+    producer = PRODUCERS.get(run["producer"])
+    if producer is None:
+        raise ShadowError(
+            f"Shadow run #{run_id} names producer {run['producer']!r}, which "
+            "is not registered. Nothing can emit its forecasts: a row written "
+            "by a producer the run does not name would be graded as the run's "
+            "own, and its verdict would describe evidence it never produced.")
     if panel is None:
         panel = panel_for(date, run["report_type"])
     deadline = _deadline_for(date, horizon_days)
@@ -330,7 +479,8 @@ def emit_for_date(run_id: int, date: str, *,
                     "prob = excluded.prob, horizon_days = excluded.horizon_days, "
                     "deadline = excluded.deadline",
                     (run_id, run["policy_version_id"], date, code,
-                     BASELINE_PROB, int(horizon_days), deadline))
+                     float(producer.forecast(date, code)), int(horizon_days),
+                     deadline))
                 row = conn.execute(
                     "SELECT id FROM shadow_predictions WHERE run_id = ? "
                     "AND date = ? AND code = ?", (run_id, date, code)).fetchone()

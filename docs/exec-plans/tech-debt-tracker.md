@@ -76,13 +76,13 @@ scoring path is wired and running: `review.py::_score_due_predictions` (whose
 docstring names itself the G1 signal) calls `scoring.score_prediction`, which
 regresses out style exposure and computes Brier, on the daily 15:30 review.
 `prob` is filled on **47 of 202** rows, earliest 2026-09-08. `brier` is NULL
-on all 202 because **no forecast had matured yet**: with no declared horizon
-the due date is `date + 5 days`, so the first batch matures **2026-09-13**.
-**Recognise (narrower, check this before writing any scoring code).** Run the
-review task once after 2026-09-13 and confirm `SUM(brier IS NOT NULL) > 0`.
-If it is still 0, this becomes a code bug in one of two places — the market
-window not covering the horizon (so `score_prediction` returns `None` and the
-row is labelled censored) or the due-date filter — and no longer a sample.
+on all 202 because **no forecast had matured yet**.
+**Recognise (narrower, check this before writing any scoring code).** Confirm
+`SUM(brier IS NOT NULL) > 0` after the market data for **2026-09-15** is in
+the database (see D10 — the calendar due date of 2026-09-13 is one trading
+day early, so the 09-08 batch is only gradeable once the 09-15 close exists).
+If it is still 0 at that point, this becomes a code bug in one of two places —
+the market window not covering the horizon, or the due-date filter.
 
 ### D7 — The champion/challenger gate has no caller
 **Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but
@@ -153,6 +153,44 @@ frontend checks. Deliberately deferred in Phase 5 rather than smuggled in with
 the page work.
 **Recognise.** `harness.yml` has a job that runs `npm run check:render` and
 `node --test tests/test_report_markdown.mjs`.
+
+### D10 — The due test counts calendar days; the horizon counts trading days
+**Cost.** `scoring._forward_return` needs `horizon + 1` rows from
+`daily_kline` — the entry close plus the close of the horizon-th *trading* day
+after it. Maturity is decided by
+`COALESCE(deadline, date(date, '+5 days')) <= as_of`, i.e. *calendar* days
+(`_deadline_for` builds its deadline with `timedelta` too). Any six
+consecutive calendar days contain at least one non-trading day, so at most
+five trading dates fall inside the window and the sixth row is never there:
+**no forecast can be scored on the day it is declared due.** The market DB
+confirms it on real data — all four prediction dates carrying a `prob`
+(2026-09-08…09-11) have 4, 3, 2 and 1 trading dates respectively inside their
+calendar window, against 6 required.
+`_score_due_predictions` then gets `None` from `score_prediction`, and
+`label_forecast` writes `censored` with the reason "no score could be
+computed" — which is the wrong fact, because the evidence was not late, it
+was not due yet.
+Two consequences, both measurable:
+1. **`matured` is unreachable for forecast labels.** The first attempt always
+   censors, so every graded forecast ends as `censored → revised`. The
+   revision stream is supposed to mean "the number changed under a later
+   price", and it instead carries a clock artifact.
+2. **`brier` cannot populate on the calendar due date.** For the 2026-09-08
+   batch (due 09-13) the window closes with the **2026-09-15** close; for
+   2026-09-11 (due 09-16) it is the **2026-09-18** close.
+**Why it survived.** `_score_due_predictions` has **no test at all** — grep
+finds it only in `review.py`. The label tests call `label_forecast` with a
+fabricated `scored=`, so they never travel through the due query,
+`score_prediction` and `_forward_return`, which is the only path where the
+two calendars meet. A function whose docstring names itself "the G1 signal"
+is exactly the function an untested seam hides in.
+**Fix.** Decide maturity in trading days, or separate the two facts: "the
+clock reached the horizon" is not "the evidence window has closed", so a
+premature attempt should leave the label `pending` instead of resolving it
+`censored`.
+**Recognise.** A forecast whose *first resolved* label is `matured` rather
+than `censored` — or a `censored` reason that distinguishes "not yet due" from
+"no data".
 
 ## Paid
 

@@ -19,7 +19,7 @@ data → sources → tools → evolution → pipeline → agents → server
 | `evolution/` | Memory utility, principles, playbooks, the holdout gate | Talk to an LLM to decide |
 | `pipeline/` | The scheduler and its tasks; the news ingest loop | Contain strategy rules |
 | `agents/` | LLM prompts and the runners around them | Write to storage directly |
-| `server/` | FastAPI, WebSocket, the dashboard build | Contain logic worth testing |
+| `server/` | FastAPI, WebSocket, the dashboard build, and the workspace read models (`server/readmodels/` — projections only) | Re-derive a number a lower layer already owns |
 
 Cross-cutting, importable anywhere: `config`, `http_client`, `notify`,
 and `evolution.replay_mode` — a contextvar holding a global "as of"

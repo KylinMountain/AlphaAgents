@@ -215,15 +215,15 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
 | 1 可信的最小切片 | ✅ 2026-09-11 | 现金含已实现损益、逐笔退出记录、显式的交易员/来源绑定、交易结果与预测标签分离、候选知识边界 |
 | 2 完整交易内核 | ✅ 2026-09-11 | 订单状态机、资金预留、T+1 批次结算、统一意图路径、内核时钟、对账、重放 |
 | 3 可归因的学习 | ✅ 2026-09-12 | 决策 episode、三类结果的生命周期、候选知识的提案与五态生命周期、已批准知识快照 |
-| **4 受控演化** | ⬅ **当前，机制已交付** | 冻结策略注册表、前向影子账户、公平评估、授权晋升与回滚、检索闸门。**但生产者只有基线、闸门无生产调用者，所以生产里尚未发生一次晋升** |
-| 5 产品整合 | — | 交易 / 学习 / 实验三个读模型贯通 API 与前端 |
+| **4 受控演化** | ✅ 2026-09-13 | 冻结策略注册表、前向影子账户、公平评估、授权晋升与回滚、检索闸门。**但生产者只有基线、闸门无生产调用者，所以生产里尚未发生一次晋升** |
+| **5 产品整合** | ⬅ **当前，V1 已交付** | 交易 / 学习 / 实验三个读模型贯通 API。**前端三个工作台尚未接** |
 
 逐项明细、每条边界、以及每一轮跑了什么命令得到什么结果，在
 [`docs/TRADER_CORE_IMPLEMENTATION.md`](docs/TRADER_CORE_IMPLEMENTATION.md)。
 
 ### 机制已交付 ≠ 已经在跑
 
-Phase 1–4 的代码都有测试钉住（全量 **1800 passed, 18 skipped**），
+Phase 1–4 的代码都有测试钉住（全量 **1828 passed, 18 skipped**），
 但**生产库还是空的**：`position_exits` / `intents` / `decision_snapshots` /
 `episodes` / `outcomes` / `learning_candidates` 全是 0 行 —— 这些表落地之后还没跑过生产。
 `predictions` 202 行里 `brier` 全为 NULL，所以校准曲线仍然是空的。
@@ -233,6 +233,25 @@ Phase 1–4 的代码都有测试钉住（全量 **1800 passed, 18 skipped**）�
 （`shadow.PRODUCERS` 只登记了恒 0.5 的基线，所以每一份裁决都是 `baseline_only`，
 而晋升只接受 `candidate_policy`）。那不是「暂时没数据」，是**一次刻意的拒绝**。
 补它要先回答「候选策略是什么」，而设计文档只指定了基线 —— 那是设计决定，不是缺函数。
+
+### 三个工作台：`unavailable` / `empty` / `present`
+
+Phase 5 的读模型（`alpha_agents/server/readmodels/`）把上面这句话做成了可读的状态，
+而不是留给人去比对文档。每个 section 声明它读的**表与列**，读之前先做一次只读探针：
+
+| 状态 | 含义 | 今天的例子 |
+|---|---|---|
+| `unavailable` / `schema=absent` | 表在本库不存在，模块从未跑过 | `policy_versions`、`shadow_runs` |
+| `unavailable` / `schema=partial` | 表在，但缺列 —— **本库 schema 落后于代码** | `gate_decisions` 缺 `evidence_scope` 与 `validation_days`；`learning_candidates` 缺 `evidence_episode_ids`，且 `candidate_transitions` 整张表不在 |
+| `empty` | 表在、0 行，**这是合法状态** | `episodes`、`outcomes`、`position_exits` |
+| `present` | 有行 | `virtual_portfolio`（52 行）、`predictions`（202 行） |
+
+这条设计的要点是**读模型不建表**：每个数据模块的读函数进入时都会 `init_schema`，
+所以一个顺手调用的页面会把「打开一次网页」变成一次 schema 变更。
+探针不通过就不调用，并把缺的东西**点名报出来** —— 「表没建」和「暂时没数据」
+从此不是同一句话。三个端点是 `/api/trade-workspace`、`/api/learn-journal`、
+`/api/evolve-lab`；`/api/portfolio` 改为委托同一个投影，不再自己拼一份。
+
 
 ---
 

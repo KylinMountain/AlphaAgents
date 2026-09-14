@@ -176,20 +176,28 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   **真实** `score_prediction`（临时 `daily_kline`，无桩）覆盖三种结局共存的一轮。
   仍要如实记下的边界：`brier` 依然只在窗口真正收口后才可能填上，09-08 那批要等
   **2026-09-15** 的收盘，09-11 那批要等 **2026-09-18**。
-- **但 `horizon_days` / `deadline` 这两个列，生产里没有任何写入者。**
-  这是 G1 之外的另一件事，且是本仓库第四类缺陷（「列存在但从未被写入」，S6 抓到过
-  `intents.order_id` 同型）。T2 的「每笔预测自己声明多久到期」机制是完整的：
-  `_deadline_for()` 在未声明时**拒绝**替调用方假设（返回 `None` 而不是套用全局默认），
-  `save_prediction` 的 INSERT/UPDATE 都写这两列，`get_predictions_due_for_scoring`
-  用 `COALESCE(deadline, date(date, '+5 days'))` 兜底并把 `deadline IS NULL` 报成
-  `legacy_horizon`，`outcome_labels` 也照着这个区分打标签。**问题在调用方**：
-  `morning_scan.py` 与 `intraday_monitor.py` 两处生产调用都传了 `prob` 却**都没传
-  `horizon_days`**，所以 202 行的 `deadline` 与 `horizon_days` 全为 NULL，
-  **每一笔预测都在用全局 5 天兜底、并被标成 `legacy_horizon`**。
-  这不是 bug（5 天就是这两个调用方想要的），是**一条已建好、当前无生产用户在用的能力** ——
-  与 Phase 4 的三个「没人调」同形。**不要顺手在调用点上补 `horizon_days=5`**：
-  那正是 `_deadline_for` 拒绝做的事（把「调用方没说」写成「调用方说了五天」）。
-  要用它，得先有第二个真的用不同期限的交易员。
+- **`horizon_days` / `deadline` 这两列在生产里曾经没有写入者 —— 2026-09-14 已接线（§14.11）。**
+  这是本仓库第四类缺陷（「列存在但从未被写入」，S6 抓到过 `intents.order_id` 同型）的又一例，
+  而它的代价被低估了：T2 的「每笔预测自己声明多久到期」机制完整（`_deadline_for()` 在未声明时
+  **拒绝**替调用方假设、`save_prediction` 的 INSERT/UPDATE 都写这两列、
+  `get_predictions_due_for_scoring` 用 `COALESCE(deadline, date(date, '+5 days'))` 兜底并把
+  `deadline IS NULL` 报成 `legacy_horizon`），但**两处生产调用都传了 `prob` 却都没传
+  `horizon_days`**，于是每一笔预报都在按**全局 5 天**兜底评分并被标成 `legacy_horizon`。
+  上一版这里写着「这不是 bug（5 天就是这两个调用方想要的）」——**那句是错的**，而且是这轮查出来的：
+  同一个 `intraday_monitor` 函数在两段之后给**同一笔决策的论点**写死 `"horizon_days": 3`，
+  生产库 41 行 theses 里 **37 行是 3 天**。所以不是「调用方没说」，是「调用方说了、没说给预报听」。
+  现在 morning 传 `r.get("horizon_days")`（提示词本来就要求模型给），intraday 把那个 3 抽成
+  `INTRADAY_HORIZON_DAYS` 并同时喂给预报与论点。
+  **仍然不要顺手补 `horizon_days=5`**：模型真的没说时预报保持未声明，这正是 `_deadline_for`
+  拒绝替调用方假设的那件事，也是 `legacy_horizon` 这个标签还剩下的一点意思。
+- **`n < 50 不上线` 没有任何代码在强制。** `GOLDEN_PRINCIPLES.md` §7 声明它，
+  `TRADER_CORE_DESIGN.md` §12 说它是「the repository's requirement」，README 说它是「诚实门槛」
+  —— 三处都在说仓库有这条规则，而代码里只有 `holdout_gate.MIN_VALIDATION_SAMPLES = 20`，
+  且晋升重检读的是**冻结版本自己声明的**那个值（`policy_registry._require_gate_cites`）。
+  于是 n 落在 20–49 的裁决同时满足闸门与在效版本、却违反 §7，**没有任何东西拦它**。
+  2026-09-14 修的是**可见性而不是行为**（§14.11）：`GOVERNANCE_MIN_SAMPLES` 把这个数字引进代码、
+  `promotion_floor_gap` 说出差异、`status` 每次打印。真正关上它要把常数提到 50，而**那会让所有已
+  冻结版本立刻变 drifted**（冻结后的行为性改动 = 新候选），所以这是一个待定的操作者决定。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -1451,6 +1459,99 @@ policy 'trader' now has version #1 in force at seq 1.
 `lint_harness` **167 文件 0 新增**（存量仍 13 条）；`lint_docs` 通过；**6 个变异探针全部有效**
 （B 去掉 adopt 分支 / C 把论点体检关回带子里 / D 关掉到期 / E1 把「从未到达」清零 / E2 删掉 `未到价`
 映射 / E3 删掉 `成交前已失效` 映射 → 对应用例均变红，复原后锚点仍在）。
+
+### 14.11 「还有多远」这个问题的两个数本身（2026-09-14 第六支）
+
+用户问「现在距离我们 Trade · Learn · Evolve 还有多远」。这一轮不新增能力，修的是**回答这个问题时
+被读的两个数**：一个印错了单位，一个从来没有被比较过；外加拿掉一个正在污染等待期的期限错配。
+
+**1. 把配对样本印成「天」。** 闸门的门槛 `MIN_VALIDATION_SAMPLES` 数的是**配对样本**
+（`paired_keys` = 双方都评过分的 `(date, code)` 对），而 `scripts/policy.py status` 把它印成
+`paired day(s)`、`shadow.coverage` 的 docstring 写成「how many days are left」。
+`coverage` 其实**同时**算了 `scored_days`（不同日期数）——两个数都在，"天"那个从来没被印出来。
+后果不是排版难看：`coverage` 的 docstring 自己说它是「操作者判断该不该去要裁决的唯一诚实进度条」，
+而一个早晨的二十笔推荐会被读成二十天的证据。现在印
+`N/20 paired sample(s) over M scored day(s)`，两个单位并排；测试同时断言
+「必须出现 `paired sample(s)`」与「不得出现 `paired day(s)`」——负断言断言的是 stdout，
+不会被源文件里任何一句 docstring 满足。
+
+**2. `n<50 不上线` 没有任何代码在强制。** `GOLDEN_PRINCIPLES.md` §7 声明它，
+`TRADER_CORE_DESIGN.md` §12 写「the repository's `n ≥ 50` requirement」，
+README 写「本仓库 `n<50 不上线` 的规则把诚实门槛定在 50」——**三处都在说仓库有这条规则，
+而代码里只有 `MIN_VALIDATION_SAMPLES = 20`**，且晋升重检读的是**冻结版本自己声明的**那个值
+（`policy_registry._require_gate_cites` 从 `frozen["rules"]` 取）。于是 n 落在 **20–49** 的裁决
+同时满足闸门与在效版本、却违反 §7，**没有任何东西拦它**。这不是推断：
+`TestTheDeclaredFloorAgainstTheRepositorysRule::test_the_rule_is_a_quotation_and_not_a_threshold`
+用 25 个配对样本把这个缺口跑成一个真的 `promote` 裁决。
+
+**修的是可见性而不是行为，而且这是刻意的选择。** 把常数提到 50 才算真正关上它，代价是
+**所有已冻结版本立刻变 drifted**（`MIN_VALIDATION_SAMPLES` 在 `policy_sources._RULE_SOURCES` 里，
+而冻结之后的行为性改动本来就该是一个新候选），在效的 V1 又是唯一一个版本 —— 所以那是一次
+操作者决定，不是一个补丁。落地的是三件可查的事：
+- `holdout_gate.GOVERNANCE_MIN_SAMPLES = 50`：把 §7 的数字变成代码里的一个**引用**，
+  **刻意不进 `_RULE_SOURCES`** —— 它不改变任何行为，进了指纹就会在它变化时报一次假漂移。
+- `holdout_gate.promotion_floor_gap(declared, when=…)`：说清差在哪里、以及「没有东西拦它」；
+  它接受传入的值而不是自己去读，因为门槛是**版本的**属性，不是眼前这份代码的。
+- `scripts/policy.py status` 每次打印「版本声明的门槛 / 闸门弃权线 / 差多少」三行。
+  与 `--producer` 必填、`gate` 无 `--dry-run` 同一个立场：不替操作者做决定。
+
+**3. 等待期曾经在产生期限不对的证据（本轮唯一的真 bug）。** 见 §7 的更正：生产库 232 行
+`predictions` 的 `horizon_days` / `deadline` 全为 NULL，于是每一笔预报按**全局 5 天**兜底评分、
+被标成 `legacy_horizon`；而同一笔决策的论点里，`intraday_monitor` 硬编码了
+`"horizon_days": 3`，生产库 41 行 theses 有 **37 行是 3 天**。
+**上一版 §7 把这件事读成「一条已建好、无生产用户的能力，而且 5 天就是调用方想要的」——错的**：
+调用方**说了**，只是没说给预报听。修法是把调用方已经决定的那个值传下去（morning 传
+`r.get("horizon_days")`，intraday 抽成 `INTRADAY_HORIZON_DAYS` 同时喂给预报与论点），
+**而不是**在调用点上补 `horizon_days=5` —— 后者正是 `_deadline_for` 拒绝做的那种替换。
+测试驱动**真实保存路径**（`_save_recommendations_list` / `_record_intraday_pick`）而不是
+`save_prediction`，因为 `save_prediction` 从来不是坏掉的那一半；变异探针把
+`INTRADAY_HORIZON_DAYS` 改成两个路径都不会碰巧产出的 4，于是「还在用字面量 3」的那一支会红。
+
+**4. 查「还有多远」时又翻出两件事，都只记录不修。**
+
+- **每天的停止规则在比较两个不同的单位**（`pipeline/tasks/shadow_run.py`）：`remaining`
+  数配对样本，`asked_already` 数验证日，于是实验会在「样本线先到、天数线后到」之间
+  **天天问闸门**，每天写一条近乎一样的行 —— 正是这个模块自己的 docstring 说它存在就是为了
+  避免的那种「有治理的形状、没有治理的实质」。**测试看不见它**：`test_shadow_run_task.py`
+  的 `_ready` 桩给出的裁决里 `n` 与 `validation_days` 都等于 `needed`，两个单位正好相等 ——
+  它活过了一个叫 `TestItAsksTheGateOnce` 的测试类。记为 **D16**，不在这里修：两种修法都在
+  回答本轮被要求别碰的那个问题（门槛是 20 个样本还是 20 天）。现在有一条用例**断言这个缺陷**
+  （命名为「两个单位不一致时停止规则会再问」）与一个把它变红的探针 —— 也就是说这条用例检测的
+  是分歧，不是修复，命名本身就是为了让读它的人不要把它当成批准。
+- **在效的版本不再描述正在跑的配置**（**D17**）：`status` 打印
+  `live configuration still matches: False`。`install` 在 `2026-09-14T03:01:06Z` 时它还是
+  `True`；**主题门那一支（`d927a0b`，14:20）**给 `DEFAULT_DECISION_PARAMS` 加了 `theme_gate`，
+  而 `decision_params_of` 会把默认值**并到**版本自己的值下面，于是交易路径现在读的这个数
+  是冻结版本从未声明过的。`policy_sources.changed_sources(1)` 精确指出就是这一个键。
+  这条不是「假漂移」：它是一条真实的、可命名的漂移，而 §11「冻结之后的行为性改动必须是一个
+  新候选」这件事没有被履行。修法只有一条命令
+  （`freeze --by … --reason "the theme gate, frozen after the fact"`，移动任何指针都不需要证据）
+  —— **刻意没跑**：它决定的是下一个候选是什么，那是操作者的判断。
+
+**跑的那一步**：在生产库开了**第一条**影子 run（`#1`，V1，`constant_0.5`，`morning`），
+理由写在 run 行里。它是 baseline 生产者，所以它的裁决带 `baseline` scope、在
+`policy_registry` 里**不可晋升** —— 开它的目的不是测量，是让 15:45 那条调度真的有一条 run
+可喂，把「时钟根本没开始走」变成「时钟开始走了」。`status` 的阴影段随之从
+`no shadow run has been opened` 变成 `0/20 paired sample(s) …`。它按 `morning` 面板配对，
+所以冠军没做晨扫的那一天不进配对 —— 这件事由报告里那句「今天没有可配对的面板」说明，
+不由沉默说明。开这条 run 时顺手修掉了一个**会训练人忽略警告**的东西：dry-run 原本对任何
+生产者都警告「等于拿策略跟自己比」，而这句话只对 `remap_confidence` 成立（它读版本参数）；
+baseline 读不到任何参数，所以同一个设置测的是「冠军有没有技术」。警告只在它成立时出现。
+
+**没做**：没有把门槛改成 50（见上）；没有在 `status` 里推算「最早可裁日期」——那需要一个**未来**
+交易日历，而本仓库的交易日历来自历史行情表 `daily_kline`（只有过去），现推等于造一个
+「交易日是什么」的第二个真相来源。报的是两个数的分子分母，不是日期。
+
+判据与决策记录见
+[计划文档](exec-plans/completed/2026-09-14-the-two-numbers-that-answer-how-far.md)。
+
+验证：**2000 passed / 18 skipped**（净增 14：`tests/test_declared_horizon_reaches_the_forecast.py` 5 条
++ `TestTheDeclaredFloorAgainstTheRepositorysRule` 4 条 + `test_policy_cli` 4 条
++ `test_shadow_run_task` 1 条）；`lint_harness` **167 文件、存量仍 13 条**；`lint_docs` 通过；
+**10 个变异探针全部有效**（去掉 intraday 预报的 horizon / 把论点改回字面量 3 / 去掉 morning 的传递 /
+在 `_deadline_for` 里把「未声明」写成 5 / status 把样本印回「天」/ 关掉门槛比较 /
+让「已达标」也报缺口 / 让 baseline 也吃那条警告 / 把影子报告的样本印回交易日 /
+**把停止规则改成单位一致**——最后这条把「断言 D16 缺陷」的用例变红，证明它测的是分歧本身）。
 
 
 

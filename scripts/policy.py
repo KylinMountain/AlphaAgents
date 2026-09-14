@@ -41,12 +41,19 @@ first (``freeze`` / ``install``), then the experiment (``shadow-open`` /
   (the evidence is the transition trail), and deletes nothing.
 
 ``status`` changes nothing and is the intended way to look before you leap: it
-prints, among the rest, how many paired days each experiment has and the
-decision parameters in force **as values** — because once a version is installed
-the code defaults stop deciding anything, and an edit to them that has no effect
-must not look like an edit that worked. A verdict asked for too early is refused
-rather than recorded, so the progress meter is also how an operator knows when
-asking is worth it.
+prints, among the rest, how many **paired samples** each experiment has, the
+promotion floor the version in force declares, and the decision parameters in
+force **as values** — because once a version is installed the code defaults stop
+deciding anything, and an edit to them that has no effect must not look like an
+edit that worked. A verdict asked for too early is refused rather than recorded,
+so the progress meter is also how an operator knows when asking is worth it.
+
+The unit word is load-bearing. The gate's floor counts **paired samples** — one
+``(date, code)`` both sides scored — and this command used to print that number
+as "paired day(s)", while the repository's own rule is stated in samples too
+("n < 50 does not ship", golden principles §7). Three spellings of one
+denominator is how an operator comes to believe an experiment is twenty days old
+when it is twenty rows old, all of them from one morning.
 
 "Changes nothing" means no pointer move and no record. Like every other entry
 point it will create the registry's tables and the shadow tables if they do not
@@ -222,6 +229,34 @@ def _cmd_install(args) -> int:
     return 0
 
 
+def _in_force_note(producer_name: str) -> str:
+    """What it means to shadow the version that is in force — as one message.
+
+    The warning this replaces fired for every producer, and it is true for only
+    one of them: ``remap_confidence`` reads the version's parameters, so
+    shadowing the incumbent hands the challenger the champion's own mapping and
+    the experiment compares a policy with itself. A baseline producer emits one
+    constant and reads none of them, so the same setup compares the champion
+    against no skill — a real measurement, just not a promotable one. A warning
+    that fires where it does not apply is how the one that does gets scrolled
+    past.
+
+    An unregistered name falls to the warning rather than to a refusal here:
+    the refusal belongs to ``shadow.open_run``, and a second implementation of
+    it is how the two come to disagree.
+    """
+    producer = shadow.PRODUCERS.get(producer_name)
+    if producer is not None and producer.kind == shadow.KIND_BASELINE:
+        return (f"  note: this is the version in force, but {producer_name!r} "
+                "is a baseline producer — it emits a fixed forecast and reads "
+                "none of the version's parameters, so this measures the "
+                "champion against no skill rather than against itself. Its "
+                "verdict carries baseline scope and cannot move the pointer.")
+    return ("  WARNING: this is the version in force, so the challenger would "
+            "apply the same parameters as the champion. Measure a *different* "
+            "version or the experiment compares a policy with itself.")
+
+
 def _cmd_shadow_open(args) -> int:
     """Open an experiment measuring one frozen version. Moves nothing.
 
@@ -247,10 +282,7 @@ def _cmd_shadow_open(args) -> int:
                   "second open shadow of one version would be refused, because "
                   "the two would be counted as one experiment")
             if pointer and pointer["version_id"] == args.version:
-                print("  WARNING: this is the version in force, so the "
-                      "challenger would apply the same parameters as the "
-                      "champion. Measure a *different* version or the "
-                      "experiment compares a policy with itself.")
+                print(_in_force_note(args.producer))
         print("dry run: nothing written.")
         return 0
 
@@ -329,8 +361,9 @@ def _cmd_gate(args) -> int:
     No dry run, on purpose: there is no way to preview the answer without
     re-deciding eligibility outside the gate, and a second implementation of
     that rule is how the two come to disagree. ``status`` is the way to look
-    first — it prints how many paired days the experiment has, against what the
-    gate needs.
+    first — it prints how many paired samples the experiment has, against what
+    the gate needs, and it reports ``n`` and ``validation_days`` separately for
+    the same reason this print does.
     """
     decision = holdout_gate.run_gate(args.version,
                                      report_type=args.report_type,
@@ -347,6 +380,40 @@ def _cmd_gate(args) -> int:
     else:
         print("  the pointer did not move, and this verdict cannot move it.")
     return 0
+
+
+def _declared_floor(version_id: int) -> int | None:
+    """The promotion floor a frozen version asserts, or None.
+
+    Read from the version's own ``rules`` block rather than from the constant,
+    because that is the copy a promotion is re-checked against: the floor is a
+    property of the version, and the code constant only decides when the gate
+    stops abstaining. An operator comparing the wrong one of those two would
+    conclude the boundary is 50 when the version says 20, or the reverse.
+    """
+    sources = registry.sources_of(version_id) or {}
+    value = (sources.get("rules") or {}).get(
+        "holdout_gate.MIN_VALIDATION_SAMPLES")
+    return value if type(value) is int else None
+
+
+def _print_promotion_floor(version_id: int) -> None:
+    """Print the two numbers that decide whether a promotion is even possible.
+
+    Both, always, and then the gap between the version's floor and the rule the
+    repository declares, because those are three different values in two
+    different units and the operator's next action depends on which one binds.
+    """
+    declared = _declared_floor(version_id)
+    print("  promotion floor: "
+          + (f"version #{version_id} declares {declared} paired sample(s)"
+             if declared is not None
+             else f"version #{version_id} declares none"))
+    print(f"  gate abstains below {holdout_gate.MIN_VALIDATION_SAMPLES} paired "
+          "sample(s) (holdout_gate.MIN_VALIDATION_SAMPLES, live code)")
+    for gap in holdout_gate.promotion_floor_gap(
+            declared, when=f"version #{version_id}"):
+        print(f"    ! {gap}")
 
 
 def _cmd_status(args) -> int:
@@ -384,6 +451,11 @@ def _cmd_status(args) -> int:
             # otherwise indistinguishable from an edit that was forgotten.
             print("  decision parameters in force: "
                   f"{json.dumps(scoring.in_force_decision_params(), sort_keys=True)}")
+            # Printed next to the parameters, and for the same reason: once a
+            # version is in force the floor a promotion is re-checked against
+            # belongs to the version, so "what would it take" is unanswerable
+            # without reading the record.
+            _print_promotion_floor(pointer["version_id"])
 
     versions = registry.versions_for(args.policy_key)
     print(f"  {len(versions)} version(s) on record:")
@@ -406,9 +478,10 @@ def _cmd_status(args) -> int:
 
     # The progress meter for every experiment, in the same command that shows
     # the record. The gate refuses a verdict asked for too early rather than
-    # recording an abstention, so "how many paired days do I have" is the number
-    # that decides when asking is worth it — and it belongs next to the pointer
-    # it would move, not in a second command an operator has to know about.
+    # recording an abstention, so "how many paired samples do I have" is the
+    # number that decides when asking is worth it — and it belongs next to the
+    # pointer it would move, not in a second command an operator has to know
+    # about. Samples, not days: see the module docstring.
     runs = shadow.coverage()["runs"]
     if not runs:
         print("  no shadow run has been opened: nothing is under experiment")
@@ -416,8 +489,9 @@ def _cmd_status(args) -> int:
         print(f"  shadow run #{run['run_id']} (version "
               f"#{run['policy_version_id']}, {run['status']}, "
               f"{run['report_type']}): {run['paired']}/{run['needed']} paired "
-              f"day(s), {run['scored']} of {run['forecasts']} forecast(s) "
-              f"scored, {run['remaining']} to go")
+              f"sample(s) over {run['scored_days']} scored day(s), "
+              f"{run['scored']} of {run['forecasts']} forecast(s) scored — "
+              f"{run['remaining']} sample(s) to go")
     return 0
 
 

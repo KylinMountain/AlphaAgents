@@ -111,10 +111,18 @@ class TestItFeedsAndGrades:
         assert "0 已评 / 1 窗口未收 / 0 已删失" in report
 
     def test_the_report_carries_the_progress_meter(self, store, experiment):
+        """Samples and days, named apart.
+
+        The meter used to read 配对进度 0/20，还差 20 个交易日 while counting
+        paired ``(date, code)`` samples — so the report a person reads to decide
+        whether to act told them twenty trading days when it meant twenty rows.
+        The exact line is asserted, with both units in it, so neither word can
+        drift back on its own.
+        """
+        needed = holdout_gate.MIN_VALIDATION_SAMPLES
         report = asyncio.run(run_shadow_run())
-        assert (f"配对进度 0/{holdout_gate.MIN_VALIDATION_SAMPLES}"
-                in report)
-        assert "还差" in report
+        assert (f"配对进度 0/{needed} 个配对样本（覆盖 0 个交易日），"
+                f"还差 {needed} 个样本") in report
 
     def test_it_is_idempotent_within_a_day(self, store, experiment):
         """Re-running does not double the panel: two rows for one stock would
@@ -201,6 +209,36 @@ class TestItAsksTheGateOnce:
             "outcome": "insufficient", "validation_days": 3}])
         asyncio.run(run_shadow_run())
         assert calls == [experiment["target"]]
+
+    def test_the_stopping_rule_asks_again_while_the_two_units_disagree(
+            self, store, experiment, monkeypatch):
+        """D16, demonstrated rather than described.
+
+        The stopping rule compares two different units: ``remaining`` counts
+        paired samples, ``asked_already`` counts validation days. A verdict that
+        satisfies the first bar while reporting fewer days than the bar does
+        **not** stop the asking, so the same experiment is asked about again —
+        and again, every run, until the day count catches up. That is the
+        "near-identical ``insufficient`` row every day" this module's docstring
+        says was the thing it was written to avoid.
+
+        This test asserts the defect, not the contract; it is named for the
+        disagreement so that reading it cannot look like approval. When D16 is
+        paid, replace it with one showing a satisfied verdict ends the asking.
+
+        The ``_ready`` stub cannot see any of this: it hands back a verdict whose
+        ``n`` and ``validation_days`` both equal ``needed``, so the two units
+        coincide and the disagreement is invisible — which is how it survived a
+        test class called ``TestItAsksTheGateOnce``.
+        """
+        calls = self._ready(monkeypatch, experiment, verdicts=[{
+            "policy_version_id": experiment["target"],
+            "run_id": experiment["run"], "outcome": "promote",
+            "n": holdout_gate.MIN_VALIDATION_SAMPLES,
+            "validation_days": 1}])
+        asyncio.run(run_shadow_run())
+        assert calls == [experiment["target"]], (
+            "asked again although a verdict already reached the sample bar")
 
     def test_it_still_asks_when_the_gate_is_ready_but_the_panel_is_empty(
             self, store, experiment, monkeypatch):

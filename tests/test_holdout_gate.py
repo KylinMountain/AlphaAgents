@@ -329,3 +329,58 @@ class TestGateDecisionsAreFoundByVersion:
 
         self._record(3, "promote", 9)
         assert eligible_decisions(30) == []
+
+
+class TestTheDeclaredFloorAgainstTheRepositorysRule:
+    """GOLDEN_PRINCIPLES §7 says n < 50 does not ship. No code enforces it.
+
+    These tests pin the *report*, not the enforcement, because the choice is
+    an operator's: raising the constant would enforce §7 in code and turn every
+    version already frozen into a drifted one (a behaviour-changing edit after
+    freezing is a new candidate), while leaving it keeps a rule that is
+    declared and unenforced. What must not happen is that the gap goes
+    unstated — which is what it did until an operator asked how far along the
+    loop was.
+    """
+
+    def test_a_floor_below_the_rule_is_a_complaint(self):
+        from alpha_agents.evolution.holdout_gate import promotion_floor_gap
+
+        complaints = promotion_floor_gap(MIN_VALIDATION_SAMPLES,
+                                         when="version #1")
+        assert len(complaints) == 1
+        (complaint,) = complaints
+        assert "version #1" in complaint
+        assert f"[{MIN_VALIDATION_SAMPLES}, " in complaint
+        assert "nothing refuses it" in complaint
+
+    def test_a_floor_at_or_above_the_rule_is_not(self):
+        from alpha_agents.evolution.holdout_gate import (
+            GOVERNANCE_MIN_SAMPLES, promotion_floor_gap)
+
+        assert promotion_floor_gap(GOVERNANCE_MIN_SAMPLES) == []
+        assert promotion_floor_gap(GOVERNANCE_MIN_SAMPLES + 10) == []
+
+    def test_no_declared_floor_is_its_own_complaint(self):
+        from alpha_agents.evolution.holdout_gate import promotion_floor_gap
+
+        (complaint,) = promotion_floor_gap(None, when="version #7")
+        assert "version #7 declares no promotion floor" in complaint
+        assert "no code enforces it" in complaint
+
+    def test_the_rule_is_a_quotation_and_not_a_threshold(self):
+        """The gap, demonstrated rather than described.
+
+        Twenty-five paired samples is below §7's fifty and above the gate's
+        twenty, so the gate returns a real verdict. If someone ever raises the
+        constant to close this, this test turns red on purpose: the
+        ``promotion_floor_gap`` wording is what has to change with it.
+        """
+        from alpha_agents.evolution.holdout_gate import GOVERNANCE_MIN_SAMPLES
+
+        rows = [{"date": "2026-09-01", "code": f"60{i:04d}", "brier": 0.2,
+                 "report_type": "morning"} for i in range(25)]
+        verdict = evaluate_candidate(rows, rows)
+        assert verdict["n"] == 25
+        assert MIN_VALIDATION_SAMPLES < verdict["n"] < GOVERNANCE_MIN_SAMPLES
+        assert verdict["outcome"] == "promote"

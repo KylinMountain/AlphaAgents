@@ -53,6 +53,15 @@ from alpha_agents.pipeline.tasks.session_memory import (
 
 logger = logging.getLogger(__name__)
 
+# How long an intraday pick gives itself to be right. Named once because it is
+# declared twice for the same decision — the forecast's own horizon and the
+# thesis derived from it — and two literals that must agree is how they come to
+# disagree. It used to be a bare ``3`` in the ``from_recommendation`` call while
+# the forecast it belongs to declared nothing, so every intraday prediction was
+# graded on the global 5-day fallback (and labelled ``legacy_horizon``) while
+# the thesis for the same decision said three days.
+INTRADAY_HORIZON_DAYS = 3
+
 
 
 
@@ -921,6 +930,15 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             # carry a probability.
             prob=(confidence_to_prob(confidence)
                   if rec_type == "actionable" else None),
+            # The horizon this decision already declares. Not a default chosen
+            # here: it is the same number the thesis for this *same* decision
+            # gets two paragraphs down, and grading the forecast on 3 days
+            # while grading its own thesis on the global 5 measures the pick
+            # against a deadline it never had. A 'signal' row carries no prob
+            # and so has no forecast to mature — None is the honest answer
+            # there, not 3.
+            horizon_days=(INTRADAY_HORIZON_DAYS
+                          if rec_type == "actionable" else None),
             trader_id=trader_id,
         )
         tag = "signal" if rec_type == "signal" else r.get("confidence", "medium")
@@ -952,7 +970,8 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         # reason is on record and from_recommendation derives the exit
         # conditions from the signals that selected the stock.
         thesis_id = from_recommendation(
-            {**r, "stop_loss": stop_loss_val, "horizon_days": 3},
+            {**r, "stop_loss": stop_loss_val,
+             "horizon_days": INTRADAY_HORIZON_DAYS},
             code, created_by="intraday", trader_id=trader.id)
         create_pending_order(
             code=code,

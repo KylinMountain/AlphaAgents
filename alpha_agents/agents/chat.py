@@ -273,8 +273,8 @@ def show_market_overview() -> str:
         bonds = overview.get("bond_yields", {})
         if bonds.get("cn_us_spread"):
             lines.append(f"中美利差: {bonds['cn_us_spread']}%")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Market overview: index/bond block unavailable: %s", e)
     return "\n".join(lines) if lines else "无数据"
 
 
@@ -543,8 +543,8 @@ def _build_context() -> str:
                     zone = f"≥{p['entry_low']:.2f}"
                 lines.append(f"  {p['code']} {p.get('name','')} 介入{zone} 止损{p.get('stop_loss') or '无'}")
             portfolio += "\n" + "\n".join(lines)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Chat context: portfolio block unavailable: %s", e)
 
     # Themes
     try:

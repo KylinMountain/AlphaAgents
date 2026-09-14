@@ -121,8 +121,8 @@ def _fuzzy_match_concept(name: str) -> str | None:
                     return r["name"]
             # Otherwise return first match
             return rows2[0]["name"]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("sector_beta: concept fuzzy match failed for %r: %s", name, e)
 
     return None
 

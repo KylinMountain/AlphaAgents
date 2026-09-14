@@ -47,8 +47,8 @@ def _bs_logout():
     if _bs_logged_in:
         try:
             bs.logout()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("baostock logout failed: %s", e)
         _bs_logged_in = False
 
 
@@ -271,8 +271,8 @@ def get_stock_history(code: str, days: int = 5) -> Optional[list[dict]]:
         local = get_local_history(code, days)
         if local:
             return local
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Market data: no local history for %s, using the API: %s", code, e)
 
     with _bs_lock:
         try:

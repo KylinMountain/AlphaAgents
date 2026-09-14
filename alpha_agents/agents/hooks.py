@@ -78,9 +78,9 @@ class ToolEventHooks(RunHooks):
                                     "text": text[:300],
                                     "timestamp": time.time(),
                                 })
-        except Exception:
+        except Exception as e:
             # Don't let parsing errors break the pipeline
-            pass
+            logger.debug("hooks: could not parse the model's reasoning block: %s", e)
 
     async def on_handoff(self, context, from_agent, to_agent):
         if self._callback:

@@ -723,6 +723,50 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
   `candidate_is_approved` / `entity_is_approved` 被写成「运维脚本在消费」，
   实测**零调用者**。另两条是状态过期（策略表已建、快照 U5 之后确实在筛选 prompt）。
 
+### 第十三轮（D3 静默 except 清零 + D5 第三维复活）
+
+2026-09-14（同日第四支）：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1930 passed, 18 skipped**（143s；本轮 +20 用例） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（159 个文件），存量 **17 条**（上一轮 43） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+| `cd web && npm run check:render` | 8/8（本轮未改前端） |
+
+**D3（26 处静默 `except ...: pass`）清零。** 全部改成 `except ... as e:` +
+`logger.debug("...: %s", e)`，**一处一条消息**（不是一个模板套 26 遍），
+14 个模块的基线条目随代码一起删掉。两处副产物值得单独记：
+
+- **`data/memory_store.py` 此前一个 logger 都没有。** 2100 行的存储层，
+  两处迁移跳过 + 一处重复教训冲突就是它那三个静默点；现在有了模块 logger，
+  并在定义处写明了为什么是 debug 级（「已经加过的列」不是新闻）。
+- **规则自己的建议是错的。** 原提示写着「若确实可忽略，在 `pass` 上方写一行注释」，
+  而检查读的是 AST（`len(node.body)==1 and isinstance(node.body[0], Pass)`）——
+  **注释不在 AST 里**，照做不会通过。提示已更正为「必须真的写一条日志，
+  顺手给 `except` 加上 `as e`」。这是本轮第二次遇到「文档/提示承诺了代码没做的事」，
+  只不过这次是 lint 自己在承诺。
+
+**D5（playbook 聚类的第三维）先量后改，量出一条原文断言不成立。**
+`_query_hit_clusters` 的第三维是 `vpa_verdict`，而**没有任何写入方记录这个键**
+（`intraday_monitor` 与 `morning_scan` 的 features 都没有它）→ 该表达式恒为 NULL →
+**聚类实际上只有两维，而 SQL 读起来像三维**。但原文的另一半是错的：
+生产库 `playbooks` **总共 1 条**、条件是 `(institutional, theme)`，
+带 `vpa_verdict` 的**一条都没有** —— 因为那一维从来没工作过。所以没有「坏掉的历史」，
+只有**比设计意图更粗的簇**。第三维换成 `change_pct_band`，**在决策时记录**
+（`intraday_monitor` 与 `scripts/replay_evolution.py` 都写），边界只在
+`evolution.playbook.change_band` 定义一次 —— 在 SQL 里 `CASE` 一次、在 Python 里再推一次，
+就是「同一个问题两个答案」，而这次漂移的后果是真的会发生：**自动创建出一个永远匹配不上的
+pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失字段当通配）。
+**已知代价照写**：加一维让簇更细、自动创建更慢（生产 47 行带 `prob`，
+阈值是每簇 3 胜），所以短期内**大概率不会**再自动创建 playbook —— 这是为具体性付的价，
+不是坏了。
+
+**新记的债 D12**：`scripts/research/` 里 21 个 `.py` 有 **11 个与 `scripts/` 顶层逐字节相同**
+（`replay_evolution.py` / `backtest_vpa.py` / `analyze_vpa_*` 一族…）。
+它就是在改 replay 的 features 时暴露的：同一个改动要改两遍，而**只改一处不会报错**。
+树的去留是仓库主人的决定，所以只记不删。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；

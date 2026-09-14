@@ -129,8 +129,8 @@ def _bs_login():
 def _bs_logout():
     try:
         bs.logout()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("baostock logout failed: %s", e)
 
 
 def _to_bs_code(code: str) -> str:

@@ -36,8 +36,8 @@ def _historical_lhb(as_of: str) -> str:
         ts = read_lhb_for_date(cut)
         if ts and ts.get("data"):
             return json.dumps(ts, ensure_ascii=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fund_flow: no Tushare LHB for %s: %s", cut, e)
 
     # Tier 2: legacy daily_snapshots JSON blob
     from alpha_agents.data.memory_store import _get_conn
@@ -96,8 +96,8 @@ def _historical_north_flow(as_of: str) -> str:
                     {"name": "深股通", "net_buy_yi": ts["sgt_yi"]},
                 ],
             }, ensure_ascii=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("fund_flow: no Tushare north-flow data: %s", e)
 
     # Tier 2: legacy daily_snapshots
     from alpha_agents.data.memory_store import _get_conn

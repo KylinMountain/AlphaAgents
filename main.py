@@ -609,7 +609,7 @@ def main() -> None:
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
     p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
     p_run_v2.add_argument("--chat", action="store_true", help="启动交互模式（后台调度+前台对话）")
-    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "night", "weekly", "opening"],
+    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "shadow", "night", "weekly", "opening"],
                           help="Run a single task and exit (for testing)")
     p_run_v2.set_defaults(func=cmd_run_v2)
 

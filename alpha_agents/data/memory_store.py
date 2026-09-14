@@ -5,12 +5,19 @@ plain functions, JSON for flexible fields.
 """
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
 
 from alpha_agents.config import MEMORY_DB_PATH
+
+# A 2100-line store with no logger was where three failures went silent: two
+# migration skips and a duplicate lesson. All three are genuinely ignorable, and
+# all three were unreadable afterwards. Debug level, because a migration that was
+# already applied is not news.
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS theme_lines (
@@ -869,8 +876,8 @@ def _get_conn() -> sqlite3.Connection:
         ):
             try:
                 conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.debug("migration skipped, column already present: %s", e)
         # After the columns exist, not before — see the note in the schema.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_exits_thesis "
@@ -911,8 +918,8 @@ def _get_conn() -> sqlite3.Connection:
         ):
             try:
                 conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as e:
+                logger.debug("migration skipped, column already present: %s", e)
 
         # Split theme strength into lifecycle vs today. The old single
         # `strength` was incremented on every intraday cycle — 48 times a
@@ -1831,8 +1838,8 @@ def insert_daily_lesson(date: str, lesson_type: str, theme: str | None,
                 (date, lesson_type, theme, content, source, tags),
             )
             conn.commit()
-        except sqlite3.IntegrityError:
-            pass  # duplicate (date, content)
+        except sqlite3.IntegrityError as e:
+            logger.debug("daily lesson for %s already recorded, ignoring the duplicate: %s", date, e)
 
 
 def get_recent_daily_lessons(days: int = 7, themes: list[str] | None = None) -> list[dict]:

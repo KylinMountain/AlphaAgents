@@ -22,7 +22,7 @@ data yet. A grade can fall — see the note at the end._
 | `data/vector_store.py` | **A** | 21 tests incl. 3000-vector scale and a naive-numpy cross-check | — |
 | `sources/` | **B** | 16 structural tests; all 13 feeds probed live | CLS down upstream; 2 feeds degraded |
 | `pipeline/tasks/news_ingest.py` | **B** | Window reads tested; ingest verified live | No test for a multi-hour outage |
-| `data/portfolio.py` + `portfolio_exit.py` | **C** | Lifecycle exercised indirectly; the exit slice moved out of `portfolio.py` in Phase 1 | Service code in the storage layer (D1) |
+| `data/portfolio.py` + `portfolio_exit.py` + `portfolio_book.py` | **C** | Lifecycle exercised indirectly; the exit slice moved out in Phase 1, the order book's reads and cancels in the pending-order round (22 tests in `test_pending_orders_finishable.py`, six mutation probes) | Service code in the storage layer (D1); an order with no live quote neither checks its thesis nor expires (D13) |
 | `pipeline/tasks/morning_scan.py` | **C** | Imports and window logic tested | The scan itself is not run in tests |
 | `pipeline/tasks/intraday_monitor.py` | **C** | Same | Same |
 | `tools/vpa/` | **C** | 13 test files inherited | Not on the main line; two files oversized (D4) |
@@ -33,7 +33,9 @@ data yet. A grade can fall — see the note at the end._
 ## Trader core (Phase 1–3) — graded 2026-09-12, gate area re-checked 2026-09-13
 
 _Only the `evolution/holdout_gate.py` row was revisited, after Phase 4 delivered
-U1–U5. The rest of the grades are still 2026-09-12's and were not re-derived._
+U1–U5; the `data/portfolio*` row was revisited again on 2026-09-14, when the
+pending-order round added a module and a test file to it. The rest of the grades
+are still 2026-09-12's and were not re-derived._
 
 **None of these can be A yet, and that is a statement about the sample, not
 the code.** Every area below is tested; none has been validated against data,

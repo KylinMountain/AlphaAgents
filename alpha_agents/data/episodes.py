@@ -308,8 +308,8 @@ def note_fill(conn: sqlite3.Connection, order_id: int, at: str) -> None:
 def note_cancel(conn: sqlite3.Connection, order_id: int, reason: str) -> None:
     """Record that a pending order was called off, and end its episode.
 
-    The single choke point for cancels: ``_cancel_order_unlocked`` is where
-    a cancel actually happens, so this catches the ones a business path
+    The single choke point for cancels: ``portfolio_book._cancel_order_unlocked``
+    is where a cancel actually happens, so this catches the ones a business path
     asked for *and* the ones the fill path performs for its own reasons
     (the drawdown gate, an unaffordable lot). Those last two are exactly
     the decisions a learning loop most needs to see, and routing the event

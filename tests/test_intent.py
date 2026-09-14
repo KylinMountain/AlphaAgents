@@ -11,13 +11,14 @@ These tests pin three things:
 2. The dispatch: all six actions route to their implementation and the
    result comes back through the wrapper unchanged, so the compatibility
    wrappers have not altered behaviour.
-3. The guard rail: no module outside the two state-machine-governed
-   writers may touch ``virtual_portfolio.status`` directly. That is the
-   mechanical form of "业务路径不直接 UPDATE 持仓状态".
+3. The guard rail: no module outside the state-machine-governed writers
+   may touch ``virtual_portfolio.status`` directly. That is the mechanical
+   form of "业务路径不直接 UPDATE 持仓状态".
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -322,34 +323,57 @@ class TestEveryActionGoesThroughTheDoor:
 class TestOnlyTheStateMachineWritesStatus:
     """The mechanical form of "业务路径不直接 UPDATE 持仓状态".
 
-    Two modules may write ``virtual_portfolio.status``, and both must do
-    it through ``order_state.assert_transition``: ``portfolio`` (fill and
-    cancel) and ``portfolio_exit`` (close). Everything else — the intent
-    layer, the monitors, the pipeline tasks, the agents — has to go
-    through a wrapper. A new direct writer fails this test, which is the
-    point.
+    Three modules may write ``virtual_portfolio.status``, and all must do
+    it through ``order_state.assert_transition``: ``portfolio`` (fill),
+    ``portfolio_book`` (cancel — it moved out with the 2026-09-14
+    pending-order work) and ``portfolio_exit`` (close). Everything else —
+    the intent layer, the monitors, the pipeline tasks, the agents — has
+    to go through a wrapper. A new direct writer fails this test, which is
+    the point.
     """
 
     #: Modules allowed to write the status column, and the reason.
     ALLOWED = {
-        "portfolio.py": "the fill and cancel transitions",
+        "portfolio.py": "the fill transition",
+        "portfolio_book.py": "the cancel transition",
         "portfolio_exit.py": "the close transition",
     }
 
     def _status_writers(self) -> dict:
-        """Files whose SQL writes virtual_portfolio.status."""
+        """Files whose SQL writes virtual_portfolio.status.
+
+        Read through the parser rather than with a regex over the raw text,
+        because the fill path spells its UPDATE as adjacent literals::
+
+            "UPDATE virtual_portfolio SET "
+            "status = ?, open_date = ?, ..."
+
+        A `[^"']*` between SET and status cannot cross that split, so the
+        fill write was invisible all along — and ``portfolio.py`` matched
+        only because the cancel path beside it happened to be written on
+        one line. Moving the cancel path to ``portfolio_book`` took that
+        accident with it. Joining adjacent literals is what the parser does
+        anyway, so the guard now sees both writes.
+        """
         found: dict[str, int] = {}
-        pattern = re.compile(
-            r"UPDATE\s+virtual_portfolio\s+SET[^\"']*\bstatus\b",
-            re.IGNORECASE)
         for path in (REPO / "alpha_agents").rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            n = len(pattern.findall(text))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            n = 0
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) \
+                        or not isinstance(node.value, str):
+                    continue
+                sql = " ".join(node.value.split())
+                if not sql.upper().startswith("UPDATE VIRTUAL_PORTFOLIO SET"):
+                    continue
+                set_clause = sql.upper().split("WHERE", 1)[0]
+                if re.search(r"\bSTATUS\b", set_clause):
+                    n += 1
             if n:
                 found[path.name] = n
         return found
 
-    def test_only_the_two_governed_writers_touch_status(self):
+    def test_only_the_governed_writers_touch_status(self):
         writers = self._status_writers()
         assert set(writers) == set(self.ALLOWED), (
             "virtual_portfolio.status is written by an unexpected module. "

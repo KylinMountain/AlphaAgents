@@ -329,7 +329,7 @@ def _reject_from_result(action: str, result) -> str:
 
 #: Which event an accepted action appends. CANCEL is deliberately absent:
 #: a cancel is recorded where it actually happens
-#: (``portfolio._cancel_order_unlocked``), because two of the cancels —
+#: (``portfolio_book._cancel_order_unlocked``), because two of the cancels —
 #: the drawdown gate and the unaffordable lot inside ``_fill_order`` —
 #: never pass through this door, and an event written here would have
 #: covered only the cancels that had already been recorded elsewhere.

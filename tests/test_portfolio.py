@@ -79,8 +79,15 @@ def _make_test_conn():
 def test_open_position():
     from alpha_agents.data.portfolio import open_position, get_open_positions
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
-        mock.return_value = _make_test_conn()
+    # The reads moved to portfolio_book with the 2026-09-14 split, and
+    # get_open_positions there binds _get_conn in its own module globals —
+    # patching the portfolio one redirects the order side only, exactly as
+    # test_close_position notes for portfolio_exit below.
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_book._get_conn") as mock_read:
+        conn = _make_test_conn()
+        mock.return_value = conn
+        mock_read.return_value = conn
         pos_id = open_position(
             code="300475", name="香农芯创", theme="芯片概念",
             open_date="2026-04-09", open_price=147.11,
@@ -97,8 +104,11 @@ def test_open_position():
 def test_no_duplicate_open_position():
     from alpha_agents.data.portfolio import open_position, get_open_positions
 
-    with patch("alpha_agents.data.portfolio._get_conn") as mock:
-        mock.return_value = _make_test_conn()
+    with patch("alpha_agents.data.portfolio._get_conn") as mock, \
+         patch("alpha_agents.data.portfolio_book._get_conn") as mock_read:
+        conn = _make_test_conn()
+        mock.return_value = conn
+        mock_read.return_value = conn
         open_position(code="300475", name="香农芯创", theme="芯片",
                       open_date="2026-04-09", open_price=147.0,
                       source="morning", reason="test")

@@ -387,6 +387,23 @@ def get_by_position(position_id: int) -> Thesis | None:
     return _row_to_thesis(row) if row else None
 
 
+def get_by_id(thesis_id: int | None) -> Thesis | None:
+    """One thesis by id, whatever its status.
+
+    Called when an order is created: the order's expiry is the idea's own
+    horizon, and the idea is named by ``thesis_id`` at that moment. Reading
+    it through ``get_active`` would make an order placed a minute after its
+    thesis was closed fall back to a default horizon — the order would
+    still exist, but its clock would belong to a different rule than the
+    one the agent declared.
+    """
+    if thesis_id is None:
+        return None
+    row = _get_conn().execute(
+        "SELECT * FROM theses WHERE id = ?", (thesis_id,)).fetchone()
+    return _row_to_thesis(row) if row else None
+
+
 def attach_position(thesis_id: int, position_id: int) -> None:
     """Link a thesis to the position it produced, once the order fills."""
     with _write_lock:

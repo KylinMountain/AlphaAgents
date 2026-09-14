@@ -18,8 +18,9 @@ The tests are in five groups:
 2. One episode per decision — a fill, an add, a trim and a close all
    belong to the episode the order opened. Not four episodes, not zero.
 3. The declaration is honest — every kind the schema allows is produced
-   by running the real write paths, and ``expire`` is absent because
-   nothing in this repository expires a pending order.
+   by running the real write paths, and ``expire`` is absent even though
+   pending orders do now expire: the expiry is recorded as the cancel it
+   is, which already has a writer.
 4. The record cannot be rewritten — events are append-only, an episode's
    identity and its frozen boundary are fixed, a closed episode cannot be
    reopened.
@@ -28,6 +29,7 @@ The tests are in five groups:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -321,31 +323,64 @@ class TestEveryDeclaredKindHasAWriter:
         assert "expire" not in episodes.KINDS
         assert "hold" not in episodes.KINDS
 
-    def test_the_pending_order_expiry_is_still_dead_code(self):
-        """Why ``expire`` is absent, pinned so it cannot quietly become
-        true: ``PENDING_EXPIRE_DAYS`` is written onto every order and
-        ``days_pending`` is computed on every check, and neither has a
-        reader anywhere in the package. If someone makes the expiry real,
-        they will have to replace this test with one that produces the
-        event — the right amount of friction.
+    def test_the_pending_order_expiry_now_produces_a_cancel_not_a_kind(
+            self, store, traders_dir, theme):
+        """The mirror of the test this replaced.
 
-        Comments and docstrings are ignored: they are allowed to *mention*
-        the dead identifier, and this module's own schema comment does.
+        Until 2026-09-14 this sat the other way round, and said so: the
+        file asserted that ``PENDING_EXPIRE_DAYS`` was written onto every
+        order and ``days_pending`` computed on every check while neither
+        had a reader anywhere in the package — pinned as dead code, with a
+        note that making the expiry real meant replacing this test with one
+        that produces the event. ``check_pending_orders`` now reads both, so
+        here is that test.
+
+        The event is a **cancel**, not a new episode kind: ``expire`` stays
+        absent on purpose, because the cancelled order is already an event
+        with a writer and a second spelling of the same fact would only
+        give the learning data two names for it.
         """
-        hits = []
-        for path in (REPO / "alpha_agents").rglob("*.py"):
-            for n, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith(("#", "--", '"', "'")):
-                    continue
-                if "days_pending" in line:
-                    hits.append(f"{path.name}:{n}: {stripped}")
-        assert len(hits) == 1 and "days_pending =" in hits[0], (
-            f"days_pending is no longer only an unread assignment: {hits}. "
-            "If the pending-order expiry became load-bearing, add "
-            "episodes.EXPIRE, teach note_cancel's sibling to write it, and "
-            "replace this test with one that produces the event.")
+        oid = _place(traders_dir)
+        row = _db().execute(
+            "SELECT expire_days, order_date FROM virtual_portfolio "
+            "WHERE id = ?", (oid,)).fetchone()
+        assert row["expire_days"] == TR.get_trader("slow").default_horizon_days, (
+            "no thesis, so the order inherits the trader's own default "
+            "horizon rather than the last-resort constant")
+
+        # The window is derived from the row, not from a hardcoded date, so
+        # this keeps testing the mechanism if the default ever changes.
+        day0 = datetime.fromisoformat(row["order_date"]).date()
+        still_valid = day0 + timedelta(days=row["expire_days"] - 1)
+        stale = day0 + timedelta(days=row["expire_days"])
+
+        # Paired: on the last day it is still the setup's own time, and an
+        # order the price never came near is left alone. Without this half
+        # a test could pass by cancelling everything on sight.
+        assert P.check_pending_orders(
+            {"600000": 5.0}, today=still_valid.isoformat()) == []
+        assert _db().execute(
+            "SELECT status FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()["status"] == "pending"
+
+        alerts = P.check_pending_orders({"600000": 5.0},
+                                        today=stale.isoformat())
+        assert [a["type"] for a in alerts] == ["cancelled"]
+        assert "未到价" in alerts[0]["reason"]
+
+        closed = _db().execute(
+            "SELECT status, close_reason FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()
+        assert closed["status"] == "cancelled"
+        assert "未到价" in closed["close_reason"]
+
+        # The reason the expiry writes is the producer the "价格未到" label
+        # never had: until now no path in the codebase emitted it.
+        from alpha_agents.data.portfolio_risk import classify_cancellation
+        assert classify_cancellation(closed["close_reason"]) == "价格未到"
+
+        assert "expire" not in episodes.KINDS
+        assert "hold" not in episodes.KINDS
 
     def test_the_spelled_out_statuses_match_the_intent_module(self):
         """``episodes`` cannot import ``intent`` (intent imports it), so

@@ -492,7 +492,7 @@ def backfill_sentiment_snapshots(days: int = 120) -> int:
 
     Uses local K-line data instead of akshare API.
     """
-    from alpha_agents.data.daily_archive import save_snapshot
+    from alpha_agents.data.daily_snapshots import save_snapshot
 
     dates = get_available_dates()
     if not dates:

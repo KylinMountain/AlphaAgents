@@ -44,7 +44,7 @@ def _fetch_via_worker_url(url: str, timeout: int = 20):
     """
     headers = get_headers()
     return _fetch_via_worker(url, "GET", headers, timeout)
-from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
+from alpha_agents.data.daily_snapshots import save_snapshot, get_snapshot
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s",

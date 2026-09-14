@@ -2,7 +2,6 @@
 # New violations fail CI. Remove a line only by fixing the code.
 alpha_agents/agents/chat.py::silent-except
 alpha_agents/agents/hooks.py::silent-except
-alpha_agents/data/daily_archive.py::layering
 alpha_agents/data/market_data.py::silent-except
 alpha_agents/data/market_history.py::silent-except
 alpha_agents/data/memory_store.py::file-size

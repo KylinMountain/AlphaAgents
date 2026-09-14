@@ -22,12 +22,23 @@ Once a trading day, after the close:
    gap, and folding the two into one number is what made an unripe forecast look
    censored.
 
-What it deliberately does **not** do: ask the gate. A verdict is evidence for a
-person's decision, and asking every day would write a near-identical
-``insufficient`` row daily until the paired count fills — the shape of
-governance without the substance, which is what the old
-``run_gate("daily_playbook", today, today)`` call was removed for. The progress
-number is reported instead, so the moment asking is worth it is visible.
+What it does **not** do daily: ask the gate. It asks exactly once, at the point
+the sample was declared sufficient — the day an experiment's paired count first
+reaches what the gate requires. Two reasons, and they are the same reason:
+
+* §12 forbids repeated inspection until something passes. Asking every day is
+  optional stopping: the same experiment gets many looks, and "one of them said
+  promote" stops being evidence. The preregistered stopping rule is the count,
+  so the question is asked when the count is reached and not before.
+* The alternative — asking daily from the start — also writes a near-identical
+  `insufficient` row every day until then, which is the shape of governance
+  without the substance. That is what the old
+  ``run_gate("daily_playbook", today, today)`` call was removed for.
+
+So the rule is mechanical: ask when ``paired >= needed`` and the newest verdict
+on that version is still short of the bar. A person looking early (via
+``scripts/policy.py gate``) does not suppress it, because their verdict's
+``validation_days`` will be short of the bar too.
 
 Nothing here can fail the day. The shadow branch is graded and never traded, so
 a broken experiment must not take the review with it: every step degrades to a
@@ -53,6 +64,46 @@ def _emit_line(run: dict, written: int | None) -> str:
     return f"• {label}：写入 {written} 条预测"
 
 
+def _position_line(row: dict, verdict: dict | None) -> str:
+    """One line for the report, and nothing else — no question is asked here."""
+    if verdict is not None and (verdict.get("validation_days") or 0) >= row["needed"]:
+        return (f"• run #{row['run_id']} 已裁决：{verdict['outcome']}"
+                f"（{verdict['validation_days']} 个验证日）—— 下一步是人工 approve")
+    if row["remaining"]:
+        return (f"• run #{row['run_id']} 配对进度 {row['paired']}/{row['needed']}"
+                f"，还差 {row['remaining']} 个交易日")
+    return (f"• run #{row['run_id']} 配对 {row['paired']}/{row['needed']}，"
+            "样本够了")
+
+
+async def _ask_the_gate(row: dict, verdict: dict | None, today: str) -> str:
+    """The one question, at the preregistered point, or a line saying why not.
+
+    Returns the report line. A refusal is reported rather than raised: the
+    gate's own refusals (an ambiguous run, a window that cannot hold evidence)
+    are answers about the experiment, and the trading day continues either way.
+    """
+    from alpha_agents.evolution import holdout_gate
+
+    asked_already = (verdict is not None
+                     and (verdict.get("validation_days") or 0) >= row["needed"])
+    if asked_already or row["remaining"]:
+        return _position_line(row, verdict)
+    try:
+        decision = await asyncio.to_thread(
+            holdout_gate.run_gate, row["policy_version_id"],
+            report_type=row["report_type"], today=today)
+    except Exception as e:
+        logger.warning("Shadow: the gate refused to answer for version #%s: %s",
+                       row["policy_version_id"], e)
+        return (f"• run #{row['run_id']} 样本够了，但闸门拒绝回答：{e}")
+    logger.info("Shadow: gate verdict on version #%s: %s",
+                row["policy_version_id"], decision["outcome"])
+    return (f"• run #{row['run_id']} 样本够了，裁决已记录：{decision['outcome']}"
+            f"（{decision['validation_days']} 个验证日，"
+            f"scope {decision['evidence_scope']}）—— 下一步是人工 approve")
+
+
 async def run_shadow_run() -> str | None:
     """Feed and grade every open shadow experiment. Returns the report text.
 
@@ -60,7 +111,7 @@ async def run_shadow_run() -> str | None:
     trading day is noise in a feed a person reads — the log carries the reason
     instead.
     """
-    from alpha_agents.evolution import shadow
+    from alpha_agents.evolution import holdout_gate, shadow
 
     try:
         runs = await asyncio.to_thread(shadow.runs, status="open")
@@ -93,6 +144,20 @@ async def run_shadow_run() -> str | None:
         logger.warning("Shadow: grading failed: %s", e)
         graded = None
 
+    try:
+        coverage = (await asyncio.to_thread(shadow.coverage))["runs"]
+    except Exception as e:
+        logger.warning("Shadow: coverage unreadable: %s", e)
+        coverage = []
+    try:
+        newest: dict[int, dict] = {}
+        for row in await asyncio.to_thread(holdout_gate.get_gate_decisions):
+            # Newest first, so the first row seen for a version is its latest.
+            newest.setdefault(row["policy_version_id"], row)
+    except Exception as e:
+        logger.warning("Shadow: verdicts unreadable: %s", e)
+        newest = {}
+
     lines = [f"【影子实验】{today}"]
     lines.extend(_emit_line(run, written[run["id"]]) for run in runs)
     if graded is None:
@@ -101,14 +166,9 @@ async def run_shadow_run() -> str | None:
         lines.append(f"• 评分：{graded['graded']} 已评 / "
                      f"{graded['deferred']} 窗口未收 / "
                      f"{graded['unscorable']} 已删失")
-    try:
-        for row in (await asyncio.to_thread(shadow.coverage))["runs"]:
-            tail = (f"，还差 {row['remaining']} 个交易日"
-                    if row["remaining"] else "，样本够了，可以问闸门了")
-            lines.append(f"• run #{row['run_id']} 配对进度 "
-                         f"{row['paired']}/{row['needed']}{tail}")
-    except Exception as e:
-        logger.warning("Shadow: coverage unreadable: %s", e)
+    for row in coverage:
+        lines.append(await _ask_the_gate(row, newest.get(row["policy_version_id"]),
+                                         today))
     logger.info("Shadow run: %d open experiment(s), %d forecast(s) written",
                 len(runs), sum(n or 0 for n in written.values()))
     return "\n".join(lines)

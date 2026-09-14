@@ -223,7 +223,7 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
 
 ### 机制已交付 ≠ 已经在跑
 
-Phase 1–5 的代码都有测试钉住（全量 **1905 passed, 18 skipped**），
+Phase 1–5 的代码都有测试钉住（全量 **1910 passed, 18 skipped**），
 但**生产库还是空的**：`position_exits` / `intents` / `decision_snapshots` /
 `episodes` / `outcomes` / `learning_candidates` 全是 0 行 —— 这些表落地之后还没跑过生产。
 `predictions` 202 行里 `brier` 全为 NULL，所以校准曲线仍然是空的。

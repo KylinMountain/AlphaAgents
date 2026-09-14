@@ -8,10 +8,14 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-14. D10 (the due test counted calendar days) and D11 (the
-evolve page's reachable branch had no render case) were paid: a not-yet-ripe
-forecast now stays `pending` instead of being censored, and the render matrix
-carries one case per branch. **Open: D2–D9.**_
+_Last updated 2026-09-14. Five items were paid the same day. D10 (the due test
+counted calendar days) — a not-yet-ripe forecast now stays `pending` instead of
+being censored. D11 (the evolve page's reachable branch had no render case) — one
+case per branch now. D2 (layering violations in `daily_archive`) — split into a
+store and a pipeline task, rather than moved as this file originally proposed.
+D9 (the frontend checks ran only when someone remembered) — they are a CI job
+now. D7 (the gate had no caller) — a scheduled task asks it once per experiment,
+at the point the sample was declared sufficient. **Open: D3, D4, D5, D6, D8.**_
 
 _On 2026-09-12 four baseline lines had become dead — the code was fixed but the
 exemption was never removed — and were deleted. Deleting a line is the point: the
@@ -23,17 +27,31 @@ wired; `brier` is NULL on a calendar, not on a missing call), which is the
 difference between "wait" and "go look". D8 and D9 were added the same day — a
 column with no writer, and a check that only runs when someone remembers._
 
-**Current baseline: 26 entries covering 47 violations.** `lint_harness.py`
-prints the 47, not the 26, because one entry can cover several occurrences in
+**Current baseline: 25 entries covering 43 violations.** `lint_harness.py`
+prints the 43, not the 25, because one entry can cover several occurrences in
 one file.
 
 ## Open
 
 ### D2 — `data/daily_archive.py` orchestrates fetches
+
+**Paid 2026-09-14 — and the fix written here was wrong.** This entry said "Move
+to `pipeline/tasks/`". The module had two responsibilities, and only one of them
+was the violation: `run_daily_archive` pulls from four `tools/` modules (that is
+the layering break), while `save_snapshot` / `get_snapshot` are a store that
+`data/market_history.py`, `data/market_data.py` and `data/sentiment_cycle.py`
+read. Moving the whole file up would have made three `data/` modules import
+`pipeline/` — trading four violations for three worse ones, in the layer that is
+supposed to have none.
+
+It was split instead: the store is `data/daily_snapshots.py`, the orchestration
+is `pipeline/tasks/daily_archive.py`. Recogniser met —
+`alpha_agents/data/daily_archive.py::layering` is gone from the baseline, and the
+grandfathered count fell 47 → 43.
+
 **Cost.** 4 layering violations. It pulls from four `tools/` modules to
 assemble a daily snapshot, which makes it a pipeline task wearing a data
 module's name.
-**Fix.** Move to `pipeline/tasks/`.
 **Recognise.** `daily_archive.py::layering` gone from the baseline.
 
 ### D3 — 26 silent `except ... : pass`
@@ -93,7 +111,7 @@ the market's calendar: D10 was fixed on 2026-09-13, so the due test no longer
 fires early and no forecast is censored for a window that is still open. What
 remains is the wait for the 2026-09-15 close.
 
-### D7 — The champion/challenger gate has no caller
+### D7 — The champion/challenger gate has no caller (paid 2026-09-14)
 **Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but
 nothing calls it. It *was* called — `lessons.post_review` ran it daily — with
 `run_gate("daily_playbook", today, today)`, a zero-length validation window, so
@@ -122,18 +140,23 @@ and an operator can create the first record. That also removes the "a promotion
 would be a no-op" defect this entry did not know about: the decision parameters
 are read from the version in force, so moving the pointer changes behaviour.
 
-The original title still holds for a second reason, and on 2026-09-14 it narrowed
-to exactly that: the shadow branch is now fed and graded by a scheduled task
-(`pipeline/tasks/shadow_run.py`, 15:45 on trading days), an operator verb exists
-(`scripts/policy.py gate`), and `status` prints each experiment's `paired/needed`
-— but **nothing asks the gate**. That is deliberate: asking daily would write a
-near-identical `insufficient` row until the count fills, which is the shape of
-governance without the substance, and it is why the old automatic call was
-removed. So the gate went from "can never fire" to "correct, candidate-bound,
-fed daily by a scheduler, and asked by nobody". Still not "running in
-production" — and the one thing that would change the title is a promotion,
-which needs ≥20 paired forward days that no one has yet.
-**Note.** This is the one debt item that is scheduled work rather than
+**Paid 2026-09-14 — the gate is now asked by itself, once per experiment.**
+`pipeline/tasks/shadow_run.py` (15:45 on trading days) asks the gate for a
+version the day its paired count first reaches what the gate requires, and never
+again: a verdict already at the bar is the stopping rule. That "once" is the
+point, not an economy — §12 forbids repeated inspection until something passes,
+and asking daily would be optional stopping *and* would write a near-identical
+`insufficient` row every day until the count filled. A person looking early with
+`scripts/policy.py gate` does not suppress the automatic question, because their
+verdict's `validation_days` is short of the bar too.
+
+So the title is finally false, and what remains is not a missing caller but a
+missing sample plus one operator decision: **no shadow run has been opened**, so
+no experiment is counting, so the gate has nothing to answer about. That is D6's
+kind of wait, and the recogniser below is still unmet for the same reason it was
+yesterday — there is no promotion to look for.
+
+**Note.** This was the one debt item that was scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".
 
@@ -161,15 +184,19 @@ refuse, and it would forge a declaration on the caller's behalf.
 caller that stated its own horizon.
 
 ### D9 — The frontend render check runs locally only
+
+**Paid 2026-09-14.** `harness.yml` gained a `frontend` job: checkout,
+`setup-node@v4` pinned to 22 with an npm cache on `web/package-lock.json`,
+`npm ci`, `npm run lint`, `npm run build`, `npm run check:render`, and
+`node --test tests/test_report_markdown.mjs`. Both frontend checks now run on
+every push and pull request. The analysis is kept because it says why the check
+exists at all.
+
 **Cost.** `cd web && npm run check:render` is the only thing that can catch a
 workspace page rendering "never wired" as "no news" — `npm run lint` and
 `npm run build` both pass on it, and it is invisible in a screenshot. It
-caught three such bugs on the day it was written. It runs only when someone
-remembers, because `harness.yml` has no node environment; the same is true of
-`tests/test_report_markdown.mjs`, the existing frontend test.
-**Fix.** A node step in CI (setup-node + `npm ci` in `web/`) covering both
-frontend checks. Deliberately deferred in Phase 5 rather than smuggled in with
-the page work.
+caught three such bugs on the day it was written. It used to run only when
+someone remembered.
 **Recognise.** `harness.yml` has a job that runs `npm run check:render` and
 `node --test tests/test_report_markdown.mjs`.
 
@@ -255,6 +282,18 @@ case red.
 
 ## Paid
 
+- The champion/challenger gate had no caller (D7). A scheduled task now asks it
+  once per experiment, at the point the sample was declared sufficient — one
+  look, because §12 forbids repeated inspection until something passes. What
+  remains is a missing sample and an operator decision, not a missing caller.
+- The frontend checks ran only when someone remembered (D9). `harness.yml` has a
+  `frontend` job that runs `npm run lint`, `npm run build`, `npm run check:render`
+  and `node --test tests/test_report_markdown.mjs` on node 22.
+- `data/daily_archive.py` broke the layering invariant four times (D2). Split
+  into `data/daily_snapshots.py` (the store, where its data-layer readers are)
+  and `pipeline/tasks/daily_archive.py` (the orchestration, which may import
+  `tools/`). The entry's own proposed fix — move the file up — would have
+  created three backwards imports.
 - The evolve page's `reachable` branch had no case in `render-check.jsx` (D11),
   so the branch the real page takes after the build registered a candidate was
   never rendered by any check. Paid 2026-09-14 with one case per branch and a

@@ -402,7 +402,7 @@ def get_concept_fund_flow() -> Optional[pd.DataFrame]:
 def _historical_sector_flow(snapshot_key: str, as_of: str) -> Optional[pd.DataFrame]:
     """Build a DataFrame shaped like the live fund flow output from historical
     daily_snapshots data. Returns the latest snapshot on or before as_of."""
-    from alpha_agents.data.daily_archive import get_snapshot
+    from alpha_agents.data.daily_snapshots import get_snapshot
     from alpha_agents.data.memory_store import _get_conn
     import pandas as pd
 

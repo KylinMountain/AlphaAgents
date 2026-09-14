@@ -22,7 +22,7 @@ from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.agents.review_agent import run_review_analysis
 from alpha_agents.notify import notify_all
-from alpha_agents.data.daily_archive import run_daily_archive
+from alpha_agents.pipeline.tasks.daily_archive import run_daily_archive
 from alpha_agents.data.portfolio import (
     get_open_positions_summary, get_today_changes_summary, get_portfolio_stats,
     format_portfolio_stats,

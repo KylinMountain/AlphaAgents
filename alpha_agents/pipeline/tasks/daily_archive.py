@@ -1,44 +1,24 @@
-"""Daily market data archiving — snapshot all key data sources for future backtesting.
+"""Daily market data archiving — snapshot all key data sources for backtesting.
 
 Called after the review task (15:30). Pure data collection, no LLM involved.
+
+It lives in ``pipeline/`` because it *fetches*: it pulls from four `tools/`
+modules and the Tushare storers, and ``data/`` may not import ``tools/``. The
+storage it writes through stays in ``data/daily_snapshots.py``, where the rest of
+the data layer reads it — see that module for why the split is this way round.
 """
 
 import json
 import logging
 import time
 
-from alpha_agents.data.memory_store import _get_conn, _write_lock
+from alpha_agents.data.daily_snapshots import save_snapshot
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.fund_flow import get_block_trade_fn
 
 logger = logging.getLogger(__name__)
-
-
-def save_snapshot(date: str, data_type: str, data: dict) -> None:
-    """Save a data snapshot. Upserts on (date, data_type)."""
-    with _write_lock:
-        conn = _get_conn()
-        conn.execute(
-            "INSERT INTO daily_snapshots (date, data_type, data) VALUES (?, ?, ?) "
-            "ON CONFLICT(date, data_type) DO UPDATE SET data = excluded.data, "
-            "created_at = datetime('now','localtime')",
-            (date, data_type, json.dumps(data, ensure_ascii=False)),
-        )
-        conn.commit()
-
-
-def get_snapshot(date: str, data_type: str) -> dict | None:
-    """Read a snapshot back. Returns parsed JSON or None."""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT data FROM daily_snapshots WHERE date = ? AND data_type = ?",
-        (date, data_type),
-    ).fetchone()
-    if row:
-        return json.loads(row["data"])
-    return None
 
 
 def _tushare_archive(today: str) -> int:

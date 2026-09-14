@@ -263,7 +263,7 @@ def backfill_snapshots(days: int = 10) -> int:
     except Exception as e:
         logger.debug("Local backfill unavailable, using akshare: %s", e)
 
-    from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
+    from alpha_agents.data.daily_snapshots import save_snapshot, get_snapshot
     from alpha_agents.data.market_data import _ak_call
 
     filled = 0
@@ -364,7 +364,7 @@ def compute_and_save_sentiment(target_date: str = "") -> dict:
     Args:
         target_date: The date this sentiment applies to (default: tomorrow for weekday, next Monday for Friday)
     """
-    from alpha_agents.data.daily_archive import get_snapshot
+    from alpha_agents.data.daily_snapshots import get_snapshot
 
     if not target_date:
         # Determine next trading day

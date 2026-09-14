@@ -50,3 +50,39 @@ jobs:
         # are skipped rather than failing the build; they are exercised
         # locally where the file exists.
         run: uv run pytest tests/ -q --no-header
+
+  frontend:
+    name: Frontend render check and report markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Build the bundle the server serves
+        working-directory: web
+        run: npm run build
+
+      - name: Render check
+        # The only check that can fail on a workspace page rendering "never
+        # wired" as "no news": `lint` and `build` are green on it, and it is
+        # invisible in a screenshot. It caught three such bugs the day it was
+        # written, and until now it ran only when someone remembered.
+        working-directory: web
+        run: npm run check:render
+
+      - name: Report markdown
+        # Plain node, no dependencies: the module under test is a plain .js.
+        run: node --test tests/test_report_markdown.mjs

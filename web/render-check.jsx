@@ -145,6 +145,26 @@ const CASES = [
    { want: [ABSENT_HEAD, PARTIAL_HEAD, '本构建不可达', 'baseline_only',
             'candidate_policy'],
      reject: ['整个读模型没到', '至少有一个候选生产者已登记'] }],
+  /* The other branch of the same banner. Added 2026-09-13, the day the build
+   * registered a candidate and `reachable` flipped: the matrix had no case for
+   * the branch the real page now takes, and `check:render` would have kept
+   * passing because it asserts about its own payload. The `want` strings are
+   * the branch's own copy, not "可达" — that is a substring of the *other*
+   * branch's "本构建不可达", so asserting it would be satisfied by the branch
+   * being absent. */
+  ['evolve · promotion reachable', EvolveView,
+   { evolve: { workspace: 'evolve', generated_at: '2026-09-14T04:30:00+00:00',
+               states: {},
+               sections: evolveSections,
+               code: { producers: ['constant_0.5', 'remap_confidence'],
+                       baseline: 'constant_0.5',
+                       candidate_producers: ['remap_confidence'],
+                       promotion_accepts: 'candidate_policy',
+                       reachable: true } } },
+   { want: ['至少有一个候选生产者已登记', '闸门可产出候选级证据',
+            'remap_confidence', 'constant_0.5'],
+     reject: ['本构建不可达', '晋升在本构建里不可达', '这不来自数据库',
+              '整个读模型没到'] }],
   ['learn · nothing at all', LearnView, { learn: null },
    { want: ['整个读模型没到'], reject: ['0 有数据', '读不到'] }],
   ['evolve · nothing at all', EvolveView, { evolve: null },

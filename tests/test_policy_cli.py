@@ -24,6 +24,7 @@ import pytest
 
 from alpha_agents.data import memory_store, policy_registry as registry
 from alpha_agents.data import scoring
+from alpha_agents.evolution import holdout_gate, shadow
 
 
 @pytest.fixture()
@@ -68,6 +69,20 @@ def _freeze(cli, *extra) -> int:
 def _install(cli, *extra, version="1") -> int:
     return cli.main(["install", "--version", version, "--by", "kylin",
                      "--reason", "nothing was in force", *extra])
+
+
+def _champion(store, date: str, code: str, *,
+              report_type: str = "morning") -> int:
+    """A champion pick, written through the real save path.
+
+    There is deliberately no CLI verb for this: the champion's picks come from
+    the trading pipeline, not from an operator. The challenger's panel is
+    whatever those picks left in ``predictions``, so a test that wants a panel
+    has to produce one the way the day does.
+    """
+    return memory_store.save_prediction(
+        date, report_type, code, "X", "看多", "high", "t", 1.0, "reason",
+        prob=0.6, trader_id="default", horizon_days=5)
 
 
 class TestTheFirstVersionCanBeCreated:
@@ -262,3 +277,158 @@ class TestTheDriftCheckStagesTheVersionUnderTest:
     def test_an_unknown_version_is_refused(self, cli, store):
         with pytest.raises(ValueError, match="No policy version"):
             cli._sources(4242)
+
+
+class TestTheExperimentIsDrivable:
+    """The operator surface for the loop: open it, feed it, grade it, ask.
+
+    These verbs are what "the mechanism is runnable" means from outside the
+    code. Before them ``emit_for_date`` and ``run_gate`` had no caller but the
+    tests, so the only way to run an experiment was to write Python — which is
+    also why nobody ever ran one.
+    """
+
+    FROZEN_AT = "2026-05-01"
+    DAY = "2026-06-02"
+
+    def _seed(self, cli, store, capsys):
+        """An incumbent in force, a candidate frozen well in the past."""
+        assert _freeze(cli, "--at", self.FROZEN_AT) == 0
+        assert _install(cli) == 0
+        assert _freeze(cli, "--at", self.FROZEN_AT,
+                       "--decision-json", '{"dim_step": 0.09}') == 0
+        capsys.readouterr()
+        # Read the id back rather than assume it: two freezes of *different*
+        # configurations are two versions, and a test that hardcodes "2" would
+        # keep passing if they silently became one.
+        return registry.versions_for()[-1]["id"]
+
+    def _open(self, cli, version: int, *extra) -> int:
+        return cli.main(["shadow-open", "--version", str(version),
+                         "--producer", "remap_confidence",
+                         "--reason", "measure the candidate", *extra])
+
+    def test_opening_a_run_names_what_it_measures(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        assert self._open(cli, version) == 0
+        out = capsys.readouterr().out
+        assert "shadow run #1 opened" in out
+        assert f"policy version #{version}" in out
+        assert "remap_confidence" in out
+        assert shadow.runs()[0]["producer"] == "remap_confidence"
+
+    def test_opening_a_run_on_the_incumbent_warns(self, cli, store, capsys):
+        """The trap, as a warning: a shadow of the version in force applies the
+        same parameters as the champion, so it compares a policy with itself."""
+        self._seed(cli, store, capsys)
+        assert self._open(cli, 1, "--dry-run") == 0
+        assert "compares a policy with itself" in capsys.readouterr().out
+
+    def test_a_dry_run_writes_nothing(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        assert self._open(cli, version, "--dry-run") == 0
+        assert shadow.runs() == []
+
+    def test_an_unregistered_producer_is_refused(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        assert cli.main(["shadow-open", "--version", str(version),
+                         "--producer", "nobody_emits_this",
+                         "--reason", "r"]) == 1
+        assert "No registered producer" in capsys.readouterr().err
+        assert shadow.runs() == []
+
+    def test_emitting_uses_the_champions_panel(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        _champion(store, self.DAY, "600000")
+        capsys.readouterr()
+
+        assert cli.main(["shadow-emit", "--run", "1", "--date", self.DAY]) == 0
+        assert "wrote 1 forecast(s)" in capsys.readouterr().out
+        rows = shadow.predictions_for(1)
+        assert [r["code"] for r in rows] == ["600000"]
+        # The version's own mapping, not the one in force.
+        assert rows[0]["prob"] == pytest.approx(
+            scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"])
+
+    def test_emitting_before_the_champion_says_so(self, cli, store, capsys):
+        """An empty panel is reported, not passed off as a quiet day."""
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        capsys.readouterr()
+
+        assert cli.main(["shadow-emit", "--run", "1", "--date", self.DAY]) == 0
+        out = capsys.readouterr().out
+        assert "wrote 0 forecast(s)" in out
+        assert "panel was empty" in out
+
+    def test_the_panel_can_be_previewed(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        _champion(store, self.DAY, "600000")
+        capsys.readouterr()
+
+        assert cli.main(["shadow-emit", "--run", "1", "--date", self.DAY,
+                         "--dry-run"]) == 0
+        assert "600000" in capsys.readouterr().out
+        assert shadow.predictions_for(1) == []
+
+    def test_scoring_keeps_the_three_outcomes_apart(self, cli, store, capsys):
+        """Same split as the champion's labels: nothing is ``unscorable``
+        merely because the window is open."""
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        _champion(store, self.DAY, "600000")
+        cli.main(["shadow-emit", "--run", "1", "--date", self.DAY])
+        capsys.readouterr()
+
+        assert cli.main(["shadow-score", "--at", "2026-06-30"]) == 0
+        out = capsys.readouterr().out
+        assert "0 graded, 1 window still open, 0 unscorable" in out
+
+    def test_a_verdict_is_recorded_and_moves_nothing(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        capsys.readouterr()
+
+        assert cli.main(["gate", "--version", str(version)]) == 0
+        out = capsys.readouterr().out
+        assert "verdict recorded: insufficient" in out
+        assert "the pointer did not move" in out
+        row = holdout_gate.get_gate_decisions(policy_version_id=version)[0]
+        assert row["outcome"] == "insufficient"
+        assert registry.active()["version_id"] == 1, "a verdict is not a move"
+
+    def test_asking_on_the_freeze_day_is_refused_not_recorded(
+            self, cli, store, capsys):
+        """A window that could never hold evidence must not leave a
+        verdict-shaped row behind."""
+        _freeze(cli)                      # frozen on the kernel clock: today
+        _install(cli)
+        assert _freeze(cli, "--decision-json", '{"dim_step": 0.09}') == 0
+        version = registry.versions_for()[-1]["id"]
+        self._open(cli, version)
+        capsys.readouterr()
+        assert cli.main(["gate", "--version", str(version)]) == 1
+        assert "Validation is forward" in capsys.readouterr().err
+        assert holdout_gate.get_gate_decisions() == []
+
+    def test_gate_has_no_dry_run_argument(self, cli, store):
+        """Refused at parse time: there is no way to preview the answer without
+        re-deciding eligibility outside the gate."""
+        with pytest.raises(SystemExit):
+            cli.main(["gate", "--version", "1", "--dry-run"])
+
+    def test_status_carries_the_progress_meter(self, cli, store, capsys):
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        capsys.readouterr()
+        assert cli.main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert "shadow run #1" in out
+        assert f"0/{holdout_gate.MIN_VALIDATION_SAMPLES} paired day(s)" in out
+
+    def test_status_says_when_nothing_is_under_experiment(self, cli, store,
+                                                         capsys):
+        assert cli.main(["status"]) == 0
+        assert "nothing is under experiment" in capsys.readouterr().out

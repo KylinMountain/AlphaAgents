@@ -8,7 +8,10 @@ person runs to change which policy is in force. Every move goes through
 compare-and-swap on ``active_policy.version_seq`` — so a change that raced
 another loses without writing rather than overwriting it.
 
-Five verbs. The two that create the record, then the three that move it:
+Nine verbs, in the order a controlled change goes through them. The record
+first (``freeze`` / ``install``), then the experiment (``shadow-open`` /
+``shadow-emit`` / ``shadow-score`` / ``gate``), then the move
+(``approve`` / ``promote``), with ``rollback`` kept for going back:
 
 * ``freeze`` — record the configuration as it is right now. **Moves no
   pointer**, and needs no evidence: a frozen version is a name for behaviour,
@@ -19,30 +22,45 @@ Five verbs. The two that create the record, then the three that move it:
 * ``install`` — put a version in force **where none is**. Refuses if the policy
   already has a pointer: from the second change onward the pointer may only
   move by promotion or rollback, both of which demand evidence, and an install
-  that could be repeated would be a back door around exactly that (§11's first
-  boundary: there is no incumbent to claim improvement over).
+  that could be repeated would be a back door around exactly that.
+* ``shadow-open`` — open an experiment measuring one frozen version. It writes
+  a run row and nothing else; the challenger is graded, never traded.
+* ``shadow-emit`` — write the challenger's forecasts for one date. The panel is
+  the champion's own picks for that day, so this is run **after** the champion
+  has forecast, or there is nothing to pair against.
+* ``shadow-score`` — grade the challenger's forecasts whose window the market
+  has closed. Re-runnable; it only fills in unscored rows.
+* ``gate`` — ask for a verdict on a version and **record it**. §11: a
+  successful automatic evaluation is not a licence to promote, so this writes
+  evidence and moves nothing.
 * ``approve`` — a person authorises a version, citing the gate verdict that
-  justifies it. Writes one approval row. **Moves no pointer.** §11 is explicit
-  that a successful automatic evaluation is not a licence to promote, so this
-  is a separate act from promoting and leaves a separate record.
+  justifies it. Writes one approval row. **Moves no pointer.**
 * ``promote`` — move the pointer to an approved version. Refuses unless a
   person approved it *and* the live configuration still hashes to it.
 * ``rollback`` — restore a version that was in force before. Needs no verdict
   (the evidence is the transition trail), and deletes nothing.
 
-``status`` changes nothing and is the intended way to look before you leap.
+``status`` changes nothing and is the intended way to look before you leap: it
+prints, among the rest, how many paired days each experiment has. A verdict
+asked for too early is refused rather than recorded, so the progress meter is
+how an operator knows when asking is worth it.
+
+"Changes nothing" means no pointer move and no record. Like every other entry
+point it will create the registry's tables and the shadow tables if they do not
+exist yet — that is one ``CREATE TABLE IF NOT EXISTS``, not a decision, and the
+trading path triggers the same DDL on its first intent.
 
     uv run python scripts/policy.py status
-    uv run python scripts/policy.py freeze --by kylin \\
-        --reason "the configuration the first experiment starts from"
-    uv run python scripts/policy.py install --version 1 --by kylin \\
-        --reason "nothing was in force" --dry-run
-    uv run python scripts/policy.py approve --version 4 --by kylin \\
-        --reason "beat the baseline over 25 paired days"
-    uv run python scripts/policy.py promote --version 4 --by kylin \\
-        --reason "approved" --dry-run
-    uv run python scripts/policy.py rollback --to-version 3 --by kylin \\
-        --reason "drawdown breach"
+    uv run python scripts/policy.py freeze --by kylin --reason "the seed"
+    uv run python scripts/policy.py install --version 1 --by kylin --reason "nothing was in force"
+    uv run python scripts/policy.py freeze --by kylin --reason "a bolder mapping" \\
+        --decision-json '{"dim_step": 0.09}'
+    uv run python scripts/policy.py shadow-open --version 2 --reason "measure it"
+    uv run python scripts/policy.py shadow-emit --run 1 --date 2026-09-14
+    uv run python scripts/policy.py shadow-score
+    uv run python scripts/policy.py gate --version 2
+    uv run python scripts/policy.py approve --version 2 --by kylin --reason "beat the champion"
+    uv run python scripts/policy.py promote --version 2 --by kylin --reason "approved"
 
 Exit 0 on success, 1 on refusal. A refusal prints which condition failed —
 someone running this by hand needs the reason, not just the verdict.
@@ -60,7 +78,7 @@ sys.path.insert(0, str(REPO))
 
 from alpha_agents.config import MEMORY_DB_PATH  # noqa: E402
 from alpha_agents.data import policy_registry as registry  # noqa: E402
-from alpha_agents.evolution import holdout_gate, policy_sources  # noqa: E402
+from alpha_agents.evolution import holdout_gate, policy_sources, shadow  # noqa: E402
 
 
 def _sources(version_id):
@@ -200,6 +218,133 @@ def _cmd_install(args) -> int:
     return 0
 
 
+def _cmd_shadow_open(args) -> int:
+    """Open an experiment measuring one frozen version. Moves nothing.
+
+    The dry run prints the *facts* the refusal would rest on rather than
+    re-deciding it: whether the version exists, how many runs are already open
+    on it, and whether it is the version in force. It says "would", and the
+    refusal itself is still decided by ``shadow.open_run`` when the command is
+    run for real — two implementations of one rule is how they come to
+    disagree.
+    """
+    if args.dry_run:
+        version = registry.get_version(args.version)
+        if version is None:
+            print(f"  refused: no policy version #{args.version} to shadow — a "
+                  "run that cannot name the policy it measures could never be "
+                  "promoted")
+        else:
+            open_now = shadow.open_runs_for(args.version, args.report_type)
+            pointer = registry.active(args.policy_key)
+            print(f"  would open a {args.report_type!r} run on version "
+                  f"#{args.version} as producer {args.producer!r}")
+            print(f"  {len(open_now)} run(s) already open on that version; a "
+                  "second open shadow of one version would be refused, because "
+                  "the two would be counted as one experiment")
+            if pointer and pointer["version_id"] == args.version:
+                print("  WARNING: this is the version in force, so the "
+                      "challenger would apply the same parameters as the "
+                      "champion. Measure a *different* version or the "
+                      "experiment compares a policy with itself.")
+        print("dry run: nothing written.")
+        return 0
+
+    run_id = shadow.open_run(policy_version_id=args.version, reason=args.reason,
+                             report_type=args.report_type,
+                             producer=args.producer, opened_at=args.at)
+    run = shadow.get_run(run_id)
+    print(f"  shadow run #{run_id} opened: policy version #{run['policy_version_id']} "
+          f"via producer {run['producer']!r} on {run['report_type']!r}, "
+          f"shadow trader {run['trader_id']!r}")
+    print("  it emits forecasts and nothing else — no order, no position, no "
+          "intent. Next: shadow-emit once the champion has picks for the day.")
+    return 0
+
+
+def _cmd_shadow_emit(args) -> int:
+    """Write the challenger's forecasts for one date.
+
+    The panel is the champion's codes for that date and report type, so this is
+    run *after* the champion has forecast. An empty panel is reported as such
+    rather than as success: zero forecasts written looks identical to a
+    successful quiet day otherwise, and the difference is the whole experiment.
+    """
+    run = shadow.get_run(args.run)
+    if run is None:
+        raise ValueError(f"No shadow run #{args.run} to emit for")
+
+    if args.dry_run:
+        panel = shadow.panel_for(args.date, run["report_type"])
+        print(f"  the panel is the champion's {run['report_type']!r} codes for "
+              f"{args.date}: {len(panel)} code(s)")
+        if panel:
+            print("    " + ", ".join(panel))
+        else:
+            print("  the champion has no forecast for that date and report "
+                  "type, so the panel is empty and there would be nothing to "
+                  "pair against. Emit after the champion's picks exist.")
+        print("dry run: nothing written.")
+        return 0
+
+    ids = shadow.emit_for_date(args.run, args.date, horizon_days=args.horizon)
+    print(f"  run #{args.run} wrote {len(ids)} forecast(s) for {args.date} at "
+          f"a {args.horizon}-day horizon")
+    if not ids:
+        print("  the panel was empty: the champion has no forecast for that "
+              "date and report type. This is not a failure — it is the "
+              "experiment having nothing to measure that day.")
+    return 0
+
+
+def _cmd_shadow_score(args) -> int:
+    """Grade the challenger's forecasts whose window the market has closed.
+
+    No dry run: it cannot write anything except a score for a forecast that
+    already exists, and re-running it changes nothing. The three counts are
+    kept apart because they are three different facts — see
+    ``shadow.score_due``.
+    """
+    if args.dry_run:
+        print("dry run: this verb has none. It writes only scores for "
+              "forecasts that already exist, is idempotent, and touches "
+              "neither the policy record nor the books.")
+        return 0
+    result = shadow.score_due(as_of=args.at, run_id=args.run)
+    print(f"  as of {result['as_of']}: {result['graded']} graded, "
+          f"{result['deferred']} window still open, "
+          f"{result['unscorable']} unscorable")
+    print("  'window still open' means the market has not traded the horizon "
+          "shut yet; those rows stay unscored and are re-checked next run.")
+    return 0
+
+
+def _cmd_gate(args) -> int:
+    """Ask for a verdict on one version, and record what it says.
+
+    No dry run, on purpose: there is no way to preview the answer without
+    re-deciding eligibility outside the gate, and a second implementation of
+    that rule is how the two come to disagree. ``status`` is the way to look
+    first — it prints how many paired days the experiment has, against what the
+    gate needs.
+    """
+    decision = holdout_gate.run_gate(args.version,
+                                     report_type=args.report_type,
+                                     today=args.today)
+    print(f"  verdict recorded: {decision['outcome']} "
+          f"over {decision['validation_days']} validation day(s), "
+          f"n={decision['n']}")
+    print(f"  {decision['reason']}")
+    print(f"  evidence scope {decision['evidence_scope']!r} "
+          f"(run #{decision['run_id']})")
+    if decision["outcome"] == "promote":
+        print("  this is promotable evidence. The pointer did not move: "
+              "approve is a separate act by a person.")
+    else:
+        print("  the pointer did not move, and this verdict cannot move it.")
+    return 0
+
+
 def _cmd_status(args) -> int:
     pointer = registry.active(args.policy_key)
     print(f"policy {args.policy_key!r}")
@@ -246,6 +391,21 @@ def _cmd_status(args) -> int:
     print("  integrity: " + ("clean" if not problems else ""))
     for problem in problems:
         print(f"    - {problem}")
+
+    # The progress meter for every experiment, in the same command that shows
+    # the record. The gate refuses a verdict asked for too early rather than
+    # recording an abstention, so "how many paired days do I have" is the number
+    # that decides when asking is worth it — and it belongs next to the pointer
+    # it would move, not in a second command an operator has to know about.
+    runs = shadow.coverage()["runs"]
+    if not runs:
+        print("  no shadow run has been opened: nothing is under experiment")
+    for run in runs:
+        print(f"  shadow run #{run['run_id']} (version "
+              f"#{run['policy_version_id']}, {run['status']}, "
+              f"{run['report_type']}): {run['paired']}/{run['needed']} paired "
+              f"day(s), {run['scored']} of {run['forecasts']} forecast(s) "
+              f"scored, {run['remaining']} to go")
     return 0
 
 
@@ -331,6 +491,58 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--version", type=int, required=True)
     _common(install)
     install.set_defaults(func=_cmd_install)
+
+    shadow_open = sub.add_parser(
+        "shadow-open", help="open an experiment measuring one frozen version.")
+    shadow_open.add_argument("--version", type=int, required=True)
+    shadow_open.add_argument("--producer", required=True,
+                             help="a name registered in shadow.PRODUCERS — "
+                                  "constant_0.5 for the no-skill baseline, or "
+                                  "remap_confidence for the candidate. An "
+                                  "unregistered name is refused, with the list.")
+    shadow_open.add_argument("--report-type", default="morning",
+                             help="which book the experiment pairs on "
+                                  "(default: morning).")
+    shadow_open.add_argument("--reason", required=True,
+                             help="why, in one sentence.")
+    shadow_open.add_argument("--at", default=None, metavar="YYYY-MM-DD",
+                             help="the date to record (default: the kernel clock).")
+    shadow_open.add_argument("--dry-run", action="store_true",
+                             help="print what would happen, then stop.")
+    shadow_open.set_defaults(func=_cmd_shadow_open)
+
+    shadow_emit = sub.add_parser(
+        "shadow-emit", help="write the challenger's forecasts for one date.")
+    shadow_emit.add_argument("--run", type=int, required=True)
+    shadow_emit.add_argument("--date", required=True, metavar="YYYY-MM-DD")
+    shadow_emit.add_argument("--horizon", type=int,
+                             default=shadow.DEFAULT_HORIZON_DAYS,
+                             help="trading days the forecast gives itself "
+                                  f"(default: {shadow.DEFAULT_HORIZON_DAYS}).")
+    shadow_emit.add_argument("--dry-run", action="store_true",
+                             help="print the panel it would use, then stop.")
+    shadow_emit.set_defaults(func=_cmd_shadow_emit)
+
+    shadow_score = sub.add_parser(
+        "shadow-score", help="grade the challenger's matured forecasts.")
+    shadow_score.add_argument("--run", type=int, default=None,
+                              help="only this run (default: every run).")
+    shadow_score.add_argument("--at", default=None, metavar="YYYY-MM-DD",
+                              help="grade as of this date (default: the kernel clock).")
+    shadow_score.add_argument("--dry-run", action="store_true",
+                              help="say why this verb has no dry run, then stop.")
+    shadow_score.set_defaults(func=_cmd_shadow_score)
+
+    gate = sub.add_parser(
+        "gate", help="ask for a verdict on a version, and record it.")
+    gate.add_argument("--version", type=int, required=True)
+    gate.add_argument("--report-type", default="morning",
+                      help="which book to compare on (default: morning).")
+    gate.add_argument("--today", default=None, metavar="YYYY-MM-DD",
+                      help="when the question is asked (default: the kernel "
+                           "clock). It cannot shorten the window — that comes "
+                           "from the version's own frozen_at.")
+    gate.set_defaults(func=_cmd_gate)
 
     approve = sub.add_parser("approve", help="authorise a version.")
     approve.add_argument("--version", type=int, required=True)

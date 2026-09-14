@@ -65,13 +65,21 @@ def _emit_line(run: dict, written: int | None) -> str:
 
 
 def _position_line(row: dict, verdict: dict | None) -> str:
-    """One line for the report, and nothing else — no question is asked here."""
+    """One line for the report, and nothing else — no question is asked here.
+
+    The unit is a paired sample, not a day. ``row['paired']`` is the number of
+    ``(date, code)`` pairs both sides scored; ``row['scored_days']`` is how many
+    distinct dates those came from. This line used to append 交易日 to the first
+    one, so one morning of twenty picks read as twenty trading days of evidence
+    — in the report a person actually reads to decide whether to act.
+    """
     if verdict is not None and (verdict.get("validation_days") or 0) >= row["needed"]:
         return (f"• run #{row['run_id']} 已裁决：{verdict['outcome']}"
                 f"（{verdict['validation_days']} 个验证日）—— 下一步是人工 approve")
     if row["remaining"]:
         return (f"• run #{row['run_id']} 配对进度 {row['paired']}/{row['needed']}"
-                f"，还差 {row['remaining']} 个交易日")
+                f" 个配对样本（覆盖 {row['scored_days']} 个交易日），"
+                f"还差 {row['remaining']} 个样本")
     return (f"• run #{row['run_id']} 配对 {row['paired']}/{row['needed']}，"
             "样本够了")
 
@@ -85,6 +93,16 @@ async def _ask_the_gate(row: dict, verdict: dict | None, today: str) -> str:
     """
     from alpha_agents.evolution import holdout_gate
 
+    # Two different units compared against one threshold: ``remaining`` counts
+    # paired samples, this counts validation days, and an experiment passes the
+    # first bar long before the second. The stopping rule therefore asks the
+    # gate *every day* in between — exactly the "near-identical insufficient row
+    # every day" this module's docstring says it was written to avoid. The tests
+    # could not see it because the stubbed verdict gives ``n`` and
+    # ``validation_days`` the same value as ``needed``, so the two units
+    # coincided. Recorded as D16 and deliberately **not** fixed here: both
+    # candidate fixes answer a question this round was told to leave alone —
+    # whether the preregistered sample is 20 samples or 20 days (D15).
     asked_already = (verdict is not None
                      and (verdict.get("validation_days") or 0) >= row["needed"])
     if asked_already or row["remaining"]:

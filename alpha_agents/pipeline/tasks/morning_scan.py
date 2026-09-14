@@ -663,6 +663,15 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
                 # G1: grade this on Brier, not on next-day direction.
                 prob=confidence_to_prob(r.get("confidence"),
                                         dims_passed=r.get("dims_passed")),
+                # The horizon the pick declared for itself. The prompt asks for
+                # one per recommendation and the thesis created below reads the
+                # same field, so the forecast and the thesis for one decision
+                # finally mature on the same day. Left as ``None`` when the
+                # model did not say: substituting the global 5-day default here
+                # would write "the caller said five days" over "the caller did
+                # not say", which is the one substitution ``_deadline_for``
+                # exists to refuse.
+                horizon_days=r.get("horizon_days"),
                 # Morning picks used to carry no features at all, which
                 # kept half the recommendations out of playbook learning.
                 # G6: record what was visible at the decision point, so

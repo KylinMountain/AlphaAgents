@@ -119,6 +119,19 @@ exit signals in the exact reverse of the dense run.
 **Enforced by.** Review checklist; `lint_docs.py` requires research docs
 to state sample sizes.
 
+**Not enforced by the code, and that is a named gap rather than an oversight.**
+The one automated path that ships a conclusion — promoting a policy version —
+re-checks `n` against a floor the *frozen version* declares
+(`holdout_gate.MIN_VALIDATION_SAMPLES`, 20 today, read out of that version's own
+`rules` block by `policy_registry`). A verdict at n between 20 and 49 therefore
+satisfies the gate, satisfies the version in force, and contradicts this rule.
+Nothing refuses it. `holdout_gate.GOVERNANCE_MIN_SAMPLES` quotes the number so a
+report can compare the two, `holdout_gate.promotion_floor_gap` names the
+difference, and `scripts/policy.py status` prints it on every run. Closing it
+for real means raising the constant — which turns every version already frozen
+into a drifted one, since a behaviour-changing edit after freezing is a new
+candidate — so it is an operator's decision, not a patch.
+
 ---
 
 ## 8. Failures are loud

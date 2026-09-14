@@ -25,7 +25,26 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14.**_
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D15, D16, D17.**_
+
+_Later the same evening, the round that removed a unit lie and a threshold that
+was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
+at last — but the entry had said the column was empty because the callers wanted
+the global default, and that was false; the correction is recorded in it.
+**D15** was added: the repository declares a sample floor in three places
+(golden principles §7, the design doc, the README) and the one automated path
+that ships a conclusion is checked against a different number, read out of the
+frozen version. The round made that gap visible rather than closing it, because
+closing it drifts every version already frozen._
+
+**D16** and **D17** came out of the same sweep, both found while answering "how
+far along is the loop": the daily task's stopping rule compares paired samples
+against validation days, so it asks the gate **every day** in between — the
+anti-pattern its own docstring says it exists to avoid; and the version in force
+**no longer matches the running configuration**, because the theme-gate round
+added a decision-time number to the fingerprinted block three hours after the
+install and nothing froze a successor for it. Neither is fixed in that round, for
+the same reason D15 is not: both candidate fixes decide a threshold question.
 
 _On 2026-09-12 four baseline lines had become dead — the code was fixed but the
 exemption was never removed — and were deleted. Deleting a line is the point: the
@@ -80,6 +99,85 @@ probe after a split: grep the old module's name through `tests/` and check every
 hit still lands. The durable fix — routing these through one fixture that
 patches every namespace binding the name — is a bigger change than the debt is
 worth today.
+
+### D15 — The repository's sample floor is declared in three places and enforced against a fourth number
+
+**Added 2026-09-14.** `GOLDEN_PRINCIPLES.md` §7 declares "No conclusion with
+n < 50 reaches production code"; `TRADER_CORE_DESIGN.md` §12 calls it "the
+repository's `n ≥ 50` requirement"; `README.md` says the repo's rule "把诚实
+门槛定在 50". None of the three is checked by anything. The code has
+`holdout_gate.MIN_VALIDATION_SAMPLES = 20`, and the promotion path re-checks a
+verdict's `n` against the floor the **frozen version** declares, which today is
+also 20 — so a verdict at n between 20 and 49 satisfies the gate, satisfies the
+version in force, and contradicts §7, and nothing refuses it.
+**Cost.** A rule the repository states as a governance floor is decorative on
+the only path that ships a conclusion. Worse than missing: three documents
+asserting it is enforced makes it the last thing anyone would go looking for.
+**Recognise.**
+`tests/test_holdout_gate.py::TestTheDeclaredFloorAgainstTheRepositorysRule::test_the_rule_is_a_quotation_and_not_a_threshold`
+drives a real `promote` verdict at n = 25 — below the rule, above the gate.
+**Made visible, not closed, 2026-09-14.** `GOVERNANCE_MIN_SAMPLES = 50` quotes
+the number in code, `promotion_floor_gap()` names the difference, and
+`scripts/policy.py status` prints all three values (version's floor, gate's
+abstention line, the rule). The fix that would close it — raising the constant
+to 50 — is deliberately not taken here: `MIN_VALIDATION_SAMPLES` is in
+`policy_sources._RULE_SOURCES`, so changing it marks **every version already
+frozen** as drifted, and the version in force is the only one there is.
+A behaviour-changing edit after freezing is supposed to be a new candidate, so
+that is an operator's call with a cost attached, not a patch.
+
+### D16 — The daily stopping rule compares paired samples against validation days
+
+**Added 2026-09-14.** `pipeline/tasks/shadow_run.py` decides whether to ask the
+gate with two conditions in two units: `row["remaining"]` counts paired
+`(date, code)` samples, and `asked_already` compares `verdict["validation_days"]`
+against that same `needed`. An experiment therefore passes the sample bar long
+before it passes the day bar, and the gate is asked **on every run in between**,
+writing a near-identical row each day — precisely the "governance in shape only"
+this module's docstring says it was written to avoid, and the reason the old
+`run_gate("daily_playbook", today, today)` call was deleted. §12's stopping rule
+is "one look, at the preregistered point"; as written this is many looks.
+**Cost.** An experiment's audit fills with rows that look like verdicts, and the
+first real verdict stops being distinguishable from the noise around it.
+**Why the suite could not see it.** `tests/test_shadow_run_task.py`'s `_ready`
+stub returns a verdict whose `n` and `validation_days` **both** equal `needed`,
+so the two units coincide and the disagreement is invisible. The defect survived
+a test class named `TestItAsksTheGateOnce`.
+**Recognise.**
+`test_the_stopping_rule_asks_again_while_the_two_units_disagree` asserts the
+defect, and the probe "the stopping rule is made unit-consistent" turns it red —
+so the test detects the disagreement rather than the fix, on purpose.
+**Fix, and why it is not taken here.** Either compare `verdict["n"]` against
+`needed` (pairs with pairs) or make the floor count days. Both *are* the D15
+question — whether the preregistered sample is 20 samples or 20 days — and each
+trades this anti-pattern for another: pairs alone lets one morning's picks end
+the experiment, days alone needs the gate's own threshold to move, which drifts
+every version already frozen. Decide D15 first; this follows from it.
+
+### D17 — The version in force no longer matches the running configuration
+
+**Added 2026-09-14, found by re-running `status`.** `scripts/policy.py status`
+prints `live configuration still matches: False` for version #1. It matched when
+`install` ran at `2026-09-14T03:01:06Z`; the theme-gate commit (`d927a0b`,
+`2026-09-14T14:20:08+08:00`) then added `theme_gate` to
+`scoring.DEFAULT_DECISION_PARAMS`, which the decision block covers — and
+`decision_params_of` merges the defaults *under* a version's own values, so the
+number the trading path reads now is one the frozen version never declared.
+`policy_sources.changed_sources(1)` attributes it to exactly that one key.
+**Cost.** The pointer names a policy that does not describe what is running, so
+every "is the incumbent still the incumbent" question has a wrong answer, and §11
+("a behaviour-changing edit after freezing creates a new candidate") has not been
+honoured for a change that did go in.
+**Recognise.** `scripts/policy.py status` → `live configuration still matches`.
+**Fix.** `freeze --by <you> --reason "the theme gate, frozen after the fact"` —
+moves no pointer, needs no evidence, and puts the configuration actually running
+on record as a version. Deliberately not run in this round: it decides what the
+next candidate is, which is the operator's call, and the pointer cannot move to
+it until a verdict exists anyway.
+**Not to be confused with** the drift the staging bug used to produce. That one
+was every version except the incumbent reporting as drifted, because the
+pointer-controlled sources were read from the system instead of from the version.
+This one is one key, on one source, with a nameable reason, and it is real.
 
 ### D2 — `data/daily_archive.py` orchestrates fetches
 
@@ -277,7 +375,7 @@ yesterday — there is no promotion to look for.
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".
 
-### D8 — A capability with no production user: per-forecast maturity
+### D8 — A capability with no production user: per-forecast maturity (half paid 2026-09-14)
 **Cost.** `predictions.horizon_days` and `predictions.deadline` are the T2
 mechanism for letting each forecast declare how long it gave itself to be
 right — the breakout book a 3-day horizon, the pullback book a 5-day one.
@@ -285,15 +383,36 @@ The mechanism is complete and tested at every layer: `_deadline_for` refuses
 to assume a horizon the caller did not state, `save_prediction` writes both
 columns on insert and update, the due query falls back to `date + 5 days`
 while reporting `legacy_horizon`, and `outcome_labels` carries that
-distinction into the label. **The callers never use it.** Both production
-call sites (`morning_scan.py`, `intraday_monitor.py`) pass `prob` and do not
-pass `horizon_days`, so all 202 rows have NULL in both columns, every row is
-graded on the global 5-day fallback, and every row is labelled undeclared.
-Nothing is broken — 5 days is what those two callers want — but the column
-reads as "declared per book" to anyone who does not check the data. This is
-the fourth class this repo keeps finding (a column that exists and is never
-written; `intents.order_id` was the third, fixed in S6).
-**Fix.** Nothing, until a second trader actually runs a different horizon.
+distinction into the label. **The callers never used it**: all 232 rows in
+production carried NULL in both columns, and every one was graded on the global
+5-day fallback. This is the fourth class this repo keeps finding (a column that
+exists and is never written; `intents.order_id` was the third, fixed in S6).
+
+**This entry was wrong about why, and the wrongness was load-bearing.** It said
+"nothing is broken — 5 days is what those two callers want". It is not: the
+`intraday_monitor` function hands `"horizon_days": 3` to the *thesis* it builds
+from the very same pick, two paragraphs below its `save_prediction` call, and 37
+of the 41 theses in production say three days. The callers had declared a
+horizon; they had not passed it to the forecast. So the loop was spending its
+paired samples grading each forecast against a deadline its own thesis disagreed
+with — the one thing a "not yet a bug" reading can least afford to be wrong
+about.
+
+**Paid 2026-09-14.** `morning_scan` passes `r.get("horizon_days")` (the prompt
+asks the model for one per pick) and `intraday_monitor` names the 3 once
+(`INTRADAY_HORIZON_DAYS`) and feeds both the forecast and the thesis from it.
+Pinned by `tests/test_declared_horizon_reaches_the_forecast.py`, which drives the
+two real save paths and patches the constant to 4, so a reader still using a
+literal fails instead of agreeing.
+
+**What is left:** the *forecast* now declares what the decision declared, but
+`_deadline_for` still returns `None` when the model states nothing, and the
+thesis still takes `from_recommendation`'s own 5-day default in that case — so
+one decision can still be recorded as "declared 5" (thesis) and "declared
+nothing" (forecast). That difference is honest rather than broken, and it is
+what `legacy_horizon` labels. Making the two agree by writing 5 over the silence
+is the substitution this entry forbids.
+
 **Do not** pass `horizon_days=5` at the call sites to make the column
 non-empty: that is precisely the substitution `_deadline_for` exists to
 refuse, and it would forge a declaration on the caller's behalf.

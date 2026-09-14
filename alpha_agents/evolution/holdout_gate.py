@@ -46,7 +46,33 @@ logger = logging.getLogger(__name__)
 
 # Below this the gate abstains and keeps the champion. Underpowered
 # comparisons are worse than none — they launder noise as evidence.
+#
+# The unit is a **paired sample** — one ``(date, code)`` both sides scored — and
+# not a day. The two were spelled the same way for as long as this constant has
+# existed (``paired_keys`` counts samples; ``scripts/policy.py`` printed the
+# result as "paired day(s)"). It matters because this number is the denominator
+# a verdict rests on, which is the number an operator reads to decide whether
+# asking for one is worth the trip. ``validation_days`` counts the distinct
+# dates behind those samples, is recorded beside every verdict, and is *not*
+# what this floor compares against.
 MIN_VALIDATION_SAMPLES = 20
+
+# The floor the repository's own rule declares — golden principles §7, "No
+# conclusion with n < 50 reaches production code". This is **not** a gate
+# threshold and this module does not enforce it: a verdict at n in
+# [MIN_VALIDATION_SAMPLES, GOVERNANCE_MIN_SAMPLES) satisfies the gate *and*
+# satisfies the version in force, while contradicting §7. Nothing refuses it.
+# :func:`promotion_floor_gap` exists so that state is reportable rather than
+# assumed away.
+#
+# It is a named constant instead of a number quoted in prose because a report
+# has to compare a *version's* declared floor against it, and a report that
+# parses markdown to find its own threshold has a second source of truth.
+#
+# Deliberately absent from ``policy_sources._RULE_SOURCES``. That tuple declares
+# which constants are *behaviour*; hashing this one into every version would
+# report a drift the moment it changed while nothing a trader does had moved.
+GOVERNANCE_MIN_SAMPLES = 50
 
 # Brier degradation tolerated before rejecting. Not zero: a candidate
 # should not be blocked by rounding.
@@ -190,6 +216,44 @@ def evaluate_candidate(champion_scores: list[dict],
     return {"promote": promote,
             "outcome": "promote" if promote else "reject",
             "reason": reason, "abstained": False, **test}
+
+
+def promotion_floor_gap(declared: int | None,
+                        when: str = "the version") -> list[str]:
+    """Complaints about a version's declared promotion floor, or an empty list.
+
+    Reported rather than repaired, and this is the only place the report can be
+    made: the floor a promotion actually re-checks is read from the **frozen
+    version** — ``policy_registry`` re-reads
+    ``holdout_gate.MIN_VALIDATION_SAMPLES`` out of the version's own ``rules``
+    block — so "which number would let a promotion through" is a property of a
+    version, not of the code in front of you. That is why the number is passed
+    in and not read here.
+
+    The gap is real and narrow: a verdict at n in [20, 50) passes the gate,
+    passes the version's own declared floor, and contradicts §7 of the golden
+    principles. Raising ``MIN_VALIDATION_SAMPLES`` to 50 would enforce §7 in
+    code and turn every version already frozen into a drifted one, because a
+    behaviour-changing edit after freezing is a new candidate — so the honest
+    state is "declared and unenforced", and this function exists so that state
+    is visible instead of assumed away. Deciding between the two is an
+    operator's call, not this module's.
+
+    ``when`` names the thing being judged, so the complaint reads as a sentence
+    about a version or about an open experiment.
+    """
+    if declared is None:
+        return [f"{when} declares no promotion floor, so the repository's "
+                f"n < {GOVERNANCE_MIN_SAMPLES} rule (GOLDEN_PRINCIPLES §7) is "
+                "the only boundary there is — and no code enforces it"]
+    if declared < GOVERNANCE_MIN_SAMPLES:
+        return [f"{when} declares a promotion floor of {declared} paired "
+                f"sample(s), below the repository's "
+                f"n >= {GOVERNANCE_MIN_SAMPLES} (GOLDEN_PRINCIPLES §7). A "
+                f"verdict at n in [{declared}, {GOVERNANCE_MIN_SAMPLES}) would "
+                "satisfy the gate and satisfy this version, and contradict "
+                "§7 — nothing refuses it"]
+    return []
 
 
 _GATE_TABLE = """

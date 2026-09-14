@@ -7,14 +7,14 @@ Scale: **A** covered by tests and validated against data · **B** tested,
 not validated · **C** works, thinly tested · **D** known gaps · **F** not
 trustworthy.
 
-_Last updated 2026-09-12. The original rows were last reviewed 2026-09-07;
+_Last updated 2026-09-14. The original rows were last reviewed 2026-09-07;
 the trader-core rows were added 2026-09-12 and none of them has production
 data yet. A grade can fall — see the note at the end._
 
 | Area | Grade | Basis | Gap |
 |---|---|---|---|
 | `data/scoring.py` | **A** | 27 tests; verified end to end on real history | — |
-| `evolution/holdout_gate.py` | **B** | 24 tests, plus the candidate-bound and evidence-scope groups in `test_gate_candidate_bound.py` | **Still not called in production.** Phase 1 disconnected the daily call: it passed a zero-length validation window, so all 3 runs abstained (`gate_decisions`, every row `validation_days: 0`). Phase 4 made the gate candidate-bound and gave the verdict an evidence scope, but nothing in `pipeline/` or `server/` schedules it, and `shadow.PRODUCERS` registers no candidate producer — so no promotable verdict is reachable yet. |
+| `evolution/holdout_gate.py` | **B** | 24 tests, plus the candidate-bound and evidence-scope groups in `test_gate_candidate_bound.py` and `TestTheDeclaredFloorAgainstTheRepositorysRule` | **Its floor is not the repository's floor.** It abstains below 20 paired samples while golden principles §7 says n < 50 does not ship, and a version declaring 20 lets a promotion through in the gap (D15). It *is* called now — `pipeline/tasks/shadow_run.py` asks it once per experiment — but every verdict so far is an abstention over an experiment that has not started. |
 | `evolution/principle_scoring.py` | **A** | 16 tests incl. decay weighting | Needs graded predictions to act on |
 | `data/decision_context.py` | **A** | 19 tests; replay verified | No history to replay |
 | `tools/exit_signals.py` | **B** | 19 tests; regime rule forward-tested over 24 windows | Patterns kept for display are known-useless |
@@ -32,10 +32,13 @@ data yet. A grade can fall — see the note at the end._
 
 ## Trader core (Phase 1–3) — graded 2026-09-12, gate area re-checked 2026-09-13
 
-_Only the `evolution/holdout_gate.py` row was revisited, after Phase 4 delivered
-U1–U5; the `data/portfolio*` row was revisited again on 2026-09-14, when the
-pending-order round added a module and a test file to it. The rest of the grades
-are still 2026-09-12's and were not re-derived._
+_Two rows were revisited on 2026-09-14 and nothing else here was re-derived._
+_The `evolution/holdout_gate.py` row was re-checked after Phase 4 delivered U1–U5_
+_and again when the round that made the sample floor reportable landed: the gate_
+_is scheduled now, and its own floor is 20 against the repository's declared 50_
+_(D15). The `data/portfolio*` row was revisited when the pending-order round_
+_added a module and a test file to it. The rest of the grades are still_
+_2026-09-12's._
 
 **None of these can be A yet, and that is a statement about the sample, not
 the code.** Every area below is tested; none has been validated against data,

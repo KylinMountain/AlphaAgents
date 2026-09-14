@@ -343,6 +343,23 @@ class TestTheExperimentIsDrivable:
         assert self._open(cli, 1, "--dry-run") == 0
         assert "compares a policy with itself" in capsys.readouterr().out
 
+    def test_a_baseline_on_the_incumbent_says_why_it_is_not_that_trap(
+            self, cli, store, capsys):
+        """The warning is about a producer that *reads* the version's
+        parameters. A baseline emits one constant and reads none of them, so
+        the same setup measures the champion against no skill — which is the
+        only way to start the clock before deciding what to test. A warning
+        that fires here is how the one that matters gets scrolled past."""
+        self._seed(cli, store, capsys)
+        capsys.readouterr()
+        assert cli.main(["shadow-open", "--version", "1",
+                         "--producer", "constant_0.5", "--reason", "r",
+                         "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert "WARNING" not in out
+        assert "baseline producer" in out
+        assert "cannot move the pointer" in out
+
     def test_a_dry_run_writes_nothing(self, cli, store, capsys):
         version = self._seed(cli, store, capsys)
         assert self._open(cli, version, "--dry-run") == 0
@@ -445,7 +462,64 @@ class TestTheExperimentIsDrivable:
         assert cli.main(["status"]) == 0
         out = capsys.readouterr().out
         assert "shadow run #1" in out
-        assert f"0/{holdout_gate.MIN_VALIDATION_SAMPLES} paired day(s)" in out
+        assert f"0/{holdout_gate.MIN_VALIDATION_SAMPLES} paired sample(s)" in out
+
+    def test_the_progress_meter_counts_samples_not_days(self, cli, store,
+                                                       capsys):
+        """The gate's floor counts paired ``(date, code)`` samples. This command
+        printed that number as "paired day(s)" and said "N to go", so one
+        morning of twenty picks read as twenty days of evidence — and the
+        number an operator reads to decide whether asking for a verdict is
+        worth the trip was the wrong one to be wrong about.
+
+        Two champions on one day, so the two counts are the same only by
+        accident and are labelled separately anyway.
+        """
+        version = self._seed(cli, store, capsys)
+        self._open(cli, version)
+        _champion(store, self.DAY, "600000")
+        _champion(store, self.DAY, "600001")
+        assert cli.main(["shadow-emit", "--run", "1", "--date", self.DAY]) == 0
+        capsys.readouterr()
+
+        assert cli.main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert "paired day(s)" not in out
+        assert (f"0/{holdout_gate.MIN_VALIDATION_SAMPLES} paired sample(s) over "
+                "0 scored day(s), 0 of 2 forecast(s) scored") in out
+
+    def test_status_names_the_promotion_floor_and_its_conflict(self, cli, store,
+                                                              capsys):
+        """The floor a promotion is re-checked against belongs to the *version*,
+        and the repository's own rule is stated in samples. They disagree
+        today; the disagreement is printed, not discovered later by whoever
+        cites a verdict at n = 20.
+        """
+        self._seed(cli, store, capsys)
+        capsys.readouterr()
+        assert cli.main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert (f"version #1 declares {holdout_gate.MIN_VALIDATION_SAMPLES} "
+                "paired sample(s)") in out
+        assert f"gate abstains below {holdout_gate.MIN_VALIDATION_SAMPLES}" in out
+        assert f"n >= {holdout_gate.GOVERNANCE_MIN_SAMPLES}" in out
+        assert "nothing refuses it" in out
+
+    def test_a_version_at_the_governance_floor_reports_no_gap(
+            self, cli, store, capsys, monkeypatch):
+        """The other branch of the same comparison, so the complaint above is
+        not a sentence this command always prints.
+        """
+        monkeypatch.setattr(holdout_gate, "MIN_VALIDATION_SAMPLES",
+                            holdout_gate.GOVERNANCE_MIN_SAMPLES)
+        _freeze(cli)
+        _install(cli)
+        capsys.readouterr()
+        assert cli.main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert (f"declares {holdout_gate.GOVERNANCE_MIN_SAMPLES} paired "
+                "sample(s)") in out
+        assert "nothing refuses it" not in out
 
     def test_status_says_when_nothing_is_under_experiment(self, cli, store,
                                                          capsys):

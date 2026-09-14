@@ -731,9 +731,18 @@ def paired_count(run_id: int) -> int:
 def coverage(run_id: int | None = None) -> dict:
     """How far each shadow run is from having evidence.
 
-    The only honest progress meter in this slice: it answers "how many days
-    are left" rather than "is it done", because the answer is a function of
-    the market's calendar and not of anything this code can hurry.
+    The only honest progress meter in this slice: it answers "how far along is
+    it" rather than "is it done", because the answer is a function of the
+    market's calendar and of nothing this code can hurry.
+
+    ``paired`` and ``needed`` are counted in **(date, code) paired samples** —
+    the unit the gate's floor compares against — and not in days. The two were
+    printed as the same thing for as long as this function existed, which made
+    the denominator of a verdict read as a calendar count. ``scored_days`` is
+    the distinct dates behind those samples; it is carried separately so the
+    two can never be mistaken for each other again, and today it decides one
+    thing: ``policy_registry`` refuses a promotion citing a verdict that rests
+    on zero days.
     """
     conn = memory_store._get_conn()
     init_schema(conn)

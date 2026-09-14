@@ -156,6 +156,12 @@ def build_context(candidates: list[dict], trader) -> str:
             f"● {c['code']} {c.get('name', '')} 现价 {c.get('price', 0):.2f} "
             f"今日 {c.get('change_pct', 0):+.2f}%")
         lines.append(f"  主线: {c.get('theme', '')}")
+        # The theme's own strength for today, carried here for the same reason
+        # `prior_view` is: the gate compares this number to a bar, and the model
+        # that decides whether to buy deserves to see it. Omitted entirely when
+        # the board could not name the theme, rather than shown as a zero.
+        if c.get("theme_note"):
+            lines.append(f"  {c['theme_note']}")
         if c.get("note"):
             lines.append(f"  选中原因: {c['note']}")
         if c.get("institutional"):

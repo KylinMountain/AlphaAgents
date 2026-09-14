@@ -11,18 +11,26 @@ import logging
 from datetime import datetime
 
 from alpha_agents.data.memory_store import (
-    get_active_themes, get_theme_by_name, upsert_theme, archive_theme,
+    archive_theme, clear_theme_score, get_active_themes, get_theme_by_name, upsert_theme,
 )
 from alpha_agents.data.market_data import get_stock_history
 from alpha_agents.tools.sector_ranking import (
+    board_match,
     get_concept_ranking_fn as _concept_ranking_fn,
     get_sector_ranking_fn as _sector_ranking_fn,
+    theme_cross_section,
 )
 
 logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_THEMES = 8
 MAX_PER_CATEGORY = 3  # Max themes from the same broad category
+
+# Consecutive daily closes the board may fail to name a theme before the misses
+# begin costing it strength. Not 1: the board endpoint serves 287–380 of ~387
+# rows per call and which ones varies, so a single miss is the network, not the
+# theme. See `mark_theme_unscored`.
+UNMEASURED_DECAY_AFTER = 2
 
 STATUS_ORDER = ["watching", "active", "peak", "declining", "archived"]
 
@@ -156,8 +164,11 @@ def update_theme_strength(name: str, signals: dict, today: str | None = None) ->
 
     ``strength`` accumulates that score, but **at most once per calendar
     day**. It is a lifecycle position — roughly how many sessions this
-    line has been confirmed — and it drives the status machine and the
-    ≥4 gate on pending orders.
+    line has been confirmed — and it drives the status machine, plus one
+    20% term of today's ``trend_score``. It is deliberately *not* the
+    admission bar any more: asking a session count "is this worth buying
+    today" is what refused four of five candidates on one theme on
+    2026-09-14. See ``theme_score`` and ``data/theme_gate.py``.
 
     The day guard is the whole point. ``_refresh_theme_strengths`` calls
     this every intraday cycle, 48 times between 09:30 and 15:00; without
@@ -205,6 +216,153 @@ def update_theme_strength(name: str, signals: dict, today: str | None = None) ->
     logger.info("Theme '%s': strength %d→%d (今日 %+d), status=%s (%s)",
                 name, current, new_strength, delta, status,
                 "; ".join(signals["details"]))
+
+
+# ── Today's theme score: one scale for every theme ─────────────────────
+
+
+def _percentile(values: list[float], value: float) -> float:
+    """Where ``value`` sits in ``values``, as 0–1. Mid-rank for ties."""
+    if not values:
+        return 0.5
+    below = sum(1 for v in values if v < value)
+    equal = sum(1 for v in values if v == value)
+    return (below + equal / 2) / len(values)
+
+
+def theme_gate_params(params: dict | None = None) -> dict:
+    """The theme gate's weights and thresholds **in force**.
+
+    Read from the policy pointer when one is installed, like the probability
+    mapping: "admit at 0.5" versus "admit at 0.35" is a difference between two
+    frozen versions rather than a code edit, which is what makes the gate
+    testable at all.
+    """
+    from alpha_agents.data import scoring
+    source = params if params is not None else scoring.in_force_decision_params()
+    return {**scoring.DEFAULT_DECISION_PARAMS["theme_gate"],
+            **(source.get("theme_gate") or {})}
+
+
+def theme_score(cross_section: list[dict], name: str, strength: int = 0,
+                *, gate: dict | None = None) -> dict | None:
+    """One theme's score for *today*, on the same scale as every other theme.
+
+    The old gate read ``strength``, which counts how many sessions a line has
+    been confirmed — a different question from "is money moving into it today" —
+    and it read a ±1 sum, so a 0.01億 inflow and a 55億 inflow scored alike. Here
+    both raw signals become **percentiles of the whole board** and are mixed with
+    confirmation into one number in 0–1.
+
+    ``None`` when the board cannot name the theme: that is "cannot see it", which
+    the caller records as a decay, not as a zero. ``board_match`` decides that,
+    because a theme and the board disagree about spelling far more often than
+    they disagree about anything else — `小金属概念` is board `小金属`, and
+    `共封装光学(CPO)` has no board row at all.
+    """
+    gate = gate or theme_gate_params()
+    rows = [r for r in cross_section if r.get("concept")]
+    match = board_match(name, rows)
+    if match is None:
+        return None
+    flow_pct = _percentile([r["net_flow_yi"] for r in rows], match["net_flow_yi"])
+    rel_pct = _percentile([r["change_pct"] for r in rows], match["change_pct"])
+    confirm = max(0.0, min(float(strength or 0) / 10.0, 1.0))
+    score = (gate["w_flow"] * flow_pct + gate["w_rel"] * rel_pct
+             + gate["w_confirm"] * confirm)
+    return {
+        "score": round(score, 4),
+        "flow_pct": round(flow_pct, 4),
+        "rel_pct": round(rel_pct, 4),
+        "confirm": round(confirm, 4),
+        "rank": 1 + sum(1 for r in rows if r["net_flow_yi"] > match["net_flow_yi"]),
+        "of": len(rows),
+    }
+
+
+def refresh_theme_scores(cross_section: list[dict] | None = None) -> dict:
+    """Recompute ``trend_score`` for every tracked theme. Returns counts.
+
+    Refreshed every cycle, unlike ``strength``: it answers "how strong is this
+    line today", and today's answer moves.
+
+    A theme the board does not name **keeps its previous score**. That is not
+    laziness: the endpoint behind the board serves a *partial* list — 287, 328,
+    333 and 380 rows on four consecutive calls, with individual boards present
+    in some and absent in others — so absence from one frame is mostly
+    truncation. Writing NULL there would make the gate fail open on a short
+    HTTP response. Absence is counted once a day instead, by
+    ``mark_theme_unscored``, which is allowed to wait for a pattern.
+    """
+    rows = theme_cross_section() if cross_section is None else cross_section
+    themes = get_active_themes()
+    if not rows:
+        logger.warning("Theme scores: no board available — %d theme(s) keep their "
+                       "previous value", len(themes))
+        return {"scored": 0, "unmatched": [], "of": 0, "board": False}
+    gate = theme_gate_params()
+    scored, unmatched = 0, []
+    for theme in themes:
+        got = theme_score(rows, theme["name"], theme.get("strength") or 0, gate=gate)
+        if got is None:
+            unmatched.append(theme["name"])
+            continue
+        upsert_theme(theme["name"], trend_score=got["score"], unmeasured_days=0)
+        scored += 1
+    if unmatched:
+        logger.info("Theme scores: %d scored, %d the board did not name this cycle: %s "
+                    "(of %d boards)", scored, len(unmatched), ", ".join(unmatched[:6]),
+                    len(rows))
+    else:
+        logger.info("Theme scores: %d scored (of %d boards)", scored, len(rows))
+    return {"scored": scored, "unmatched": unmatched, "of": len(rows), "board": True}
+
+
+def mark_theme_unscored(name: str, today: str | None = None) -> dict:
+    """The close found no board row for this theme. Count it, then decay it.
+
+    The review used to ``continue`` here, logging that the theme's invalidation
+    "will not fire today" — and since that condition is the only thing that ever
+    fires, four themes sat frozen at their creation value for a week. So absence
+    has to count against a theme. But it cannot count immediately: the board
+    endpoint returns a *partial* list that varies call to call, so the first miss
+    is far more likely to be a truncated response than a vanished theme, and
+    decaying on it would retire healthy lines at the rate of network noise.
+
+    Hence the counter. One miss is recorded and forgiven; from
+    ``UNMEASURED_DECAY_AFTER`` on, each day without a board reading takes a point
+    off the line, which walks it to ``declining`` and then ``archived``. The
+    score is cleared at that point too (``clear_theme_score``) — once we have
+    concluded the board cannot see it, a stale number must not keep gating
+    orders while the line retires.
+
+    Idempotent per day via ``last_scored_date``: review may run more than once.
+    """
+    theme = get_theme_by_name(name)
+    if not theme or theme["status"] == "archived":
+        return {"days": 0, "decayed": False}
+    when = today or datetime.now().strftime("%Y-%m-%d")
+    if (theme.get("last_scored_date") or "") == when:
+        return {"days": theme.get("unmeasured_days") or 0, "decayed": False}
+    days = (theme.get("unmeasured_days") or 0) + 1
+    if days < UNMEASURED_DECAY_AFTER:
+        upsert_theme(name, unmeasured_days=days, last_scored_date=when)
+        logger.info("主线 '%s' 今日不在板块数据里（第 %d 日）——一次可能是抓取不全，"
+                    "记录但不衰减", name, days)
+        return {"days": days, "decayed": False}
+    strength = theme.get("strength") or 0
+    new_strength = max(0, strength - 1)
+    status = theme.get("status")
+    if new_strength < 4 and status in ("active", "peak"):
+        status = "declining"
+    elif new_strength <= 1 and status in ("declining", "watching"):
+        status = "archived"
+    upsert_theme(name, status=status, strength=new_strength, unmeasured_days=days,
+                 daily_score=-1, last_scored_date=when)
+    clear_theme_score(name)
+    logger.info("主线 '%s'：连续 %d 日无板块数据，按未确认衰减 %d→%d，status=%s",
+                name, days, strength, new_strength, status)
+    return {"days": days, "decayed": True, "status": status}
 
 
 def sectors_from_events(events: list[dict], min_importance: int = 4) -> dict[str, dict]:

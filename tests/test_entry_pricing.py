@@ -250,17 +250,55 @@ class TestDeclineBecomesMemory:
 
     def test_a_declined_stock_is_still_asked_about(self, monkeypatch):
         """The filter is gone. This is the whole point of the change."""
-        from alpha_agents.data import portfolio
+        from alpha_agents.data import theme_gate
         from alpha_agents.pipeline.tasks import intraday_monitor as MON
         from alpha_agents.pipeline.tasks import session_memory as IM
-        monkeypatch.setattr(portfolio, "resolve_theme", lambda t: t)
-        monkeypatch.setattr(portfolio, "_theme_too_weak", lambda t: None)
+        # Patched on `theme_gate`, not on `portfolio`: the filter imports the
+        # gate from there, so patching the old home would leave these stubs
+        # unused and the test silently testing nothing.
+        monkeypatch.setattr(theme_gate, "resolve_theme", lambda t: t)
+        monkeypatch.setattr(theme_gate, "theme_admits", lambda t: None)
         IM._declined.clear()
         IM.note_decline("301511", 12.40, "位置太高")
         out = MON._worth_asking(
             [{"code": "301511", "theme": "固态电池"}], {"301511": 13.60})
         assert len(out) == 1, "被否过的票必须还能再被问一次"
         assert "位置太高" in out[0]["prior_view"]
+
+    def test_the_filter_and_order_creation_read_one_gate(self, monkeypatch):
+        """A candidate dropped here would have been refused there.
+
+        The two bars drifting apart is the failure this guards: too tight and
+        the filter discards candidates creation would have accepted, too loose
+        and it queues pricing for orders that die at creation. So the filter
+        must call the same function, and a theme with no acceptable verdict
+        must be dropped with that verdict in the log.
+        """
+        from alpha_agents.pipeline.tasks import intraday_monitor as MON
+        from alpha_agents.data import theme_gate
+        monkeypatch.setattr(theme_gate, "resolve_theme", lambda t: t)
+        monkeypatch.setattr(theme_gate, "theme_admits",
+                            lambda t: f"主线偏弱({t})")
+        out = MON._worth_asking([{"code": "000001", "theme": "固态电池"}], {})
+        assert out == []
+
+    def test_a_scored_theme_travels_to_the_pricing_prompt(self, monkeypatch):
+        """The score has to reach the model, or the gate is invisible again."""
+        from alpha_agents.pipeline.tasks import intraday_monitor as MON
+        from alpha_agents.data import theme_gate
+
+        class T:
+            id = "t1"
+            max_position_pct = 0.15
+
+        monkeypatch.setattr(theme_gate, "resolve_theme", lambda t: t)
+        monkeypatch.setattr(theme_gate, "theme_admits", lambda t: None)
+        monkeypatch.setattr(theme_gate, "theme_score_note",
+                            lambda t: "今日主线强度 0.82/1.00")
+        out = MON._worth_asking(
+            [{"code": "000001", "theme": "固态电池", "price": 10.0}], {})
+        assert out[0]["theme_note"] == "今日主线强度 0.82/1.00"
+        assert "0.82" in EP.build_context(out, T())
 
     def test_yesterdays_no_is_not_todays_context(self):
         from datetime import datetime, timedelta

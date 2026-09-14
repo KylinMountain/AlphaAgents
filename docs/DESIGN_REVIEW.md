@@ -14,6 +14,13 @@
 >   它们是研究结论，不随代码变动而失效。
 > - **§8.5「校准曲线还是空的」仍然成立。** 2026-09-12 复查：`predictions` 202 行，
 >   `brier` 全为 NULL。卡点依然是样本量，不是代码。
+> - **§8.1 与 §7 里的 `MIN_THEME_STRENGTH = 4` 已于 2026-09-14 退役。** 那个常数
+>   连同它的诊断一起被采纳：下单门槛改成一个**截面标准化过的当日主线分**
+>   （`theme_lines.trend_score`，0–1），准入与撤销读**两个不同的数**（迟滞带），
+>   四个参数进 `scoring.DEFAULT_DECISION_PARAMS["theme_gate"]` 由策略指针控制。
+>   实现与取舍见 `docs/exec-plans/completed/2026-09-14-theme-signal-as-a-score.md`。
+>   §8.1 的结论（「这个阈值从未被验证过」）因此**不再是缺陷形态，而成了待验证的
+>   假设** —— 门槛现在是版本间的差异，可以走冻结→影子→闸门那条路验。
 > - 本文在文档体系里的位置见 [`README.md`](README.md) 的 Research inputs 一节。
 
 ---

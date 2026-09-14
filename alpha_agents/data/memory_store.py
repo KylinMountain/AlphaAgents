@@ -121,6 +121,15 @@ def _get_conn() -> sqlite3.Connection:
             "ALTER TABLE predictions ADD COLUMN trader_id TEXT DEFAULT 'default'",
             "ALTER TABLE theme_lines ADD COLUMN daily_score INTEGER DEFAULT 0",
             "ALTER TABLE theme_lines ADD COLUMN last_scored_date TEXT",
+            # Today's cross-sectionally normalised theme strength. Null on every
+            # pre-existing row, which is the honest value: those rows were never
+            # scored on this scale, and reading null as 0 would retire them.
+            "ALTER TABLE theme_lines ADD COLUMN trend_score REAL",
+            # Consecutive daily closes the board could not name this theme. One
+            # miss is a truncated frame (the endpoint returns 287–380 of ~387
+            # boards, varying per call); several in a row are the theme. See
+            # `theme_manager.mark_theme_unscored`.
+            "ALTER TABLE theme_lines ADD COLUMN unmeasured_days INTEGER DEFAULT 0",
             # Indexes live here rather than in _SCHEMA: executescript runs
             # before the ALTERs above, so indexing a column an older
             # database has not gained yet fails the whole schema pass.
@@ -296,6 +305,8 @@ def upsert_theme(
     status: str | None = None,
     strength: int | None = None,
     daily_score: int | None = None,
+    trend_score: float | None = None,
+    unmeasured_days: int | None = None,
     last_scored_date: str | None = None,
     catalyst: str | None = None,
     core_stocks: list[dict] | None = None,
@@ -318,6 +329,10 @@ def upsert_theme(
                 sets.append("strength = ?"); vals.append(strength)
             if daily_score is not None:
                 sets.append("daily_score = ?"); vals.append(daily_score)
+            if trend_score is not None:
+                sets.append("trend_score = ?"); vals.append(trend_score)
+            if unmeasured_days is not None:
+                sets.append("unmeasured_days = ?"); vals.append(unmeasured_days)
             if last_scored_date is not None:
                 sets.append("last_scored_date = ?"); vals.append(last_scored_date)
             if catalyst is not None:
@@ -335,15 +350,34 @@ def upsert_theme(
             return existing["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO theme_lines (name, status, strength, daily_score, last_scored_date, "
-                "catalyst, core_stocks, leader_code, notes, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO theme_lines (name, status, strength, daily_score, trend_score, "
+                "unmeasured_days, last_scored_date, catalyst, core_stocks, leader_code, notes, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (name, status or "watching", strength or 0, daily_score or 0,
-                 last_scored_date, catalyst,
+                 trend_score, unmeasured_days or 0, last_scored_date, catalyst,
                  json.dumps(core_stocks or [], ensure_ascii=False), leader_code, notes, now, now),
             )
             conn.commit()
             return cur.lastrowid
+
+
+def clear_theme_score(name: str) -> None:
+    """Clear ``trend_score`` back to "unmeasured" (NULL), never to zero.
+
+    ``upsert_theme`` cannot express this — for every other column ``None`` means
+    "leave it alone", which is exactly right for a partial update and exactly
+    wrong here. A theme the board could not name this cycle has to lose the
+    number, because the gate reads this column to decide whether money may go
+    in, and yesterday's 0.2 is not evidence about today.
+    """
+    with _write_lock:
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE theme_lines SET trend_score = NULL, updated_at = ? WHERE name = ?",
+            (datetime.now().isoformat(), name),
+        )
+        conn.commit()
 
 
 def archive_theme(name: str) -> None:

@@ -26,6 +26,24 @@ CREATE TABLE IF NOT EXISTS theme_lines (
     -- one that broke out this morning.
     strength INTEGER DEFAULT 0,
     daily_score INTEGER DEFAULT 0,
+    -- Today's *cross-sectionally normalised* strength, 0–1, refreshed every
+    -- cycle. A third number because the first two answer the wrong question for
+    -- a gate: `strength` is a count of confirmed sessions and `daily_score` is a
+    -- raw ±1 sum, so a 0.01億 inflow and a 55億 inflow score the same. This one
+    -- is where the theme sits in the whole board today (flow percentile,
+    -- relative-strength percentile, confirmation), and it is what admission and
+    -- cancellation read. Null means "not scored yet" — never "scored zero".
+    trend_score REAL,
+    -- Consecutive daily closes at which the board did not name this theme.
+    --
+    -- Measured 2026-09-14: the THS endpoint behind the board serves a *partial*
+    -- list — 287, 328, 333 and 380 rows on four consecutive calls, with
+    -- individual boards (`共封装光学(CPO)`) present in some and absent in
+    -- others. Absence from one frame is therefore mostly truncation, not
+    -- evidence, and a theme must not be retired for it. This counter is why the
+    -- retirement path waits: one miss is the network, several in a row are the
+    -- theme. Reset whenever the board does name the theme.
+    unmeasured_days INTEGER DEFAULT 0,
     last_scored_date TEXT,
     created_at TEXT,
     updated_at TEXT,

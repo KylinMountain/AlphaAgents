@@ -11,7 +11,6 @@ A-share rules: buy in multiples of 100 shares.
 
 import logging
 import os
-import re
 from datetime import datetime
 
 from alpha_agents.data import (
@@ -19,6 +18,12 @@ from alpha_agents.data import (
     trade_ledger,
 )
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
+# Whether a theme may carry an order is its own question, and it now has its
+# own module: the two-bar hysteresis that replaced the single `strength >= 4`
+# veto did not fit under this file's line ceiling. `resolve_theme` comes from
+# there too and is re-exported here, because callers have always reached for
+# it through this module.
+from alpha_agents.data.theme_gate import resolve_theme, theme_admits, theme_gate
 from alpha_agents.data.trader import DEFAULT_TRADER
 # The exit slice lives in portfolio_exit: the friction model, the append-only
 # exit legs, and the close path that books them. Re-exported here because entry
@@ -86,16 +91,13 @@ ADD_POSITION_DROP_PCT = 5.0      # 持仓跌超5%才考虑补仓
 # position started.
 HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT", "8.0"))
 
-# The strength a theme needs before a new order may be written against it.
-#
-# Read at creation *and* on every pending check, from this one constant so
-# the two cannot drift apart. They used to be enforced only on the check,
-# one cycle late: of 97 cancelled orders, ~80 died as 主线走弱 on themes
-# that were already at strength 0-2 when the order was written. The system
-# was creating orders it had already decided it would not hold, then
-# cancelling them, then counting those cancellations as evidence about
-# entry prices.
-MIN_THEME_STRENGTH = 4
+# The `MIN_THEME_STRENGTH = 4` veto that used to sit here is gone. It read the
+# same constant at creation and on every pending check "so the two cannot drift
+# apart" — and they did not drift, which was the problem: it vetoed candidates
+# before the model saw them, then re-vetoed the order every five minutes while it
+# waited to fill (106 of 117 orders cancelled, ~100 of them as 主线走弱). The bar
+# is now a cross-sectionally normalised score with two levels — admission above
+# cancellation — and it lives in `data/theme_gate.py` with that history.
 
 
 def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
@@ -244,44 +246,6 @@ def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
 # ── Pending Orders (挂单) ───────────────────────────────────
 
 
-def resolve_theme(theme: str) -> str | None:
-    """Canonical theme name for an order, or None when there is no thesis.
-
-    ``check_pending_orders`` already refuses to hold a position whose theme
-    is not in theme_lines — "no theme, no logical basis". That rule ran a
-    cycle too late: an order was created from whatever concept string the
-    agent wrote in its 关联概念 column, then cancelled the next cycle with
-    "关联主线'磷化工'不存在". A capital slot spent on an idea the system had
-    already decided it would not hold.
-
-    Agents also write compound labels ("化肥/磷化工") for a theme tracked
-    under one of its parts, so an exact match alone would reject ideas the
-    system does hold.
-    """
-    if not theme:
-        return None
-    from alpha_agents.data.memory_store import get_active_themes
-    try:
-        known = [t["name"] for t in get_active_themes()]
-    except Exception as e:
-        # Without the theme list there is nothing to check against; let the
-        # order through rather than dropping ideas on an unrelated failure.
-        logger.warning("Theme lookup failed, accepting order theme %r: %s",
-                       theme, e)
-        return theme
-
-    if theme in known:
-        return theme
-    parts = [p.strip() for p in re.split(r"[/、,，|]", theme) if p.strip()]
-    for part in parts:
-        if part in known:
-            return part
-    for name in known:
-        if name and (name in theme or theme in name):
-            return name
-    return None
-
-
 def _valid_prediction(conn, prediction_id: int | None, code: str, trader_id: str) -> bool:
     if prediction_id is None:
         return True
@@ -361,13 +325,10 @@ def _create_pending_order_impl(
             return None
         theme = resolved
 
-        # The same strength bar check_pending_orders applies, applied at
-        # creation instead of one cycle later. Of 97 cancelled orders, ~80
-        # died as 主线走弱 — and the theme was already at strength 0-2 when
-        # the order was written. The system was creating orders it had
-        # already decided it would not hold, then cancelling them, then
-        # counting the cancellations as evidence about entry prices.
-        weak = _theme_too_weak(theme)
+        # The same admission bar check_pending_orders applies, applied at
+        # creation instead of one cycle later — see `data/theme_gate.py` for
+        # what it is now and why the old one cost 106 of 117 orders.
+        weak = theme_admits(theme)
         if weak:
             logger.info("Rejected order %s %s: %s — 下一轮也会被撤，不如不建",
                         code, name, weak)
@@ -434,34 +395,6 @@ def _create_pending_order_impl(
         return cursor.lastrowid
 
 
-def _theme_too_weak(theme: str) -> str | None:
-    """Why this theme cannot carry a new order, or None if it can.
-
-    Reads the same thresholds check_pending_orders enforces, so the two
-    cannot disagree — an order accepted here and cancelled there is a
-    wasted capital slot and a fake data point about entry pricing.
-
-    Falls open on a lookup failure: a broken theme read must not stop the
-    system from trading, and the cancel path still runs a cycle later.
-    """
-    if not theme:
-        return None
-    try:
-        row = get_theme_by_name(theme)
-    except Exception as e:
-        logger.debug("Theme strength check unavailable for %r: %s", theme, e)
-        return None
-    if not row:
-        return None
-    status = row.get("status")
-    if status in ("declining", "archived"):
-        return f"主线已{status}({theme})"
-    strength = row.get("strength") or 0
-    if strength < MIN_THEME_STRENGTH:
-        return f"主线太弱({theme}强度{strength}<{MIN_THEME_STRENGTH})"
-    return None
-
-
 def check_pending_orders(
     realtime_prices: dict[str, float],
     today: str,
@@ -507,37 +440,28 @@ def check_pending_orders(
             continue
 
         # Dynamic expiry based on theme health:
-        # - Theme healthy (strength >= 4) → keep the order alive, no expiry
-        # - Theme weak (strength < MIN_THEME_STRENGTH) or declining/archived → cancel
-        # - No theme → fall back to fixed expiry
+        # - Theme still carries the thesis → keep the order alive, no expiry
+        # - Cancelled only when the theme has clearly weakened, or was retired,
+        #   or there is no theme to hang the thesis on
         theme_name = order.get("theme", "")
         if theme_name:
             theme = get_theme_by_name(theme_name)
-            if theme:
-                if theme.get("status") in ("declining", "archived"):
-                    _cancel_order(order["id"], f"主线衰退({theme_name}已{theme['status']})")
-                    alerts.append({
-                        "type": "cancelled",
-                        "code": code,
-                        "name": order.get("name", ""),
-                        "reason": f"主线衰退({theme_name})",
-                    })
-                    continue
-                if (theme.get("strength") or 0) < MIN_THEME_STRENGTH:
-                    _cancel_order(order["id"], f"主线走弱({theme_name}强度{theme['strength']})")
-                    alerts.append({
-                        "type": "cancelled",
-                        "code": code,
-                        "name": order.get("name", ""),
-                        "reason": f"主线走弱({theme_name})",
-                    })
-                    continue
-                # Theme healthy → keep order alive regardless of days
-            else:
+            if theme is None:
                 # Theme not found in DB → no logical basis, cancel
                 _cancel_order(order["id"], f"关联主线'{theme_name}'不存在")
-                alerts.append({"type": "cancelled", "code": code, "name": order.get("name", ""), "reason": f"主线不存在"})
+                alerts.append({"type": "cancelled", "code": code,
+                               "name": order.get("name", ""), "reason": "主线不存在"})
                 continue
+            # The cancel bar is deliberately lower than the admission bar: an
+            # order that was admitted on a strong theme must not be pulled for
+            # a wobble back to the level it was admitted at.
+            reason = theme_gate(theme_name, "cancel")
+            if reason:
+                _cancel_order(order["id"], reason)
+                alerts.append({"type": "cancelled", "code": code,
+                               "name": order.get("name", ""), "reason": reason})
+                continue
+            # Theme still carries the thesis → keep the order alive regardless of days
         else:
             # No theme at all → no logical basis, cancel
             _cancel_order(order["id"], "无关联主线，缺乏持仓逻辑")

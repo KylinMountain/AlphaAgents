@@ -357,6 +357,21 @@ DEFAULT_DECISION_PARAMS: dict = {
     "confidence_priors": {"high": 0.58, "medium": 0.53, "low": 0.50},
     "dim_step": 0.04,
     "dim_base": 0.44,
+    # The theme gate travels with the same pointer, because it is the same kind
+    # of thing: a number the trading path reads when it decides. `w_*` are the
+    # weights of today's cross-sectionally normalised theme score (see
+    # `pipeline.theme_manager.theme_score`); `admit_score` is where a *candidate*
+    # may be priced, and `cancel_score` is a deliberately **lower** bar than
+    # admission — the band between them is what stops a pending order from being
+    # killed by daily-frequency noise at the boundary. 106 of 117 orders died
+    # that way.
+    "theme_gate": {
+        "w_flow": 0.45,
+        "w_rel": 0.35,
+        "w_confirm": 0.20,
+        "admit_score": 0.50,
+        "cancel_score": 0.35,
+    },
 }
 
 

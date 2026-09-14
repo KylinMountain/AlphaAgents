@@ -14,9 +14,12 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, update_theme_strength, maybe_discover_theme,
-    retire_stale_themes, check_leader_health,
+    retire_stale_themes, check_leader_health, mark_theme_unscored,
+    refresh_theme_scores,
 )
-from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
+from alpha_agents.tools.sector_ranking import (
+    board_match, get_sector_ranking_fn, get_concept_ranking_fn, theme_cross_section,
+)
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
@@ -204,7 +207,7 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         market_change = 0.0  # Approximate from breadth
         ad_ratio = breadth.get("advance_decline_ratio", 1)
 
-        # The whole board for scoring, the top of it for discovery.
+        # The board for scoring, the top of it for discovery.
         #
         # Same trap as the intraday refresh: a theme is looked up in the
         # ranking, and a theme falls out of the ranking exactly when it
@@ -213,12 +216,20 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         # skipped precisely the lines that most needed downgrading. They
         # kept yesterday's score and their exit conditions could not fire.
         #
-        # One fetch either way: get_concept_fund_flow returns all ~386
-        # boards and top_n only truncates the response.
+        # Scoring reads `theme_cross_section()` rather than the ranking: that
+        # frame holds concepts *and* industries (themes come from both —
+        # `石油加工贸易` is an industry and never matched a concept-only frame),
+        # and it is matched tolerantly (theme `小金属概念` is board `小金属`).
+        # Discovery still reads the ranking's gainers.
         ranking = json.loads(get_concept_ranking_fn(top_n=999))
-        concept_lookup = {c.get("concept", ""): c
-                          for c in ranking.get("gainers", [])
-                          + ranking.get("losers", [])}
+        board = theme_cross_section()
+        if not board:
+            # Both frames down. Skipping the pass is the point: with no board
+            # every theme looks unmeasured, and `mark_theme_unscored` would take
+            # a point off all of them for our network trouble. Nothing to
+            # discover from either, since discovery reads the same source.
+            logger.warning("收盘无板块数据 —— 本轮不评估主线，避免把抓取失败记成主线失效")
+            return
 
         # Get anomaly data — check which stocks hit limit up today
         limit_up_codes: set[str] = set()
@@ -235,10 +246,12 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         # Update existing themes
         existing_names = {t["name"] for t in existing_themes}
         for theme in existing_themes:
-            c = concept_lookup.get(theme["name"])
+            c = board_match(theme["name"], board)
             if c is None:
-                logger.info("主线 '%s' 不在板块数据里，收盘无法评分 —— "
-                            "它的失效条件今天不会触发", theme["name"])
+                # Not "its exit condition will not fire" any more: a miss is
+                # counted, and a run of misses decays the line. See
+                # `mark_theme_unscored` for why the first one is forgiven.
+                mark_theme_unscored(theme["name"])
                 continue
             # Check if this theme's leader hit limit up
             leader_code = theme.get("leader_code", "")
@@ -671,6 +684,14 @@ async def run_review() -> str | None:
 
     # Re-read themes after update
     themes = get_active_themes()
+
+    # 2b. Today's cross-sectional theme score — the number the theme gate reads
+    # instead of `strength >= 4`. Runs after the strength pass on purpose:
+    # confirmation is one of the score's three inputs.
+    try:
+        logger.info("Theme scores refreshed: %s", await asyncio.to_thread(refresh_theme_scores))
+    except Exception as e:
+        logger.warning("Theme score refresh failed: %s", e)
 
     # 2b. Snapshot theme strengths for velocity detection (end-of-day state)
     # Used by portfolio.check_positions to detect rapid theme decay

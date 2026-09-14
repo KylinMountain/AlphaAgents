@@ -16,7 +16,9 @@ from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
-from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, update_theme_strength, maybe_discover_theme
+from alpha_agents.pipeline.theme_manager import (
+    evaluate_theme_signals, maybe_discover_theme, refresh_theme_scores, update_theme_strength,
+)
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.notify import notify_all
 from alpha_agents.data import clock
@@ -37,6 +39,13 @@ from alpha_agents.pipeline.tasks.book_manager import manage_book
 from alpha_agents.pipeline.tasks.anomaly_scan import (
     _detect_anomalies, _detect_style_rotation, _news_for_sectors,
     _refresh_theme_strengths,
+)
+# Report post-processing — real prices in the table, the cause-analysis LLM pass,
+# and the empty-actionable fallback — lives in its own module: they all operate
+# on the report text and share none of this module's state, and the file was at
+# its line ceiling. Imported back here because this is where they are called.
+from alpha_agents.pipeline.tasks.intraday_report import (
+    _auto_fill_actionable, _fix_prices_in_report, _get_cause_analysis,
 )
 from alpha_agents.pipeline.tasks.session_memory import (
     note_decline, recall_decline,
@@ -213,6 +222,14 @@ async def run_intraday_monitor() -> str | None:
 
     # ── Lightweight theme strength refresh (uses sector ranking, no LLM) ──
     await asyncio.to_thread(_refresh_theme_strengths)
+
+    # ── Today's cross-sectional theme score — what the theme gate reads ──
+    # Refreshed every cycle, unlike `strength`: it answers "how strong is this
+    # line today", and it is the number admission and cancellation compare
+    # against. It fetches the board again rather than reusing the pass above,
+    # which is worth the second call: the endpoint returns a partial list each
+    # time, so two draws see more of the board than one.
+    await asyncio.to_thread(refresh_theme_scores)
 
     themes = get_active_themes()
     if not themes:
@@ -638,257 +655,6 @@ async def run_intraday_monitor() -> str | None:
     return output
 
 
-def _fix_prices_in_report(report: str) -> str:
-    """Replace hallucinated prices with real Sina data.
-
-    Also moves stocks that are at limit-up (>=9.8%) from 可操作标的 to 信号确认,
-    since you can't buy a stock that's already at the daily limit.
-    """
-    # Extract all stock codes mentioned in table rows
-    codes_in_report = re.findall(r"\|\s*(\d{6})\s*\|", report)
-    if not codes_in_report:
-        return report
-
-    rt = get_realtime_quotes(list(set(codes_in_report)))
-    if not rt:
-        return report
-
-    # Collect stocks that are actually at limit-up but listed as actionable
-    limit_up_moves = []
-
-    lines = report.split("\n")
-    fixed_lines = []
-    in_actionable_table = False
-
-    for line in lines:
-        # Detect we're in the actionable table
-        if "【可操作标的】" in line:
-            in_actionable_table = True
-            fixed_lines.append(line)
-            continue
-        if in_actionable_table and line.strip() and not line.strip().startswith("|"):
-            in_actionable_table = False
-
-        match = re.match(r"\|\s*(\d{6})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|", line)
-        if match and in_actionable_table:
-            code = match.group(1)
-            try:
-                name = match.group(2).strip()
-                action = match.group(5).strip()
-
-                if code in rt:
-                    real = rt[code]
-                    price = real.get("price", 0)
-                    change_pct = real.get("change_pct", 0)
-                    # If at limit-up (>=9.8%), remove from actionable, add to signals
-                    if change_pct >= 9.8:
-                        limit_up_moves.append(
-                            f"• {code} {name} 涨停封板({change_pct:+.2f}%) "
-                            f"— 实际已涨停，从可操作移至信号确认"
-                        )
-                        continue  # Skip this row from actionable table
-
-                    fixed_lines.append(
-                        f"| {code} | {name} | {price:.2f}元 | "
-                        f"{change_pct:+.2f}% | {action} |"
-                    )
-                    continue
-            except Exception as e:
-                logger.warning("Failed to fix price for %s in report: %s", code, e)
-
-        fixed_lines.append(line)
-
-    # Append limit-up stocks to signal section
-    if limit_up_moves:
-        result = "\n".join(fixed_lines)
-        insert_text = "\n".join(limit_up_moves)
-        # Try to append after existing signal section
-        if "【信号确认】" in result:
-            # Find last line of signal section and append
-            signal_idx = result.index("【信号确认】")
-            # Find next section after signal
-            next_section = None
-            for marker in ["【可操作标的】", "【主线状态变化】"]:
-                pos = result.find(marker, signal_idx + 10)
-                if pos > 0:
-                    next_section = pos
-                    break
-            if next_section:
-                result = result[:next_section] + insert_text + "\n\n" + result[next_section:]
-            else:
-                result += "\n" + insert_text
-        else:
-            # No signal section exists, add one before actionable
-            result = result.replace("【可操作标的】",
-                                    "【信号确认】（已涨停，系统自动识别）\n" + insert_text + "\n\n【可操作标的】")
-        return result
-
-    return "\n".join(fixed_lines)
-
-
-async def _get_cause_analysis(context: str) -> str:
-    """V2 anomaly tracing: observe → trace cause → judge persistence.
-
-    Restored from V2 spec design. LLM has tools to search for catalysts
-    and check fund flow sources. Code handles stock selection and pricing.
-
-    Tools given:
-      - web_search: find news catalysts (policy, earnings, events)
-      - get_lhb_detail: check institutional vs hot money seats
-      - get_stock_fund_flow: check main force vs retail flow direction
-      - get_sector_data: check related sector linkage
-    """
-    import asyncio
-    from agents import Agent, Runner
-    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-    from openai import AsyncOpenAI
-    from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
-    from alpha_agents.tools.registry import (
-        web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data,
-        get_cls_telegraph, get_news,
-    )
-
-    # Agent client — counted by the tracing hook, not wrapped here.
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
-    model = OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
-    agent = Agent(
-        name="cause_analyst",
-        instructions=(
-            "你是盘中异动追因分析师。检测到市场异动后，你需要追溯原因并判断持续性。\n\n"
-            "## 思维链路（严格按步骤执行）\n\n"
-            "1. **观察**：阅读传入的异动数据，识别核心异动（哪个板块、什么类型的资金异动）\n"
-            "2. **追因**：\n"
-            "   - **优先**调用 get_cls_telegraph（财联社电报）搜索最新快讯，关键词用板块名或龙头股名\n"
-            "   - 如果财联社没有，调用 get_news（东方财富新闻）搜索\n"
-            "   - 如果国内源都没有，再调用 web_search 搜索（注意：web_search 对中文新闻效果有限）\n"
-            "   - 调用 get_lhb_detail 查看龙虎榜，判断资金来源是机构还是游资\n"
-            "   - 如果有明确的龙头股，调用 get_stock_fund_flow 查看主力资金方向\n"
-            "   - 调用 get_sector_data 查看关联板块是否联动\n"
-            "3. **判断**：基于追因结果判断——\n"
-            "   - 机构资金 + 明确政策/产业催化 + 多板块联动 → **持续行情**\n"
-            "   - 游资席位 + 无明确催化 + 单一个股 → **一日游，不追**\n"
-            "   - 资金异动但无新闻催化 → **主力提前布局，密切关注**\n\n"
-            "## 输出格式\n\n"
-            "对每个异动板块/方向输出：\n"
-            "【异动】{板块名} {异动类型}\n"
-            "• 催化: {找到的新闻原因，没找到就写'未发现明确催化，可能是资金先行'}\n"
-            "• 资金来源: {机构/游资/主力/不明}\n"
-            "• 关联板块: {是否有联动}\n"
-            "• 判断: {一日游/持续行情/主力提前布局}\n"
-            "• 失效条件: {什么情况下判断不成立}\n\n"
-            "## 重要原则\n"
-            "- 不要推荐股票，不要给操作建议，不要生成表格\n"
-            "- 资金行为优先于新闻叙事——如果资金在流入但没有新闻，不要说'没有异动'\n"
-            "- 没找到新闻催化不代表没有原因，可能是主力提前知道了什么\n"
-            "- 每个工具最多调用一次，不要重复调用"
-        ),
-        model=model,
-        tools=[get_cls_telegraph, get_news, web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data],
-    )
-
-    try:
-        result = await asyncio.wait_for(
-            Runner.run(agent, f"以下是刚检测到的市场异动，请按思维链路追因分析：\n\n{context}",
-                       max_turns=30),
-            timeout=90,
-        )
-        output = result.final_output or ""
-
-        # Clean up LLM tool call tags that leak into output (LongCat compatibility)
-        import re as _re_clean
-        output = _re_clean.sub(r'</?longcat_tool_call>', '', output)
-        output = _re_clean.sub(r'</?tool_call>', '', output)
-        output = _re_clean.sub(r'\{"name":\s*"[^"]+",\s*"arguments":\s*\{[^}]*\}\}', '', output)
-        output = output.strip()
-
-        if not output or len(output) < 20:
-            logger.warning("Cause analysis returned empty/garbage, using fallback")
-            return context
-
-        return output
-    except asyncio.TimeoutError:
-        logger.warning("Cause analysis timed out (90s)")
-        return context
-    except Exception as e:
-        logger.warning("Cause analysis failed: %s", e)
-        return context
-
-
-def _auto_fill_actionable(report: str, sectors: list[str]) -> str:
-    """If the actionable table is empty, auto-fill it from sector beta picks.
-
-    LLM sometimes only recommends limit-up stocks. This fallback ensures
-    the report always has non-limit-up candidates.
-    """
-    # Check if actionable table is empty (only header/separator, no data rows)
-    lines = report.split("\n")
-    in_table = False
-    has_data_rows = False
-    for line in lines:
-        if "【可操作标的】" in line:
-            in_table = True
-            continue
-        if in_table and line.strip().startswith("|") and "代码" not in line and "---" not in line:
-            # Found a data row
-            has_data_rows = True
-            break
-        if in_table and line.strip() and not line.strip().startswith("|"):
-            break  # End of table section
-
-    if has_data_rows:
-        return report  # Table already has data, don't override
-
-    # Fetch beta picks and build table rows
-    try:
-        from alpha_agents.tools.sector_beta import get_sector_best_stocks_fn
-        from alpha_agents.data.market_data import get_realtime_quotes
-
-        all_picks = []
-        for sector in sectors:
-            result = json.loads(get_sector_best_stocks_fn(sector, top_n=3))
-            for s in result.get("top", []):
-                if s.get("today_change_pct", 0) < 9.8:  # Not limit-up
-                    all_picks.append(s)
-
-        if not all_picks:
-            return report
-
-        # Build table rows
-        table_rows = []
-        for s in all_picks[:5]:
-            code = s["code"]
-            name = s["name"]
-            price = s.get("price", 0)
-            chg = s.get("today_change_pct", 0)
-            beta = s.get("beta_weighted", 0)
-            note = s.get("note", "")
-            table_rows.append(
-                f"| {code} | {name} | {price:.2f}元 | {chg:+.2f}% | "
-                f"高beta={beta:.2f}, {note} (系统预选) |"
-            )
-
-        if table_rows:
-            # Insert after the table header
-            new_lines = []
-            inserted = False
-            for line in lines:
-                new_lines.append(line)
-                if not inserted and "可操作标的" in line:
-                    # Skip to after header/separator
-                    pass
-                if not inserted and line.strip().startswith("|---"):
-                    new_lines.extend(table_rows)
-                    inserted = True
-            if inserted:
-                report = "\n".join(new_lines)
-                logger.info("Auto-filled %d actionable stocks from sector beta picks", len(table_rows))
-    except Exception as e:
-        logger.debug("Auto-fill actionable failed: %s", e)
-
-    return report
-
-
-
 def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
     """Drop only what no judgement can rescue, and remember the rest.
 
@@ -896,19 +662,29 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
     rather than about ideas that are probably bad:
 
       * the theme is not one the system tracks — order creation refuses it
-      * the theme is below MIN_THEME_STRENGTH — order creation refuses it
+      * the theme is below the admission bar — order creation refuses it
 
     Pricing a candidate whose order would be rejected is not a judgement
     call being taken away; it is work with no possible outcome. 博敏电子
     was priced twice today on 存储芯片 and 先进封装, and both orders died
     at creation for an untracked theme.
 
+    Both filters read the same gate order creation reads (``data.theme_gate``),
+    and that is the point of that module. A filter one bar tighter than
+    creation silently drops candidates creation would have taken; one bar
+    looser queues up work that dies a cycle later. The bar itself is no longer
+    ``strength >= 4`` — it is today's cross-sectional theme score, so a line
+    qualifies on money arriving *today* rather than on how many sessions it has
+    been confirmed, which is what let one theme's low count kill four
+    candidates on 2026-09-14.
+
     **A recent decline is no longer a filter.** It travels with the
     candidate as ``prior_view`` instead, because the problem it was
     solving was never too much freedom — it was no memory. See
-    ``recall_decline``.
+    ``recall_decline``. The theme's score travels the same way, as
+    ``theme_note``, so the model prices with the number in front of it.
     """
-    from alpha_agents.data.portfolio import _theme_too_weak, resolve_theme
+    from alpha_agents.data.theme_gate import resolve_theme, theme_admits, theme_score_note
 
     out, dropped, recalled = [], [], 0
     for r in recs:
@@ -918,11 +694,14 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
         if resolved is None:
             dropped.append(f"{code}(主线'{theme}'不在跟踪列表，下单必被拒)")
             continue
-        weak = _theme_too_weak(resolved)
+        weak = theme_admits(resolved)
         if weak:
             dropped.append(f"{code}({weak})")
             continue
         item = {**r, "theme": resolved}
+        note = theme_score_note(resolved)
+        if note:
+            item["theme_note"] = note
         prior = recall_decline(code, prices.get(code) or 0)
         if prior:
             item["prior_view"] = prior

@@ -117,32 +117,38 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 - **已批准知识快照**（Phase 3 的 T4）**已交付**：`knowledge_snapshots` /
   `knowledge_snapshot_items` 两表与 `alpha_agents/data/knowledge_snapshots.py` 都已存在
   （交付明细见 §11 与第九节第八轮）。「保留」与「生效」之间现在有一道可审计的关口。
-  它剩下两个边界：
-  - **快照不进任何生效路径。** 模块里没有 `apply_snapshot`，没有 prompt、检索权重、
-    或任何 `_get_*` 的返回值读它。`approve()` 的唯一调用者是运维脚本
-    `scripts/approve_knowledge.py`（即「人的动作」），所以「已批准」现在是
-    **可查的事实**，不是**已生效的行为** —— 这正是 §10 要的形状，不是遗漏。
-  - **读侧只有运维脚本与测试在读。** `candidate_is_approved` / `entity_is_approved` /
-    `drifted` 的消费者是 `scripts/episode_coverage.py` 与测试，没有任何决策路径读它。
-    与候选区一样：是**有能力**，不是**有数据**。
-- **策略版本注册与前向影子实验**（Phase 4）—— 机制已交付，且**2026-09-13 起闭环可运行**。
-  U1–U5 的机制存在（冻结策略注册表、前向影子评估、候选绑定闸门、人工晋升与回滚、检索闸门），
-  同日补上了两个此前缺失的部件：`shadow.PRODUCERS` 现在有一条 `kind="candidate"` 的
-  生产者（`remap_confidence`，用**它绑定版本**的参数重映射冠军记录的信心标签），
-  `scripts/policy.py` 现在有 `freeze` / `install` 两个子命令（此前四个动词没有一个能
-  创建第一行记录）。**「可运行」不等于「跑过」**：生产库的
-  `policy_versions` / `active_policy` / `shadow_runs` 三张表仍然不存在、一次真实晋升
-  也没发生过，因为缺的是样本不是代码（`predictions.brier` 仍 0 行）。
-  逐项见 §12 的边界清单与 §14；tech-debt 记为 D6 / D7 / D11。
-  **2026-09-14 更新：第 0 步已在生产库执行（V1 在效、`policy_*` 表已建），
-  四个实验动词已接上每日调度 —— 但 promote 仍然没有跑过，而且今天也跑不了：
-  它要 ≥20 个配对交易日的前向证据。见 §14.7。**
+  它剩下三个边界：
+  - **快照会筛选进 prompt 的行，但不会写回任何东西。** 模块里没有 `apply_snapshot`：
+    它不写回 prompt 文件、不写回检索权重、不改任何 `_get_*` 的返回值。
+    （上一版这里写的是「快照不进任何生效路径」，那句在 U5 之后就不成立了；
+    完整的更正与适用范围见本节末尾「快照是记录，不是检索闸门」那一条。）
+    `approve()` 的唯一调用者是运维脚本 `scripts/approve_knowledge.py`（即「人的动作」），
+    所以「已批准」是**可查的事实**，而它**是否在生效**由策略指针决定 —— 这正是 §10 的形状。
+  - **两个读侧函数没有任何消费者。** `candidate_is_approved` / `entity_is_approved`
+    在 `alpha_agents/`、`scripts/`、`main.py` 里**一处调用都没有**（2026-09-14 实测），
+    只有测试在调。上一版说「消费者是 `scripts/episode_coverage.py`」是**错的** ——
+    那个脚本读的是 `counts` / `integrity` / `drifted` / `verify_snapshot` /
+    `items_for` / `all_snapshots` / `snapshots_for_candidate`，其中 `drifted` 确实在被读。
+    这两个函数属于「有能力、无消费者」那一类，别把运维脚本当成它的用户。
+  - **`drifted` 的消费者只有运维脚本与测试**，没有任何决策路径读它。
+- **策略版本注册与前向影子实验**（Phase 4）—— **已交付，且 2026-09-14 起在生产里跑**。
+  U1–U5 的机制（冻结策略注册表、前向影子评估、候选绑定闸门、人工晋升与回滚、检索闸门）
+  之外，09-13 补了两个缺失部件（`kind="candidate"` 的出厂生产者 `remap_confidence`；
+  `scripts/policy.py` 的 `freeze` / `install`），09-14 又补了实验的四个操作动词与
+  **每日调度**，并**在生产库执行了第 0 步**：`policy_versions` / `active_policy` /
+  `policy_transitions` / `policy_approvals` 四表已建，**V1 在效**，其参数与代码默认
+  逐值相同（行为中性）。**仍未发生的事只有一件：一次真实晋升。** 它今天也做不到 ——
+  要 ≥20 个配对交易日的前向证据，而**一条影子 run 都还没开**（开 run 是人的动作，
+  且必须先想清楚第一个候选测什么）。逐项见 §12 与 §14.6 / §14.7；
+  tech-debt 记为 D6 / D7。
 - **产品整合**（Phase 5）—— **2026-09-13 已交付 V1 + V2 + V3，见 §13**。
   三个读模型、三个端点、三个前端工作台都已存在，`/api/portfolio` 已改为委托同一个投影。
-  但**「页面能打开」不是「页面有事实」**：三个工作台在生产库上处于**三种不同的状态**
-  （`policy_*` / `shadow_*` 表不存在、`gate_decisions` 与 `learning_candidates` 缺列、
-  `episodes` / `outcomes` 0 行），这些状态由读模型自己报出来、由页面自己渲染出来，
-  不靠人去比对文档。**Learn 与 Evolve 两个页面今天显示的主要是「当前状态说明」，不是数据。**
+  **但「页面能打开」不是「页面有事实」。** 生产库上三个工作台的状态各不相同，而且
+  **会随运维动作变化**：09-13 实测 evolve 的 `pointer` / `shadow` 是 `absent`；
+  09-14 执行第 0 步之后 `pointer` 变 **present**（1 个版本在效）、`shadow` 变 **empty**
+  （表建好、0 条 run），`gates` 仍 **partial**（旧 schema，要等第一次写裁决才会自动迁移），
+  trade / learn 未变 —— 所以**今天「进化实验台」有真实内容，而「学习日志」仍然主要是状态说明**。
+  这些状态由读模型自己报出来、由页面自己渲染出来，不靠人去比对文档。
 - **奖励信号（G1）的机制已在跑，缺的是样本不是代码。** `predictions` 表有
   `prob` / `log_score` / `brier` / `excess_return` / `residual_alpha` 五列；
   `review` 任务里的 `_score_due_predictions`（其 docstring 自述 *"This is the G1 signal"*）

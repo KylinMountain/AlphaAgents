@@ -8,7 +8,7 @@
 **收口要点**：判据 1–9 全部落地。`tests/test_policy_cli.py::TestTheExperimentIsDrivable`
 13 个用例驱动真 `main(argv)`；渲染矩阵 7 → 8 个用例（D11 偿还）；
 两个变异探针被捕获（`Reachability` 的 `open` 钉死、`shadow-emit` 的面板置空）。
-全量 **1894 passed, 18 skipped**。**边界照旧**：没有自动调度，生产里一条 run 都没开 ——
+全量 **1895 passed, 18 skipped**。**边界照旧**：没有自动调度，生产里一条 run 都没开 ——
 `status` 里的「no shadow run has been opened」就是这条边界的证据。
 逐项状态以 `docs/TRADER_CORE_IMPLEMENTATION.md` §12 / §14.6 为准。
 

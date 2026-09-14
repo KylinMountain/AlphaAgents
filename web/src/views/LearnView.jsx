@@ -40,10 +40,10 @@ function Kpi({ label, value, valueClass = '', note }) {
   )
 }
 
-function Row({ label, value }) {
+function Row({ label, value, note }) {
   return (
     <tr>
-      <td>{label}</td>
+      <td>{label}{note ? <small>（{note}）</small> : null}</td>
       <td className="num">{value ?? DASH}</td>
     </tr>
   )
@@ -167,11 +167,32 @@ function Candidates({ sec }) {
   )
 }
 
-/* ── 评估货币：当前最要紧的一个数字 ─────────────────────────────── */
+/* ── 评估货币：成熟度日历，不是缺口 ─────────────────────────────── */
 function Forecasts({ sec }) {
   const v = sec?.value || {}
-  const gap = (v.rows ?? 0) - (v.brier_scored ?? 0)
+  const p = v.pricing || {}
   const stats = v.recent_hit_rate || {}
+  const batches = p.batches || []
+  let verdict
+  if (!v.rows) {
+    verdict = { cls: 'soft',
+      text: '还没有预测。评估货币的账，从第一行带概率的预测记起。' }
+  } else if (v.prob_rows === 0) {
+    verdict = { cls: 'thesis-warn',
+      text: '没有一行带概率（prob）的预测 —— 评估货币无从产生，闸门会一直 abstain。' }
+  } else if (p.ripe_unscored > 0) {
+    verdict = { cls: 'thesis-warn',
+      text: `有 ${p.ripe_unscored} 行窗口已收口却还没有 Brier —— 复盘的评分步没跑到它们，这是要修的。` }
+  } else if (p.unscored > 0 && p.archive_readable === false) {
+    verdict = { cls: 'soft',
+      text: '行情档案不可读，无法判断这些窗口收口了没有 —— 评分步会按「未收口」拒绝断言。' }
+  } else if (p.unripe > 0) {
+    verdict = { cls: 'soft',
+      text: `还没有评估货币，但这是成熟度，不是缺口：brier 只在证据窗口收口后写，`
+            + `最早一批还差 ${p.min_remaining_days} 个交易日。` }
+  } else {
+    verdict = { cls: 'soft', text: '可定价的预测都有 Brier 了。' }
+  }
   return (
     <WorkspaceCard title="预测与评估货币" sec={sec}
                    subtitle="校准曲线是用 brier 画的，不是用命中率画的">
@@ -179,18 +200,36 @@ function Forecasts({ sec }) {
         <tbody>
           <Row label="预测行数" value={v.rows} />
           <Row label="已评命中（hit）" value={v.scored} />
+          <Row label="可定价（带 prob）" value={v.prob_rows ?? DASH}
+               note={v.rows && v.prob_rows != null && v.prob_rows < v.rows
+                 ? `其余 ${v.rows - v.prob_rows} 行无概率，不进 Brier 的账` : ''} />
           <Row label="已有 Brier" value={v.brier_scored} />
           <Row label="近 30 日命中率"
                value={stats.total ? `${stats.hit_rate}%` : DASH} />
         </tbody>
       </table>
       <div style={{ padding: '0 14px 14px' }}>
-        <p className={gap > 0 ? 'thesis-warn' : 'soft'}>
-          {gap > 0
-            ? `还没有评估货币：${gap} 行没有 Brier。没有 brier 就没有配对检验的货币，`
-              + '闸门只能 abstain —— 这不是「暂时没数据」，是当前最要紧的缺口。'
-            : '每一条预测都有 Brier 了。'}
-        </p>
+        <p className={verdict.cls}>{verdict.text}</p>
+        {batches.length ? (
+          <table className="table">
+            <thead>
+              <tr><th>批次日期</th><th className="num">行数</th>
+                  <th className="num">声明窗口</th><th className="num">已过交易日</th>
+                  <th className="num">还差</th></tr>
+            </thead>
+            <tbody>
+              {batches.map((b) => (
+                <tr key={`${b.date}-${b.horizon}`}>
+                  <td>{b.date}</td>
+                  <td className="num">{b.rows}</td>
+                  <td className="num">{b.need} 个交易日</td>
+                  <td className="num">{b.have == null ? DASH : b.have}</td>
+                  <td className="num">{b.remaining == null ? DASH : b.remaining}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
         {stats.by_confidence
           ? (
             <table className="table">

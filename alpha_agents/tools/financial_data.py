@@ -9,7 +9,7 @@ import json
 import logging
 
 from alpha_agents.data.market_data import get_financial_indicator
-from alpha_agents.data.memory_store import get_cached_financials, save_cached_financials
+from alpha_agents.data.vpa_store import get_cached_financials, save_cached_financials
 
 logger = logging.getLogger(__name__)
 

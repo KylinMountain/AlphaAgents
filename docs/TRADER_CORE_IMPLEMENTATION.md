@@ -133,7 +133,10 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   创建第一行记录）。**「可运行」不等于「跑过」**：生产库的
   `policy_versions` / `active_policy` / `shadow_runs` 三张表仍然不存在、一次真实晋升
   也没发生过，因为缺的是样本不是代码（`predictions.brier` 仍 0 行）。
-  逐项见 §12 的边界清单与 §14；tech-debt 记为 D6 / D11。
+  逐项见 §12 的边界清单与 §14；tech-debt 记为 D6 / D7 / D11。
+  **2026-09-14 更新：第 0 步已在生产库执行（V1 在效、`policy_*` 表已建），
+  四个实验动词已接上每日调度 —— 但 promote 仍然没有跑过，而且今天也跑不了：
+  它要 ≥20 个配对交易日的前向证据。见 §14.7。**
 - **产品整合**（Phase 5）—— **2026-09-13 已交付 V1 + V2 + V3，见 §13**。
   三个读模型、三个端点、三个前端工作台都已存在，`/api/portfolio` 已改为委托同一个投影。
   但**「页面能打开」不是「页面有事实」**：三个工作台在生产库上处于**三种不同的状态**
@@ -656,6 +659,32 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 `CREATE TABLE IF NOT EXISTS`，与交易路径第一次落 intent 时触发的同一段 DDL；
 但把那句话写准比保留一句好听的强。
 
+### 第十一轮（实验接上每日调度 + 生产库执行第 0 步）
+
+2026-09-14（同日第二支）：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1905 passed, 18 skipped**（158s；本轮 +10 用例） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（158 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+| `cd web && npm run check:render` | 8 个用例全过（本轮未改前端） |
+
+新增 `tests/test_shadow_run_task.py`（10 个用例）分四组：喂与评、**从不问闸门**
+（跑完断言 `gate_decisions` 为空）、**永不带走交易日**（`runs` / `emit_for_date` /
+`coverage` 各自抛异常时任务不向上抛）、以及幂等（同一天重复跑不产生第二行面板）。
+
+**生产库的写入**（本仓库第一次对 `data/memory.db` 写策略记录，由人决定并先 dry-run）：
+`freeze` → `version #1`（`c1d8632aca3ef97e`）→ `install` → 指针 seq 1。
+`status` 复核：`live configuration still matches: True` / `integrity: clean` /
+**在效参数与 `DEFAULT_DECISION_PARAMS` 逐值相同**（所以是行为中性的「装上已有的配置」）。
+副本复测三个工作台：只有 evolve 变（`pointer` absent→**present**、`shadow` absent→empty）。
+
+**一处提前验证掉的运维风险**：生产 `gate_decisions` 是旧 schema，而 `gate` 要写四个新列。
+在**副本**上确认 `_ensure_gate_table` 的 `ALTER TABLE` 会补齐并写入成功（4 行）。
+生产库没有因此写任何裁决行 —— 仍是 3 行旧 abstain。**这一步刻意提前做**：
+等 20 个交易日后敲 `gate` 才发现表写不进去，代价太大。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -866,6 +895,8 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 | learn | `candidates` | **partial** | unavailable |
 | learn | `forecasts` | complete | **present（202 行）** |
 | evolve | `pointer` / `shadow` | **absent** | unavailable |
+| evolve | `pointer`（**2026-09-14 复测**） | complete | **present（1 个版本在效）** |
+| evolve | `shadow`（**2026-09-14 复测**） | complete | empty（表已建、0 条 run） |
 | evolve | `gates` | **partial** | unavailable |
 | evolve | `knowledge` | complete | empty |
 
@@ -928,6 +959,9 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
   的表**根本不存在**。所以「学习日志」「进化实验台」这两个页面**已经上线**，
   **但它们的页面内容大部分是当前状态的说明，而不是数据**。
   任何「已上线 = 有内容」的读法都是错的。
+  **（2026-09-14 更新：`evolve.pointer` 已经是 `present`（V1 在效）、`shadow` 是
+  `empty`（表建好、0 条 run），所以进化实验台从这天起有真实内容；`learn` 那一侧
+  没变，仍然主要是状态说明。见 §14.7。）**
 - **`evolve.candidates` 与 `evolve.gates` 会显示 `partial`。** 这要求运维动作
   （让当前代码的进程连一次库，或显式迁移），不是前端能修的。页面只报状态。
 - **本阶段没有任何写入路径被修改。** 三个读模型全部只读，不新增写者。
@@ -939,10 +973,11 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 
 ## 14. 第 0 步与路线 B（Phase 4 闭环可运行，2026-09-13）
 
-记录日期：2026-09-13（§14.6 于次日补上）。计划见
+记录日期：2026-09-13（§14.6 / §14.7 于次日补上）。计划见
 [成熟度计划](exec-plans/completed/2026-09-13-forecast-maturity-trading-days.md)、
-[闭环计划](exec-plans/completed/2026-09-13-evolution-loop-runnable.md) 与
-[操作面计划](exec-plans/completed/2026-09-14-evolution-operator-surface.md)。
+[闭环计划](exec-plans/completed/2026-09-13-evolution-loop-runnable.md)、
+[操作面计划](exec-plans/completed/2026-09-14-evolution-operator-surface.md) 与
+[调度计划](exec-plans/completed/2026-09-14-shadow-run-scheduled.md)。
 
 这一节把两支切片写在一起，因为它们是同一个决定的两半：**先把判据说准，再把闭环接上**。
 两件事都不是「加功能」，都是**取消一个谎**。
@@ -1040,19 +1075,25 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 这是「文档与代码一起被重审」而不是「把断言删掉」：两条都保留了断言并在 docstring 里
 写明了为什么翻。
 
-### 14.5 明确没做（本轮的边界）
+### 14.5 明确没做（本轮 09-13 那支切片的边界）
+
+> 这一节写的是 **09-13 那天收盘时的**边界，保留原文以便对照。其中三条已在
+> **09-14** 被后面的切片推翻或偿还，逐条在下面注明；当前边界以 §12 与 §14.7 为准。
 
 - **没有跑过任何一次真实 freeze / install / promote。** 生产库的三张表仍然不存在。
   本轮的交付物是**能跑**，不是**跑过**：往生产注册表写第一个版本、开第一条影子 run
   是操作决定，需要人拿着 CLI 做，且必须先 freeze 一个与在效版本不同的版本。
+  **（09-14 更新：freeze 与 install 已在生产库执行，V1 在效，见 §14.7。
+  promote 仍然没有跑过，而且今天也跑不了 —— 它要 ≥20 个配对交易日的前向证据。）**
 - **影子跑仍然没有生产入口**（无 `open_run` / `emit_for_date` 的 CLI 动词）——
-  见 §12 的边界清单。**（本行已被 §14.6 推翻：2026-09-14 补上了四个动词，
-  但生产里仍然一条 run 都没开。）**
+  见 §12 的边界清单。**（09-14 更新：四个动词补上了，见 §14.6；
+  而且 `shadow-emit` / `shadow-score` 已经接上每日调度，见 §14.7。）**
 - **没有实现 `apply(version_id)`**（把版本参数写回磁盘）。在指针决定参数的模型里
   它不是必需品：提升之后行为已经改变，磁盘常量退化为「未安装时的默认值」。
 - **`check:render` 的 evolve 用例仍只用 `reachable: false` 的合成 payload**，
   所以翻成 `true` 的那条渲染分支**目前没有渲染用例**。合成 payload 覆盖的是渲染，
   不是构建事实，所以它不会因为本轮改动而红 —— 记下来，别当成已经覆盖了。
+  **（09-14 更新：D11 已偿还，两个分支各一个用例。）**
 - **`_require_matches_live` 没动。** 它对「提示词被手改而没开新版本」的拦截仍然有效，
   也是 rollback 安全性的依据；本轮只把「指针控制的来源」从它管辖的范围里按
   `knowledge` 的先例分出来（staging），没有放松其它四个。
@@ -1102,5 +1143,59 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 `shadow-score` 挂到每个交易日），生产里也仍然一条 run 都没开。
 **「有动词」与「有人跑」是两件事** —— `status` 里那句
 「no shadow run has been opened」就是这条边界的证据。
+
+### 14.7 第 0 步在生产库上执行 + 实验接上调度（2026-09-14）
+
+两件事，同一天，都是**由人决定的**（用户明确选了「freeze + install」与「现在就接调度」）。
+
+**一、生产库的指针建立了。** 这是本仓库第一次对 `data/memory.db` 写策略记录：
+
+```
+$ .venv/bin/python scripts/policy.py freeze --by evilkylin \
+      --reason "the seed before any experiment: the default decision mapping"
+  version #1 written.  content hash c1d8632aca3ef97e
+$ .venv/bin/python scripts/policy.py install --version 1 --by evilkylin \
+      --reason "nothing was in force; the loop's first version"
+policy 'trader' now has version #1 in force at seq 1.
+```
+
+复核（`status`）：`in force: version #1 at seq 1`、`live configuration still matches: True`、
+`integrity: clean`、`decision parameters in force: {"confidence_priors": {...}, "dim_base": 0.44,
+"dim_step": 0.04}` —— **与 `DEFAULT_DECISION_PARAMS` 逐值相同，所以行为中性**：
+装上的是「已经在跑的配置」，只是它现在有名字了。
+
+**由此生效的所有权切换（单向）**：`confidence_priors` / `dim_step` / `dim_base` 从此归指针。
+再改 `scoring.DEFAULT_DECISION_PARAMS` **对行为没有影响**。要改映射只有一条路：
+`freeze --decision-json` → 开影子跑 → **等 ≥20 个配对交易日**（`MIN_VALIDATION_SAMPLES`；
+本仓库 `n<50` 的规则把诚实门槛定在 50）→ `gate` → `approve` → `promote`。
+没有 uninstall。这是 §11 的意图，但它是单向的，所以 `status` 现在把在效的那组参数
+**按值**打出来 —— 让「改了没用」与「改好了」不再长得一样（§14.6 第 4 条）。
+
+**二、实验每天自己跑。** `alpha_agents/pipeline/tasks/shadow_run.py` + `main.py` 里
+`Task("shadow_run", ..., dtime(15, 45))`，交易日 15:45，**排在 15:30 的 review 之后**
+（那时冠军当天的选股已经定了，面板才是最终面板）。它做两件事：
+
+1. 对每条**开启**的 run 写挑战者当天的预测（面板 = 冠军当天的选股）；
+2. 给窗口已被市场交易到收口的预测补分数，并分别报出「已评分 / 窗口未收 / 已删失」。
+
+**它刻意不问闸门。** 裁决是给人做决定用的证据，每天问一次只会在配对天数填满之前
+天天写一行几乎一样的 `insufficient` —— 「有治理的形状、没有治理的实质」，
+而那正是旧的 `run_gate("daily_playbook", today, today)` 被删掉的原因。
+报告里给的是进度：`配对进度 0/20，还差 20 个交易日`。
+
+**副本上的实测（2026-09-14，写入之后）**：三个工作台里只有 evolve 变了 ——
+`pointer` 从 **absent → present**，`shadow` 从 **absent → empty**（表建好了、0 条 run），
+`gates` 仍 **partial**、`knowledge` 仍 empty；`evolve.code` 报
+`candidate_producers=['remap_confidence']` / `reachable=True`。
+**所以「进化实验台」这个页面从今天起有真实内容了**（在此之前的 24 小时里它显示的是
+「表不存在」）。
+
+**一个提前验证掉的风险**：生产库的 `gate_decisions` 是**旧 schema**（缺
+`evidence_scope` / `validation_days` / `policy_version_id` / `outcome` 四列），
+而 `gate` 要往这四列里写。`_ensure_gate_table` 会在**第一次写入时**跑
+`ALTER TABLE`，所以在**副本**上试过一次：四列补齐、行写进去、`outcome` 与
+`evidence_scope` 读得回来。**没有**因此在生产库上写任何裁决行
+（生产 `gate_decisions` 仍是旧 schema，仍是 3 行 abstained）。
+这一步是刻意提前做的：等 20 个交易日后敲 `gate` 才发现表写不进去，代价太大。
 
 

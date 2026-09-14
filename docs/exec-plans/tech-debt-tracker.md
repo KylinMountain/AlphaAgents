@@ -118,12 +118,17 @@ and an operator can create the first record. That also removes the "a promotion
 would be a no-op" defect this entry did not know about: the decision parameters
 are read from the version in force, so moving the pointer changes behaviour.
 
-The original title still holds for a second reason: nothing **schedules**
-`run_gate`. On 2026-09-14 an operator verb was added (`scripts/policy.py gate`,
-with `shadow-open` / `shadow-emit` / `shadow-score` beside it and a `paired/needed`
-progress meter in `status`), so the gate went from "can never fire" to "correct,
-candidate-bound, askable by hand and never asked" — progress on every axis except
-the one the title names. Still not "running in production".
+The original title still holds for a second reason, and on 2026-09-14 it narrowed
+to exactly that: the shadow branch is now fed and graded by a scheduled task
+(`pipeline/tasks/shadow_run.py`, 15:45 on trading days), an operator verb exists
+(`scripts/policy.py gate`), and `status` prints each experiment's `paired/needed`
+— but **nothing asks the gate**. That is deliberate: asking daily would write a
+near-identical `insufficient` row until the count fills, which is the shape of
+governance without the substance, and it is why the old automatic call was
+removed. So the gate went from "can never fire" to "correct, candidate-bound,
+fed daily by a scheduler, and asked by nobody". Still not "running in
+production" — and the one thing that would change the title is a promotion,
+which needs ≥20 paired forward days that no one has yet.
 **Note.** This is the one debt item that is scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".

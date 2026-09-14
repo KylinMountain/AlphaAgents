@@ -201,13 +201,16 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 **Phase 2 / Phase 3 只做到一半**
 
 - **信息边界的强制校验**。现在**有消费者了**（第四轮新增）：`attribution.freeze` 拒绝晚于内核时钟的边界，成交时 `clock.guard_fill` 校验「下单决策的 `information_cutoff` 不得晚于成交日」。但设计 §15 的完整合同「Every actionable input satisfies the availability cutoff」**仍未成立**：只有这两处，校验的是**声明的边界本身**是不是未来，而不是「这次决策引用的每一个输入都落在边界内」。当前强制的仍然是「边界不可事后改写」（触发器 + 哈希）与「边界不得是未来」；**不是**「每个输入都被逐一验证过」。
-- **挂单有效期是死代码**（T1 期间查出来的第三例「字段只写不读」）。`PENDING_EXPIRE_DAYS` 被写进每个订单行，
-  `check_pending_orders` 每次都算 `days_pending`，**两者都没有任何读者**：有主线的挂单跟随主线生命周期，
-  无主线的挂单在更早的一行就被当作「无关联主线」撤掉了，固定期限永远走不到。因此
-  `episode_events.kind` 里**没有 `expire`** —— 声明一个没有写入路径的状态，正是本仓库已经犯过两次的
-  「承诺无可调用入口」。该结论由
-  `tests/test_episodes.py::TestEveryDeclaredKindHasAWriter::test_the_pending_order_expiry_is_still_dead_code`
-  机械钉住。
+- **挂单有效期曾经是死代码**（T1 期间查出来的第三例「字段只写不读」），**2026-09-14 已接线**（§14.10）：
+  `expire_days` 现在取自论点自己的 `horizon_days`，其次交易员的 `default_horizon_days`，最后才回落到
+  `PENDING_EXPIRE_DAYS`；`check_pending_orders` 在**价格没有进带子**时读 `days_pending >= expire_days`，
+  撤单理由带「未到价」。因此 `episode_events.kind` 里**仍然没有 `expire`**，理由不变且更硬：到期本来
+  就是一撤单，`_cancel_order` 已有完整审计（episode + 预留释放），再造一个种类等于给同一件事两个名字。
+  钉住它的用例按它自己 docstring 里的指示翻了面：
+  `tests/test_episodes.py::TestEveryDeclaredKindHasAWriter::test_the_pending_order_expiry_now_produces_a_cancel_not_a_kind`。
+- **到期判据里已知的一个洞**：只要这一轮**没有实时价**（`price is None`，例如停牌），挂单既不体检论点
+  也不到期。这是刻意的——「未到价」是对行情的断言，没有行情就不该写它，与打分侧「行情库缺失判窗口
+  未收口」同一条原则。代价是停牌股的挂单会一直挂着，直到有人看见。
 - **平仓/减仓的 episode 事件只指向持仓，不指向账本腿**。`episode_events.ref_id` 对 `close` / `trim`
   记的是 `virtual_portfolio.id`；设计想要的那条「事件 → 账本行」的边**没有建立**，因为
   `portfolio_exit._close_position_impl` 的返回契约是 `bool`（S5 定下、有测试钉住），
@@ -418,6 +421,9 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 1. 计划里点名的 `expire` 事件类型**没有写入路径**（挂单有效期是死代码），因此**没有**写进
    `episode_events.kind` 的 `CHECK`；用一条静态断言把「它仍然是死代码」钉住，
    这样将来真做有效期的人必须先删掉那条测试、再加事件类型。
+   —— 2026-09-14 兑现了：有效期接线（§14.10）时按这条指示把用例翻面为
+   `test_the_pending_order_expiry_now_produces_a_cancel_not_a_kind`；`expire` 仍然没有进
+   `CHECK`，因为到期记录为一次撤单，不是新种类。
 2. 计划里点名的 `hold` / abstention 同样没有写入路径，理由是「本仓库没有任何地方**决定过**
    『今天不买』」，造一个空调用点就是本文件反复在抓的那类缺陷。
 3. `close` / `trim` 的事件只能指向持仓行，**指不到账本腿**，因为
@@ -1391,6 +1397,60 @@ policy 'trader' now has version #1 in force at seq 1.
 验证：**1938 passed / 18 skipped**（本轮净增 28 条）；`lint_harness` 166 文件 0 新增；
 `lint_docs` 通过；6 个变异探针（改坏源码 → 确认对应用例变红 → 复原）全部有效，
 覆盖：拉丁片段一致性、衰减门槛、缺席计数复位、`theme_note` 出/入提示词、未评分放行。
+
+### 14.10 挂单必须能被了结：预留预检、每轮论点体检、真正的到期（同日第五支）
+
+起点是「有一笔挂单没成交」这个问题。追下去不是两个 bug，是**一条从未被写下的不变式**：
+「pending 挂单必须恰好持有一条 `held` 现金预留」。三个地方依赖它——`_fill_order` 的
+`consume_reservation`、撤单路径的 `release_reservation`、以及 `reserve_for_order` 只在建单时被
+调用——但没有一处保证它。
+
+| 订单 | 为什么没成交 | 真正的缺陷 |
+|---|---|---|
+| #117 中石科技 | 09-11 09:49 建于 84.69，区间 95.5–98.0，之后四个交易日最高 87.24 | 它建于 `reservations` 模块（当晚 22:58 随 `0fbe89a` 落地）**之前 13 小时**，没有预留行 ⇒ **既成交不了也撤不掉**；而它按 conviction 排在首位，异常抛出循环、被 `manage_book` 吞成一句「组合管理失败」，**该交易员当轮剩余动作全被跳过** |
+| #118 德福科技 | 14:27:42 建于 109.32，区间 109.3–112.5；当日 112.02 在服务启动之前，之后一直在 108.98–109.17 | 一次真实的错过，但指标里**没有能装它的桶**：`_ENTRY_OUTCOMES` 的 `"当日未成交"` 全仓库没有任何生产者 |
+
+| 改动 | 位置 | 要点 |
+|---|---|---|
+| B 预留预检 | `portfolio.check_pending_orders` | 进入任何规则前先取预留：没有 ⇒ **adopt**（按建单同一公式补一条 `held`，幂等）并打醒目日志；处于终态 ⇒ **跳过 + 每轮 error**，不猜、不修、不撤 |
+| C 论点体检每轮执行 | 同上 | `_thesis_already_broken` 从 `if triggered:` 里搬出来；**没有**新增「跌破带子下沿即撤」——那等于再写一套阈值，而论点里已经声明了失效条件 |
+| D 到期真正被读 | 同上 + `portfolio._expire_days_for` | 建单 `expire_days` = 论点 `horizon_days` → 交易员 `default_horizon_days` → `PENDING_EXPIRE_DAYS`；监控侧 `days_pending >= expire_days` 撤单，理由含「未到价」 |
+| E 指标双向 | `portfolio_risk` | `missed_right` = 「介入价太低」+「价格未到」；注入文案同时给「把区间上移」与「拉回或承认不会来、skip」两条路 |
+
+**实现中量出来的四件事改了设计，其中一件否掉了我写在计划里的做法：**
+
+1. **成交必须压过到期。** 计划 D5 只定了判据 `days_pending >= expire_days`，没定它与成交检查的先后，
+   实现时写的是「到期在前」。写测试才发现：那条撤单理由字面上写着「未到价」，而那一轮价格**正在带子内**
+   ——等于往学习数据里写一条被自己那一行反驳的标签，`entry_quality` 的每一次读数都会继承它。
+   改成 `if triggered: 成交 elif 到期: 撤`。附带效果：**没有实时价就不写「未到价」**（已写进 §7）。
+2. **标签表比一个死键更糟。** 把真实理由逐个过 `classify_cancellation`：**8 个理由里 5 个落到「其他」**，
+   包括**全部主线撤单与论点撤单**。键是照着想象的字符串写的——代码写的是 `论点在成交前已失效`、
+   `主线明显走弱(评分…)`、`主线已declining(…)`、`关联主线'X'不存在`，没有一个包含它配的那个键。
+   已按**代码真正写出的子串**重配（旧拼写保留：表里的历史行是它们写的）。没有这一步，本次新接的
+   「未到价」也只是往一个看不见的表里再加一格。
+3. **`PENDING_EXPIRE_DAYS` 实际上是够不着的兜底**：`Trader.default_horizon_days` 在 dataclass 里默认 5，
+   所以 `_trader_pct(..., fallback)` 永远拿到 5（`breakout.yaml` 声明 3、`pullback.yaml` 5），常数只在
+   交易员查不到时才会出现。测试照这个事实写：用 3 和 4 两个数把「来自论点」与「来自交易员」分开。
+4. **按模块名写死的静态守卫会随搬家一起失真。** 拆 `portfolio_book` 后 `test_intent.py` 红了，但红的
+   原因不是「多了个写入者」，而是这条守卫**一直靠一个巧合通过**：成交路径的
+   `UPDATE virtual_portfolio SET` 写成相邻字面量，`SET[^"']*status` 这类正则跨不过去，`portfolio.py`
+   之所以在允许名单里，只是因为旁边那条撤单 UPDATE 恰巧写成一行。改成用 AST 读（解析器本来就会拼接
+   相邻字面量），现在**两条**写入都看得见——守卫比原来强，而且不再依赖排版。
+
+**文件大小**：本轮给 `check_pending_orders` 加了真职责，`portfolio.py` 再次破线（1221 行），于是按职责
+拆出 `data/portfolio_book.py`（订单簿的行 + 唯一的「不行使就离开」路径：撤单），重导出让
+`from portfolio import get_pending_orders / _cancel_order` 照旧可用。现在 `portfolio.py` **1123 行**、
+`portfolio_book.py` **144 行**。**这次搬家的副作用要知道**：按 `alpha_agents.data.portfolio._get_conn`
+打桩不再能重定向读路径（`get_open_positions` 在 `portfolio_book` 里绑定 `_get_conn`），
+`test_portfolio.py` 的两处补上了自己的桩，照 `test_close_position` 当初给 `portfolio_exit` 写的注释同办。
+
+判据 12 条与决策记录 D1–D8 见
+[计划文档](exec-plans/completed/2026-09-14-a-pending-order-must-be-finishable.md)。
+
+验证：**1986 passed / 18 skipped**（本轮净增 22 条，新增 `tests/test_pending_orders_finishable.py` 22 条）；
+`lint_harness` **167 文件 0 新增**（存量仍 13 条）；`lint_docs` 通过；**6 个变异探针全部有效**
+（B 去掉 adopt 分支 / C 把论点体检关回带子里 / D 关掉到期 / E1 把「从未到达」清零 / E2 删掉 `未到价`
+映射 / E3 删掉 `成交前已失效` 映射 → 对应用例均变红，复原后锚点仍在）。
 
 
 

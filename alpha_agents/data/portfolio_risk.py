@@ -335,11 +335,37 @@ def describe_clusters() -> str:
 _ENTRY_OUTCOMES = {
     "涨走": "介入价太低",
     "资金不足": "资金分配",
-    "当日未成交": "价格未到",
+    # "当日未成交" used to sit here and nothing ever wrote it: the label
+    # "价格未到" existed for three weeks with no producer, so the one
+    # failure a breakout book is most likely to have — the price never
+    # came to the zone at all — could not be counted. The expiry path in
+    # ``portfolio`` now cancels with a reason containing 未到价, so this
+    # key names what the code actually writes.
+    "未到价": "价格未到",
+    # The keys below were re-read against the strings the cancel paths
+    # really emit, on 2026-09-14 — the same audit that found "当日未成交".
+    # Five of the eight reasons written by ``check_pending_orders`` and
+    # ``theme_gate`` were landing in 其他, including every theme cancel: the
+    # thesis cancel is spelled "论点在成交前已失效", the weak-line cancel is
+    # "主线明显走弱(评分…)", the retired line is "主线已declining(…)", and a
+    # missing line is "关联主线'X'不存在". Not one of them contains the key
+    # it was paired with. Each key below is the substring the code writes
+    # today; the older spellings stay because rows already in the table
+    # carry them and this classifier reads history too.
+    #
+    # Two reasons deliberately have no bucket. "日期解析失败" is a corrupt
+    # row, not an entry-quality outcome. "无关联主线，缺乏持仓逻辑" is
+    # legacy: ``resolve_theme`` refuses an untracked theme at creation, so
+    # no order can reach that cancel any more. Both land in 其他, which is
+    # what 其他 is for — not a place to file a mapping nobody checked.
+    "成交前已失效": "论点先于价格失效",
     "论点已失效": "论点先于价格失效",
+    "主线明显走弱": "主线先于价格失效",
     "主线走弱": "主线先于价格失效",
     "主线衰退": "主线先于价格失效",
-    "主线不存在": "主线不存在",
+    "主线已declining": "主线先于价格失效",
+    "主线已archived": "主线先于价格失效",
+    "不存在": "主线不存在",
 }
 
 
@@ -357,6 +383,12 @@ def entry_quality(days: int = 30, trader_id: str | None = None) -> dict:
     entry price was wrong. A system that keeps being right and keeps not
     getting filled has an entry problem, not a selection problem, and
     nothing else in the stats will ever say so.
+
+    It is deliberately the sum of two opposite mistakes — ``missed_ran_away``
+    (zone below the market) and ``missed_never_came`` (zone above it) — and
+    both are reported separately next to it. A single-direction number can
+    only ever argue for moving zones one way, which is how an entry-style
+    statistic turns into an entry-style bias.
 
     This is *the* number that separates one entry style from another, so
     a trader asking about its own entries must pass its id; ``None``
@@ -383,11 +415,22 @@ def entry_quality(days: int = 30, trader_id: str | None = None) -> dict:
         [f"-{days} days", *extra]
     ).fetchone()[0]
 
-    missed = counts.get("介入价太低", 0)
+    # Both directions count, and they are opposite mistakes. 介入价太低 is
+    # the zone sitting *below* the market and the price running away up;
+    # 价格未到 is the zone sitting *above* it and the price never arriving.
+    # Only the first was countable, which made this number a ratchet —
+    # every reading of it pushed entry zones higher, and nothing in the
+    # system could ever say "your zone is too high". That is precisely the
+    # failure a breakout book has, so the book with the most reason to
+    # read this number was the one it could not describe.
+    ran_away = counts.get("介入价太低", 0)
+    never_came = counts.get("价格未到", 0)
+    missed = ran_away + never_came
     attempts = filled + len(rows)
     return {
         "n": len(rows), "filled": filled, "by_reason": counts,
         "missed_right": missed,
+        "missed_ran_away": ran_away, "missed_never_came": never_came,
         "missed_rate": round(missed / attempts * 100, 1) if attempts else 0.0,
     }
 
@@ -458,18 +501,29 @@ def inject_entry_side(days: int = 30, trader_id: str | None = None) -> str:
 
 def inject_entry_quality(days: int = 30,
                          trader_id: str | None = None) -> str:
-    """The entry-price lesson, for the review and the morning prompt."""
+    """The entry-price lesson, for the review and the morning prompt.
+
+    Two counts, two opposite pieces of advice. A lesson that only ever
+    names the run-away direction coaches every book toward higher entry
+    zones — a strategy change disguised as feedback, which is the one
+    thing the traders/ directory exists to keep out of the config.
+    """
     q = entry_quality(days=days, trader_id=trader_id)
     if not q.get("n"):
         return ""
     lines = [f"【介入质量】近{days}天 成交 {q['filled']} 笔、撤单 {q['n']} 笔"]
     for label, n in sorted(q["by_reason"].items(), key=lambda kv: -kv[1]):
         lines.append(f"• {label}: {n} 笔")
-    if q["missed_rate"] >= 25:
-        lines.append(f"→ **{q['missed_rate']:.0f}% 的介入意图是「选对了但没买到」**（价格涨走）。"
-                     "介入区间系统性偏低——你在等一个走强的主线不会给的回调。"
+    ran, never = q["missed_ran_away"], q["missed_never_came"]
+    if not (ran or never):
+        return "\n".join(lines)
+    lines.append(f"→ 选对了但没买到共 {q['missed_right']} 笔"
+                 f"（占介入意图 {q['missed_rate']:.0f}%），两个方向相反：")
+    if ran:
+        lines.append(f"• 价格涨走 {ran} 笔——区间挂在现价下方，那个回调没来。"
                      "把区间上移，或对高信心的标的直接用市价。")
-    elif q["missed_right"]:
-        lines.append(f"→ 其中 {q['missed_right']} 笔是选对了但价格涨走，"
-                     "属于介入价位问题，不是选股问题。")
+    if never:
+        lines.append(f"• 价格从未到达 {never} 笔——区间挂在现价上方，那个价位没出现过。"
+                     "要么把区间拉回真能成交的位置，要么承认这个设定本来就不会来、"
+                     "直接 skip。挂太远和挂太低一样是错，只是错的方向相反。")
     return "\n".join(lines)

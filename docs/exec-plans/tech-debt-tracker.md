@@ -8,7 +8,12 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-14. Eight items were paid the same day. D10 (the due test
+_Last updated 2026-09-14 (evening). The pending-order round paid no numbered item
+but added two: **D13** — an order with no live quote neither checks its thesis
+nor expires (deliberate, and the hole is named here rather than hidden) — and
+**D14** — test doubles keyed on a module's namespace break silently when code
+moves, which is how a split that left every test green still moved a seam the
+tests were leaning on. D10 (the due test
 counted calendar days) — a not-yet-ripe forecast now stays `pending` instead of
 being censored. D11 (the evolve page's reachable branch had no render case) — one
 case per branch now. D2 (layering violations in `daily_archive`) — split into a
@@ -20,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12.**_
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14.**_
 
 _On 2026-09-12 four baseline lines had become dead — the code was fixed but the
 exemption was never removed — and were deleted. Deleting a line is the point: the
@@ -37,6 +42,44 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D13 — A pending order with no live quote neither checks its thesis nor expires
+
+**Added 2026-09-14.** Deliberate during the pending-order round, and written
+down rather than papered over: the expiry is asked only once a live price is
+known, because the reason it writes — 未到价 — is a claim about the market, and
+this repository does not let a missing input produce an assertion (the scoring
+side refuses to close an evidence window while the kline store is absent, for
+the same reason). The cost lands on the other side: a suspended stock's order
+waits indefinitely, skipping both its thesis check and its own deadline, and
+nothing in the system says so.
+**Cost.** An order on a halted stock is unfinishable again — the defect this
+round set out to remove, reached by a different route.
+**Recognise.** A pending row whose `code` has had no `realtime_prices` entry for
+more than `expire_days` consecutive cycles. `check_pending_orders` cannot
+currently tell "the price is missing this cycle" from "the price is missing and
+has been for a week"; the second one needs a rule.
+
+### D14 — Test doubles keyed on a module's namespace break silently when code moves
+
+**Added 2026-09-14, found the hard way.** Moving `get_open_positions` into
+`portfolio_book` left `patch("alpha_agents.data.portfolio._get_conn")` still
+succeeding and still doing nothing: the function binds `_get_conn` in its own
+module globals, so the patch redirected only the write path and the assertion
+failed somewhere else. Two `test_portfolio.py` cases needed a second patch, and
+`test_intent.py`'s allow-list went red for a third reason — it had been passing
+on an accident. The fill path's `UPDATE virtual_portfolio SET` is written as
+adjacent string literals, which the old `[^"']*status` regex could not see
+across, so `portfolio.py` was on the allow-list only because the cancel UPDATE
+beside it happened to be spelled on one line. The guard reads the AST now.
+**Cost.** A split that leaves every test green can still have moved a seam the
+tests were silently leaning on; the failure surfaces later as an unrelated
+assertion.
+**Recognise.** Any `patch("...module.name")` whose function has moved. Cheap
+probe after a split: grep the old module's name through `tests/` and check every
+hit still lands. The durable fix — routing these through one fixture that
+patches every namespace binding the name — is a bigger change than the debt is
+worth today.
 
 ### D2 — `data/daily_archive.py` orchestrates fetches
 

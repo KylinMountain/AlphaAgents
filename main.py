@@ -301,6 +301,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor, set_scheduler
     from alpha_agents.pipeline.tasks.review import run_review
+    from alpha_agents.pipeline.tasks.shadow_run import run_shadow_run
     from alpha_agents.pipeline.tasks.night_scan import run_night_scan
     from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
@@ -317,6 +318,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             "opening_reminder": ("开盘提醒", "green"),
             "intraday_monitor": ("盘中提醒", "yellow"),
             "review": ("复盘报告", "cyan"),
+            "shadow_run": ("影子实验", "cyan"),
             "night_scan": ("夜报", "blue"),
             "weekly_report": ("周报", "magenta"),
         }
@@ -371,6 +373,15 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task("review", run_review, dtime(15, 30),
                             timeout_seconds=1200, catch_up_grace_minutes=90))
 
+    # Shadow experiments: 15:45, trading days only, behind the review so the
+    # day's champion picks are final before the challenger is paired against
+    # them. Writes the challenger's forecasts and grades what matured; it never
+    # asks the gate — that is a person's call, and asking daily would only
+    # record the same "insufficient" verdict until the paired count fills. The
+    # report carries each experiment's paired/needed progress instead.
+    scheduler.add_task(Task("shadow_run", run_shadow_run, dtime(15, 45),
+                            timeout_seconds=300, catch_up_grace_minutes=90))
+
     # Night scan: 20:00, every day (monitors foreign markets)
     scheduler.add_task(Task(
         "night_scan", run_night_scan,
@@ -393,6 +404,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             "opening": run_opening_reminder,
             "intraday": run_intraday_monitor,
             "review": run_review,
+            "shadow": run_shadow_run,
             "night": run_night_scan,
             "weekly": run_weekly_report,
         }

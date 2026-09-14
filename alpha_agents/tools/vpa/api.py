@@ -137,7 +137,7 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
     else:
         previous_report = ""
         try:
-            from alpha_agents.data.memory_store import get_latest_vpa_analysis
+            from alpha_agents.data.vpa_store import get_latest_vpa_analysis
             prev = get_latest_vpa_analysis(code, as_of=as_of)
             if prev and prev.get("report"):
                 previous_report = prev["report"]
@@ -291,7 +291,7 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
             **_det_fields,
         }
     try:
-        from alpha_agents.data.memory_store import (
+        from alpha_agents.data.vpa_store import (
             save_vpa_analysis, save_vpa_signal, save_vpa_scenario,
         )
         # v7 review I#82: persist selected_candidate_id so live-mode

@@ -1,13 +1,9 @@
 # Grandfathered violations — see docs/exec-plans/tech-debt-tracker.md
 # New violations fail CI. Remove a line only by fixing the code.
-alpha_agents/data/memory_store.py::file-size
 alpha_agents/data/memory_store.py::layering
 alpha_agents/data/position_monitor.py::layering
-alpha_agents/data/snapshot_store.py::file-size
 alpha_agents/pipeline/monitor.py::layering
 alpha_agents/pipeline/scheduler.py::layering
 alpha_agents/pipeline/tasks/morning_scan.py::layering
 alpha_agents/pipeline/tasks/review.py::layering
-alpha_agents/tools/vpa/data.py::file-size
-alpha_agents/tools/vpa/llm.py::file-size
 alpha_agents/tools/vpa/llm.py::layering

@@ -767,6 +767,48 @@ pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失
 它就是在改 replay 的 features 时暴露的：同一个改动要改两遍，而**只改一处不会报错**。
 树的去留是仓库主人的决定，所以只记不删。
 
+### 第十四轮（D4：四个超大文件按职责拆开）
+
+2026-09-14（同日第五支）：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1930 passed, 18 skipped**（145s；**与改动前逐项相同** —— 这是纯结构改动） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（**164 个文件**），存量 **13 条**（上一轮 17；`file-size` 四条已删） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+| `cd web && npm run check:render` | 8/8（未改前端） |
+
+四处抽取、五个新模块，**没有一个超过 1200 行**（把行数从一个大文件搬到另一个大文件不是修法）：
+
+| 原文件 | 原 | 现 | 搬走什么 |
+|---|---|---|---|
+| `data/memory_store.py` | 2161 | **1063** | `_SCHEMA`（824）→ `data/memory_schema.py`；VPA + 财务**缓存**组（275）→ `data/vpa_store.py` |
+| `tools/vpa/data.py` | 1409 | **827** | 装载 + 派生指标组（598，13 个函数）→ `tools/vpa/bars.py` |
+| `data/snapshot_store.py` | 1338 | **1082** | `_SCHEMA`（257）→ `data/snapshot_schema.py` |
+| `tools/vpa/llm.py` | 1243 | **887** | 343 行 system prompt + `PROMPT_VERSION` → `tools/vpa/prompts.py` |
+
+**三处零调用面变更**（`memory_schema` / `snapshot_schema` / `vpa/prompts`）：
+原模块重新导出搬走的名字，所以既有的 `from … import …` 全部照旧，
+而且名字不可能漂移 —— 是同一个对象。**两处必须改调用点**（`vpa_store` 与 `bars`，
+共 3 行 import），因为 `vpa_store` 要从 `memory_store` 拿连接、
+`bars` 被同层的四个模块调用 —— 原模块若再导入它们就成环。
+
+**两处「量了但不搬」**（写进计划文档）：`snapshot_store` 的 news 组（约 250 行）
+有 **28 个调用者**（十四个 `sources/` 适配器全在内），而只搬 schema 就已达标；
+把**连接本身**（`_get_conn` / `MEMORY_DB_PATH`）搬到独立基础模块在结构上更干净，
+但要改 **47 个测试文件里的约 75 处 patch**，改错一处的后果是测试写到生产库 ——
+那值得单独一支，且与「进 1200 行」无关。
+
+**本轮的一次当场兑现**：新写的 `bars.py` 用了 `Optional` 但没 import，
+`lint_harness` 的 **undefined-name** 规则直接拦下（`expected: NameError 只会在生产环境
+的那条分支上炸`）。这条规则本来就是为那类缺陷写的，在重构里立刻抓到一次。
+
+**范围失误（记下来，不掩盖）**：D4 的四个文件里有两个属于 `tools/vpa/`。
+我在动手前只把四个文件名列了出来，**没有说出「所以会搬 VPA 的代码」这个后果**，
+用户因此在事后才意识到 VPA 被动过。技术上是逐字节搬家（`ANNA_COULLING_PROMPT`
+与 `PROMPT_VERSION` 的 sha256、`bars.py` 的 13 个函数全部与原文相同，已比对验证），
+但**范围沟通是失误**：该先问一句「D4 里有两个 VPA 文件，动不动」。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；

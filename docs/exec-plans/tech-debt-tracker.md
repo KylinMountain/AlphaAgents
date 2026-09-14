@@ -8,7 +8,7 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-14. Seven items were paid the same day. D10 (the due test
+_Last updated 2026-09-14. Eight items were paid the same day. D10 (the due test
 counted calendar days) — a not-yet-ripe forecast now stays `pending` instead of
 being censored. D11 (the evolve page's reachable branch had no render case) — one
 case per branch now. D2 (layering violations in `daily_archive`) — split into a
@@ -18,8 +18,9 @@ now. D7 (the gate had no caller) — a scheduled task asks it once per experimen
 at the point the sample was declared sufficient. D3 (26 silent `except: pass`) —
 every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
+D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D4, D6, D8, D12.**_
+`scripts/*.py`. **Open: D6, D8, D12.**_
 
 _On 2026-09-12 four baseline lines had become dead — the code was fixed but the
 exemption was never removed — and were deleted. Deleting a line is the point: the
@@ -31,9 +32,9 @@ wired; `brier` is NULL on a calendar, not on a missing call), which is the
 difference between "wait" and "go look". D8 and D9 were added the same day — a
 column with no writer, and a check that only runs when someone remembers._
 
-**Current baseline: 11 entries covering 17 violations.** `lint_harness.py`
-prints the 17, not the 11, because one entry can cover several occurrences in
-one file. (Was 26 entries / 47 violations on 2026-09-13.)
+**Current baseline: 7 entries covering 13 violations.** `lint_harness.py`
+prints the 13, not the 7, because one entry can cover several occurrences in
+one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
 
@@ -90,14 +91,38 @@ ignorable.
 cleared earlier; this pass took the remaining 14.
 
 ### D4 — 4 files over 1200 lines
-`data/memory_store.py` (2145), `tools/vpa/data.py` (1410),
-`data/snapshot_store.py` (1339), `tools/vpa/llm.py` (1244).
-**Cost.** A file an agent cannot hold in context gets edited blindly, and
-blind edits are where duplication starts.
-**Fix.** Split by responsibility, not by line count.
-**Recognise.** `file-size` gone from the baseline.
+
+**Paid 2026-09-14.** All four are under the limit, and none of the five new
+modules is over it either — moving lines from one file into another is not a fix.
+
+| was | now | cut |
+|---|---|---|
+| `data/memory_store.py` 2161 | **1063** | `_SCHEMA` (824) → `data/memory_schema.py`; the VPA + financials **caches** (275) → `data/vpa_store.py` |
+| `tools/vpa/data.py` 1409 | **827** | the bars-and-derived-metrics group (598) → `tools/vpa/bars.py` |
+| `data/snapshot_store.py` 1338 | **1082** | `_SCHEMA` (257) → `data/snapshot_schema.py` |
+| `tools/vpa/llm.py` 1243 | **887** | the 343-line system prompt + its `PROMPT_VERSION` → `tools/vpa/prompts.py` |
+
+Three of the five cuts needed **no caller changes at all**: `memory_store`,
+`snapshot_store` and `vpa/data.py` re-export the moved names, so every existing
+`from … import …` keeps working and the name cannot drift (it is the same object).
+Only `vpa_store` needed its two callers updated — because it imports the
+connection from `memory_store`, so `memory_store` cannot import it back.
+
+Two cuts were **measured and rejected**: `snapshot_store`'s news group (~250
+lines) has 28 callers — all fourteen `sources/` adapters — and the schema cut
+alone already put the file under the limit; and moving the connection itself
+(`_get_conn` / `MEMORY_DB_PATH`) would mean touching ~75 patch sites across 47
+test files plus `conftest`, where one miss sends tests at the production
+database. That is a separate slice, and it is not needed to satisfy this entry.
+
+**Recognise.** `file-size` gone from the baseline — met: the four lines were
+deleted and the grandfathered count fell 17 → 13.
 **Note.** Was 5 files; the count moves as the code does, so check it rather
 than trusting this line.
+**Caught by the harness on the way in.** The new `bars.py` used `Optional`
+without importing it, and `lint_harness`'s undefined-name rule failed the build
+on it — the same rule whose job is to notice a `NameError` that only fires on a
+production branch, doing exactly that on a refactor.
 
 ### D5 — Playbook clustering lost a dimension
 
@@ -351,6 +376,11 @@ the next person does not "fix a bug" in one copy only.
 
 ## Paid
 
+- Four files were past the 1200-line limit (D4). Nine modules now, none over it,
+  and three of the five cuts changed no caller at all — the moved names are
+  re-exported by the file they left. Two further cuts were measured and rejected:
+  a 250-line news group with 28 callers, and moving the database connection, which
+  would touch ~75 patch sites across 47 test files.
 - Playbook clustering grouped on a dimension nothing wrote (D5). It is now
   `change_pct_band`, recorded at decision time with the boundaries defined once,
   so the grouping, the generated condition and the matcher read one value. The

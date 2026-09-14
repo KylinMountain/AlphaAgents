@@ -125,16 +125,103 @@ class TestItFeedsAndGrades:
         assert len(shadow.predictions_for(experiment["run"])) == 1
 
 
-class TestItNeverAsksTheGate:
-    def test_no_verdict_is_recorded(self, store, experiment):
-        """A verdict is evidence for a person's decision. Asking daily would
-        write a near-identical `insufficient` row every day until the paired
-        count fills — governance in shape only, which is what the old
-        ``run_gate("daily_playbook", today, today)`` call was removed for."""
+class TestItDoesNotAskEarly:
+    def test_no_verdict_before_the_sample_is_there(self, store, experiment):
+        """A verdict is evidence for a person's decision, and there is none to
+        give yet."""
         _champion(_day(0), CANDIDATE)
         asyncio.run(run_shadow_run())
         assert holdout_gate.get_gate_decisions() == []
         assert PR.active()["version_id"] == experiment["incumbent"]
+
+
+class TestItAsksTheGateOnce:
+    """§12's stopping rule, as code: one look, at the preregistered point.
+
+    Asking daily would be optional stopping — many looks at one experiment, and
+    "one of them said promote" stops being evidence. It would also write a
+    near-identical `insufficient` row every day until the count filled, which is
+    the shape of governance without the substance.
+
+    ``coverage`` is stubbed to say the sample is there; the question itself, the
+    grading and the emit are real. Twenty paired days of champion and challenger
+    are what the real path needs, and building them is
+    ``test_gate_candidate_bound``'s job, not this one's.
+    """
+
+    def _ready(self, monkeypatch, experiment, *, paired=20, verdicts=()):
+        calls: list = []
+        monkeypatch.setattr(shadow, "coverage", lambda *a, **k: {"runs": [
+            {"run_id": experiment["run"],
+             "policy_version_id": experiment["target"],
+             "status": "open", "report_type": "morning",
+             "opened_at": _day(-30), "forecasts": paired, "scored": paired,
+             "scored_days": paired, "paired": paired,
+             "needed": holdout_gate.MIN_VALIDATION_SAMPLES,
+             "remaining": max(0, holdout_gate.MIN_VALIDATION_SAMPLES - paired)}]})
+        monkeypatch.setattr(holdout_gate, "get_gate_decisions",
+                            lambda *a, **k: list(verdicts))
+        monkeypatch.setattr(holdout_gate, "run_gate", lambda version, **kw: (
+            calls.append(version) or {
+                "outcome": "promote",
+                "validation_days": holdout_gate.MIN_VALIDATION_SAMPLES,
+                "evidence_scope": "candidate_policy",
+                "n": holdout_gate.MIN_VALIDATION_SAMPLES,
+                "reason": "beat the champion on a paired panel"}))
+        return calls
+
+    def test_it_asks_once_when_the_sample_is_there(self, store, experiment,
+                                                  monkeypatch):
+        calls = self._ready(monkeypatch, experiment)
+        _champion(_day(0), CANDIDATE)
+        report = asyncio.run(run_shadow_run())
+        assert calls == [experiment["target"]]
+        assert "裁决已记录：promote" in report
+        assert "人工 approve" in report
+
+    def test_it_does_not_ask_again_the_next_day(self, store, experiment,
+                                               monkeypatch):
+        """One verdict at the bar is the stopping rule. A second look would be
+        the same evidence counted twice."""
+        calls = self._ready(monkeypatch, experiment, verdicts=[{
+            "policy_version_id": experiment["target"], "run_id": experiment["run"],
+            "outcome": "promote",
+            "validation_days": holdout_gate.MIN_VALIDATION_SAMPLES}])
+        report = asyncio.run(run_shadow_run())
+        assert calls == []
+        assert "已裁决：promote" in report
+        assert "人工 approve" in report
+
+    def test_a_person_looking_early_does_not_suppress_the_ask(
+            self, store, experiment, monkeypatch):
+        """A manual `gate` before the count is reached is short of the bar, so
+        the preregistered question still gets asked."""
+        calls = self._ready(monkeypatch, experiment, verdicts=[{
+            "policy_version_id": experiment["target"], "run_id": experiment["run"],
+            "outcome": "insufficient", "validation_days": 3}])
+        asyncio.run(run_shadow_run())
+        assert calls == [experiment["target"]]
+
+    def test_it_still_asks_when_the_gate_is_ready_but_the_panel_is_empty(
+            self, store, experiment, monkeypatch):
+        """The emit and the question are independent steps: a day with no
+        champion picks does not stop the count reaching the bar."""
+        calls = self._ready(monkeypatch, experiment)
+        report = asyncio.run(run_shadow_run())
+        assert "没有可配对的面板" in report
+        assert calls == [experiment["target"]]
+
+    def test_a_gate_refusal_is_reported_not_raised(self, store, experiment,
+                                                   monkeypatch):
+        self._ready(monkeypatch, experiment)
+
+        def refuse(version, **kw):
+            raise holdout_gate.GateError("two shadow runs are open")
+
+        monkeypatch.setattr(holdout_gate, "run_gate", refuse)
+        report = asyncio.run(run_shadow_run())
+        assert "闸门拒绝回答" in report
+        assert "two shadow runs are open" in report
 
 
 class TestItCannotFailTheDay:

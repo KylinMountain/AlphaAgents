@@ -691,6 +691,38 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 生产库没有因此写任何裁决行 —— 仍是 3 行旧 abstain。**这一步刻意提前做**：
 等 20 个交易日后敲 `gate` 才发现表写不进去，代价太大。
 
+### 第十二轮（把「该修的」修掉：D2 / D7 / D9，外加一处文档更正）
+
+2026-09-14（同日第三支）：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1910 passed, 18 skipped**（149s；本轮 +5 用例） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（**159 个文件**），存量 **43 条**（上一轮 47 → D2 的 4 处分层违规清零） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+| `cd web && npm run check:render` | 8/8 |
+| `.github/workflows/harness.yml` | 新增 `frontend` job；**YAML 结构与步骤已校验，但 workflow 本身没有在本机跑过** |
+
+- **D9**：前端两项检查进 CI —— `setup-node@v4`（node 22 + 以 `web/package-lock.json`
+  为 key 的 npm 缓存）→ `npm ci` → `lint` → `build` → `check:render` →
+  `node --test tests/test_report_markdown.mjs`。**每一条命令都在本机跑过并全绿**，
+  但「CI 里真的会绿」这件事**没有被验证**（本机不具备 runner）—— 如实记下这个边界。
+- **D7**：`shadow_run` 现在**每条约一次**问闸门，正好在配对天数**首次**到达门槛那天；
+  已有裁决达到门槛就不再问。理由是 §12 禁止反复窥视（optional stopping）——
+  每天问既是反复窥视，又会天天写一行几乎相同的 `insufficient`。
+  人工提前问过（`validation_days` 不足）不会抑制自动提问。变异探针
+  （把守卫改成恒 `False`）被「第二天不再问」的用例捕获。
+- **D2**：**这条技术债条目自己写错了修法。** `daily_archive.py` 有两个职责：
+  `run_daily_archive` 拉四个 `tools/` 模块（**这才是违规**），而
+  `save_snapshot` / `get_snapshot` 是 `data/market_history`、`data/market_data`、
+  `data/sentiment_cycle` 在读的**存储**。按原条目整体搬到 `pipeline/`，会让三个
+  `data/` 模块 import `pipeline/` —— 四处违规换三处更糟的反向违规。
+  改为**拆**：`data/daily_snapshots.py`（存储，留在读者身边）+
+  `pipeline/tasks/daily_archive.py`（编排，可以 import `tools/`）。
+- **文档更正（同日在回答「还剩什么没实现」时发现）**：三条过期断言，其中一条是**真错** ——
+  `candidate_is_approved` / `entity_is_approved` 被写成「运维脚本在消费」，
+  实测**零调用者**。另两条是状态过期（策略表已建、快照 U5 之后确实在筛选 prompt）。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -1203,5 +1235,19 @@ policy 'trader' now has version #1 in force at seq 1.
 `evidence_scope` 读得回来。**没有**因此在生产库上写任何裁决行
 （生产 `gate_decisions` 仍是旧 schema，仍是 3 行 abstained）。
 这一步是刻意提前做的：等 20 个交易日后敲 `gate` 才发现表写不进去，代价太大。
+
+### 14.8 闸门自己问了（同日第三支）
+
+上面那句「报告里给的是进度」在当天晚些时候被推翻了一半：**现在会问，但只问一次。**
+
+规则是机械的：某条实验的**配对天数首次达到**闸门要求的那个交易日，
+`shadow_run` 替人问一次；此后只要最新一条裁决的 `validation_days` 已经达标，
+就不再问。理由不是省事，是 §12 禁止反复窥视 —— 每天问一次等于对同一个实验反复取样，
+「其中有一次说 promote」就不再是证据；顺带也不再每天写一行几乎相同的 `insufficient`。
+**人工提前问过不会抑制自动提问**，因为那条裁决的 `validation_days` 本来就不足门槛。
+
+三处一起还掉的债（D2 / D7 / D9）逐条见 §9 第十二轮与
+[tech-debt tracker](exec-plans/tech-debt-tracker.md)；其中 **D2 的条目自己写错了修法**，
+已在条目里写明为什么「整体搬到 `pipeline/`」会造出更糟的反向违规。
 
 

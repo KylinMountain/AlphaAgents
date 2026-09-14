@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 
 import akshare as ak
 
-from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
+from alpha_agents.data.daily_snapshots import save_snapshot, get_snapshot
 from alpha_agents.config import no_proxy
 
 logging.basicConfig(level=logging.INFO,

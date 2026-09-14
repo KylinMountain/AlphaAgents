@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 def test_save_and_get_snapshot():
     """Test that save_snapshot writes and get_snapshot reads correctly."""
-    from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
+    from alpha_agents.data.daily_snapshots import save_snapshot, get_snapshot
 
-    with patch("alpha_agents.data.daily_archive._get_conn") as mock_conn:
+    with patch("alpha_agents.data.daily_snapshots._get_conn") as mock_conn:
         import sqlite3
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -27,9 +27,9 @@ def test_save_and_get_snapshot():
 
 def test_save_snapshot_upserts():
     """Test that saving the same date+type overwrites."""
-    from alpha_agents.data.daily_archive import save_snapshot, get_snapshot
+    from alpha_agents.data.daily_snapshots import save_snapshot, get_snapshot
 
-    with patch("alpha_agents.data.daily_archive._get_conn") as mock_conn:
+    with patch("alpha_agents.data.daily_snapshots._get_conn") as mock_conn:
         import sqlite3
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -46,7 +46,7 @@ def test_save_snapshot_upserts():
 
 def test_run_daily_archive_calls_all_sources(monkeypatch):
     """Test that run_daily_archive attempts to archive all data types."""
-    from alpha_agents.data import daily_archive
+    from alpha_agents.pipeline.tasks import daily_archive
     archived = []
 
     def fake_save(date, data_type, data):

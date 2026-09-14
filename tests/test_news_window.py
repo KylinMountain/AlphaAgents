@@ -30,9 +30,25 @@ class TestNormalisePublishedAt:
         assert (normalise_published_at("Mon, 07 Sep 2026 14:30:00")
                 == "2026-09-07 14:30:00")
 
-    def test_yearless_format_assumes_current_year(self):
-        got = normalise_published_at("Fri Oct 28 03:49")
-        assert got.startswith(f"{datetime.now().year}-10-28")
+    def test_yearless_format_takes_the_most_recent_past_occurrence(self):
+        """This test used to assert "assume the current year", full stop.
+
+        That is how a stamp of "Dec 16" read in September became **2026-12-16** —
+        a future date, which out-sorts every real row in a feed ordered by
+        ``published_at`` and therefore held the top of the live panel for three
+        days while ingestion worked perfectly. A feed that omits the year means
+        the most recent occurrence, so a current-year reading that lands in the
+        future is last year's date.
+
+        Asserted as an invariant rather than an expected year, because the
+        expected year is a function of today.
+        """
+        from datetime import timedelta
+        for raw in ("Fri Oct 28 03:49", "Wed Dec 16 20:00", "Fri Sep 04 05:09"):
+            got = normalise_published_at(raw)
+            assert got != ""
+            assert (datetime.strptime(got, "%Y-%m-%d %H:%M:%S")
+                    - datetime.now() < timedelta(hours=6)), raw
 
     def test_unparseable_returns_empty_so_caller_can_drop(self):
         for raw in ("", "   ", "昨天", "not a date", None):

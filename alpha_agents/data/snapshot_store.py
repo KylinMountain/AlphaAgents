@@ -800,6 +800,7 @@ def normalise_published_at(raw: str) -> str:
         return ""
 
     from datetime import datetime as _dt
+    from datetime import timedelta
 
     # RFC 2822 first, via the email parser rather than strptime: %z matches
     # numeric offsets ('+0000') and 'Z', but not the alphabetic zone names
@@ -823,9 +824,23 @@ def normalise_published_at(raw: str) -> str:
             parsed = _dt.strptime(raw, fmt)
         except ValueError:
             continue
-        # Formats without a year default to 1900; assume the current one.
+        # Formats without a year default to 1900; assume the current one — and
+        # if that lands in the future, the stamp means *last* year, not next
+        # year's. A feed that omits the year means the most recent occurrence:
+        # reading "Dec 16" in September as this coming December wrote
+        # 2026-12-16 into the table, and that row sat at the top of the live
+        # feed for three days because nothing real can out-sort a future stamp.
+        # The six-hour allowance covers a source a few timezones ahead of us.
         if parsed.year == 1900:
             parsed = parsed.replace(year=_dt.now().year)
+            if parsed - _dt.now() > timedelta(hours=6):
+                try:
+                    parsed = parsed.replace(year=parsed.year - 1)
+                except ValueError:
+                    # Feb 29 of a leap year has no counterpart a year earlier.
+                    # Left alone; the read side caps it at now.
+                    logger.debug("Year-less stamp %r has no previous-year form",
+                                 raw)
         if parsed.tzinfo is not None:
             parsed = parsed.astimezone().replace(tzinfo=None)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
@@ -1003,7 +1018,20 @@ def read_latest_news(limit: int = 100,
     if sources:
         q.append("AND source IN (%s)" % ",".join("?" * len(sources)))
         params.extend(sources)
-    q.append("ORDER BY published_at DESC LIMIT ?")
+    # Ordered by publication time — or by *arrival*, whichever is earlier.
+    #
+    # A row stamped in the future out-sorts everything real, so it sits at the
+    # top of the feed for as long as it exists: two SEC rows dated 2026-12-16 and
+    # 2026-11-05 pinned this feed for three days, and the panel looked frozen
+    # while ingestion was working perfectly. Capping the key at *now* does not
+    # fix that — a key that moves with the query clock keeps such a row at the
+    # top for ever. Taking the earlier of the two does: a normal row is ordered
+    # by when it was published, an anomalous one by when it arrived, and neither
+    # can claim a future.
+    #
+    # The documented intent survives: a flash stamped a minute ahead of this box
+    # still leads, because its arrival is later than its stamp.
+    q.append("ORDER BY MIN(published_at, captured_at) DESC LIMIT ?")
     params.append(limit)
     rows = _get_conn().execute(" ".join(q), params).fetchall()
     return [{

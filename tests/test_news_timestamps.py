@@ -11,7 +11,7 @@ normalisation shipped.
 import pytest
 
 from alpha_agents.data import snapshot_store
-from alpha_agents.data.snapshot_store import normalise_published_at
+from alpha_agents.data.snapshot_store import normalise_published_at, now_captured_at
 
 
 @pytest.fixture()
@@ -117,3 +117,72 @@ class TestReadIgnoresLegacyOrdering:
         rows = store.read_latest_news(limit=5)
 
         assert rows[0]["title"] == "今天的快讯"
+
+
+class TestAYearLessStampIsNotFromTheFuture:
+    """A feed that omits the year means the most recent occurrence.
+
+    Reading "Dec 16" in September as *this* coming December wrote 2026-12-16 into
+    the table, and that row then sat at the top of the live feed for three days —
+    nothing real can out-sort a future stamp, so the panel looked frozen while
+    ingestion was working perfectly. Asserted as an invariant rather than an
+    expected year, because the expected year is a function of today.
+    """
+
+    @pytest.mark.parametrize("raw", [
+        "Wed Dec 16 20:00", "Thu Nov 5 20:00", "Sat Jan 3 09:30",
+    ])
+    def test_it_is_never_more_than_a_few_hours_ahead(self, raw):
+        from datetime import datetime, timedelta
+        parsed = datetime.strptime(normalise_published_at(raw),
+                                   "%Y-%m-%d %H:%M:%S")
+        assert parsed - datetime.now() < timedelta(hours=6)
+
+    def test_an_explicit_year_is_left_alone(self):
+        """Only our own inference is corrected.
+
+        A stamp that carried its year is the source's claim; the read side caps
+        its *ordering*, it does not rewrite the value. Otherwise the feed would
+        quietly edit what a source said.
+        """
+        assert normalise_published_at("2026-12-16 20:00:00") == \
+            "2026-12-16 20:00:00"
+
+
+class TestTheFeedIsNotPinnedByAFutureStamp:
+    def test_a_future_row_does_not_hold_the_top(self, store):
+        conn = store._get_conn()
+        conn.execute(
+            "INSERT INTO news_items (source, published_at, title, summary, url, "
+            "hash, captured_at) VALUES (?,?,?,?,?,?,?)",
+            ("SEC", "2026-12-16 20:00:00", "future-dated", "", "", "h9",
+             "2026-09-11 11:02"),
+        )
+        conn.commit()
+        store.save_news("财联社电报", [{
+            "title": "刚刚到的快讯", "summary": "",
+            "time": now_captured_at(), "url": "",
+        }])
+
+        rows = store.read_latest_news(limit=5)
+
+        assert rows[0]["title"] == "刚刚到的快讯"
+        assert "future-dated" in [r["title"] for r in rows], "and not hidden"
+
+    def test_a_stamp_a_minute_ahead_still_leads(self, store):
+        """The read's own design note, kept: a flash stamped slightly ahead of
+        this box must not vanish from a feed whose job is to show what just
+        arrived. Ordering by the earlier of stamp and arrival keeps it at the
+        top of its minute rather than dropping it."""
+        from datetime import datetime, timedelta
+        ahead = (datetime.now() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        older = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        store.save_news("金十数据", [{"title": "一分钟后的戳", "summary": "",
+                                      "time": ahead, "url": ""}])
+        store.save_news("财联社电报", [{"title": "更早的一条", "summary": "",
+                                        "time": older, "url": ""}])
+
+        titles = [r["title"] for r in store.read_latest_news(limit=5)]
+
+        assert "一分钟后的戳" in titles, "a slightly-ahead stamp must not vanish"
+        assert titles.index("一分钟后的戳") < titles.index("更早的一条")

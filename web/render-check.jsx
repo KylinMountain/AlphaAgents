@@ -95,10 +95,46 @@ const learnSections = {
                       ['learning_candidates.evidence_episode_ids',
                        'candidate_transitions']),
   forecasts: present('predictions',
-                     { rows: 202, scored: 170, brier_scored: 0,
+                     { rows: 232, scored: 202, brier_scored: 0, prob_rows: 48,
                        recent_hit_rate: { total: 10, hits: 6, hit_rate: 60,
-                                          by_confidence: { high: { total: 2, hits: 2, hit_rate: 100 } } } },
-                     202),
+                                          by_confidence: { high: { total: 2, hits: 2, hit_rate: 100 } } },
+                       pricing: { unscored: 48, ripe_unscored: 0, unripe: 48,
+                                  min_remaining_days: 1, archive_readable: true,
+                                  batches: [
+                                    { date: '2026-09-08', rows: 7, horizon: 5,
+                                      need: 6, have: 5, remaining: 1 },
+                                    { date: '2026-09-09', rows: 29, horizon: 5,
+                                      need: 6, have: 4, remaining: 2 }] } },
+                     232),
+}
+
+/* The other branch of the evaluation currency: a window the market has
+ * traded shut with no score behind it. This one IS a defect — the only
+ * branch the page renders as a warning — so the matrix must hold both and
+ * their copy must not be substrings of each other. */
+const learnRipe = {
+  ...learnSections,
+  forecasts: present('predictions',
+                     { rows: 232, scored: 202, brier_scored: 0, prob_rows: 48,
+                       recent_hit_rate: {},
+                       pricing: { unscored: 48, ripe_unscored: 7, unripe: 41,
+                                  min_remaining_days: 2, archive_readable: true,
+                                  batches: [{ date: '2026-09-07', rows: 7,
+                                              horizon: 5, need: 6, have: 6,
+                                              remaining: 0 }] } },
+                     232),
+}
+
+/* And the branch where the currency can never exist: no row carries a prob. */
+const learnUnpriceable = {
+  ...learnSections,
+  forecasts: present('predictions',
+                     { rows: 100, scored: 80, brier_scored: 0, prob_rows: 0,
+                       recent_hit_rate: {},
+                       pricing: { unscored: 0, ripe_unscored: 0, unripe: 0,
+                                  min_remaining_days: null,
+                                  archive_readable: true, batches: [] } },
+                     100),
 }
 
 const evolveSections = {
@@ -132,9 +168,20 @@ const CASES = [
   ['learn · empty + partial', LearnView,
    { learn: { workspace: 'learn', generated_at: '2026-09-13T04:30:00+00:00',
               states: {}, sections: learnSections } },
-   { want: ['学习日志', '这是合法状态，不是缺失', PARTIAL_HEAD, '还没有评估货币',
+   { want: ['学习日志', '这是合法状态，不是缺失', PARTIAL_HEAD, '成熟度，不是缺口',
+            '最早一批还差 1 个交易日', '可定价（带 prob）',
             'learning_candidates.evidence_episode_ids'],
-     reject: [ABSENT_HEAD, '整个读模型没到'] }],
+     reject: [ABSENT_HEAD, '整个读模型没到', '当前最要紧的缺口'] }],
+  ['learn · a batch is ripe but unscored', LearnView,
+   { learn: { workspace: 'learn', generated_at: '2026-09-14T04:30:00+00:00',
+              states: {}, sections: learnRipe } },
+   { want: ['窗口已收口却还没有 Brier', '这是要修的'],
+     reject: ['成熟度，不是缺口'] }],
+  ['learn · nothing carries a prob', LearnView,
+   { learn: { workspace: 'learn', generated_at: '2026-09-14T04:30:00+00:00',
+              states: {}, sections: learnUnpriceable } },
+   { want: ['没有一行带概率（prob）的预测', '闸门会一直 abstain'],
+     reject: ['成熟度，不是缺口'] }],
   ['evolve · absent + partial', EvolveView,
    { evolve: { workspace: 'evolve', generated_at: '2026-09-13T04:30:00+00:00',
                states: {},

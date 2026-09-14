@@ -114,6 +114,41 @@ def _market_dates(conn: sqlite3.Connection, entry_date: str,
     return [row["date"] for row in rows]
 
 
+def window_progress(entry_date: str,
+                    horizon: int = DEFAULT_HORIZON_DAYS) -> dict | None:
+    """How much of the evidence window the market has traded past.
+
+    The one place the window arithmetic lives. ``need`` is ``horizon + 1``
+    trading bars from the entry date (the entry bar is the first bar of the
+    window), ``have`` is how many the market has actually traded, and
+    ``remaining`` the gap — so "the 09-08 batch is one trading day short"
+    is a fact that can be reported, not re-derived. Callers that only need
+    the boolean go through :func:`evidence_window_closed`; callers that
+    must *say* how unripe a batch is — the review report, the Learn page —
+    take the counts, so that sentence never gets a second copy of the
+    arithmetic to disagree with.
+
+    ``None`` is a refusal to claim: the archive is absent or unreadable,
+    so not even "open" can be asserted about the window.
+    """
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        dates = _market_dates(conn, entry_date, horizon)
+        need = horizon + 1
+        have = len(dates)
+        return {"closed": have >= need, "have": have, "need": need,
+                "remaining": max(need - have, 0),
+                "last_market_date": dates[-1] if dates else None}
+    except sqlite3.Error as e:
+        logger.warning("scoring: cannot read the market calendar for %s: %s",
+                       entry_date, e)
+        return None
+    finally:
+        conn.close()
+
+
 def evidence_window_closed(entry_date: str,
                            horizon: int = DEFAULT_HORIZON_DAYS) -> bool:
     """Whether ``horizon`` trading days have passed since ``entry_date``.
@@ -136,19 +171,11 @@ def evidence_window_closed(entry_date: str,
     one: with no archive we cannot establish that the window closed, so we do
     not assert that it did. The cost is that a broken archive looks like a
     growing pile of unripe forecasts rather than a pile of censored ones, which
-    is why the callers report the deferred count instead of dropping it.
+    is why the callers report the deferred count instead of dropping it. The
+    arithmetic is :func:`window_progress`'s; this is its boolean.
     """
-    conn = _connect()
-    if conn is None:
-        return False
-    try:
-        return len(_market_dates(conn, entry_date, horizon)) >= horizon + 1
-    except sqlite3.Error as e:
-        logger.warning("scoring: cannot read the market calendar for %s: %s",
-                       entry_date, e)
-        return False
-    finally:
-        conn.close()
+    progress = window_progress(entry_date, horizon)
+    return bool(progress and progress["closed"])
 
 
 def _market_forward_return(conn: sqlite3.Connection, entry_date: str,

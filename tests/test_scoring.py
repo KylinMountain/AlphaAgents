@@ -254,6 +254,43 @@ class TestEvidenceWindowClosed:
         assert scoring.evidence_window_closed("2026-09-07", 5) is False
 
 
+class TestWindowProgress:
+    """The counts behind the boolean, so "not ripe yet" can be *said*.
+
+    ``evidence_window_closed`` answers a yes/no question, and the Learn page
+    needs more than that: how far along is each batch, how many trading days
+    are left. If the page re-derived that from its own arithmetic, the two
+    copies would eventually disagree — one of them would call a window shut
+    that the other keeps open, and the grader would be the wrong one. So the
+    counts live here, next to the predicate, and the predicate reads them.
+    """
+
+    def test_the_counts_match_the_boolean(self, market):
+        """have/need/remaining are the predicate, stated as numbers."""
+        _bars(market, _WEEK)
+        progress = scoring.window_progress("2026-09-07", 4)
+        assert progress["closed"] is True
+        assert progress["have"] == 5
+        assert progress["need"] == 5
+        assert progress["remaining"] == 0
+
+        progress = scoring.window_progress("2026-09-07", 5)
+        assert progress["closed"] is False
+        assert progress["have"] == 5
+        assert progress["need"] == 6
+        assert progress["remaining"] == 1
+
+    def test_a_refusal_is_none_not_a_count(self, tmp_path, monkeypatch):
+        """An unreadable archive is not "0 days done" — nothing is knowable.
+
+        ``remaining: 5`` would read as a patient countdown; the honest value
+        for "we cannot see the market" is no value at all, so the page can
+        refuse to display a progress bar over an archive that is not there.
+        """
+        monkeypatch.setattr(scoring, "DB_PATH", tmp_path / "nothing.db")
+        assert scoring.window_progress("2026-09-07", 5) is None
+
+
 class TestTheMappingComesFromThePointer:
     """The mapping is policy, so the version in force decides it.
 

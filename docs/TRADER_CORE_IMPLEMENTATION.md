@@ -1553,5 +1553,54 @@ baseline 读不到任何参数，所以同一个设置测的是「冠军有没�
 让「已达标」也报缺口 / 让 baseline 也吃那条警告 / 把影子报告的样本印回交易日 /
 **把停止规则改成单位一致**——最后这条把「断言 D16 缺陷」的用例变红，证明它测的是分歧本身）。
 
+### §14.12 Learn 页把成熟度叫成了缺口（2026-09-14 傍晚）
+
+Learn 页有两块在说错话，都是截图里直接看得见的。
+
+**「候选知识」块：schema 落后于代码，读模型只好降态。** `learning_candidates` 在生产库还是
+T3 之前的形状（缺四个提案列），`candidate_transitions` 整张表不存在——因为这个库**从来没有
+写者跑过**（0 行），而读模型按设计**先探针再读、绝不建表**。修法就是
+`PARTIAL_NOTE` 自己指明的那句：「补 schema 是运维动作」——备份（SQLite backup API 到
+`/tmp/memory.db.before-candidate-migration`）后对生产库跑了一次幂等的
+`learning_candidates.init_schema`。之后这块从 `落后于代码/修不到` 变成
+`complete / empty`（0 行、integrity 干净），配它本来就有的那句诚实话：
+**候选生命周期刻意不被管线驱动，代价就是这里长期为空**。空是合法状态，缺列不是。
+
+**「预测与评估货币」块：把 D10 的日历叫成了「当前最要紧的缺口」。** 旧文案是
+`232 行没有 Brier …… 这不是「暂时没数据」，是当前最要紧的缺口`。两处都错：
+
+1. **分母错了**。`rows - brier_scored` 把没有 `prob` 的行也算进「缺的评估」——可评估的总体是
+   带 `prob` 的 **48 行**，其余 184 行是观察信号，永远不进 Brier 的账，数它们是在数一笔
+   没人欠的债。
+2. **性质错了**。brier 只在证据窗口收口后写（`scoring.evidence_window_closed` 是唯一判据），
+   所以「已有 Brier = 0」在窗口未收口时是**成熟度，不是缺口**。真正要修的只有一种形状：
+   **窗口收了还没分**。
+
+修法是让页面说事实而不是说判断：
+
+- `scoring` 新增公开的 **`window_progress(entry_date, horizon)`**（`closed/have/need/remaining`）
+  ——窗口算术的**唯一**一份，`evidence_window_closed` 改成由它推导（行为不变，原用例全绿）。
+  页面要「报出还差几天」就必须拿计数，而计数不能再有一份自己的算术。
+- 读模型 `learn._read_forecasts` 增加 **`pricing`** 块：按 `(date, horizon_days)` 分批，
+  每批给 `have/need/remaining`；`ripe_unscored` 单独数（这是唯一的缺陷信号）；
+  行情档案不可读时批次进度为 `None` 并报 `archive_readable: False`——**拒绝断言**，
+  不在看不见的行情上画进度条。兜底 horizon 用评分器自己的 `DEFAULT_HORIZON_DAYS`，
+  否则页面量的窗口和分数落的窗口不是同一个。
+- 前端 `Forecasts` 改成五个分支：无预测 / **prob_rows=0（warn：评估货币无从产生）** /
+  **ripe_unscored>0（warn：评分步没跑到，这是要修的）** / 档案不可读（拒绝断言）/
+  未熟（soft：成熟度，不是缺口，最早一批还差 N 个交易日）+ 批次进度表。
+- `check:render` 补了两个用例（熟了没分 / 无 prob），并且**当场抓到一条真 bug**：
+  组件初版从 `pricing` 里读 `prob_rows`，而它在 totals 顶层——lint 和 build 全绿灯，
+  渲染矩阵红了（§10 的老规矩再次生效）。
+
+生产库现在的真实读数：232 行 / hit 202 / **可定价 48 / brier 0**，pricing 报
+`ripe_unscored 0`、`unripe 48`、最早一批（09-08 的 7 行）**还差 1 个交易日**——
+即 2026-09-15 收盘后第一批 brier 才可能落地。和 §14.11 的推算逐批吻合。
+
+验证：**2007 passed / 18 skipped**（净增 7：`test_forecast_pricing_readmodel.py` 5 条 +
+`TestWindowProgress` 2 条；check:render 新用例不计入 pytest）；`lint_harness` 167 文件、
+存量仍 13 条；`lint_docs` 通过；`web` 三条（lint / build / check:render）全过，
+渲染矩阵 10 用例 OK。
+
 
 

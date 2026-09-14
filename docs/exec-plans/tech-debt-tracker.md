@@ -8,16 +8,20 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-13. On 2026-09-12 four baseline lines had become dead —
-the code was fixed but the exemption was never removed — and were deleted.
-Deleting a line is the point: the exemption existed to keep CI honest while the
-code was broken, and once it is fixed the line is a lie about the repo._
+_Last updated 2026-09-14. D10 (the due test counted calendar days) and D11 (the
+evolve page's reachable branch had no render case) were paid: a not-yet-ripe
+forecast now stays `pending` instead of being censored, and the render matrix
+carries one case per branch. **Open: D2–D9.**_
 
-_Also on 2026-09-13: D6's recogniser became narrower and checkable (the
-scoring path is wired; `brier` is NULL on a calendar, not on a missing call),
-which is the difference between "wait" and "go look". D8 and D9 were added the
-same day — a column with no writer, and a check that only runs when someone
-remembers._
+_On 2026-09-12 four baseline lines had become dead — the code was fixed but the
+exemption was never removed — and were deleted. Deleting a line is the point: the
+exemption existed to keep CI honest while the code was broken, and once it is
+fixed the line is a lie about the repo._
+
+_2026-09-13: D6's recogniser became narrower and checkable (the scoring path is
+wired; `brier` is NULL on a calendar, not on a missing call), which is the
+difference between "wait" and "go look". D8 and D9 were added the same day — a
+column with no writer, and a check that only runs when someone remembers._
 
 **Current baseline: 26 entries covering 47 violations.** `lint_harness.py`
 prints the 47, not the 26, because one entry can cover several occurrences in

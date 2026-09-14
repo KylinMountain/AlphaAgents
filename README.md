@@ -271,12 +271,16 @@ Phase 4 的另一半也在 2026-09-13 补上了：`scripts/policy.py` 此前四�
 Phase 5 的读模型（`alpha_agents/server/readmodels/`）把上面这句话做成了可读的状态，
 而不是留给人去比对文档。每个 section 声明它读的**表与列**，读之前先做一次只读探针：
 
-| 状态 | 含义 | 今天的例子 |
+| 状态 | 含义 | 今天的例子（2026-09-14） |
 |---|---|---|
-| `unavailable` / `schema=absent` | 表在本库不存在，模块从未跑过 | `policy_versions`、`shadow_runs` |
-| `unavailable` / `schema=partial` | 表在，但缺列 —— **本库 schema 落后于代码** | `gate_decisions` 缺 `evidence_scope` 与 `validation_days`；`learning_candidates` 缺 `evidence_episode_ids`，且 `candidate_transitions` 整张表不在 |
-| `empty` | 表在、0 行，**这是合法状态** | `episodes`、`outcomes`、`position_exits` |
-| `present` | 有行 | `virtual_portfolio`（52 行）、`predictions`（202 行） |
+| `unavailable` / `schema=absent` | 表在本库不存在，模块从未跑过 | `candidate_transitions` |
+| `unavailable` / `schema=partial` | 表在，但缺列 —— **本库 schema 落后于代码** | `gate_decisions` 缺 `evidence_scope` 等四列（第一次写裁决时会自动 `ALTER`）；`learning_candidates` 缺 `evidence_episode_ids` |
+| `empty` | 表在、0 行，**这是合法状态** | `episodes`、`outcomes`、`position_exits`、`shadow_runs` |
+| `present` | 有行 | `virtual_portfolio`（52 行）、`predictions`（202 行）、`policy_versions`（1 个版本在效） |
+
+**这一列会随运维动作变，所以它带日期。** 09-13 实测 evolve 的 `pointer` / `shadow` 是
+`absent`；09-14 执行第 0 步（`freeze` + `install`）之后分别变成 `present` 与 `empty`。
+「进化实验台」这个页面因此从 09-14 起有真实内容，而「学习日志」仍然主要是状态说明。
 
 这条设计的要点是**读模型不建表**：每个数据模块的读函数进入时都会 `init_schema`，
 所以一个顺手调用的页面会把「打开一次网页」变成一次 schema 变更。

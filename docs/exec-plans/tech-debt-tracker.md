@@ -79,10 +79,15 @@ regresses out style exposure and computes Brier, on the daily 15:30 review.
 on all 202 because **no forecast had matured yet**.
 **Recognise (narrower, check this before writing any scoring code).** Confirm
 `SUM(brier IS NOT NULL) > 0` after the market data for **2026-09-15** is in
-the database (see D10 — the calendar due date of 2026-09-13 is one trading
-day early, so the 09-08 batch is only gradeable once the 09-15 close exists).
+the database (see D10 — the calendar due date was one trading day early, which
+is now fixed, but the *window* still closes on the 09-15 close, so the 09-08
+batch is only gradeable once that row exists).
 If it is still 0 at that point, this becomes a code bug in one of two places —
 the market window not covering the horizon, or the due-date filter.
+**Status 2026-09-14.** Unchanged, and the reason it is still open is now purely
+the market's calendar: D10 was fixed on 2026-09-13, so the due test no longer
+fires early and no forecast is censored for a window that is still open. What
+remains is the wait for the 2026-09-15 close.
 
 ### D7 — The champion/challenger gate has no caller
 **Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but
@@ -101,19 +106,23 @@ no-skill baseline, which says the champion has skill and says nothing about
 whether a policy is better.
 **Status 2026-09-13.** The mechanism is delivered (Phase 4, U1–U5) and this
 recogniser is still unmet: `gate_decisions` holds no non-abstain production
-row. The blocker has become two things, and only one of them is data:
+row. The blocker is now **one** thing, not two:
 
 1. `predictions.brier` is still NULL on every row, so the champion half of any
    comparison is empty.
-2. `shadow.PRODUCERS` registers the constant baseline only, so nothing in the
-   build emits candidate-grade evidence and every verdict is refused on
-   `evidence_scope` by design. Adding a candidate producer is a design
-   decision — what the challenger *is* — not a missing function.
 
-The original title still holds for a third reason: `run_gate` has no production
-caller. Nothing in `pipeline/` or `server/` schedules it, so the gate went from
-"can never fire" to "correct, candidate-bound and never asked" — progress, and
-still not "running in production".
+The second reason is gone: `shadow.PRODUCERS` now registers
+`remap_confidence` with `kind="candidate"`, and `scripts/policy.py` gained the
+`freeze` / `install` verbs, so the build can produce candidate-grade evidence
+and an operator can create the first record. That also removes the "a promotion
+would be a no-op" defect this entry did not know about: the decision parameters
+are read from the version in force, so moving the pointer changes behaviour.
+
+The original title still holds for a second reason: `run_gate` has no production
+caller. Nothing in `pipeline/` or `server/` schedules it, and there is still no
+verb that opens or advances a shadow run, so the gate went from "can never fire"
+to "correct, candidate-bound and never asked" — progress, and still not
+"running in production".
 **Note.** This is the one debt item that is scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".
@@ -155,6 +164,11 @@ the page work.
 `node --test tests/test_report_markdown.mjs`.
 
 ### D10 — The due test counts calendar days; the horizon counts trading days
+
+**Paid 2026-09-13 — kept here for the analysis, not as an open item.** The fix
+is recorded at the end of this entry; the cost analysis is left intact because
+it is the evidence that the recogniser below is the right one.
+
 **Cost.** `scoring._forward_return` needs `horizon + 1` rows from
 `daily_kline` — the entry close plus the close of the horizon-th *trading* day
 after it. Maturity is decided by
@@ -184,16 +198,51 @@ fabricated `scored=`, so they never travel through the due query,
 `score_prediction` and `_forward_return`, which is the only path where the
 two calendars meet. A function whose docstring names itself "the G1 signal"
 is exactly the function an untested seam hides in.
-**Fix.** Decide maturity in trading days, or separate the two facts: "the
-clock reached the horizon" is not "the evidence window has closed", so a
-premature attempt should leave the label `pending` instead of resolving it
-`censored`.
-**Recognise.** A forecast whose *first resolved* label is `matured` rather
-than `censored` — or a `censored` reason that distinguishes "not yet due" from
-"no data".
+**Fix (landed 2026-09-13).** The second option, taken — the two facts are now
+separate. `scoring.evidence_window_closed(entry_date, horizon)` asks the
+market's own calendar whether `horizon + 1` trading days have elapsed, and it is
+the only source of that judgement: it is derived, never a boolean a caller
+passes in, because a caller-supplied verdict is what lets a label decide what
+the evidence says. `outcome_labels.label_forecast` consults it when no score
+came back — a window still open leaves the label `pending` and writes nothing,
+while a closed window with no price still censors, exactly as before.
+`review._score_due_predictions` and `shadow.score_due` each report "graded /
+window still open / censored" separately instead of folding three different
+answers into one count. `deadline` keeps its calendar meaning on purpose: it is
+the author's *declaration*, not the system's inference.
+**Recognise.** A forecast whose first resolved label is `censored` while the
+market had not traded `horizon + 1` days past its entry date. The old
+recogniser (a first-resolved `matured`) still applies and is now reachable: the
+2026-09-08 batch is graded on the **2026-09-15** close.
+**Tests.** `tests/test_score_due_predictions.py` — six cases, the function's
+first, running the real predicate and the real `score_prediction` over a
+synthetic `daily_kline` rather than stubbing either.
+
+### D11 — The evolve page's "reachable" branch has no render case
+**Cost.** `cd web && npm run check:render` is the only check that can fail on a
+workspace rendering the wrong thing, and its evolve case feeds a hand-built
+payload with `reachable: false`. On 2026-09-13 the build flipped to
+`reachable: true` (a candidate producer was registered), so the branch the real
+page now takes — the "可达" banner and the non-warning KPI note — has **no case
+in the matrix**. The check still passes, because it asserts about its own
+synthetic payload; this is a coverage gap rather than a wrong claim, and the
+`reachable: false` case is worth keeping for the same reason.
+**Fix.** A second evolve case with `candidate_producers: ['remap_confidence']`
+and `reachable: true`, asserting the reachable copy appears **and** that
+`本构建不可达` does not — the pair, since a "must appear" assertion is
+satisfiable by a coincidentally correct neighbour string.
+**Recognise.** Two evolve cases in `render-check.jsx`, one per branch of
+`Reachability`.
 
 ## Paid
 
+- The forecast due test counted calendar days against a trading-day horizon
+  (D10), so no forecast could be scored on its declared due date and the
+  `matured` label was unreachable — every graded forecast went through
+  `censored → revised`, turning an informative correction stream into clock
+  noise. Fixed 2026-09-13 by separating "the clock reached the horizon" from
+  "the evidence window has closed"; a not-yet-ripe forecast now stays
+  `pending`.
 - `data/portfolio.py` had 3 layering violations — service code (stop-loss,
   holding caps, bearish signals) sitting in the storage layer. It no longer
   imports `tools/` at all, and the exit slice moved to `portfolio_exit.py` in

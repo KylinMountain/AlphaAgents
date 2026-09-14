@@ -71,6 +71,10 @@ def version(store) -> int:
             "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
             "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
             "knowledge": {"snapshot_id": None},
+            # The pointer-controlled source: the decision parameters the
+            # trading path reads. What is in force before anything is installed
+            # is the code default block, which is what a freeze records.
+            "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
         },
         created_by="kylin", reason="frozen for the forward window")
 
@@ -116,6 +120,21 @@ def _fake_score(brier: float = 0.25, outcome: bool = True):
                 "residual_alpha": 0.005, "outcome": outcome,
                 "scored_at": "2026-06-01 10:00:00"}
     return _score
+
+
+@pytest.fixture(autouse=True)
+def window_closed(monkeypatch):
+    """The market has traded every window in this module shut.
+
+    Autouse because this file is about the shadow *record* — runs, binding,
+    isolation, grading bookkeeping — and every grading test here means "the
+    window is over, grade it". The sandbox has no ``daily_kline`` at all, which
+    is the other branch (deferred) and has its own tests: the real predicate in
+    ``test_scoring.py``, the deferred accounting in ``test_score_due_predictions.py``
+    and in ``TestGrading.test_a_window_that_is_still_open_is_deferred`` below.
+    """
+    monkeypatch.setattr(scoring, "evidence_window_closed",
+                        lambda entry_date, horizon=5: True)
 
 
 # ── 1. A run is bound to a version ─────────────────────────────────────
@@ -317,8 +336,30 @@ class TestGrading:
         run = _open(version)
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         result = SH.score_due(as_of="2026-06-01")
-        assert result == {"graded": 0, "unscorable": 1, "as_of": "2026-06-01"}
+        assert result == {"graded": 0, "unscorable": 1, "deferred": 0,
+                          "as_of": "2026-06-01"}
         assert SH.scored_for(run) == []
+
+    def test_a_window_that_is_still_open_is_deferred_not_unscorable(
+            self, store, version, monkeypatch):
+        """The other half of the split, and the reason it is a split.
+
+        ``unscorable`` claims the window closed and the price never came — a
+        data gap. A window the market has not traded shut is not that, and
+        counting it as one made a live experiment read like a broken feed.
+        """
+        monkeypatch.setattr(scoring, "evidence_window_closed",
+                            lambda entry_date, horizon=5: False)
+        monkeypatch.setattr(scoring, "score_prediction",
+                            lambda *a, **k: pytest.fail("not ripe, not graded"))
+        run = _open(version)
+        SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
+        result = SH.score_due(as_of="2026-06-01")
+        assert result == {"graded": 0, "unscorable": 0, "deferred": 1,
+                          "as_of": "2026-06-01"}
+        # Still waiting, not dropped: the row is re-selected next run.
+        assert SH.scored_for(run) == []
+        assert len(SH.predictions_for(run)) == 1
 
     def test_grading_can_be_scoped_to_one_run(self, store, version, monkeypatch):
         monkeypatch.setattr(scoring, "score_prediction", _fake_score())
@@ -326,7 +367,8 @@ class TestGrading:
         SH.emit_for_date(first, "2026-01-05", panel=["600000"], horizon_days=5)
         PR_second = PR.freeze(
             sources={"prompts": {}, "model": {}, "retrieval": {}, "rules": {},
-                     "knowledge": {"snapshot_id": None}},
+                     "knowledge": {"snapshot_id": None},
+                     "decision": dict(scoring.DEFAULT_DECISION_PARAMS)},
             created_by="kylin", reason="second")
         second = _open(PR_second)
         SH.emit_for_date(second, "2026-01-05", panel=["000001"], horizon_days=5)

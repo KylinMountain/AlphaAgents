@@ -31,6 +31,7 @@ import pytest
 from alpha_agents.data import clock, episodes, intent as I, memory_store
 from alpha_agents.data import outcomes as O
 from alpha_agents.data import portfolio as P
+from alpha_agents.data import scoring
 from alpha_agents.data import thesis as T
 from alpha_agents.data import trader as TR
 from alpha_agents.evolution import outcome_labels as OL
@@ -49,6 +50,21 @@ def store(tmp_path, monkeypatch):
     if c is not None:
         c.close()
     memory_store._local.conn = None
+
+
+@pytest.fixture()
+def window_closed(monkeypatch):
+    """The market has traded the forecast window shut.
+
+    Stubbed, not built: a label's contract is "the horizon is over, here is
+    what we could grade", and manufacturing a ``daily_kline`` inside a test
+    about the label lifecycle would test the price layer instead. The
+    predicate itself is exercised against a fake market in
+    ``test_scoring.py``; without this stub the sandbox has no archive at all,
+    which is the *other* branch and has its own test below.
+    """
+    monkeypatch.setattr(scoring, "evidence_window_closed",
+                        lambda entry_date, horizon=5: True)
 
 
 @pytest.fixture()
@@ -508,7 +524,8 @@ class TestTheLabellers:
         assert other["changed"] is False, "a matured label is not re-derived"
         assert len(O.history(conn, O.FORECAST, "prediction", pid)) == 2
 
-    def test_a_missing_score_is_censored_not_dropped(self, store):
+    def test_a_missing_score_is_censored_not_dropped(self, store,
+                                                     window_closed):
         """A system that silently skips the un-gradeable ones reports a
         hit rate over a sample it chose."""
         pid = _prediction(date="2026-01-05", horizon_days=3)
@@ -516,11 +533,56 @@ class TestTheLabellers:
         result = OL.label_forecast(conn, prediction=_due("2026-01-08")[0],
                                    scored=None, as_of="2026-01-08")
         assert result["state"] == O.CENSORED
+        assert result["deferred"] is False
         label = O.current(conn, O.FORECAST, "prediction", pid)
         assert label["state"] == O.CENSORED
         assert "no score" in label["evidence"]["reason"]
 
-    def test_a_censored_forecast_is_corrected_when_the_data_arrives(self, store):
+    def test_a_window_that_is_still_open_is_not_censored(self, store):
+        """The deadline is a calendar count; the window is trading days.
+
+        D10, as an assertion. ``deadline`` fired on day 3 and the forward
+        return needs four bars, so on the day the due test hands the row over
+        there is nothing to grade *and nothing missing* — we simply have not
+        waited. Recording "we waited and got nothing" here put a censored
+        label on every forecast in the book the moment its calendar deadline
+        passed, then revised each one back days later.
+        """
+        pid = _prediction(date="2026-01-05", horizon_days=3)
+        conn = _db()
+        result = OL.label_forecast(conn, prediction=_due("2026-01-08")[0],
+                                   scored=None, as_of="2026-01-08")
+        assert result["deferred"] is True
+        assert result["changed"] is False
+        assert result["state"] == O.PENDING
+        label = O.current(conn, O.FORECAST, "prediction", pid)
+        assert label["state"] == O.PENDING, "no terminal label was earned"
+        assert "reason" not in label["evidence"]
+
+    def test_the_same_row_censors_once_the_window_closes(self, store,
+                                                        monkeypatch):
+        """The control for the test above: deferral is not an escape.
+
+        Re-running the evaluator after the market traded the window shut must
+        censors the row — otherwise "not yet" would be a place rows go to be
+        forgotten, which is the opposite of what §9 asks for.
+        """
+        pid = _prediction(date="2026-01-05", horizon_days=3)
+        conn = _db()
+        pred = _due("2026-01-08")[0]
+        first = OL.label_forecast(conn, prediction=pred, scored=None,
+                                  as_of="2026-01-08")
+        assert first["deferred"] is True
+        monkeypatch.setattr(scoring, "evidence_window_closed",
+                            lambda entry_date, horizon=5: True)
+        second = OL.label_forecast(conn, prediction=pred, scored=None,
+                                   as_of="2026-01-09")
+        assert second["state"] == O.CENSORED and second["changed"] is True
+        assert [r["state"] for r in O.history(conn, O.FORECAST, "prediction",
+                                              pid)] == [O.PENDING, O.CENSORED]
+
+    def test_a_censored_forecast_is_corrected_when_the_data_arrives(
+            self, store, window_closed):
         """The live path for ``censored → revised``: the horizon arrived
         without evidence, the evidence turned up later, and the correction
         is appended rather than overwriting the censored fact."""

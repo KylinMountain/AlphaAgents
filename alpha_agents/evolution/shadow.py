@@ -31,33 +31,44 @@ fills cannot reach the main account, and shadow-derived lessons cannot enter
 the champion's active knowledge" then holds by construction rather than by
 review.
 
-**The baseline, and who is allowed to emit.** §11 names three roles, not two:
-a champion, a challenger, and "an appropriate frozen simple non-LLM baseline".
-The first producer here *is* the baseline — a constant 0.5, "permanently
-uncertain". ``brier_score``'s own docstring names 0.25 as "the line to beat", so
-it asks the one question a first experiment should ask: does the champion beat
-no skill at all. It is non-LLM, deterministic, and has nothing to freeze beyond
-its own definition, which is what makes it a usable bound rather than a second
-opinion.
+**Two producers, and what each is for.** §11 names three roles, not two: a
+champion, a challenger, and "an appropriate frozen simple non-LLM baseline".
 
+``constant_0.5`` is the baseline — a constant 0.5, "permanently uncertain".
+``brier_score``'s own docstring names 0.25 as "the line to beat", so it asks the
+one question a first experiment should ask: does the champion beat no skill at
+all. It is non-LLM, deterministic, and has nothing to freeze beyond its own
+definition, which is what makes it a usable bound rather than a second opinion.
 It is **not** a candidate policy, and that difference decides whether a verdict
 may promote: beating a no-skill bound answers "does the champion have skill",
-not "is this policy better". :data:`PRODUCERS` records each producer's *kind*,
-``holdout_gate`` writes the kind into the verdict as its evidence scope, and
-``policy_registry`` refuses to promote on anything that is not a candidate's.
-So the scope follows from the code that emitted the forecasts, never from a
-label the caller typed — see the note on :data:`PRODUCERS`.
+not "is this policy better".
 
-**The panel is shared; the forecast is not.** The challenger forecasts exactly
+``remap_confidence`` is the candidate, and the first this build has had. It
+applies **its own version's** confidence → probability mapping to the champion's
+recorded confidence label. That is §12's module-level experiment: the picks and
+the upstream signal are held fixed and one mapping is varied, so a pair over the
+same codes compares the mapping rather than two different opinions. Before it
+existed every verdict this repo could produce was baseline-only and nothing was
+promotable — the mechanism was delivered and could not run.
+
+:data:`PRODUCERS` records each producer's *kind*, ``holdout_gate`` writes the
+kind into the verdict as its evidence scope, and ``policy_registry`` refuses to
+promote on anything that is not a candidate's. So the scope follows from the
+code that emitted the forecasts, never from a label the caller typed — see the
+note on :data:`PRODUCERS`.
+
+**The panel is shared, and so is the signal.** The challenger forecasts exactly
 the codes the champion forecast that day, because §12 requires prediction
 comparison to use "a common opportunity panel" and a paired test over the same
 predictions. Reading the champion's codes to define the panel is not
-contamination — it fixes *what* is compared, and the probability is a constant
-that does not look at the champion's. What is deliberately absent is any
-treatment of abstentions or missing responses: the panel is the champion's
-codes, the denominator is reported as ``paired`` in :func:`coverage`, and a
-challenger that is missing rows is visibly missing them rather than scored as
-if it had answered.
+contamination — it fixes *what* is compared. The candidate reads one thing more:
+the champion's confidence label, because a mapping with nothing to map is not a
+mapping. What it must not read is the champion's *probability*: that is the
+number the verdict grades, and a challenger derived from it would be grading
+itself. What is deliberately absent is any treatment of abstentions or missing
+responses: the panel is the champion's codes, the denominator is reported as
+``paired`` in :func:`coverage`, and a challenger that is missing rows is visibly
+missing them rather than scored as if it had answered.
 """
 
 from __future__ import annotations
@@ -96,17 +107,69 @@ class ShadowError(ValueError):
 
 
 @dataclass(frozen=True)
+class DecisionContext:
+    """The world a shadow run is bound to.
+
+    ``params`` is the decision-parameter block of the version the run measures,
+    read out of that version rather than out of the running system — which is
+    the only reason two versions can produce two different forecasts for the
+    same day. ``signals`` is the champion's recorded confidence label per code,
+    the upstream a mapping needs in order to be a mapping.
+
+    Both are resolved **before** the write lock is taken and passed in, so the
+    forecast never reaches back into a database while its own row is being
+    written.
+    """
+
+    policy_version_id: int
+    report_type: str
+    params: dict
+    signals: dict
+
+
+@dataclass(frozen=True)
 class Producer:
     """Who emits a run's forecasts, and what its verdict may support.
 
-    ``forecast`` takes the date and the code and returns a probability. The
-    baseline ignores both arguments, which is the point of it; a candidate is
-    free to read the frozen policy version the run is bound to.
+    ``forecast`` takes the date, the code and the :class:`DecisionContext` the
+    run is bound to, and returns a probability. The baseline ignores all three,
+    which is the point of it; a candidate reads the context, because the
+    version's parameters are what it is a candidate *of* — a producer that
+    could not see them could not differ from the champion it is measured
+    against.
     """
 
     name: str
     kind: str
-    forecast: Callable[[str, str], float]
+    forecast: Callable[[str, str, DecisionContext], float]
+
+
+#: The candidate producer's name, registered in :data:`PRODUCERS` below.
+CANDIDATE_NAME = "remap_confidence"
+
+
+def remap_confidence(date: str, code: str, ctx: DecisionContext) -> float:
+    """The champion's signal, through this version's mapping.
+
+    The challenger. §12's module-level experiment: the opportunity panel and the
+    upstream confidence labels are the champion's and are held fixed, and the
+    confidence → probability mapping is the one variable the version asserts.
+
+    What this must never read is the champion's ``prob``. That number is what
+    the verdict grades, and a challenger computed from it would be comparing a
+    mapping against itself. A code the champion recorded no label for falls to
+    a coin flip, which is what an unknown label means everywhere else; it is
+    still counted in the panel, because dropping it would be a coverage
+    decision made silently and :func:`coverage` is where that belongs.
+
+    The limit worth stating: the champion's own probability came from the
+    *whole* block applied on its own path — the evidence-count branch where the
+    caller had the count, the label branch otherwise — while this can only
+    apply the label branch, because a label is the only input the champion
+    records. So the pair measures the label path, which is the path most of the
+    book takes, and a promotion changes both.
+    """
+    return scoring.confidence_to_prob(ctx.signals.get(code), params=ctx.params)
 
 
 #: The producers a shadow run may name, by name.
@@ -124,13 +187,16 @@ class Producer:
 #: read back through this table, so changing a name's kind would silently
 #: reinterpret verdicts already in the audit.
 #:
-#: This table holds the baseline and nothing else. There is **no candidate
-#: producer yet**, so every verdict this build can produce is baseline-only and
-#: nothing is promotable — which is the honest state, and the reason a
-#: promotion is refused rather than the reason one is never asked for.
+#: One baseline and one candidate. The baseline answers "does the champion have
+#: skill"; the candidate is what a verdict can actually promote on. Neither is
+#: an LLM, and that is a requirement rather than a preference: §11 asks for a
+#: frozen simple non-LLM baseline, and §12 forbids treating a model's confidence
+#: in itself as ground truth.
 PRODUCERS: dict[str, Producer] = {
     BASELINE_NAME: Producer(name=BASELINE_NAME, kind=KIND_BASELINE,
-                            forecast=lambda date, code: BASELINE_PROB),
+                            forecast=lambda date, code, ctx: BASELINE_PROB),
+    CANDIDATE_NAME: Producer(name=CANDIDATE_NAME, kind=KIND_CANDIDATE,
+                             forecast=remap_confidence),
 }
 
 
@@ -433,6 +499,9 @@ def emit_for_date(run_id: int, date: str, *,
     name the run recorded. That lookup is the only place a probability is
     decided, so "which producer emitted this" — the fact a verdict's evidence
     scope is derived from — is answered by the same act that writes the row.
+    The producer is handed the *version it is bound to*: the parameters come
+    from ``policy_version_id``, not from the configuration in force, which is
+    what lets a challenger differ from the champion it is compared against.
 
     Idempotent per (run, date, code): re-emitting a day updates the forecast
     rather than adding a second row for the same stock, because two rows would
@@ -463,6 +532,13 @@ def emit_for_date(run_id: int, date: str, *,
         raise ShadowError(
             f"A {horizon_days}-day horizon does not produce a deadline; the "
             "forecast could never mature.")
+    # Resolved before the lock: the parameters of the version being measured,
+    # and the champion's labels for the panel it will be paired against.
+    ctx = DecisionContext(
+        policy_version_id=run["policy_version_id"],
+        report_type=run["report_type"],
+        params=scoring.decision_params_of(run["policy_version_id"]),
+        signals=_champion_signals(date, panel, run["report_type"]))
 
     ids: list[int] = []
     with memory_store._write_lock:
@@ -479,8 +555,8 @@ def emit_for_date(run_id: int, date: str, *,
                     "prob = excluded.prob, horizon_days = excluded.horizon_days, "
                     "deadline = excluded.deadline",
                     (run_id, run["policy_version_id"], date, code,
-                     float(producer.forecast(date, code)), int(horizon_days),
-                     deadline))
+                     float(producer.forecast(date, code, ctx)),
+                     int(horizon_days), deadline))
                 row = conn.execute(
                     "SELECT id FROM shadow_predictions WHERE run_id = ? "
                     "AND date = ? AND code = ?", (run_id, date, code)).fetchone()
@@ -488,8 +564,43 @@ def emit_for_date(run_id: int, date: str, *,
     return ids
 
 
+def _champion_signals(date: str, codes: list[str],
+                      report_type: str) -> dict:
+    """The champion's recorded confidence label for each code, one query.
+
+    The upstream a candidate mapping needs. Scoped to the run's own report type
+    because that is what ``panel_for`` does: a post-market prediction is not a
+    forecast of the morning run, and pairing the morning panel with a
+    post-market label would be a comparison of two different days' questions.
+
+    A code with two rows — two traders on the same morning — takes the earliest
+    by ``id``. The panel itself makes no trader distinction, so this is a
+    choice; it is stated here rather than left to row order.
+    """
+    wanted = [_text(code, "code") for code in codes]
+    if not wanted:
+        return {}
+    conn = memory_store._get_conn()
+    placeholders = ",".join("?" for _ in wanted)
+    rows = conn.execute(
+        f"SELECT code, confidence FROM predictions WHERE date = ? "
+        f"AND report_type = ? AND code IN ({placeholders}) ORDER BY id",
+        (date, report_type, *wanted)).fetchall()
+    signals: dict = {}
+    for row in rows:
+        signals.setdefault(row["code"], row["confidence"])
+    return signals
+
+
 def _deadline_for(date: str, horizon_days: int) -> str | None:
-    """The day a forecast matures. Calendar days, matching ``predictions``."""
+    """The day a forecast matures, in calendar days, matching ``predictions``.
+
+    A *pre-filter*, not the maturity test. It is a declaration the forecast
+    made about itself and it fires on days the market never opened, so
+    ``score_due`` still asks ``scoring.evidence_window_closed`` before it
+    grades anything: this date says "we should stop waiting around now", and
+    only the market's own calendar says "the evidence could exist".
+    """
     try:
         days = int(horizon_days)
     except (TypeError, ValueError):
@@ -512,6 +623,14 @@ def score_due(*, as_of: str | None = None, run_id: int | None = None) -> dict:
     ground truth". A forecast whose market data is not there yet stays
     unscored rather than being graded as a miss, so an absent price cannot
     manufacture evidence.
+
+    ``unscorable`` and ``deferred`` are counted apart because they are
+    different facts, and reporting one number for both made a live experiment
+    look like a data outage. ``deferred`` means the row's deadline passed on
+    the calendar but the market has not traded the window shut
+    (``scoring.evidence_window_closed``) — nothing is missing, we have not
+    waited yet. ``unscorable`` means the window closed and still no score came
+    back: a suspended stock, a delisted code, no benchmark for that day.
     """
     when = _text(as_of, "as_of") if as_of else _today()
     conn = memory_store._get_conn()
@@ -524,9 +643,13 @@ def score_due(*, as_of: str | None = None, run_id: int | None = None) -> dict:
         args.append(run_id)
     sql += " ORDER BY date, code"
 
-    graded = skipped = 0
+    graded = skipped = deferred = 0
     with memory_store._write_lock:
         for row in conn.execute(sql, tuple(args)).fetchall():
+            if not scoring.evidence_window_closed(row["date"],
+                                                  row["horizon_days"]):
+                deferred += 1
+                continue
             result = scoring.score_prediction(
                 row["code"], row["date"], row["prob"], row["horizon_days"])
             if result is None:
@@ -542,7 +665,8 @@ def score_due(*, as_of: str | None = None, run_id: int | None = None) -> dict:
                  row["id"]))
             graded += 1
         conn.commit()
-    return {"graded": graded, "unscorable": skipped, "as_of": when}
+    return {"graded": graded, "unscorable": skipped, "deferred": deferred,
+            "as_of": when}
 
 
 # ── Reading ────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import pytest
 
 from alpha_agents.data import knowledge_snapshots as KS
 from alpha_agents.data import memory_store, policy_registry as PR
+from alpha_agents.data import scoring
 from alpha_agents.evolution import feedback
 
 TODAY = "2026-09-12"
@@ -28,6 +29,9 @@ def _sources(snapshot_id):
         "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
         "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
         "knowledge": {"snapshot_id": snapshot_id},
+        # The pointer-controlled source. Nothing is installed in these tests, so
+        # what a freeze records is the code default block.
+        "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
     }
 
 

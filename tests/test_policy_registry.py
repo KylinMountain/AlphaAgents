@@ -37,6 +37,7 @@ import pytest
 
 from alpha_agents.data import memory_store
 from alpha_agents.data import policy_registry as PR
+from alpha_agents.data import scoring
 from alpha_agents.evolution import feedback
 from alpha_agents.evolution import policy_sources as PS
 
@@ -64,13 +65,20 @@ def store(tmp_path, monkeypatch):
 
 
 def _sources(**over) -> dict:
-    """A complete, valid source set, with named sources overridden."""
+    """A complete, valid source set, with named sources overridden.
+
+    ``decision`` is the pointer-controlled source, and an honest freeze records
+    the parameters *in force* — which before anything is installed are the code
+    defaults. Writing anything else here would make the version look drifted
+    against the system it was frozen from, which is a different test.
+    """
     base = {
         "prompts": {"morning_scan.md": "aaa"},
         "model": {"agent_model": "qwen-plus"},
         "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
         "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
         "knowledge": {"snapshot_id": None},
+        "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
     }
     base.update(over)
     return base
@@ -425,6 +433,67 @@ class TestDrift:
         assert summary["counts"]["versions"] == 1
         assert summary["active"]["version_id"] == version_id
         assert summary["integrity"] == []
+
+
+class TestThePointerControlledSourceIsStaged:
+    """A version's own decision parameters are not drift — they are the version.
+
+    The drift check exists to catch behaviour edited without opening a version.
+    It cannot do that job for a source whose value *is* the pointer: judged
+    against the configuration in force, every version except the incumbent
+    would report as drifted, and rolling back to one would be refused by the
+    safety check rather than allowed by it. So a version is judged against its
+    own staged values, the way ``knowledge`` already was.
+    """
+
+    def test_a_candidate_verifies_against_itself_not_the_incumbent(self, store):
+        incumbent = PS.freeze_live(created_by="kylin", reason="the incumbent")
+        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+        candidate = PS.freeze_live(created_by="kylin", reason="a candidate",
+                                   decision_params={"dim_step": 0.09})
+
+        assert PS.verify_live(candidate) is True
+        assert PS.verify_live(incumbent) is True
+        assert PS.drifted() == [], "a version that is merely not in force"
+        assert PS.changed_sources(candidate) == {}
+
+    def test_a_candidate_differs_from_the_incumbent(self, store):
+        """The point of staging the parameters: the two versions are two
+        behaviours. Without the difference, a promotion has nothing to move."""
+        incumbent = PS.freeze_live(created_by="kylin", reason="the incumbent")
+        candidate = PS.freeze_live(created_by="kylin", reason="a candidate",
+                                   decision_params={"dim_step": 0.09})
+        assert incumbent != candidate
+        assert (PR.sources_of(incumbent)["decision"]["dim_step"]
+                == scoring.DEFAULT_DECISION_PARAMS["dim_step"])
+        assert PR.sources_of(candidate)["decision"]["dim_step"] == 0.09
+
+    def test_a_staged_block_keeps_every_other_declared_value(self, store):
+        """A candidate that moves one key still records the whole block: a
+        version whose behaviour leaned on a default it did not declare would be
+        a version its own hash does not describe."""
+        incumbent = PS.freeze_live(created_by="kylin", reason="the incumbent")
+        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+        candidate = PS.freeze_live(created_by="kylin", reason="a candidate",
+                                   decision_params={"dim_step": 0.09})
+        block = PR.sources_of(candidate)["decision"]
+        assert block["dim_step"] == 0.09
+        assert block["dim_base"] == scoring.DEFAULT_DECISION_PARAMS["dim_base"]
+        assert (block["confidence_priors"]
+                == scoring.DEFAULT_DECISION_PARAMS["confidence_priors"])
+
+    def test_a_freeze_without_staging_records_what_is_in_force(self, store):
+        """``decision_params=None`` means "the parameters in force", so an
+        ordinary freeze of a system running V2 records V2's block rather than
+        the code defaults."""
+        first = PS.freeze_live(created_by="kylin", reason="first")
+        PR.install(version_id=first, actor="kylin", reason="first policy")
+        bolder = {**scoring.DEFAULT_DECISION_PARAMS, "dim_step": 0.09}
+        second = PS.freeze_live(created_by="kylin", reason="second",
+                                decision_params=bolder)
+        assert PR.sources_of(second)["decision"] == bolder
+        # Re-freezing the same live configuration returns the same version.
+        assert PS.freeze_live(created_by="kylin", reason="again") == first
 
 
 # ── 8. Integrity ───────────────────────────────────────────────────────

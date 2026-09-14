@@ -5,12 +5,12 @@ import { CodeFact, WorkspaceCard, WorkspaceHead } from '../components/WorkspaceS
  *
  * Three of the four cards below are `unavailable` on the current database,
  * and that is not a rendering problem — the tables were never created,
- * because nothing has ever run. The banner at the top says why, and the
- * reason is in the code rather than in the data: `shadow.PRODUCERS` registers
- * one producer and it is the constant-0.5 baseline, while a promotion only
- * accepts `candidate_policy` evidence. So the promotion path is unreachable
- * in this build, and a page that showed "0 verdicts" without saying so would
- * read as a quiet week.
+ * because nothing has ever run. The banner at the top keeps the two reasons
+ * apart, because they are fixed by different things: the *code* can now
+ * promote (one candidate producer is registered, since 2026-09-13), while the
+ * *data* cannot yet justify a promotion (no version is in force and no
+ * experiment has run). A page that showed "0 verdicts" without saying either
+ * would read as a quiet week.
  */
 
 function Kpi({ label, value, valueClass = '', note }) {

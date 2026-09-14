@@ -4,12 +4,23 @@
 §14 ends Phase 4 with "evidence controls future policy changes through one
 audited entry point". This is that entry point: the only thing in the repo a
 person runs to change which policy is in force. Every move goes through
-``policy_registry.promote`` / ``rollback``, and both are a compare-and-swap on
-``active_policy.version_seq`` — so a change that raced another loses without
-writing rather than overwriting it.
+``policy_registry.promote`` / ``rollback`` / ``install``, and all three are a
+compare-and-swap on ``active_policy.version_seq`` — so a change that raced
+another loses without writing rather than overwriting it.
 
-Three verbs, and the difference between them is the whole of §11:
+Five verbs. The two that create the record, then the three that move it:
 
+* ``freeze`` — record the configuration as it is right now. **Moves no
+  pointer**, and needs no evidence: a frozen version is a name for behaviour,
+  and nothing is in force until something puts it there. This is the
+  ``draft → frozen`` of §11, and without it the registry had no way to get its
+  first row — which is why every other verb here refuses with "no policy
+  version #N" until it has been run once.
+* ``install`` — put a version in force **where none is**. Refuses if the policy
+  already has a pointer: from the second change onward the pointer may only
+  move by promotion or rollback, both of which demand evidence, and an install
+  that could be repeated would be a back door around exactly that (§11's first
+  boundary: there is no incumbent to claim improvement over).
 * ``approve`` — a person authorises a version, citing the gate verdict that
   justifies it. Writes one approval row. **Moves no pointer.** §11 is explicit
   that a successful automatic evaluation is not a licence to promote, so this
@@ -22,6 +33,10 @@ Three verbs, and the difference between them is the whole of §11:
 ``status`` changes nothing and is the intended way to look before you leap.
 
     uv run python scripts/policy.py status
+    uv run python scripts/policy.py freeze --by kylin \\
+        --reason "the configuration the first experiment starts from"
+    uv run python scripts/policy.py install --version 1 --by kylin \\
+        --reason "nothing was in force" --dry-run
     uv run python scripts/policy.py approve --version 4 --by kylin \\
         --reason "beat the baseline over 25 paired days"
     uv run python scripts/policy.py promote --version 4 --by kylin \\
@@ -36,6 +51,7 @@ someone running this by hand needs the reason, not just the verdict.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -48,17 +64,22 @@ from alpha_agents.evolution import holdout_gate, policy_sources  # noqa: E402
 
 
 def _sources(version_id):
-    """Stage only the target snapshot; every non-knowledge source stays live.
+    """Stage the target's own pointer-controlled sources; all others stay live.
 
-    Changing the pointer is what switches knowledge. Comparing a candidate
-    against the incumbent's snapshot (or the newest unrelated approval) would
-    make both promotion and rollback impossible for knowledge-only changes.
+    Changing the pointer is what switches the pointer-controlled sources —
+    knowledge, and the decision parameters the trading path reads. Comparing a
+    candidate against the incumbent's values (or the newest unrelated approval)
+    would make both promotion and rollback impossible for a change to either
+    one, because the target would always hash to something other than itself.
+
+    Everything else — prompts, model, retrieval budgets, the rule constants —
+    is read from the running system, which is the point of the check: a prompt
+    edited without opening a version has to fail here.
     """
-    sources = registry.sources_of(version_id)
+    sources = policy_sources.collect_for_version(version_id)
     if sources is None:
         raise ValueError(f"No policy version #{version_id}")
-    return policy_sources.collect(
-        knowledge_snapshot_id=sources["knowledge"].get("snapshot_id"))
+    return sources
 
 
 def _eligible_verdict(version_id: int, decision_id: int | None):
@@ -85,6 +106,98 @@ def _eligible_verdict(version_id: int, decision_id: int | None):
             "at least one day of paired forward evidence. There is nothing "
             "for a person to approve — §16 forbids inventing the evidence.")
     return eligible[0]
+
+
+def _staged_decision_params(raw: str | None) -> dict | None:
+    """Parse ``--decision-json`` into the block a version will assert.
+
+    None means "the parameters in force", which is what an ordinary freeze
+    records. A block is what a *candidate* asserts, and it is merged over the
+    parameters in force key by key: ``confidence_priors`` is replaced whole
+    rather than merged into, so a version never depends on a prior it did not
+    declare. Pass all of the priors you mean to change.
+    """
+    if raw is None:
+        return None
+    try:
+        staged = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"--decision-json is not valid JSON: {exc}") from exc
+    if not isinstance(staged, dict):
+        raise ValueError(
+            "--decision-json must be a JSON object of decision parameters, "
+            f"got {type(staged).__name__}")
+    return staged
+
+
+def _cmd_freeze(args) -> int:
+    """Record the live configuration as a version. Moves nothing.
+
+    The first row of the registry has to come from somewhere, and it cannot
+    come from an approval or a promotion: both cite evidence about a version
+    that has to exist already. This is the other direction — the configuration
+    is read off the running system and named. It is deliberately allowed to
+    produce a version nothing uses yet, because that is what a challenger is.
+    """
+    staged = _staged_decision_params(args.decision_json)
+    before = {version["id"] for version in registry.versions_for(args.policy_key)}
+    if args.dry_run:
+        digest = registry.content_hash_for(
+            policy_sources.collect(decision_params=staged))
+        same = next((version["id"]
+                     for version in registry.versions_for(args.policy_key)
+                     if version["content_hash"] == digest), None)
+        print(f"  content hash {digest[:16]}")
+        print("  " + (f"already on record as version #{same} — freezing it "
+                      "again would return that version unchanged."
+                      if same else
+                      "not on record; this would write a new version."))
+        print("dry run: nothing written.")
+        return 0
+
+    version_id = policy_sources.freeze_live(
+        created_by=args.by, reason=args.reason, policy_key=args.policy_key,
+        parent_id=args.parent_version, decision_params=staged,
+        frozen_at=args.at)
+    version = registry.get_version(version_id)
+    print(f"  version #{version_id} "
+          + ("written." if version_id not in before
+             else "was already on record; nothing new was written."))
+    print(f"  frozen {version['frozen_at']} by {version['created_by']}: "
+          f"{version['reason']}")
+    print(f"  content hash {version['content_hash'][:16]}")
+    if staged:
+        print(f"  this version asserts: {json.dumps(staged, sort_keys=True)}")
+    print("  the pointer did not move: nothing is in force until an install "
+          "or a promotion says so.")
+    return 0
+
+
+def _cmd_install(args) -> int:
+    """Put a version in force where none is. Refuses if one already is."""
+    pointer = registry.active(args.policy_key)
+    if args.dry_run:
+        version = registry.get_version(args.version)
+        if version is None:
+            print(f"  refused: no policy version #{args.version} to install")
+        elif pointer is None:
+            print(f"  would put version #{args.version} "
+                  f"({version['content_hash'][:12]}) in force at seq 1")
+        else:
+            print(f"  refused: policy {args.policy_key!r} already has version "
+                  f"#{pointer['version_id']} in force at seq "
+                  f"{pointer['version_seq']}. Moving it is a promotion or a "
+                  "rollback, both of which require evidence.")
+        print("dry run: nothing written.")
+        return 0
+
+    seq = registry.install(version_id=args.version, actor=args.by,
+                           reason=args.reason, policy_key=args.policy_key,
+                           at=args.at)
+    print(f"policy {args.policy_key!r} now has version #{args.version} in "
+          f"force at seq {seq}. This is the first version: from here the only "
+          "way to move the pointer is a promotion or a rollback.")
+    return 0
 
 
 def _cmd_status(args) -> int:
@@ -200,6 +313,24 @@ def main(argv: list[str] | None = None) -> int:
                        help="the date to record (default: the kernel clock).")
         p.add_argument("--dry-run", action="store_true",
                        help="print what would happen, then stop.")
+
+    freeze = sub.add_parser(
+        "freeze", help="record the live configuration as a version.")
+    freeze.add_argument("--parent-version", type=int, default=None,
+                        help="the version this one derives from, if any.")
+    freeze.add_argument(
+        "--decision-json", default=None, metavar="JSON",
+        help="decision parameters this version asserts, as a JSON object "
+             "merged over the ones in force (default: exactly those). Whole "
+             "keys are replaced, so pass every prior you mean to change.")
+    _common(freeze)
+    freeze.set_defaults(func=_cmd_freeze)
+
+    install = sub.add_parser(
+        "install", help="put a version in force where none is.")
+    install.add_argument("--version", type=int, required=True)
+    _common(install)
+    install.set_defaults(func=_cmd_install)
 
     approve = sub.add_parser("approve", help="authorise a version.")
     approve.add_argument("--version", type=int, required=True)

@@ -424,12 +424,22 @@ def _score_due_predictions() -> str:
     and it is neutralised for style exposure, so it measures picking
     rather than beta — and it reaches useful precision in hundreds of
     observations instead of years.
+
+    "Elapsed" is the calendar deadline and it is only a *pre-filter*: the
+    deadline is a day count the forecast declared for itself, while the
+    window it stands for is measured in trading days, so the due set
+    contains rows the market has not traded far enough past yet. Those are
+    counted and reported, not censored — see
+    ``scoring.evidence_window_closed`` and ``outcome_labels.label_forecast``.
+    A run that reported only "0/7 scored" would hide which of the three
+    things happened to each row.
     """
     from datetime import datetime as _dt
     from alpha_agents.data.memory_store import (
         get_predictions_due_for_scoring, save_prediction_score,
         get_scored_predictions, _get_conn,
     )
+    from alpha_agents.data.outcomes import CENSORED
     from alpha_agents.data.scoring import (
         score_prediction, summarize_scores, DEFAULT_HORIZON_DAYS,
     )
@@ -438,7 +448,7 @@ def _score_due_predictions() -> str:
     today = _dt.now().strftime("%Y-%m-%d")
     due = get_predictions_due_for_scoring(today, DEFAULT_HORIZON_DAYS)
     conn = _get_conn()
-    scored = 0
+    scored = deferred = censored = 0
     for pred in due:
         # The window is the horizon *this forecast declared*; the global
         # default is only the fallback for rows that pre-date the
@@ -456,14 +466,25 @@ def _score_due_predictions() -> str:
         if result:
             save_prediction_score(pred["id"], result)
             scored += 1
-        # Labelled whether or not a score came back: "the horizon arrived
-        # and the evidence did not" is a censored label, and dropping it
-        # would report a hit rate over a sample of the gradeable ones.
-        OL.label_forecast(conn, prediction=pred, scored=result, as_of=today)
+        # Labelled whether or not a score came back — but the label a
+        # missing score earns depends on whether the evidence window has
+        # closed. "The horizon arrived and the evidence did not" is a
+        # censored label; a window still open is not a fact to record, and
+        # dropping it would report a hit rate over a sample of the
+        # gradeable ones. ``label_forecast`` decides which, from the
+        # market's own calendar.
+        labelled = OL.label_forecast(conn, prediction=pred, scored=result,
+                                     as_of=today)
+        if labelled.get("deferred"):
+            deferred += 1
+        elif labelled.get("changed") and labelled.get("state") == CENSORED:
+            censored += 1
     conn.commit()
 
-    if scored:
-        logger.info("Scored %d/%d due predictions", scored, len(due))
+    if scored or deferred or censored:
+        logger.info(
+            "Forecast scoring: %d graded, %d window still open, %d censored "
+            "of %d price-due", scored, deferred, censored, len(due))
 
     summary = summarize_scores(get_scored_predictions(days=30))
     if not summary.get("n"):

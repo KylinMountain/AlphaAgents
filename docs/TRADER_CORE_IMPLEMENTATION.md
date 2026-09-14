@@ -125,15 +125,15 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   - **读侧只有运维脚本与测试在读。** `candidate_is_approved` / `entity_is_approved` /
     `drifted` 的消费者是 `scripts/episode_coverage.py` 与测试，没有任何决策路径读它。
     与候选区一样：是**有能力**，不是**有数据**。
-- **策略版本注册与前向影子实验**（Phase 4）—— **2026-09-13 已不再是「未实现」，见 §12**。
-  但两件事必须分开写：**机制已交付 ≠ 已经在跑**。U1–U5 的机制存在
-  （冻结策略注册表、前向影子评估、候选绑定闸门、人工晋升与回滚、检索闸门），
-  **而生产里尚未发生一次真实晋升**。原因有两个：其一是样本不是代码
-  （生产库 `predictions.brier` 仍全为空）；其二是**当前没有候选生产者** ——
-  `shadow.PRODUCERS` 只登记了恒 0.5 的基线，所以这个构建能产出的每一份裁决都是
-  `baseline_only`，而 `policy_registry._require_eligible_gate` 只接受
-  `candidate_policy`。于是 `gate_decisions` 里**不存在任何非 abstain 的生产行**；
-  这不是遗漏，是一次刻意的拒绝。
+- **策略版本注册与前向影子实验**（Phase 4）—— 机制已交付，且**2026-09-13 起闭环可运行**。
+  U1–U5 的机制存在（冻结策略注册表、前向影子评估、候选绑定闸门、人工晋升与回滚、检索闸门），
+  同日补上了两个此前缺失的部件：`shadow.PRODUCERS` 现在有一条 `kind="candidate"` 的
+  生产者（`remap_confidence`，用**它绑定版本**的参数重映射冠军记录的信心标签），
+  `scripts/policy.py` 现在有 `freeze` / `install` 两个子命令（此前四个动词没有一个能
+  创建第一行记录）。**「可运行」不等于「跑过」**：生产库的
+  `policy_versions` / `active_policy` / `shadow_runs` 三张表仍然不存在、一次真实晋升
+  也没发生过，因为缺的是样本不是代码（`predictions.brier` 仍 0 行）。
+  逐项见 §12 的边界清单与 §14；tech-debt 记为 D6 / D11。
 - **产品整合**（Phase 5）—— **2026-09-13 已交付 V1 + V2 + V3，见 §13**。
   三个读模型、三个端点、三个前端工作台都已存在，`/api/portfolio` 已改为委托同一个投影。
   但**「页面能打开」不是「页面有事实」**：三个工作台在生产库上处于**三种不同的状态**
@@ -148,20 +148,25 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   （最早 2026-09-08），而 `brier` / `residual_alpha` 都是 **0 行**，原因不是没接，
   是**还没有一笔预测的窗口走完**。所以 Learn 页面上那句「还没有评估货币」说的是
   **样本还没成熟**，读成「评分没实现」是错的。
-- **但「成熟」这件事本身算错了一天，而且必然算错。** 到期判定用**日历天**
-  （`COALESCE(deadline, date(date, '+5 days')) <= as_of`），而 `scoring._forward_return`
-  要 `horizon + 1` 个**交易日**收盘 —— 任意 6 个连续日历天必含至少一个非交易日，
-  所以窗口内最多 5 个交易日，第 6 行**永远不会在到期日存在**。真实数据上四个有 `prob`
-  的预测日（09-08…09-11）在各自日历窗内只有 4 / 3 / 2 / 1 个交易日。
-  两个后果都是可测的：其一，`_score_due_predictions` 拿到 `None`，`label_forecast`
-  写 `censored`（「证据没到」），而事实是**证据还没到期** —— 于是**预测标签的 `matured`
-  状态不可达**，每一条被评分的预测都会走 `censored → revised`，把「数字变了」这条
-  有信息的修正流变成时钟噪声；其二，`brier` 不可能在日历到期日填上：09-08 那批要等
+- **「到期」曾算错一天，而且必然算错 —— 2026-09-13 已修（D10）。** 到期判定原本用
+  **日历天**（`COALESCE(deadline, date(date, '+5 days')) <= as_of`），而
+  `scoring._forward_return` 要 `horizon + 1` 个**交易日**收盘 —— 任意 6 个连续日历天
+  必含至少一个非交易日，所以窗口内最多 5 个交易日，第 6 行**永远不会在到期日存在**。
+  真实数据上四个有 `prob` 的预测日（09-08…09-11）在各自日历窗内只有 4 / 3 / 2 / 1 个交易日。
+  两个后果：其一，`_score_due_predictions` 拿到 `None`，`label_forecast` 写
+  `censored`（「证据没到」），而事实是**证据还没到期** —— 于是**预测标签的 `matured`
+  状态不可达**，每一条被评分的预测都要走 `censored → revised`，把「数字变了」这条
+  有信息的修正流变成时钟噪声；其二，`brier` 不可能在日历到期日填上。
+  修法是**把两个问题分开**，而不是把 `deadline` 改成交易日：`scoring.evidence_window_closed`
+  问「市场自己的日历上，这个窗口收口了没有」，`label_forecast` 在窗口未收口时
+  **保持 `pending`、一个字都不写**，只有窗口收口且拿不到分数才写 `censored`。
+  `deadline` 保持日历语义（它是作者的**声明**，不是系统的推断），`_score_due_predictions`
+  与 `shadow.score_due` 都分别报出「已评分 / 窗口未收 / 已删失」三个数而不是一个。
+  它之所以一直没被发现，是因为 **`_score_due_predictions` 一个测试都没有**；现在
+  `tests/test_score_due_predictions.py` 用**真实** `evidence_window_closed` +
+  **真实** `score_prediction`（临时 `daily_kline`，无桩）覆盖三种结局共存的一轮。
+  仍要如实记下的边界：`brier` 依然只在窗口真正收口后才可能填上，09-08 那批要等
   **2026-09-15** 的收盘，09-11 那批要等 **2026-09-18**。
-  它之所以一直没被发现，是因为 **`_score_due_predictions` 一个测试都没有**（grep 只在
-  `review.py` 里出现）—— 标签测试用伪造的 `scored=` 直接调 `label_forecast`，
-  从不经过「到期查询 → `score_prediction` → `_forward_return`」这条唯一让两个日历相遇的路径。
-  **记为 tech-debt D10**（本文件与 README 早前写的「2026-09-13 成熟」是错的，已更正）。
 - **但 `horizon_days` / `deadline` 这两个列，生产里没有任何写入者。**
   这是 G1 之外的另一件事，且是本仓库第四类缺陷（「列存在但从未被写入」，S6 抓到过
   `intents.order_id` 同型）。T2 的「每笔预测自己声明多久到期」机制是完整的：
@@ -596,6 +601,37 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 而不是「设计里提到的每一件事都做了」：候选与快照都**不进任何生效路径**是本阶段的硬约束，
 而「未批准即不生效」的检索侧强制（§7 记下的那条边界）属于 Phase 4。
 
+### 第九轮（D10 成熟度 + 第 0 步 CLI + 路线 B：闭环可运行）
+
+2026-09-13：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1881 passed, 18 skipped**（121s；本轮 +53 用例） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（157 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_score_due_predictions.py`（6 个用例，该函数此前 **0 个**）、
+`tests/test_policy_cli.py`（22 个用例，驱动真 `main(argv)`）；其余为既有文件的用例
+（`test_scoring.py` 加 `TestEvidenceWindowClosed` / `TestTheMappingComesFromThePointer`、
+`test_policy_registry.py` 加 staging 一组、`test_policy_promotion.py` 加
+`TestPromotionChangesTheMapping`、`test_gate_candidate_bound.py` 加
+`TestTheShippedCandidate`、`test_outcomes.py` 与 `test_shadow_runs.py` 各加
+「窗口未收口」的两个方向）。
+
+**六个变异探针，全部被捕获**（脚本 `.pytest-tmp/probe.py`；每个探针独立跑单用例、
+复原后校验锚点仍在原处）：见 §14.1 的表。两个新用例是**故意让它红的**：
+两处 pin 的 docstring 都写着「加了候选生产者就会红，请连同文档一起重审」，
+本轮它如期红了，处理方式是保留断言并改写，而不是删掉。
+
+**两处必须记下的覆盖边界**：① `check:render` 的 evolve 用例用的是
+`reachable: false` 的合成 payload，所以翻成 `true` 的渲染分支**没有渲染用例**
+（记入 D11）；② 本轮新增的断言都取具体数值或状态（`0.72`、`PENDING`、
+`deferred is True`、`candidate_producers == ['remap_confidence']`），
+没有「不为空 / 至少一个」这类可被邻居恰好满足的写法 ——
+`test_the_shipped_registry_holds_exactly_one_candidate` 断言的是**条数**，
+理由同上。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -708,7 +744,7 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 | 切片 | 提交 | 内容 |
 |---|---|---|
 | U1 冻结策略注册表 | `83fbdfa` | `policy_versions` / `active_policy` / `policy_approvals`；哈希从**活的配置源**重算，漂移是变红的断言；`policy_ref` 写进新产生的 `intents` / `decision_snapshots` |
-| U2 影子预测与隔离 | `5f8b0a4` | `shadow_runs` / `shadow_predictions` 独立表；影子不进主账户、不进冠军知识命名空间。**生产者目前只有基线，见下** |
+| U2 影子预测与隔离 | `5f8b0a4` | `shadow_runs` / `shadow_predictions` 独立表；影子不进主账户、不进冠军知识命名空间。**出厂时生产者只有基线，2026-09-13 补上候选，见 §14** |
 | U3 候选绑定评估 | `a5f288a` | `run_gate(policy_version_id)`：验证窗口由冻结时间派生，「今天 vs 今天」构造不出来；`validation_days` 提升为列 |
 | U4 晋升与回滚 | `f23bca6` | 晋升 = 对指针的一次原子 CAS；人工批准不可变；回滚与晋升同片交付且不删任何成交/账本/结果；`scripts/policy.py` 是唯一写入口 |
 | U5 检索闸门 | 本轮 | `inject_playbooks` / `inject_principles` 改为按**当前生效策略指向的已批准快照**选行；fail-closed |
@@ -732,17 +768,22 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 
 ### 明确未实现（Phase 4 的边界，别读成已完成）
 
-- **没有候选生产者。** `shadow.PRODUCERS` 只有 `constant_0.5` 一条，其 `forecast`
-  恒返回 0.5。设计 §11 要的三个角色（champion / challenger / baseline）里，
-  challenger 与 baseline 目前是同一个东西。补它要先回答「候选策略是什么」——
-  设计文档只指定了 baseline，这是一个新的设计决定，不该由实现者替设计者定。
-  机械判据：`tests/test_gate_candidate_bound.py::
-  TestTheScopeBelongsToTheProducer::test_the_shipped_registry_holds_no_candidate`。
+> 本节记 2026-09-13 那两支切片**修好之后**剩下的边界；修了什么见 §14。
+> 这里只写**仍然没有**的东西，因为「机制在」最容易被读成「在跑」。
+
+- **候选生产者有了，但它不是「一个策略」。** `shadow.PRODUCERS` 现在有两条：恒 0.5 的
+  基线与 `kind="candidate"` 的 `remap_confidence`。后者是 §12 意义上的
+  **module-level 实验**：机会面板与上游信心标签都用冠军的并固定住，变的只有
+  「标签 → 概率」这一层映射。它能被立刻评估（不必先等出一个 LLM 策略的样本），
+  代价是它**测的不是整个策略**，而是映射这一层。机械判据：
+  `tests/test_gate_candidate_bound.py::TestTheShippedCandidate`。
 - **生产里没有发生过晋升。** `gate_decisions` 里没有非 abstain 的生产行。
-  「晋升路径可达」由测试证明（测试临时登记一个候选生产者驱动全路径），
-  它证明的是**机制通**，不是**生产里跑过**。
-- **影子跑没有生产入口。** `scripts/policy.py` 只有 `status` / `approve` / `promote` /
-  `rollback` 四个子命令，没有开启或推进影子跑的入口；`emit_for_date` 的调用者只有测试。
+  「晋升路径可达」由测试证明 —— 且现在用的是**出厂候选**而不是测试里临时登记的桩 ——
+  它证明的仍然是**机制通**，不是**生产里跑过**。
+- **影子跑仍然没有生产入口。** `scripts/policy.py` 现在有 `freeze` / `install`
+  与原有的四个动词，但**没有**「开一条影子跑」或「按日推进 `emit_for_date`」的命令，
+  `emit_for_date` 的调用者仍然只有测试。开跑要先由人调 `shadow.open_run`，
+  且必须先 `freeze` 一个**与在效版本不同**的版本 —— 否则影子量的是它自己。
 - **闸门没有生产调用者，所以 D7 的标题仍然成立。** `run_gate` 的调用者只有测试；
   `alpha_agents/pipeline/` 与 `alpha_agents/server/` 都不引用 `holdout_gate`。
   闸门从「永远触发不了」变成了「正确、可绑定候选、但没人调」—— 这是进步，
@@ -803,8 +844,11 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 | evolve | `gates` | **partial** | unavailable |
 | evolve | `knowledge` | complete | empty |
 
-`evolve.code` 报出 `producers=['constant_0.5']` / `candidate_producers=[]` /
-`reachable=False` —— Phase 4 那句「本构建产不出可晋升的裁决」因此成为一个**页面可读的事实**。
+`evolve.code` 报出 `producers=['constant_0.5', 'remap_confidence']` /
+`candidate_producers=['remap_confidence']` / `reachable=True` ——
+**2026-09-13 之后这一项翻了**，而它翻的是*代码*事实不是数据事实：现在这个构建
+**能**产出可晋升的裁决（见 §14），而生产里仍然一个版本都没有、一条实验都没跑。
+页面上的横幅把这两件事分开说，正是为了让「可达」不被读成「在跑」。
 读完之后**没有任何表被新建**。
 
 **验证用的是副本。** `memory_store._get_conn()` 首次连接时会执行自己的 `_SCHEMA`，
@@ -865,6 +909,125 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 - **`check:render` 不进 CI。** `harness.yml` 里没有 node 环境，本仓库的前端逻辑测试
   （`tests/test_report_markdown.mjs`）同样是本地命令。给前端单开 CI 是独立的一件事。
 - **G1（奖励改成 Brier + 因子残差 alpha）的机制已在跑，见 §7 对应条目。**
-  页面上的「还没有评估货币」说的是**样本还没成熟**，不是代码没接。
+  页面上的「还没有评估货币」说的是**样本还没成熟**，不是代码没接；
+  而「什么时候算成熟」这件事在 2026-09-13 修过一次（D10，日历天 vs 交易日），见 §14。
+
+## 14. 第 0 步与路线 B（Phase 4 闭环可运行，2026-09-13）
+
+记录日期：2026-09-13。计划见
+[成熟度计划](exec-plans/completed/2026-09-13-forecast-maturity-trading-days.md) 与
+[闭环计划](exec-plans/completed/2026-09-13-evolution-loop-runnable.md)。
+
+这一节把两支切片写在一起，因为它们是同一个决定的两半：**先把判据说准，再把闭环接上**。
+两件事都不是「加功能」，都是**取消一个谎**。
+
+### 14.1 预报成熟度：日历到期 ≠ 证据窗口收口（D10）
+
+修的是 §7 那条。三个问题被一个过滤器粘在了一起 —— ①过没过声明的期限（日历）、
+②市场把这个窗口交易到收口没有（交易日）、③这一笔拿不拿得到分数（有没有价格）。
+把 ②③ 混起来的后果是「我们还没等到」被写成「我们等了、没等到」。
+
+| 位置 | 变化 |
+|---|---|
+| `scoring.evidence_window_closed(entry_date, horizon)` | 新增。**唯一**的判据来源：`daily_kline` 中 `date >= entry_date` 的不同日期数 ≥ `horizon + 1`。与它守着的 `_forward_return` 共用 `_market_dates` |
+| `outcome_labels.label_forecast` | `scored is None` 时先问窗口：未收口 → **不写任何终态**（`changed=False` / `deferred=True`，标签停在 `pending`）；收口且无分 → 仍写 `censored`（原样保留） |
+| `review._score_due_predictions` | 分别计数「已评分 / 窗口未收 / 已删失」并一起记日志；此前只报一个 `scored` |
+| `shadow.score_due` | 同一刀：窗口未收记 `deferred`，**不**记 `unscorable` —— 后者专指「窗口收了但拿不到价格」 |
+
+三条设计决定（详见计划的决策日志）：不改 `deadline` 的日历语义（它是作者的**声明**）；
+判据放在产出它的模块里而不是由调用方传布尔值进来；行情库缺失时判「未收口」——
+写 `censored` 是对世界下断言，而归档缺失是**我们读世界**的故障，该由 source health 报。
+
+**本轮的六个变异探针**（先让它红，再复原；脚本 `.pytest-tmp/probe.py`，
+每次复原后校验锚点仍在）：
+
+| 探针 | 结果 |
+|---|---|
+| `evidence_window_closed` 恒返回 `True`（fail-open） | 1 failed（`test_five_calendar_days_are_four_trading_days`） |
+| 去掉 deferred 分支（未到期又写成 `censored`） | 1 failed（`test_a_window_that_is_still_open_is_not_censored`） |
+| 概率映射忽略指针、读回常量 | 1 failed（`test_the_decisions_follow_the_pointer`） |
+| 候选生产者改读冠军的 `prob` 而不是 `confidence` | 1 failed（`test_it_does_not_read_the_champions_probability`） |
+| 验证一个版本时不再 staging 它自己的 `decision` | 1 failed（`test_a_candidate_verifies_against_itself_not_the_incumbent`） |
+| `freeze` 丢掉 `--decision-json` 暂存的内容 | 1 failed（`test_a_candidate_records_the_block_it_asserts`） |
+
+**新增的测试**：`tests/test_score_due_predictions.py`（6 个用例，此前该函数**一个测试都没有**）。
+它**不用桩**：临时造 `daily_kline`（60 支 × 43 天），跑真实的 `evidence_window_closed` +
+真实的 `score_prediction`，断言一轮扫描里三种结局共存。日历 bug 当初就是在这个函数里
+躲过了所有测试，所以这一轮要求它的覆盖必须是真行情。
+
+### 14.2 第 0 步：`freeze` / `install`
+
+`scripts/policy.py` 此前四个动词（status / approve / promote / rollback）**没有一个能创建
+第一行记录** —— approve 与 promote 都要引用一个必须已存在的版本。于是生产库
+`policy_versions` / `active_policy` / `shadow_runs` 三张表**都不存在**，整套机制没有操作入口。
+
+新增两个动词，并把「创建记录」与「移动指针」分开：
+
+- `freeze --by --reason [--parent-version] [--at] [--dry-run] [--decision-json]`
+  —— 写出一个版本，**不动指针**。内容幂等：同一配置再 freeze 返回同一个版本号。
+- `install --version --by --reason [--at] [--dry-run]` —— **在没有任何版本在效时**建立指针。
+  已有指针则拒绝并说明「移动它是一次晋升或回滚，两者都要证据」。重复 install 是后门，被堵。
+
+`--decision-json` 是路线 B 的入口：指针决定的参数不在磁盘上，所以**候选只能靠声明写下来**。
+
+### 14.3 路线 B：让一个来源真的可执行，并让提升真的改变行为
+
+第 0 步只让记录能建；**它不解决「提升在行为上是一次空操作」**。原因是
+`promote` 要求 live 配置仍等于目标版本的哈希，而冠军的概率读的是代码里的常量 ——
+于是任何能通过 `promote` 的版本，其参数**在提升前就已经在跑**。指针只是给已经在跑的东西
+起了个名字，而影子实验里候选与冠军是同一个映射的两份记录。
+
+修法是给这组参数**唯一的权威来源**：新增第 6 个声明来源 `decision`
+（`confidence_priors` / `dim_step` / `dim_base`），决策路径读**在效版本**里的值，
+没有版本在效才读代码默认。
+
+| 位置 | 变化 |
+|---|---|
+| `policy_registry.SOURCE_NAMES` | 增加 `SOURCE_DECISION = "decision"`：第 2 个**指针控制**的来源 |
+| `scoring` | `DEFAULT_DECISION_PARAMS` 取代三个模块常量；`confidence_to_prob(..., params=None)` 默认读**在效版本**；`decision_params_of` / `in_force_decision_params` |
+| `policy_sources` | `collect(decision_params=...)`；`_staged_from` / `collect_for_version(version_id)` —— 与 `knowledge` 同法 staging |
+| `shadow` | `DecisionContext`（版本参数 + 面板信号）；`Producer.forecast(date, code, ctx)`；出厂候选 `remap_confidence`（`kind="candidate"`） |
+| `scripts/policy.py::_sources` | 收敛到 `collect_for_version`，四个检查点走同一条路 |
+
+**staging 是这一节最容易漏、又最难发现的点。** 指针控制的来源若跟 live 比，
+每个「不在效的版本」都会被报成 drifted —— 提升无法移动到任何与现在的不同的版本，
+回滚会被安全检查本身挡死。`test_a_rollback_restores_the_previous_mapping` 就是这个锚：
+它会让 V2 在效、然后回滚到 V1，并断言决策路径真的回到旧映射。
+
+**关于出厂候选的边界，必须一并说清**：`remap_confidence` 是 §12 意义上的
+**module-level 实验** —— 面板与上游信心标签都是冠军的并固定住，只有「标签 → 概率」
+这一层映射是变量。所以它**能被立刻评估**（不必等一个 LLM 策略攒出样本），
+代价是它测的不是整个策略。另外冠军自己的概率在 `dims_passed` 可得时走的是
+「基数 + 步长 × 维度」那条分支，而候选只能走标签分支（标签是冠军唯一记录下来的输入），
+所以这对测量偏重标签路径 —— 而生产库里 39/47 行正是 `intraday` 那条标签路径。
+
+### 14.4 两处被钉住的红线，按设计者的要求翻了
+
+两处机械判据在本轮**如期变红**，它们的 docstring 都写着「加了候选生产者就会红，
+请连同文档一起重审」：
+
+| 用例 | 从 | 到 |
+|---|---|---|
+| `test_gate_candidate_bound.py::TestTheScopeBelongsToTheProducer::test_the_shipped_registry_holds_*` | 恰好 0 个候选 | 恰好 1 个候选，且其 scope 是 `candidate_policy` |
+| `test_readmodels.py::TestTheEvolvePayloadCarriesTheGap::test_this_build_registers_*` | `candidate_producers == []` / `reachable is False` | `== [remap_confidence]` / `reachable is True` |
+
+这是「文档与代码一起被重审」而不是「把断言删掉」：两条都保留了断言并在 docstring 里
+写明了为什么翻。
+
+### 14.5 明确没做（本轮的边界）
+
+- **没有跑过任何一次真实 freeze / install / promote。** 生产库的三张表仍然不存在。
+  本轮的交付物是**能跑**，不是**跑过**：往生产注册表写第一个版本、开第一条影子 run
+  是操作决定，需要人拿着 CLI 做，且必须先 freeze 一个与在效版本不同的版本。
+- **影子跑仍然没有生产入口**（无 `open_run` / `emit_for_date` 的 CLI 动词）——
+  见 §12 的边界清单。
+- **没有实现 `apply(version_id)`**（把版本参数写回磁盘）。在指针决定参数的模型里
+  它不是必需品：提升之后行为已经改变，磁盘常量退化为「未安装时的默认值」。
+- **`check:render` 的 evolve 用例仍只用 `reachable: false` 的合成 payload**，
+  所以翻成 `true` 的那条渲染分支**目前没有渲染用例**。合成 payload 覆盖的是渲染，
+  不是构建事实，所以它不会因为本轮改动而红 —— 记下来，别当成已经覆盖了。
+- **`_require_matches_live` 没动。** 它对「提示词被手改而没开新版本」的拦截仍然有效，
+  也是 rollback 安全性的依据；本轮只把「指针控制的来源」从它管辖的范围里按
+  `knowledge` 的先例分出来（staging），没有放松其它四个。
 
 

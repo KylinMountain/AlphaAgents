@@ -1,12 +1,63 @@
 """G1 — probabilistic forecasts graded on Brier and factor residual."""
 
 import math
+import sqlite3
 
 import pytest
 
+from alpha_agents.data import policy_registry as PR
+from alpha_agents.data import scoring
 from alpha_agents.data.scoring import (
     _ols_residual, brier_score, confidence_to_prob, log_score, summarize_scores,
 )
+
+
+def _sources(decision: dict) -> dict:
+    """A complete source set whose pointer-controlled block is ``decision``."""
+    return {
+        "prompts": {}, "model": {}, "retrieval": {}, "rules": {},
+        "knowledge": {"snapshot_id": None}, "decision": decision,
+    }
+
+#: A market that trades Monday to Friday. The five dates are real ones —
+#: 2026-09-07 Mon through 2026-09-11 Fri — because the D10 bug is about the
+#: weekend sitting inside a calendar horizon, and a made-up weekday list
+#: would not have caught it.
+_WEEK = ("2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11")
+
+_DAILY_KLINE = """
+CREATE TABLE daily_kline (
+    code TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL,
+    close REAL, volume INTEGER, turnover_rate REAL, change_pct REAL,
+    PRIMARY KEY (code, date));
+CREATE INDEX idx_kline_date ON daily_kline(date);
+"""
+
+
+@pytest.fixture()
+def market(tmp_path, monkeypatch):
+    """A ``market_history.db`` for ``scoring`` to read, and its connection.
+
+    A real file, not ``:memory:``: ``scoring._connect`` opens the path
+    read-only if it exists, so the predicate can only be exercised through
+    storage.
+    """
+    path = tmp_path / "market_history.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_DAILY_KLINE)
+    monkeypatch.setattr(scoring, "DB_PATH", path)
+    yield conn
+    conn.close()
+
+
+def _bars(conn, dates, *, codes=("600000",), close=10.0):
+    for date in dates:
+        for code in codes:
+            conn.execute(
+                "INSERT INTO daily_kline (code, date, close, volume, "
+                "turnover_rate) VALUES (?, ?, ?, 1000, 1.0)",
+                (code, date, close))
+    conn.commit()
 
 
 class TestBrierScore:
@@ -129,3 +180,132 @@ class TestSummarizeScores:
         rows[0]["residual_alpha"] = None
         s = summarize_scores(rows)
         assert s["n"] == 2 and s["n_with_residual"] == 1
+
+
+class TestEvidenceWindowClosed:
+    """Has the market traded the forecast window shut?
+
+    This is the question the calendar cannot answer, and answering it wrong is
+    D10: a 5-trading-day window was declared as ``date + 5`` calendar days, so
+    the due test handed over forecasts whose forward return did not exist yet —
+    and the evaluator censored them, writing "the horizon arrived and the
+    evidence did not" for calls nobody had waited on.
+    """
+
+    def test_five_calendar_days_are_four_trading_days(self, market):
+        """The exact shape: a Mon-Fri week is five dates, and from Tuesday it
+        is four — one short of a five-day window's six bars."""
+        _bars(market, _WEEK)
+        assert scoring.evidence_window_closed("2026-09-07", 5) is False
+        assert scoring.evidence_window_closed("2026-09-08", 5) is False
+        # One fewer day of horizon is what those four bars actually support.
+        assert scoring.evidence_window_closed("2026-09-08", 3) is True
+
+    def test_the_entry_bar_is_the_first_bar_of_the_window(self, market):
+        """``_forward_return`` reads ``horizon + 1`` rows starting at the
+        entry, so five bars support a four-day horizon, not five."""
+        _bars(market, _WEEK)
+        assert scoring.evidence_window_closed("2026-09-07", 4) is True
+        assert scoring.evidence_window_closed("2026-09-07", 5) is False
+
+    def test_one_more_bar_closes_a_five_day_window(self, market):
+        _bars(market, _WEEK + ("2026-09-14",))
+        assert scoring.evidence_window_closed("2026-09-07", 5) is True
+
+    def test_it_reads_the_market_not_the_stock(self, market):
+        """A stock with no bars at all must not look like an open window.
+
+        The window belongs to the calendar the comparison runs on. If it were
+        read from the stock's own series, every suspended name would sit
+        "not yet ripe" for ever instead of being censored honestly.
+        """
+        _bars(market, _WEEK, codes=("600001",))
+        assert scoring.evidence_window_closed("2026-09-07", 4) is True
+        assert scoring.evidence_window_closed("2026-09-07", 5) is False
+
+    def test_it_agrees_with_the_grader_it_guards(self, market):
+        """The predicate exists to describe ``_forward_return``'s limit.
+
+        If the two can disagree, the guard is decoration: a closed window that
+        returns no number is a censored forecast, and an open one that returns
+        a number is a window that closed early.
+        """
+        _bars(market, _WEEK)
+        conn = scoring._connect()
+        try:
+            assert scoring._forward_return(
+                conn, "600000", "2026-09-07", 5) is None
+            assert scoring._forward_return(
+                conn, "600000", "2026-09-07", 4) is not None
+        finally:
+            conn.close()
+
+    def test_an_absent_archive_is_not_a_closed_window(self, tmp_path,
+                                                     monkeypatch):
+        """A refusal to claim, not a claim. With no archive we cannot
+        establish that the window shut, so the caller keeps the forecast
+        pending rather than censoring it on a guess."""
+        monkeypatch.setattr(scoring, "DB_PATH", tmp_path / "nothing.db")
+        assert scoring.evidence_window_closed("2026-09-07", 5) is False
+
+    def test_an_archive_without_a_kline_table_is_not_closed(self, market):
+        market.execute("DROP TABLE daily_kline")
+        market.commit()
+        assert scoring.evidence_window_closed("2026-09-07", 5) is False
+
+
+class TestTheMappingComesFromThePointer:
+    """The mapping is policy, so the version in force decides it.
+
+    Reading the module constants at decision time is what made ``promote``
+    inert: the registry refuses to move the pointer to a version the live
+    configuration does not hash to, so a permitted promotion was always one
+    whose numbers were already running. Two answers to "which mapping is the
+    trader using" is one answer too many — they stop agreeing the moment the
+    pointer moves, and the one that is read wins.
+    """
+
+    def test_nothing_in_force_uses_the_code_defaults(self):
+        assert (scoring.in_force_decision_params()
+                == scoring.DEFAULT_DECISION_PARAMS)
+        assert (confidence_to_prob("high")
+                == scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"])
+
+    def test_the_version_in_force_decides(self):
+        bolder = {**scoring.DEFAULT_DECISION_PARAMS,
+                  "confidence_priors": {"high": 0.72, "medium": 0.60,
+                                        "low": 0.45}}
+        version = PR.freeze(sources=_sources(bolder), created_by="kylin",
+                            reason="a bolder mapping")
+        assert confidence_to_prob("high") == pytest.approx(0.58), \
+            "frozen is not the same thing as in force"
+        PR.install(version_id=version, actor="kylin", reason="first policy")
+        assert confidence_to_prob("high") == pytest.approx(0.72)
+        # The evidence-count branch moves with the same block.
+        assert confidence_to_prob(dims_passed=3) == pytest.approx(0.56)
+
+    def test_an_uninstalled_version_changes_nothing(self):
+        PR.freeze(sources=_sources({**scoring.DEFAULT_DECISION_PARAMS,
+                                    "dim_step": 0.09}),
+                  created_by="kylin", reason="never installed")
+        assert confidence_to_prob(dims_passed=4) == pytest.approx(0.60)
+
+    def test_an_unknown_version_reads_the_defaults(self):
+        assert scoring.decision_params_of(None) == scoring.DEFAULT_DECISION_PARAMS
+        assert (scoring.decision_params_of(4242)
+                == scoring.DEFAULT_DECISION_PARAMS)
+
+    def test_a_partial_block_reads_over_the_defaults(self):
+        """An undeclared parameter is a default, not a missing decision.
+
+        The alternative — raising — stops a decision on the trading path, and
+        the version's record still says exactly what it declared: the merge
+        happens in one place and the next freeze writes the block back whole.
+        """
+        version = PR.freeze(sources=_sources({"dim_step": 0.09}),
+                            created_by="kylin", reason="one key moved")
+        params = scoring.decision_params_of(version)
+        assert params["dim_step"] == 0.09
+        assert params["dim_base"] == scoring.DEFAULT_DECISION_PARAMS["dim_base"]
+        assert (params["confidence_priors"]
+                == scoring.DEFAULT_DECISION_PARAMS["confidence_priors"])

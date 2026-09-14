@@ -23,6 +23,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from alpha_agents.config import DATA_DIR
+from alpha_agents.data import policy_registry
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,59 @@ def _forward_return(conn: sqlite3.Connection, code: str, entry_date: str,
     return (end - start) / start * 100
 
 
+def _market_dates(conn: sqlite3.Connection, entry_date: str,
+                  horizon: int) -> list[str]:
+    """The market's own trading dates from ``entry_date`` — at most horizon+1.
+
+    The *market's* series, not this stock's. "Has the window closed" is a
+    question about the calendar the comparison runs on; a suspended stock
+    missing its own bars is a different fact, and only the benchmark series
+    can tell the two apart. Every window question in this module asks it here.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT date FROM daily_kline WHERE date >= ? "
+        "ORDER BY date LIMIT ?", (entry_date, horizon + 1),
+    ).fetchall()
+    return [row["date"] for row in rows]
+
+
+def evidence_window_closed(entry_date: str,
+                           horizon: int = DEFAULT_HORIZON_DAYS) -> bool:
+    """Whether ``horizon`` trading days have passed since ``entry_date``.
+
+    The calendar cannot answer this. A deadline of ``date + horizon`` days is
+    a *declaration* — how long the forecast gave itself — and it fires on days
+    the market never opened. Any six consecutive calendar days contain a
+    weekend, so a 5-day window needs at least seven of them; a due test that
+    reads the calendar hands the evaluator forecasts whose evidence cannot
+    exist yet.
+
+    This is the fact that separates "not ripe" from "we cannot say". The caller
+    that meets a forecast with no score needs to know which of the two it is
+    looking at, because only the second one is a censored label — "the horizon
+    arrived and the evidence did not" is a claim about the world, and it must
+    not be written for a window that is still open.
+
+    False when the archive is absent or unreadable. That branch is a refusal to
+    claim, matching the module's preference for an absent number over a wrong
+    one: with no archive we cannot establish that the window closed, so we do
+    not assert that it did. The cost is that a broken archive looks like a
+    growing pile of unripe forecasts rather than a pile of censored ones, which
+    is why the callers report the deferred count instead of dropping it.
+    """
+    conn = _connect()
+    if conn is None:
+        return False
+    try:
+        return len(_market_dates(conn, entry_date, horizon)) >= horizon + 1
+    except sqlite3.Error as e:
+        logger.warning("scoring: cannot read the market calendar for %s: %s",
+                       entry_date, e)
+        return False
+    finally:
+        conn.close()
+
+
 def _market_forward_return(conn: sqlite3.Connection, entry_date: str,
                            horizon: int) -> float | None:
     """Median forward return across the market — the benchmark leg.
@@ -104,13 +158,10 @@ def _market_forward_return(conn: sqlite3.Connection, entry_date: str,
     Median rather than mean: A-share cross-sections are right-skewed, and
     comparing a stock against a mean manufactures a fake negative edge.
     """
-    dates = conn.execute(
-        "SELECT DISTINCT date FROM daily_kline WHERE date >= ? "
-        "ORDER BY date LIMIT ?", (entry_date, horizon + 1),
-    ).fetchall()
+    dates = _market_dates(conn, entry_date, horizon)
     if len(dates) < horizon + 1:
         return None
-    d0, dN = dates[0]["date"], dates[horizon]["date"]
+    d0, dN = dates[0], dates[horizon]
 
     row = conn.execute(
         "SELECT a.close AS c0, b.close AS cN FROM daily_kline a "
@@ -283,33 +334,91 @@ def score_prediction(code: str, entry_date: str, prob: float,
     }
 
 
-# Starting priors for the ordinal confidence the pipeline already
-# produces. Deliberately close to 0.5: the base rate of beating the
-# market is ~50%, and the attribution literature puts selection alpha
-# near zero, so a system with no track record has no business claiming
-# 0.8. These are a seed to be re-fit once enough Brier history exists —
-# overconfident seeds would just book bad scores until then.
-_CONFIDENCE_PRIORS = {"high": 0.58, "medium": 0.53, "low": 0.50}
-
-# Each cross-validation dimension that passes nudges the probability;
+# ── The decision parameters ────────────────────────────────────────────
+#
+# The confidence → probability mapping, as *policy parameters* rather than
+# constants. Deliberately close to 0.5: the base rate of beating the market is
+# ~50%, and the attribution literature puts selection alpha near zero, so a
+# system with no track record has no business claiming 0.8. These are a seed to
+# be re-fit once enough Brier history exists — overconfident seeds would just
+# book bad scores until then. ``confidence_priors`` maps the ordinal label;
+# ``dim_base + dim_step × (dimensions passed)`` maps the evidence count, and
 # 4/4 lands at 0.60, 0/4 at 0.44.
-_DIM_STEP = 0.04
-_DIM_BASE = 0.44
+#
+# Read from the **version in force**, not from here, whenever one is in force.
+# This dict is what the system does before anything is installed, and what a
+# freeze records. Reading it directly at decision time is what made "promote
+# version N" behaviourally inert: ``policy_registry.promote`` requires the live
+# configuration to hash to the version it moves to, so if the decision path
+# reads the live constants, then by the time a promotion is permitted the
+# numbers have already changed — the pointer names the past, and a challenger
+# measured against the champion is measuring itself.
+DEFAULT_DECISION_PARAMS: dict = {
+    "confidence_priors": {"high": 0.58, "medium": 0.53, "low": 0.50},
+    "dim_step": 0.04,
+    "dim_base": 0.44,
+}
+
+
+def decision_params_of(version_id: int | None) -> dict:
+    """One version's decision parameters, with the defaults merged in.
+
+    A version carrying no block — or a partial one — reads as its own values
+    over the defaults rather than raising. A KeyError here stops a decision,
+    and trading a wrong number for no decision at all is the worse trade; the
+    merge is also the rule the collector uses when freezing, so the next freeze
+    writes the complete block back.
+    """
+    params = dict(DEFAULT_DECISION_PARAMS)
+    if version_id is None:
+        return params
+    stored = (policy_registry.sources_of(version_id) or {}).get(
+        policy_registry.SOURCE_DECISION)
+    if isinstance(stored, dict):
+        params.update(stored)
+    return params
+
+
+def in_force_decision_params() -> dict:
+    """The mapping in force, or the code defaults when nothing is.
+
+    Read from the **policy pointer**, the same way the knowledge gate reads
+    ``feedback.in_force_snapshot_id``: the version in force names exactly one
+    parameter block, and that is the answer. The tempting alternative — read
+    the constants, they are the same values — leaves two answers to "what
+    mapping is running", and they stop agreeing the moment the pointer moves.
+    """
+    version = policy_registry.active_version()
+    if version is None:
+        return dict(DEFAULT_DECISION_PARAMS)
+    return decision_params_of(version["id"])
 
 
 def confidence_to_prob(confidence: str | None = None,
                        dims_passed: int | None = None,
-                       dims_total: int = 4) -> float:
+                       dims_total: int = 4,
+                       params: dict | None = None) -> float:
     """Seed probability for a recommendation.
 
     Prefers the evidence count (how many cross-validation dimensions
     actually passed) over the ordinal label, since the count is what the
     label was derived from and it degrades more gracefully.
+
+    ``params`` defaults to the mapping **in force**. Passing it explicitly is
+    for a challenger, which has to apply the version its run is bound to
+    rather than the one the champion is running — the whole content of the
+    experiment is that the two differ.
     """
+    if params is None:
+        params = in_force_decision_params()
     if dims_passed is not None:
-        p = _DIM_BASE + _DIM_STEP * max(0, min(dims_passed, dims_total))
-        return round(min(max(p, 0.35), 0.75), 4)
-    return _CONFIDENCE_PRIORS.get((confidence or "").lower(), 0.50)
+        base = float(params.get("dim_base", DEFAULT_DECISION_PARAMS["dim_base"]))
+        step = float(params.get("dim_step", DEFAULT_DECISION_PARAMS["dim_step"]))
+        value = base + step * max(0, min(dims_passed, dims_total))
+        return round(min(max(value, 0.35), 0.75), 4)
+    priors = (params.get("confidence_priors")
+              or DEFAULT_DECISION_PARAMS["confidence_priors"])
+    return priors.get((confidence or "").lower(), 0.50)
 
 
 def summarize_scores(rows: list[dict]) -> dict:

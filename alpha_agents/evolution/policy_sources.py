@@ -24,6 +24,16 @@ closes cannot answer "which policy produced this decision". Cost constants
 (commission, slippage) are excluded too: they change measured *results*, not
 the decision the trader makes, and mixing the two would make the fingerprint
 report a change where behaviour did not move.
+
+Two of the five are **not** read from the running system but staged from the
+version under test, and the difference matters: ``knowledge`` (the approved
+snapshot the pointer names) and ``decision`` (the parameters the trading path
+reads — see ``scoring.in_force_decision_params``). They are values the pointer
+*controls*, so judging a version against the configuration in force would report
+every version except the incumbent as drifted and refuse a rollback to it.
+:func:`collect_for_version` is the one way to collect them for a check; a caller
+that assembles the arguments by hand will get a false drift, which looks exactly
+like a version edited behind the registry's back.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ import json
 
 from alpha_agents import config
 from alpha_agents.data import knowledge_snapshots, policy_registry
+from alpha_agents.data import scoring
 from alpha_agents.evolution import feedback, holdout_gate
 
 # ── The declared sources ───────────────────────────────────────────────
@@ -132,15 +143,37 @@ def knowledge_fingerprint(snapshot_id=_ACTIVE_KNOWLEDGE) -> dict:
     return {"snapshot_id": snapshot_id}
 
 
-# ── Collecting ─────────────────────────────────────────────────────────
+def _decision_block(staged: dict | None) -> dict:
+    """The decision parameters a version asserts.
+
+    ``None`` is "whatever is in force". A staged dict is merged **over** the
+    parameters in force, top-level key by key — so a candidate that changes the
+    mapping and one that changes nothing else both record a complete block.
+    Replace whole keys rather than half of one: a version whose behaviour
+    depended on a default it did not declare would be a version the hash does
+    not fully describe.
+    """
+    in_force = scoring.in_force_decision_params()
+    if staged is None:
+        return in_force
+    return {**in_force, **dict(staged)}
 
 
-def collect(*, knowledge_snapshot_id=_ACTIVE_KNOWLEDGE) -> dict:
+def collect(*, knowledge_snapshot_id=_ACTIVE_KNOWLEDGE,
+            decision_params: dict | None = None) -> dict:
     """Read the live configuration into the declared source tuple.
 
     The single definition of what a policy version covers: ``freeze`` and
     ``verify`` both go through here, so a source cannot be covered by the
     write and missing from the check.
+
+    ``decision_params`` stages the one pointer-controlled source instead of
+    reading it. ``None`` means "the parameters in force"; an explicit dict is
+    what a candidate asserts. Checking a version **must** stage its own, or
+    every version that is not the one in force reads as drifted and could never
+    be rolled back to — the safety check would close the safety valve. Use
+    :func:`collect_for_version` for that rather than assembling the arguments
+    by hand.
     """
     return {
         "prompts": prompt_fingerprints(),
@@ -148,7 +181,37 @@ def collect(*, knowledge_snapshot_id=_ACTIVE_KNOWLEDGE) -> dict:
         "retrieval": _constant_source(_RETRIEVAL_SOURCES),
         "rules": _constant_source(_RULE_SOURCES),
         "knowledge": knowledge_fingerprint(knowledge_snapshot_id),
+        "decision": _decision_block(decision_params),
     }
+
+
+def _staged_from(frozen: dict) -> dict:
+    """``collect``'s arguments for judging a version against itself.
+
+    One helper rather than four call sites, so the next pointer-controlled
+    source has one place to be added instead of a hunt for every place a
+    version is checked. Forgetting one of those is not a loud failure: it is a
+    false drift report, and a version that can never be promoted or rolled back
+    to looks exactly like a version that was edited behind the registry's back.
+    """
+    return {
+        "knowledge_snapshot_id":
+            (frozen.get("knowledge") or {}).get("snapshot_id"),
+        "decision_params": frozen.get(policy_registry.SOURCE_DECISION),
+    }
+
+
+def collect_for_version(version_id: int) -> dict | None:
+    """The live configuration with a version's own staged sources, or None.
+
+    The staging is what makes ``promote`` able to put a *different* mapping in
+    force: the pointer-controlled sources are read from the version being
+    moved to rather than from the system it is moving away from.
+    """
+    frozen = policy_registry.sources_of(version_id)
+    if frozen is None:
+        return None
+    return collect(**_staged_from(frozen))
 
 
 # ── Convenience over the registry ──────────────────────────────────────
@@ -158,22 +221,29 @@ def freeze_live(*, created_by: str, reason: str,
                 policy_key: str = policy_registry.POLICY_KEY_DEFAULT,
                 parent_id: int | None = None,
                 knowledge_snapshot_id=_ACTIVE_KNOWLEDGE,
+                decision_params: dict | None = None,
                 frozen_at: str | None = None) -> int:
-    """Freeze the configuration as it is right now."""
+    """Freeze the configuration as it is right now.
+
+    ``decision_params`` stages a *candidate* mapping — the parameters this
+    version asserts instead of the ones in force. Without it every freeze
+    records what the pointer already says, and a version that differs from the
+    incumbent is unrepresentable; with it, the challenger the gate measures
+    exists as a record before it exists as a behaviour.
+    """
     return policy_registry.freeze(
-        sources=collect(knowledge_snapshot_id=knowledge_snapshot_id),
+        sources=collect(knowledge_snapshot_id=knowledge_snapshot_id,
+                        decision_params=decision_params),
         created_by=created_by, reason=reason, policy_key=policy_key,
         parent_id=parent_id, frozen_at=frozen_at)
 
 
 def verify_live(version_id: int) -> bool:
-    """Does live code plus the version's staged snapshot match it?"""
-    frozen = policy_registry.sources_of(version_id)
-    if frozen is None:
+    """Does live code plus the version's staged sources match it?"""
+    live = collect_for_version(version_id)
+    if live is None:
         return False
-    return policy_registry.verify_version(
-        version_id,
-        collect(knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id")))
+    return policy_registry.verify_version(version_id, live)
 
 
 def drifted(policy_key: str = policy_registry.POLICY_KEY_DEFAULT) -> list[dict]:
@@ -190,8 +260,7 @@ def drifted(policy_key: str = policy_registry.POLICY_KEY_DEFAULT) -> list[dict]:
     for version in policy_registry.versions_for(policy_key):
         frozen = policy_registry.sources_of(version["id"])
         try:
-            live = collect(
-                knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id"))
+            live = collect(**_staged_from(frozen))
         except ValueError:
             live = None
         if live is None or not policy_registry.verify_version(version["id"], live):
@@ -211,13 +280,15 @@ def changed_sources(version_id: int) -> dict:
 
     ``drifted`` answers yes or no; this answers *what moved*, because a hash
     mismatch that cannot be attributed costs a long hunt through prompt files
-    and constants.
+    and constants. The pointer-controlled sources are staged, so they never
+    appear here — a version's own decision parameters and knowledge snapshot
+    are not drift, they are the version.
     """
     version = policy_registry.get_version(version_id)
     if version is None:
         return {}
     frozen = json.loads(version["sources_json"])
-    live = collect(knowledge_snapshot_id=frozen["knowledge"].get("snapshot_id"))
+    live = collect(**_staged_from(frozen))
     return {name: {"frozen": frozen.get(name), "live": live.get(name)}
             for name in policy_registry.SOURCE_NAMES
             if frozen.get(name) != live.get(name)}

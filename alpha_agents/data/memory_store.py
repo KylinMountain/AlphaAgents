@@ -1290,6 +1290,16 @@ def get_predictions_due_for_scoring(as_of: str, horizon_days: int = 5,
     declaration the forecast never made. Grading every book at one global
     horizon measured neither of them once two traders ran different ones.
 
+    The ``deadline`` here is a **necessary, not sufficient** condition: it is
+    a calendar count, and the window it stands for is measured in trading
+    days, so the returned rows include forecasts the market has not traded
+    far enough past yet. That is deliberate — the filter is an indexed
+    pre-filter and the decisive test costs a query per row — but it means
+    callers must not treat "returned by this function" as "gradeable".
+    ``scoring.evidence_window_closed`` answers the second question, and
+    ``outcome_labels.label_forecast`` will not censor a row whose window is
+    still open.
+
     Only rows carrying a ``prob`` can be graded — legacy rows without one
     are skipped rather than back-filled with a guess.
     """

@@ -88,7 +88,25 @@ POLICY_KEY_DEFAULT = "trader"
 #: snapshot is a change of behaviour, so it belongs in the hash; the snapshot
 #: id is a declaration, not a running counter, so the hash stays stable while
 #: trades close.
-SOURCE_NAMES = ("prompts", "model", "retrieval", "rules", "knowledge")
+#:
+#: ``decision`` is the second **pointer-controlled** source: the parameters the
+#: trading path itself reads. The other four are fingerprints of what is on
+#: disk — the checkers recompute them and refuse an approval or a pointer move
+#: when they have drifted, which is what makes the registry answer "is what is
+#: in force still what is configured". That check cannot work for a source
+#: whose value *is* the pointer: a version that is not in force would always
+#: look drifted, and rolling back to it would be refused by the safety check
+#: rather than permitted by it. So this one is **staged** when a version is
+#: verified — read out of the version under test, not out of the running system
+#: — the way ``knowledge`` already is (see ``evolution.policy_sources``).
+#:
+#: It is a separate name rather than a few extra keys inside ``rules`` because
+#: one source holding both kinds of value would make the drift check mean
+#: something different per key, which is a worse thing to have to remember.
+SOURCE_DECISION = "decision"
+
+SOURCE_NAMES = ("prompts", "model", "retrieval", "rules", "knowledge",
+                SOURCE_DECISION)
 
 TRANSITION_KINDS = ("install", "promote", "rollback")
 

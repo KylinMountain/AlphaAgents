@@ -42,17 +42,21 @@ EvoAgentBench 结论是"没有任何现有自动方法能在所有设置下维�
   `review` 任务上，**不是待接的代码**。
 - 生产库实测：`prob` 已填 **47 / 202** 行（最早 2026-09-08），
   `brier` 与 `residual_alpha` 均 **0 行** —— 因为**还没有一笔预测的窗口走完**。
-- **但这句「等日历」要按交易日算，而代码按日历天算。** 到期判定是
-  `COALESCE(deadline, date(date,'+5 days')) <= as_of`（日历天），而
+- **但这句「等日历」要按交易日算，而代码原本按日历天算 —— 2026-09-13 已修（D10）。**
+  到期判定原本是 `COALESCE(deadline, date(date,'+5 days')) <= as_of`（日历天），而
   `scoring._forward_return` 要 6 个**交易日**收盘；任意 6 个连续日历天必含至少一个
   非交易日，所以**每一笔预测在它「到期」那天都拿不到数据**。真实数据上 09-08…09-11
   四个预测日在各自日历窗内只有 4/3/2/1 个交易日，全部不够。
-  两个后果：预测标签的 `matured` 状态**不可达**（首评必然 `censored`，之后 `revised`）；
-  `brier` 不可能在到期日填上 —— 09-08 那批要等 **2026-09-15** 收盘，09-11 那批要等
-  **2026-09-18**。原因是 **`_score_due_predictions` 没有任何测试**（详见 tech-debt D10）。
-- **不要据此认为验收已完成**：等 2026-09-15 的收盘进库之后复核
-  `SUM(brier IS NOT NULL) > 0`。若那时仍为 0，才是真问题（最可能是市场数据不覆盖该窗口，
-  于是 `score_prediction` 返回 `None`）。
+  修法是把两件事分开：`scoring.evidence_window_closed` 问「市场把这个窗口交易到
+  收口没有」，窗口未收口的预报**保持 `pending` 而不是被写成 `censored`**
+  （「我们还没等到」与「我们等了、没等到」是两件事，后者才是 §9 要记的）。
+  `_score_due_predictions` 也不再只报一个 `scored`，而是分别报出
+  「已评分 / 窗口未收 / 已删失」；`shadow.score_due` 同刀，`deferred` 与
+  `unscorable` 分开。它此前**一个测试都没有**，现在有六个（真行情、无桩）。
+- **不要据此认为验收已完成**：`brier` 仍然只在窗口真正收口后才可能出现 ——
+  09-08 那批等 **2026-09-15** 收盘，09-11 那批等 **09-18**。等 09-15 的收盘进库之后
+  复核 `SUM(brier IS NOT NULL) > 0`。若那时仍为 0，才是真问题（最可能是市场数据
+  不覆盖该窗口，于是 `score_prediction` 返回 `None`）。
 - **附带发现**：`predictions.horizon_days` / `deadline` 机制完整（`_deadline_for` 在
   未声明时拒绝替调用方假设，due 查询把 `deadline IS NULL` 报成 `legacy_horizon`），
   但两处生产调用（`morning_scan.py` / `intraday_monitor.py`）都传了 `prob` 却

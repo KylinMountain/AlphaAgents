@@ -14,7 +14,10 @@ The three, and what each may not be confused with (§9):
   ``predictions.horizon_days`` / ``deadline``; a row that pre-dates the
   declaration falls back to the global default and says so in the label's
   evidence (``legacy_horizon``) instead of recording a claim its author
-  never made.
+  never made. The declared deadline is a **calendar** date and the window it
+  stands for is measured in **trading** days, so a forecast with no score is
+  only censored once the market has actually traded the window shut
+  (``scoring.evidence_window_closed``); until then it stays pending.
 * **trade** — ``sweep_trade_labels``. What the position realised, derived
   from ``position_exits``. The label carries **refs to the ledger legs,
   never the money**: the return has one home and it is not this table.
@@ -46,6 +49,7 @@ import logging
 import sqlite3
 
 from alpha_agents.data import episodes, outcomes
+from alpha_agents.data import scoring
 from alpha_agents.data import thesis as T
 from alpha_agents.evolution import process_quality
 
@@ -71,15 +75,29 @@ def label_forecast(conn: sqlite3.Connection, *, prediction: dict,
                    scored: dict | None, as_of: str) -> dict:
     """Grade one forecast against the horizon it declared.
 
-    ``scored`` is ``scoring.score_prediction``'s result, or None when the
-    horizon arrived and the evidence did not — no price history, a
-    suspended stock, a delisted code. None is a *censored* label, not an
-    excuse to wait: §9 wants "we cannot say" recorded, because a system
-    that silently drops the un-gradeable ones reports a hit rate over a
-    sample it chose.
+    ``scored`` is ``scoring.score_prediction``'s result, or None when nothing
+    could be computed. None splits into two different facts, and the split is
+    the reason ``scoring.evidence_window_closed`` exists:
 
-    Returns ``{"outcome_id", "state", "changed"}``. ``changed`` is False
-    for a forecast already graded — a matured label is never re-derived.
+    * the **window has closed** and the evidence is missing — no price history,
+      a suspended stock, a delisted code. That is a *censored* label, not an
+      excuse to wait: §9 wants "we cannot say" recorded, because a system that
+      silently drops the un-gradeable ones reports a hit rate over a sample it
+      chose.
+    * the **window is still open** — the declared deadline was a calendar date
+      and the market has not traded enough days past the entry for the forward
+      return to exist. Nothing is missing; we simply have not waited yet. The
+      label stays ``pending`` and this function writes nothing.
+
+    Conflating the two is what made a due date fire on weekend arithmetic: the
+    forecast was censored on its calendar deadline and revised days later when
+    the bars finally arrived, so the record carried "we waited and got nothing"
+    for calls nobody had waited on.
+
+    Returns ``{"outcome_id", "state", "changed", "deferred"}``. ``changed`` is
+    False for a forecast already graded — a matured label is never re-derived —
+    and ``deferred`` is True only for the still-open window above, so a caller
+    can report "not yet ripe" separately from "graded" and from "censored".
     """
     prediction_id = int(prediction["id"])
     legacy = bool(prediction.get("legacy_horizon"))
@@ -105,18 +123,29 @@ def label_forecast(conn: sqlite3.Connection, *, prediction: dict,
     state = outcomes.get(conn, label_id)["state"]
 
     if state == outcomes.MATURED:
-        return {"outcome_id": label_id, "state": state, "changed": False}
+        return {"outcome_id": label_id, "state": state, "changed": False,
+                "deferred": False}
 
     if scored is None:
+        horizon = (prediction.get("horizon_days")
+                   or scoring.DEFAULT_HORIZON_DAYS)
+        if not scoring.evidence_window_closed(prediction.get("date"), horizon):
+            # Read here rather than taken from the caller on purpose: whether
+            # the window closed is derived from the market's own calendar, and
+            # a caller-supplied boolean would be a verdict someone typed — the
+            # defect class where a label decides what the evidence says.
+            return {"outcome_id": label_id, "state": state, "changed": False,
+                    "deferred": True}
         if state == outcomes.CENSORED:
-            return {"outcome_id": label_id, "state": state, "changed": False}
+            return {"outcome_id": label_id, "state": state, "changed": False,
+                    "deferred": False}
         new_id = outcomes.resolve(
             conn, label_id, state=outcomes.CENSORED,
             evaluator_version=FORECAST_EVALUATOR,
             evidence={**declared, "reason": "no score could be computed"},
             available_at=as_of)
         return {"outcome_id": new_id, "state": outcomes.CENSORED,
-                "changed": True}
+                "changed": True, "deferred": False}
 
     # A censored label whose evidence finally arrived is corrected by
     # appending a revision — the live case for ``censored → revised``.
@@ -135,7 +164,8 @@ def label_forecast(conn: sqlite3.Connection, *, prediction: dict,
     new_id = outcomes.resolve(
         conn, label_id, state=target, evaluator_version=FORECAST_EVALUATOR,
         evidence=evidence, available_at=as_of)
-    return {"outcome_id": new_id, "state": target, "changed": True}
+    return {"outcome_id": new_id, "state": target, "changed": True,
+            "deferred": False}
 
 
 def declare_outstanding_forecasts(conn: sqlite3.Connection, *, as_of: str,

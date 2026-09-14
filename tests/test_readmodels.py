@@ -302,19 +302,22 @@ class TestTheEvolvePayloadCarriesTheGap:
         assert code["producers"] == sorted(shadow.PRODUCERS)
         assert code["baseline"] == shadow.BASELINE_NAME
 
-    def test_this_build_registers_no_candidate_producer(self):
-        """Phase 4's honest boundary, pinned mechanically.
+    def test_this_build_registers_exactly_one_candidate_producer(self):
+        """Phase 4's boundary, pinned mechanically — and it flipped.
 
-        A promotion accepts only `candidate_policy` evidence, and every
-        verdict this build can produce is `baseline_only` because the only
-        registered producer is the constant-0.5 baseline. If someone registers
-        a candidate, this test goes red and tells them to update the claim
-        rather than leaving two documents disagreeing.
+        A promotion accepts only `candidate_policy` evidence. This test used to
+        assert that *no* candidate was registered, so every verdict the build
+        could produce was `baseline_only` and nothing was promotable. A
+        candidate was registered on 2026-09-13, the test went red as its
+        docstring asked it to, and what it pins now is the count: one candidate
+        is what makes the promotion path reachable, and two would mean a verdict
+        could describe a run the reader has no reason to think was chosen.
         """
         from alpha_agents.data import policy_registry as pr
+        from alpha_agents.evolution import shadow
         code = _snapshot("evolve")["code"]
-        assert code["candidate_producers"] == []
-        assert code["reachable"] is False
+        assert code["candidate_producers"] == [shadow.CANDIDATE_NAME]
+        assert code["reachable"] is True
         assert code["promotion_accepts"] == pr.SCOPE_CANDIDATE
         assert code["promotion_accepts"] == "candidate_policy"
 

@@ -58,6 +58,9 @@ _SOURCES = {
     "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
     "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
     "knowledge": {"snapshot_id": None},
+    # The pointer-controlled source. Nothing is installed in these fixtures, so
+    # an honest freeze records the code default block.
+    "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
 }
 
 
@@ -135,7 +138,17 @@ def _grade_challenger(monkeypatch, brier: float, *, as_of: str = ASKED_ON):
     Market data is not available in a unit test, and the gate's job is to
     compare two graded series — so the grading step is stubbed and everything
     after it is real.
+
+    The *window* is stubbed alongside it, and that is a separate fact rather
+    than part of the grading: ``score_due`` asks the market's own calendar
+    whether the forecast window has closed before it will grade anything, and
+    a sandbox with no ``daily_kline`` answers "not yet" to every row. Every
+    scenario here is dated after the freeze and means to be graded, so the
+    window is declared shut. The predicate's real behaviour is pinned in
+    ``test_scoring.py``.
     """
+    monkeypatch.setattr(scoring, "evidence_window_closed",
+                        lambda entry_date, horizon=5: True)
     monkeypatch.setattr(scoring, "score_prediction",
                         lambda code, entry_date, prob, horizon=None: {
                             "brier": brier, "log_score": 0.69,
@@ -512,6 +525,7 @@ def _sources(tag: str) -> dict:
         "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
         "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
         "knowledge": {"snapshot_id": None},
+        "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
     }
 
 
@@ -525,15 +539,16 @@ def bare(store) -> int:
 
 @pytest.fixture()
 def candidate(monkeypatch) -> str:
-    """A registered candidate producer, for the duration of one test.
+    """A **temporary** candidate producer, for the duration of one test.
 
-    Registration is the act that makes a producer real, so a test that wants
-    candidate-grade evidence has to perform it. Nothing downstream writes a
-    scope by hand: ``run_gate`` reads this entry.
+    Not the shipped one: this file is about what a verdict's scope is derived
+    from, and a producer whose forecast is a constant makes the scope the only
+    variable. The shipped candidate is measured separately, in
+    :class:`TestTheShippedCandidate`.
     """
     monkeypatch.setitem(SH.PRODUCERS, CANDIDATE, SH.Producer(
         name=CANDIDATE, kind=SH.KIND_CANDIDATE,
-        forecast=lambda date, code: 0.30))
+        forecast=lambda date, code, ctx: 0.30))
     return CANDIDATE
 
 
@@ -549,16 +564,22 @@ def _emit_and_grade(store, run_id: int, monkeypatch, *, days: int = 25):
 
 
 class TestTheScopeBelongsToTheProducer:
-    def test_the_shipped_registry_holds_no_candidate(self):
-        """The documentation's claim, as an assertion.
+    def test_the_shipped_registry_holds_exactly_one_candidate(self):
+        """The documentation's claim, as an assertion — and it flipped.
 
-        The docs say the mechanism is delivered and that no promotion has
-        happened. This is why: nothing in the build emits candidate-grade
-        forecasts, so ``run_gate`` cannot produce a promotable verdict. Adding
-        a candidate producer should fail here first, so that the documentation
-        and this refusal are revisited together rather than drifting apart.
+        The previous revision of this test pinned *no* candidate producer, and
+        its docstring asked that adding one fail here first so that the code and
+        the documentation were revisited together. It did fail, when
+        ``remap_confidence`` was registered. What has to hold now is the count:
+        two candidates would let a verdict describe whichever run the reader
+        has no reason to think was chosen, and a candidate that quietly stopped
+        being registered would leave ``run_gate`` unable to produce anything
+        promotable while the docs said otherwise.
         """
-        assert [p.kind for p in SH.PRODUCERS.values()] == [SH.KIND_BASELINE]
+        kinds = [p.kind for p in SH.PRODUCERS.values()]
+        assert kinds.count(SH.KIND_CANDIDATE) == 1
+        assert kinds.count(SH.KIND_BASELINE) == 1
+        assert SH.scope_for(SH.CANDIDATE_NAME) == PR.SCOPE_CANDIDATE
 
     def test_a_name_with_no_emitter_cannot_be_opened(self, store, bare):
         """The bypass, as a refusal.
@@ -580,7 +601,7 @@ class TestTheScopeBelongsToTheProducer:
     def test_a_kind_the_module_never_defined_is_not_a_candidate(self,
                                                                 monkeypatch):
         monkeypatch.setitem(SH.PRODUCERS, "mystery", SH.Producer(
-            name="mystery", kind="wishful", forecast=lambda date, code: 0.9))
+            name="mystery", kind="wishful", forecast=lambda date, code, ctx: 0.9))
         with pytest.raises(SH.ShadowError, match="does not define"):
             SH.scope_for("mystery")
 
@@ -667,3 +688,114 @@ class TestAnAmbiguousGateQuestionIsRefused:
                     report_type=REPORT, opened_at=FROZEN_AT)
         got = _run(bare)
         assert got["abstained"]
+
+
+# ── 9. The shipped candidate reads the version it is bound to ──────────
+
+
+def _with_decision(tag: str, block: dict) -> dict:
+    """A configuration whose *decision parameters* are the thing that differs."""
+    return {**_sources(tag), "decision": block}
+
+
+class TestTheShippedCandidate:
+    """The first candidate this build has, and the two things it must not be.
+
+    It exists so that a verdict can be promotable at all. What makes it worth
+    testing is that it reads the version its run is bound to: same day, same
+    codes, same upstream signal, two versions → two forecasts. Without that it
+    would be a second constant, and "promote version N" would still change
+    nothing. What keeps it honest is that it never reads the champion's
+    probability — the number the verdict grades.
+    """
+
+    def test_it_maps_the_champions_signal_through_its_versions_block(
+            self, store):
+        bolder = {**scoring.DEFAULT_DECISION_PARAMS,
+                  "confidence_priors": {"high": 0.72, "medium": 0.60,
+                                        "low": 0.45}}
+        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
+                              reason="the incumbent", frozen_at=FROZEN_AT)
+        target = PR.freeze(sources=_with_decision("candidate", bolder),
+                           created_by="kylin", reason="a bolder mapping",
+                           frozen_at=FROZEN_AT)
+        _champion(store, "2026-06-02", "A", 0.30)      # recorded as "high"
+
+        got = {}
+        for version in (incumbent, target):
+            run_id = SH.open_run(policy_version_id=version, reason="measure it",
+                                 report_type=REPORT,
+                                 producer=SH.CANDIDATE_NAME,
+                                 opened_at=FROZEN_AT)
+            SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
+            got[version] = SH.predictions_for(run_id)[0]["prob"]
+
+        assert got[incumbent] == pytest.approx(0.58)
+        assert got[target] == pytest.approx(0.72), \
+            "the run's own version has to decide the forecast"
+
+    def test_it_does_not_read_the_champions_probability(self, store):
+        """The one input it must not take.
+
+        A candidate computed from the champion's probability would be graded
+        against a mapping of itself, and that probability is the number the
+        verdict is about. Nothing here says so in a comment: the champion's
+        ``prob`` is changed and the candidate's forecast must not move.
+        """
+        version = PR.freeze(sources=_sources("v"), created_by="kylin",
+                            reason="the version", frozen_at=FROZEN_AT)
+        run_id = SH.open_run(policy_version_id=version, reason="measure it",
+                             report_type=REPORT, producer=SH.CANDIDATE_NAME,
+                             opened_at=FROZEN_AT)
+        _champion(store, "2026-06-02", "A", 0.30)
+        SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
+        before = SH.predictions_for(run_id)[0]["prob"]
+
+        store.execute("UPDATE predictions SET prob = 0.99 WHERE code = 'A'")
+        store.commit()
+        SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
+        after = SH.predictions_for(run_id)[0]["prob"]
+
+        expected = scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"]
+        assert before == pytest.approx(expected)
+        assert after == before == pytest.approx(expected)
+
+    def test_a_code_with_no_recorded_label_falls_to_a_coin_flip(self, store):
+        """Unknown is 0.5 everywhere else, and it stays in the panel: dropping
+        it would be a coverage decision made silently, and ``coverage()`` is
+        where that belongs."""
+        version = PR.freeze(sources=_sources("v"), created_by="kylin",
+                            reason="the version", frozen_at=FROZEN_AT)
+        run_id = SH.open_run(policy_version_id=version, reason="measure it",
+                             report_type=REPORT, producer=SH.CANDIDATE_NAME,
+                             opened_at=FROZEN_AT)
+        SH.emit_for_date(run_id, "2026-06-02", panel=["NOBODY_FORECAST_THIS"])
+        rows = SH.predictions_for(run_id)
+        assert len(rows) == 1
+        assert rows[0]["prob"] == pytest.approx(0.5)
+
+    def test_the_shipped_candidate_reaches_a_promotable_verdict(
+            self, store, monkeypatch):
+        """The closed loop, on the real producer rather than a temporary one.
+
+        ``TestTheWholePathIsReachable`` does the same walk with a stubbed
+        constant forecast. This is the same path with the producer the build
+        actually ships, which is the difference between "the path exists" and
+        "the path is the one that runs".
+        """
+        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
+                              reason="the incumbent", frozen_at="2026-05-01")
+        target = PR.freeze(sources=_sources("target"), created_by="kylin",
+                           reason="the candidate", frozen_at=FROZEN_AT)
+        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+
+        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
+                             report_type=REPORT,
+                             producer=SH.CANDIDATE_NAME, opened_at=FROZEN_AT)
+        _emit_and_grade(store, run_id, monkeypatch)
+
+        got = _run(target)
+        assert got["evidence_scope"] == PR.SCOPE_CANDIDATE
+        assert got["outcome"] == "promote"
+        assert got["validation_days"] >= 20
+        assert PR.active()["version_id"] == incumbent, "a verdict moves nothing"

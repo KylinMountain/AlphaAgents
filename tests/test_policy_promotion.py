@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from alpha_agents.data import memory_store, policy_registry as PR
+from alpha_agents.data import scoring
 
 FROZEN_1 = "2026-01-01"
 FROZEN_2 = "2026-01-02"
@@ -47,13 +48,19 @@ FROZEN_3 = "2026-01-03"
 
 
 def _sources(tag: str) -> dict:
-    """A syntactically valid source set, distinguishable by ``tag``."""
+    """A syntactically valid source set, distinguishable by ``tag``.
+
+    ``decision`` is the pointer-controlled source; what is in force before
+    anything is installed is the code default block, which is what a freeze
+    records.
+    """
     return {
         "prompts": {"morning_scan.md": tag},
         "model": {"agent_model": "qwen-plus"},
         "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
         "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
         "knowledge": {"snapshot_id": None},
+        "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
     }
 
 
@@ -69,8 +76,8 @@ def _persist_verdict(conn, verdict: dict) -> dict:
 
     The scope is written by hand here deliberately: these tests are about what
     a promotion does with a verdict, not about how a verdict earns its scope.
-    That a real candidate run produces this value — and that nothing in the
-    build produces it today — is asserted in ``test_gate_candidate_bound.py``.
+    That a real candidate run produces this value — and that the shipped
+    candidate does reach it — is asserted in ``test_gate_candidate_bound.py``.
     """
     from alpha_agents.evolution import holdout_gate as HG
     decision = {**verdict, "promote": verdict["outcome"] == "promote",
@@ -816,3 +823,78 @@ class TestTheOperatorCLI:
         store.commit()
         assert cli.main(["status"]) == 0
         assert "does not exist" in capsys.readouterr().out
+
+
+# ── The promotion is the change ────────────────────────────────────────
+
+
+def _bolder() -> dict:
+    """A mapping that is not the one in force, and says so in one number."""
+    return {**scoring.DEFAULT_DECISION_PARAMS,
+            "confidence_priors": {"high": 0.72, "medium": 0.60, "low": 0.45}}
+
+
+class TestPromotionChangesTheMapping:
+    """The defect this closed, stated as a behaviour rather than a promise.
+
+    ``promote`` requires the live configuration to hash to the version it moves
+    to. While the decision parameters were module constants, that meant the only
+    promotable version was one whose numbers were already running: the pointer
+    moved and nothing else did, and a challenger measured against the champion
+    was measuring itself. The parameters are now owned by the pointer, so moving
+    the pointer *is* the change.
+
+    Asserted from the decision path, not from the registry: that the registry
+    agrees with itself is what it already did.
+    """
+
+    def _incumbent_and_candidate(self, store):
+        candidate_sources = {**_sources("v2"), "decision": _bolder()}
+        incumbent = PR.freeze(sources=_sources("v1"), created_by="kylin",
+                              reason="the incumbent", frozen_at=FROZEN_1)
+        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+        target = PR.freeze(sources=candidate_sources, created_by="kylin",
+                           reason="a bolder mapping", frozen_at=FROZEN_2)
+        return incumbent, target, candidate_sources
+
+    def test_the_decisions_follow_the_pointer(self, store):
+        incumbent, target, candidate_sources = self._incumbent_and_candidate(store)
+        assert scoring.confidence_to_prob("high") == pytest.approx(0.58)
+
+        claim = _persist_verdict(store, _verdict(target))
+        PR.approve(version_id=target, approved_by="kylin", reason="approved",
+                   gate_decision=claim, sources=candidate_sources, at=FROZEN_3)
+        assert scoring.confidence_to_prob("high") == pytest.approx(0.58), \
+            "an approval is not a change of behaviour"
+        assert PR.active()["version_id"] == incumbent
+
+        PR.promote(version_id=target, actor="kylin", reason="go",
+                   sources=candidate_sources, expected_seq=1, at=FROZEN_3)
+
+        assert PR.active()["version_id"] == target
+        assert scoring.confidence_to_prob("high") == pytest.approx(0.72), \
+            "the pointer decides the mapping the trader applies"
+
+    def test_a_rollback_restores_the_previous_mapping(self, store):
+        """The safety valve, now that the parameters are under the pointer.
+
+        The drift check would refuse this if a version's parameters were judged
+        against the configuration in force: rolling back to the incumbent while
+        the candidate runs looks exactly like "the incumbent has drifted". It is
+        the staging that keeps the valve open, so this is the test that would
+        have caught it being closed.
+        """
+        incumbent, target, candidate_sources = self._incumbent_and_candidate(store)
+        claim = _persist_verdict(store, _verdict(target))
+        PR.approve(version_id=target, approved_by="kylin", reason="approved",
+                   gate_decision=claim, sources=candidate_sources, at=FROZEN_3)
+        PR.promote(version_id=target, actor="kylin", reason="go",
+                   sources=candidate_sources, expected_seq=1, at=FROZEN_3)
+        assert scoring.confidence_to_prob("high") == pytest.approx(0.72)
+
+        PR.rollback(to_version_id=incumbent, actor="kylin", reason="breach",
+                    sources=_sources("v1"), expected_seq=2, at=FROZEN_3)
+
+        assert PR.active()["version_id"] == incumbent
+        assert scoring.confidence_to_prob("high") == pytest.approx(0.58), \
+            "the old mapping is back, and it is the old one"

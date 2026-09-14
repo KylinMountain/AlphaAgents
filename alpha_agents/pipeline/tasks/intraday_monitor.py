@@ -255,8 +255,8 @@ async def run_intraday_monitor() -> str | None:
                 if event_lines:
                     events_context = "【今日已知事件（晨扫识别）】\n" + "\n".join(event_lines)
                     logger.info("Intraday: loaded %d events from morning scan", len(event_lines))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Intraday: morning event context unavailable: %s", e)
 
     # Build context for prior intraday recommendations (continuity)
     prior_context = ""
@@ -268,8 +268,8 @@ async def run_intraday_monitor() -> str | None:
                 price_str = f" @ {r['entry_price']:.2f}元" if r.get("entry_price") else ""
                 lines.append(f"  {r['code']} {r['name']}{price_str} ({r['confidence']}) — {r.get('reason', '')}")
             prior_context = "【今日已推荐标的（保持一致性，如需改变判断请明确说明原因）】\n" + "\n".join(lines)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Intraday: prior-recommendation context unavailable: %s", e)
 
     # ── Sentiment cycle context ──
     sentiment_ctx = ""
@@ -283,8 +283,8 @@ async def run_intraday_monitor() -> str | None:
             f"  买入策略: {strat.get('buy_style', '')}\n"
             f"  卖出策略: {strat.get('sell_style', '')}"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Intraday: sentiment-cycle block unavailable: %s", e)
 
     # ── Pre-fetch best stocks for anomaly sectors (code-level, not LLM-dependent) ──
     candidate_sectors = []  # Must be defined before try block
@@ -329,8 +329,8 @@ async def run_intraday_monitor() -> str | None:
                 if s and s not in seen and gainer.get("change_pct", 0) > 1.5:
                     candidate_sectors.append(s)
                     seen.add(s)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Intraday: sector extraction unavailable: %s", e)
 
         # Source 3: Active themes with strength >= 6 (stable but may not change daily)
         for t in themes:
@@ -1106,10 +1106,19 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
     try:
         # Phase 1: capture decision-time features for Playbook clustering
         # (Phase 3). Fields match available_fields in the evolution spec.
+        #
+        # `change_pct_band` is the third clustering dimension, and it is
+        # recorded rather than derived at read time so the grouping (SQL), the
+        # generated pattern condition and the matcher all read one value. The
+        # boundary table lives in `evolution.playbook.change_band`, which owns
+        # it the same way it owns the condition it produces.
+        from alpha_agents.evolution.playbook import change_band
+
         features = merge_features({
             "theme": r.get("theme", ""),
             "score": r.get("score", 0),
             "change_pct": r.get("change_pct", 0),
+            "change_pct_band": change_band(r.get("change_pct")),
             "institutional": r.get("institutional", ""),
             "playbook_id": r.get("playbook_id"),
             "playbook_name": r.get("playbook_name", ""),

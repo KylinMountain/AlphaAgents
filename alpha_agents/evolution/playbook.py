@@ -27,6 +27,49 @@ _BOOST_MIN_TRADES = 10
 _BOOST_HIT_THRESHOLD = 0.7
 _DEPRECATE_DAYS = 14
 
+#: The entry-move dimension, bucketed at decision time.
+#:
+#: This is the **one** definition of the boundaries. The writer records
+#: ``features["change_pct_band"]`` with :func:`change_band`, the clustering groups
+#: on that stored key, and the matcher compares against it — so all three read the
+#: same value. Deriving the band twice (a SQL ``CASE`` for the grouping and a
+#: Python rule for the matching) is the shape this repository keeps finding: the
+#: two drift, and an auto-created pattern describes a cluster it can never match.
+#:
+#: It replaced ``vpa_verdict``, which was a third grouping dimension that nothing
+#: wrote — a constant NULL, so the clustering had collapsed to two dimensions
+#: without anyone noticing. See the plan in ``docs/exec-plans/completed/``.
+CHANGE_BANDS = ((0.0, "down"), (2.0, "flat"), (5.0, "mid"))
+CHANGE_BAND_TOP = "strong"
+CHANGE_BAND_UNKNOWN = "unknown"
+
+#: Display labels for generated names and descriptions. The band names above are
+#: values in a pattern; these are for the human reading "Auto: 半导体-大涨".
+CHANGE_BAND_LABELS = {
+    "down": "下跌",
+    "flat": "微涨",
+    "mid": "中涨",
+    "strong": "大涨",
+    CHANGE_BAND_UNKNOWN: "涨幅未知",
+}
+
+
+def change_band(change_pct) -> str:
+    """Bucket the day's move. The single definition of the boundaries.
+
+    ``unknown`` for anything that is not a number, and that is not the same as
+    ``flat``: a morning pick has no day move to speak of, and calling it "flat"
+    would put a made-up value into a feature the matcher compares against.
+    """
+    try:
+        pct = float(change_pct)
+    except (TypeError, ValueError):
+        return CHANGE_BAND_UNKNOWN
+    for upper, name in CHANGE_BANDS:
+        if pct < upper:
+            return name
+    return CHANGE_BAND_TOP
+
 
 def _check_condition(field_value, op: str, target) -> bool:
     """Evaluate one condition. Return False on any type mismatch — never raise."""
@@ -227,6 +270,13 @@ _AUTO_CREATE_LOOKBACK_DAYS = 14
 
 def _query_hit_clusters(days: int = _AUTO_CREATE_LOOKBACK_DAYS) -> list[dict]:
     """Group recent verified intraday predictions by decision-feature cluster.
+
+    Three dimensions, all of them **live**: the entry-move band
+    (``change_pct_band``, written at decision time — see :func:`change_band`),
+    the theme, and whether an institution was involved. It used to group on
+    ``vpa_verdict`` instead of the band, and nothing wrote that key: a constant
+    NULL is not a dimension, so the grouping had quietly collapsed to two.
+
     Returns rows where wins >= _AUTO_CREATE_MIN_WINS. CRITICAL: only uses
     report_type='intraday' (excludes 'intraday_signal' limit-up observations
     which would dominate clustering with useless patterns)."""
@@ -235,7 +285,7 @@ def _query_hit_clusters(days: int = _AUTO_CREATE_LOOKBACK_DAYS) -> list[dict]:
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     q = """
     SELECT
-        json_extract(features_json, '$.vpa_verdict') as vpa_verdict,
+        json_extract(features_json, '$.change_pct_band') as change_pct_band,
         json_extract(features_json, '$.theme') as theme,
         CASE WHEN json_extract(features_json, '$.institutional') IS NOT NULL
                   AND json_extract(features_json, '$.institutional') != ''
@@ -249,7 +299,7 @@ def _query_hit_clusters(days: int = _AUTO_CREATE_LOOKBACK_DAYS) -> list[dict]:
       AND features_json IS NOT NULL
       AND features_json != '{}'
       AND date >= ?
-    GROUP BY vpa_verdict, theme, institutional_present
+    GROUP BY change_pct_band, theme, institutional_present
     HAVING hits >= ?
     ORDER BY hits DESC
     """
@@ -258,21 +308,29 @@ def _query_hit_clusters(days: int = _AUTO_CREATE_LOOKBACK_DAYS) -> list[dict]:
 
 
 def _pattern_from_cluster(cluster: dict) -> dict:
-    """Build the pattern_json for a feature cluster."""
+    """Build the pattern_json for a feature cluster.
+
+    One condition per dimension the cluster actually pins. A cluster of rows
+    written before ``change_pct_band`` existed has no value for it, so the
+    generated pattern simply omits that condition rather than pinning it to a
+    null — the cluster's evidence is real and its pattern should say what it
+    really distinguishes.
+    """
     conditions = []
     if cluster.get("theme"):
         conditions.append({"field": "theme", "op": "==", "value": cluster["theme"]})
-    if cluster.get("vpa_verdict"):
-        conditions.append({"field": "vpa_verdict", "op": "==",
-                           "value": cluster["vpa_verdict"]})
+    if cluster.get("change_pct_band"):
+        conditions.append({"field": "change_pct_band", "op": "==",
+                           "value": cluster["change_pct_band"]})
     if cluster.get("institutional_present"):
         conditions.append({"field": "institutional", "op": "contains",
                            "value": "机构"})
     desc_parts = []
     if cluster.get("theme"):
         desc_parts.append(cluster["theme"])
-    if cluster.get("vpa_verdict"):
-        desc_parts.append(f"VPA{cluster['vpa_verdict']}")
+    if cluster.get("change_pct_band"):
+        desc_parts.append(CHANGE_BAND_LABELS.get(cluster["change_pct_band"],
+                                                 str(cluster["change_pct_band"])))
     if cluster.get("institutional_present"):
         desc_parts.append("机构买入")
     return {"description": "+".join(desc_parts), "conditions": conditions}
@@ -365,8 +423,11 @@ def scan_and_auto_create(today: str) -> list[int]:
         sig = _pattern_signature(json.dumps(pattern))
         if not sig or sig in existing_sigs:
             continue
-        name_parts = [str(cluster[key]) for key in ("theme", "vpa_verdict")
+        name_parts = [str(cluster[key]) for key in ("theme",)
                       if cluster.get(key)]
+        if cluster.get("change_pct_band"):
+            name_parts.append(CHANGE_BAND_LABELS.get(cluster["change_pct_band"],
+                                                     str(cluster["change_pct_band"])))
         if cluster.get("institutional_present"):
             name_parts.append("institutional")
         name = f"Auto: {'-'.join(name_parts)}"

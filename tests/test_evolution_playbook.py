@@ -1,5 +1,10 @@
 """Tests for alpha_agents.evolution.playbook."""
+from datetime import date
 from unittest.mock import patch
+
+import pytest
+
+from alpha_agents.data import memory_store as ms
 
 
 SAMPLE_PLAYBOOK = {
@@ -198,7 +203,7 @@ def test_scan_and_auto_create_ignores_signal_rows():
 
 def test_scan_and_auto_create_quarantines_a_new_pattern():
     """The cluster is described as a candidate; no playbook is created live."""
-    cluster = {"vpa_verdict": "bullish", "theme": "CPO",
+    cluster = {"change_pct_band": "strong", "theme": "CPO",
                "institutional_present": 1,
                "hits": 4, "total": 5, "avg_return": 4.2}
     with patch("alpha_agents.evolution.playbook._query_hit_clusters",
@@ -218,22 +223,26 @@ def test_scan_and_auto_create_quarantines_a_new_pattern():
     assert kwargs["operation"] == "create"
     assert not kwargs.get("target_id")
     pattern = kwargs["payload"]["pattern_json"]
-    # Conditions must reference theme + vpa_verdict + institutional (contains 机构)
+    # One condition per dimension the cluster pins: theme + the entry-move band
+    # + institutional (contains 机构). The band replaced `vpa_verdict`, which no
+    # writer recorded — a constant NULL was never a dimension.
     fields = {c["field"] for c in pattern["conditions"]}
-    assert fields == {"theme", "vpa_verdict", "institutional"}
-    # Name includes identifying bits
-    assert "CPO" in kwargs["payload"]["name"]
-    assert "bullish" in kwargs["payload"]["name"]
+    assert fields == {"theme", "change_pct_band", "institutional"}
+    # Name includes identifying bits, and the band reads in the language of the
+    # candidate list rather than as a machine value.
+    name = kwargs["payload"]["name"]
+    assert "CPO" in name
+    assert "大涨" in name
     m_live.assert_not_called()
 
 
 def test_scan_and_auto_create_skips_existing_pattern():
-    cluster = {"vpa_verdict": "bullish", "theme": "CPO",
+    cluster = {"change_pct_band": "strong", "theme": "CPO",
                "institutional_present": 0,
                "hits": 3, "total": 4, "avg_return": 2.0}
-    # Existing playbook matches the same signature (theme + vpa_verdict, no institutional)
-    existing = [{"id": 1, "name": "Auto: CPO-bullish",
-                 "pattern_json": '{"conditions":[{"field":"theme","op":"==","value":"CPO"},{"field":"vpa_verdict","op":"==","value":"bullish"}]}',
+    # Existing playbook matches the same signature (theme + band, no institutional)
+    existing = [{"id": 1, "name": "Auto: CPO-大涨",
+                 "pattern_json": '{"conditions":[{"field":"theme","op":"==","value":"CPO"},{"field":"change_pct_band","op":"==","value":"strong"}]}',
                  "status": "active"}]
     with patch("alpha_agents.evolution.playbook._query_hit_clusters",
                return_value=[cluster]), \
@@ -244,3 +253,98 @@ def test_scan_and_auto_create_skips_existing_pattern():
         created = scan_and_auto_create("2026-04-17")
     assert created == []
     m_save.assert_not_called()
+
+
+class TestTheEntryMoveDimension:
+    """The third clustering dimension, and why it is written down.
+
+    It replaced `vpa_verdict`, which the query grouped on and **no writer
+    recorded** — a constant NULL, so the grouping had two live dimensions while
+    the SQL read as if it had three. Two things keep the replacement honest:
+    the boundaries exist once (`change_band`), and the value is recorded at
+    decision time rather than derived again in SQL. Deriving it twice is how a
+    playbook gets created for a cluster it can never match.
+    """
+
+    @pytest.mark.parametrize("pct,band", [
+        (-3, "down"), (-0.1, "down"), (0, "flat"), (1.99, "flat"),
+        (2, "mid"), (4.99, "mid"), (5, "strong"), (20, "strong"),
+    ])
+    def test_the_boundaries(self, pct, band):
+        from alpha_agents.evolution.playbook import change_band
+        assert change_band(pct) == band
+
+    def test_a_pick_with_no_move_is_unknown_not_flat(self):
+        """Nothing to measure is not the same as measuring zero: the matcher
+        compares against this value, so a made-up "flat" would match patterns
+        the decision never justified."""
+        from alpha_agents.evolution.playbook import change_band
+        for bad in (None, "", "abc", [], {}):
+            assert change_band(bad) == "unknown"
+
+    def test_two_bands_are_two_clusters(self, tmp_path, monkeypatch):
+        """The behavioural claim, not a grep of the SQL.
+
+        Six rows identical in theme and institutional, differing only in the
+        band. Two clusters, one per band — if the band were a constant (which is
+        what `vpa_verdict` had become) there would be exactly one.
+        """
+        from alpha_agents.evolution.playbook import _query_hit_clusters
+
+        monkeypatch.setattr(ms, "MEMORY_DB_PATH", tmp_path / "memory.db")
+        monkeypatch.setattr(ms._local, "conn", None, raising=False)
+        today = date.today().isoformat()
+        for i, band in enumerate(["strong"] * 3 + ["flat"] * 3):
+            pid = ms.save_prediction(
+                date=today, report_type="intraday", code=f"00000{i}",
+                name="A", direction="bullish", confidence="medium",
+                theme_line="CPO", entry_price=10.0, reason="r",
+                features={"theme": "CPO", "change_pct_band": band,
+                          "institutional": ""})
+            ms.update_prediction_result(pid, next_day_return=1.0, hit=1)
+
+        clusters = _query_hit_clusters(days=365)
+
+        assert {c["change_pct_band"] for c in clusters} == {"strong", "flat"}
+        assert len(clusters) == 2, "one cluster per band, not one merged group"
+
+    def test_a_row_without_the_band_still_forms_a_cluster(self, tmp_path,
+                                                          monkeypatch):
+        """Rows written before the key existed keep their evidence: the cluster
+        forms, and the pattern it generates simply omits the condition it cannot
+        pin rather than pinning a null."""
+        from alpha_agents.evolution.playbook import (_pattern_from_cluster,
+                                                     _query_hit_clusters)
+
+        monkeypatch.setattr(ms, "MEMORY_DB_PATH", tmp_path / "memory.db")
+        monkeypatch.setattr(ms._local, "conn", None, raising=False)
+        today = date.today().isoformat()
+        for i in range(3):
+            pid = ms.save_prediction(
+                date=today, report_type="intraday", code=f"60000{i}",
+                name="A", direction="bullish", confidence="medium",
+                theme_line="半导体", entry_price=10.0, reason="r",
+                features={"theme": "半导体", "institutional": ""})
+            ms.update_prediction_result(pid, next_day_return=1.0, hit=1)
+
+        clusters = _query_hit_clusters(days=365)
+
+        assert len(clusters) == 1
+        assert clusters[0]["change_pct_band"] is None
+        fields = {c["field"] for c in _pattern_from_cluster(clusters[0])["conditions"]}
+        assert fields == {"theme"}
+
+    def test_a_decision_without_the_band_does_not_satisfy_a_band_condition(self):
+        """Fail closed. Missing must not read as "any band", or every pattern
+        carrying this dimension would silently widen to cover them all."""
+        from alpha_agents.evolution.playbook import match_playbook
+
+        pattern = ('{"conditions":[{"field":"change_pct_band","op":"==",'
+                   '"value":"strong"}]}')
+        pb = {"id": 1, "name": "Auto: CPO-大涨", "weight": 1.0,
+              "status": "active", "pattern_json": pattern}
+        with patch("alpha_agents.evolution.playbook.get_active_playbooks",
+                   return_value=[pb, {**pb, "id": 2}]):
+            assert match_playbook({"theme": "CPO"}) is None
+            assert match_playbook({"theme": "CPO",
+                                   "change_pct_band": "strong"}) is not None

@@ -8,14 +8,18 @@ Grandfathered violations live in `scripts/lint_baseline.txt`. A line is
 removed from that file only by fixing the code — a baseline that can grow
 is not a baseline.
 
-_Last updated 2026-09-14. Five items were paid the same day. D10 (the due test
+_Last updated 2026-09-14. Seven items were paid the same day. D10 (the due test
 counted calendar days) — a not-yet-ripe forecast now stays `pending` instead of
 being censored. D11 (the evolve page's reachable branch had no render case) — one
 case per branch now. D2 (layering violations in `daily_archive`) — split into a
 store and a pipeline task, rather than moved as this file originally proposed.
 D9 (the frontend checks ran only when someone remembered) — they are a CI job
 now. D7 (the gate had no caller) — a scheduled task asks it once per experiment,
-at the point the sample was declared sufficient. **Open: D3, D4, D5, D6, D8.**_
+at the point the sample was declared sufficient. D3 (26 silent `except: pass`) —
+every one now names the exception and logs it. D5 (the clustering dimension) —
+measured, half the entry turned out false, and the dead dimension is live again.
+D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
+`scripts/*.py`. **Open: D4, D6, D8, D12.**_
 
 _On 2026-09-12 four baseline lines had become dead — the code was fixed but the
 exemption was never removed — and were deleted. Deleting a line is the point: the
@@ -27,9 +31,9 @@ wired; `brier` is NULL on a calendar, not on a missing call), which is the
 difference between "wait" and "go look". D8 and D9 were added the same day — a
 column with no writer, and a check that only runs when someone remembers._
 
-**Current baseline: 25 entries covering 43 violations.** `lint_harness.py`
-prints the 43, not the 25, because one entry can cover several occurrences in
-one file.
+**Current baseline: 11 entries covering 17 violations.** `lint_harness.py`
+prints the 17, not the 11, because one entry can cover several occurrences in
+one file. (Was 26 entries / 47 violations on 2026-09-13.)
 
 ## Open
 
@@ -55,6 +59,24 @@ module's name.
 **Recognise.** `daily_archive.py::layering` gone from the baseline.
 
 ### D3 — 26 silent `except ... : pass`
+
+**Paid 2026-09-14.** All 26 sites across 14 modules now bind the exception and
+log at debug, one message written per site rather than one template. The 14
+baseline lines were deleted with the code, and the grandfathered count fell
+43 → 17.
+
+Two things the work turned up, both worth keeping:
+
+- **`data/memory_store.py` had no logger at all.** A 2100-line store where two
+  migration skips and a duplicate-lesson conflict were the three silent handlers.
+  It has one now, added with its reason.
+- **The rule's own advice was wrong.** The message used to suggest "or write a
+  comment above the `pass` explaining why the failure is ignorable" — but the
+  check reads the AST (`len(node.body) == 1 and isinstance(node.body[0], Pass)`),
+  and a comment is not in the AST. Following that advice left the violation
+  standing. The message now says so, and says the `except` needs `as e` to name
+  the exception in the log line.
+
 **Cost.** The PBOC parser returned rows whose every headline was the
 literal string `"true"` for months, because nothing on that path was
 allowed to complain. Every silent handler is a place that can happen
@@ -63,8 +85,9 @@ again.
 comment above the `pass` explaining why the failure is genuinely
 ignorable.
 **Recognise.** `silent-except` count in the baseline falls.
-**Progress.** 29 → 26. `data/embeddings.py`, `evolution/lessons.py` and
-`evolution/playbook.py` were cleared; their baseline lines were removed.
+**Progress.** 29 → 26 → **0**. The first three modules
+(`data/embeddings.py`, `evolution/lessons.py`, `evolution/playbook.py`) were
+cleared earlier; this pass took the remaining 14.
 
 ### D4 — 4 files over 1200 lines
 `data/memory_store.py` (2145), `tools/vpa/data.py` (1410),
@@ -77,13 +100,39 @@ blind edits are where duplication starts.
 than trusting this line.
 
 ### D5 — Playbook clustering lost a dimension
+
+**Paid 2026-09-14 — and half of this entry was measured false.**
+
+`_query_hit_clusters` grouped on `vpa_verdict` and **no writer recorded that
+key**: neither `intraday_monitor` nor `morning_scan` puts it in `features_json`,
+so the expression was a constant NULL and the clustering had two live dimensions
+while the SQL read as if it had three. The cost therefore is not "historical
+rules broke" — it is that clusters were **coarser than intended**, so an
+auto-created pattern described "a theme, with or without an institution" rather
+than a kind of setup.
+
+The entry's second claim ("every historical playbook carrying a `vpa_verdict`
+condition can no longer match") **does not hold in production**: `playbooks`
+holds exactly one row and its conditions are `(institutional, theme)`. Zero have
+`vpa_verdict`, precisely because the dimension never worked. Measuring first is
+what turned "retire the broken patterns" into "don't touch anything".
+
+The dimension is now `change_pct_band`, **recorded at decision time** by
+`intraday_monitor` and by the replay script, with the boundaries defined once in
+`evolution.playbook.change_band`. Recording it rather than deriving it twice (a
+SQL `CASE` for the grouping plus a Python rule for the matching) is the point:
+two definitions drift, and an auto-created pattern then describes a cluster it
+can never match. `vpa_verdict` no longer appears in the module.
+
 **Cost.** Removing `vpa_verdict` from recorded features collapsed
-clustering from three dimensions to two (`theme` × `institutional`), and
-every historical playbook carrying a `vpa_verdict` condition can no
-longer match.
-**Fix.** Add replacement buckets from features already recorded — score
-band, change_pct band, anomaly category.
-**Recognise.** `_query_hit_clusters` groups on three or more dimensions.
+clustering from three dimensions to two (`theme` × `institutional`).
+**Recognise.** `_query_hit_clusters` groups on three or more dimensions — met,
+and pinned behaviourally: six rows differing only in the band form two clusters
+and one.
+**Known cost of the fix, accepted.** A third live dimension makes clusters finer,
+so auto-creation gets slower: production has 47 rows with a `prob` and the
+threshold is 3 wins per cluster. Expect no new auto-created playbook for a while
+— that is specificity being paid for, not a breakage.
 
 ### D6 — Entry side is unevaluated
 **Cost.** The largest gap in `docs/strategy_evaluation_2026-09.md`. G6
@@ -280,8 +329,37 @@ the exact failure mode the pair exists to prevent.
 `Reachability`, and a mutation probe (pin `open` to `false`) that turns the new
 case red.
 
+### D12 — `scripts/research/` is a byte-identical copy of `scripts/`
+
+**Cost.** 21 `.py` files live under `scripts/research/` and **11 of them are
+byte-identical** to a same-named file one level up: `replay_evolution.py`,
+`backtest_vpa.py`, the `analyze_vpa_*` family, `reparse_vpa_cache.py`, and so on.
+Found on 2026-09-14 while changing the replay script's recorded features — the
+same edit had to be made twice, and **nothing would have failed if only one copy
+had been fixed**. That is this repository's recurring "one question, two answers"
+shape with a filesystem for a database, and the failure mode is silent: the two
+copies drift a line at a time until one of them is wrong and nobody knows which.
+**Fix.** Decide which tree owns them. If `scripts/research/` is a snapshot for
+the research notes, keep it and make it a deliberate export (a header saying what
+it is and how it is refreshed); otherwise delete the duplicates and keep one
+copy. Deleting the 11 is the safer half — nothing imports them.
+**Recognise.** No file under `scripts/research/` hashes equal to a same-named
+file in `scripts/`.
+**Note.** Not fixed in the same turn that found it: removing a tree is the
+owner's call, and it is not on the path of any behavioural change. Listed here so
+the next person does not "fix a bug" in one copy only.
+
 ## Paid
 
+- Playbook clustering grouped on a dimension nothing wrote (D5). It is now
+  `change_pct_band`, recorded at decision time with the boundaries defined once,
+  so the grouping, the generated condition and the matcher read one value. The
+  entry's "historical patterns broke" half was measured false: production has one
+  playbook and it never had that condition.
+- 26 silent `except ...: pass` (D3) across 14 modules now name the exception and
+  log it. `data/memory_store.py` had no logger at all. The lint rule's own advice
+  was also wrong — a comment above the `pass` cannot clear it, because the check
+  reads the AST — and the message now says so.
 - The champion/challenger gate had no caller (D7). A scheduled task now asks it
   once per experiment, at the point the sample was declared sufficient — one
   look, because §12 forbids repeated inspection until something passes. What

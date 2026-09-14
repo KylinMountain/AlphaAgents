@@ -284,8 +284,8 @@ async def run_morning_scan() -> str | None:
             futures = json.loads(await asyncio.to_thread(get_futures_quotes_fn, "原油,沪金", 2))
             for q in futures.get("quotes", []):
                 lines.append(f"  {q['name']}: {q['latest_close']} ({q['change_pct']:+.2f}%)")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Morning scan: futures block unavailable: %s", e)
 
         global_ctx = "【全球市场】\n" + "\n".join(lines) if lines else ""
     except Exception as e:
@@ -303,8 +303,8 @@ async def run_morning_scan() -> str | None:
             f"  买入策略: {strat.get('buy_style', '')}\n"
             f"  卖出策略: {strat.get('sell_style', '')}"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Morning scan: sentiment-cycle block unavailable: %s", e)
 
     # 6. Run morning agent with context
     themes_ctx = _format_themes(themes)
@@ -423,8 +423,8 @@ async def _cross_validate_recommendations(recs: list[dict]) -> list[dict]:
         ad_ratio = breadth.get("advance_decline_ratio", 1)
         emotion_pass = ad_ratio > 0.8  # V2 原始标准
         emotion_known = True
-    except Exception:
-        pass  # emotion_known stays False → dim marked as "?"
+    except Exception as e:
+        logger.debug("Cross-validation: market breadth unavailable, emotion marked unknown: %s", e)
 
     validated = []
     for r in recs:
@@ -764,8 +764,8 @@ def _extract_json_recommendations(report: str) -> list[dict]:
         data = repair_json(match.group(1), return_objects=True)
         if isinstance(data, list):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Could not repair the model's JSON: %s", e)
     return []
 
 

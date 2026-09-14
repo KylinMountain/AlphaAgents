@@ -237,7 +237,7 @@ def _verify_previous_day(yesterday: str, today: str) -> int:
 
         # Phase 3 playbook trade recording
         try:
-            from alpha_agents.evolution.playbook import match_playbook
+            from alpha_agents.evolution.playbook import change_band, match_playbook
             from alpha_agents.data.memory_store import record_playbook_trade
             features = json.loads(pred.get("features_json") or "{}")
             if features:
@@ -344,6 +344,7 @@ async def _replay_one_day(target_date: str, next_date: Optional[str]) -> dict:
             "theme": a["theme"],
             "score": a["score"],
             "change_pct": a["change_pct"],
+            "change_pct_band": change_band(a["change_pct"]),
             "institutional": a["institutional"],
             "rec_type": "actionable",
         }

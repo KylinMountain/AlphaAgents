@@ -139,8 +139,8 @@ async def route_and_analyze(events: list[dict], event_bus=None,
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(event_bus.emit(event))
-            except RuntimeError:
-                pass
+            except RuntimeError as e:
+                logger.debug("event emit skipped: no running loop in this callback: %s", e)
         return emit
 
     stock_hooks = ToolEventHooks(_make_emitter("stock"), agent_label="股票策略师") if event_bus else None

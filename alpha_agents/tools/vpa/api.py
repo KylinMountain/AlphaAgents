@@ -142,8 +142,8 @@ def compute_vpa_with_llm(code: str, name: str = "", days: int = 60,
             if prev and prev.get("report"):
                 previous_report = prev["report"]
                 logger.debug("Found previous VPA analysis for %s from %s", code, prev.get("analysis_date"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("VPA: previous-report lookup failed for %s: %s", code, e)
 
     # Step 3: LLM interpretation with history context
     llm_result = _call_llm_vpa(

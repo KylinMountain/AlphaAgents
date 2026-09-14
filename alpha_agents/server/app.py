@@ -395,8 +395,8 @@ async def websocket_endpoint(ws: WebSocket):
             msg = await queue.get()
             event_bus.mark_consumed(queue)
             await ws.send_text(json.dumps({"type": "event", "data": json.loads(msg)}, ensure_ascii=False))
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as e:
+        logger.debug("WebSocket client disconnected: %s", e)
     except Exception:
         logger.debug("WebSocket closed", exc_info=True)
     finally:

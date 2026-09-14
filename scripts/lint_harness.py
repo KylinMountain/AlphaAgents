@@ -307,6 +307,22 @@ def check_logging(path: Path, tree: ast.AST) -> list[Violation]:
                 ' 改成惰性格式化: logger.info("处理 %s 失败: %s", code, err)。'
                 "这样未触发的日志不付格式化开销，且相同事件的消息可被 grep 聚合。",
             ))
+        # A mapping placeholder needs a mapping. `logger.debug("... %(code)s", e)`
+        # reads as a perfectly lazy log line and raises TypeError the first time
+        # the handler runs — the one moment nobody tests. Checked statically
+        # because no amount of normal-path testing reaches it.
+        fmt = node.args[0] if node.args else None
+        if (isinstance(fmt, ast.Constant) and isinstance(fmt.value, str)
+                and "%(" in fmt.value):
+            rest = node.args[1:]
+            if not (len(rest) == 1 and isinstance(rest[0], ast.Dict)):
+                out.append(Violation(
+                    path, node.lineno, "structured-logging",
+                    "映射式占位符 %(name)s 配的是位置参数",
+                    ' 要么全用 %s 依次传参: logger.debug("... %s: %s", code, e)；'
+                    '要么整体传一个字典: logger.debug("... %(code)s", '
+                    '{"code": code})。混用会在异常路径上抛 TypeError。',
+                ))
     return out
 
 
@@ -335,8 +351,9 @@ def check_exceptions(path: Path, tree: ast.AST) -> list[Violation]:
             out.append(Violation(
                 path, node.lineno, "silent-except",
                 "except ... : pass 静默吞掉异常",
-                'logger.debug("...失败: %s", e) 至少留痕。'
-                "若这里确实可以忽略，在 pass 上方写一行注释说明为什么——"
+                'logger.debug("...失败: %s", e) 至少留痕（顺手给 except 加上 as e）。'
+                "必须真的写一条日志：这条规则读的是 AST，而注释不在 AST 里，"
+                "所以「在 pass 上方写一行注释」并不能让它通过。"
                 "静默失败是本仓库出过事故的地方。",
             ))
     return out

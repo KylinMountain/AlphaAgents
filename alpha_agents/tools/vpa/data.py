@@ -960,8 +960,8 @@ def _compute_context(df: pd.DataFrame, window: int = 20, code: str = "") -> dict
                         )
                     else:
                         ctx["volume_rel_strength_label"] = f"下跌日均量比 {avg_down_vol:.2f}"
-        except Exception:
-            pass  # Best-effort signal — don't fail VPA if index data unavailable
+        except Exception as e:
+            logger.debug("VPA context: relative-volume label unavailable: %s", e)
 
     # ── Problem 4: Supply/Demand test detection (Wyckoff phase 2 & 4) ──
     # After吸筹, 测试 supply is exhausted. After派发, 测试 demand is exhausted.

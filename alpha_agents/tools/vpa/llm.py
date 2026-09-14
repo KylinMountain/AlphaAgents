@@ -329,8 +329,8 @@ def _response_preview(resp, max_chars: int = 800) -> str:
             try:
                 text = json.dumps(fn(), ensure_ascii=False, default=str)
                 return text[:max_chars]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("VPA: could not preview the response object: %s", e)
     try:
         return str(resp)[:max_chars]
     except Exception:
@@ -1234,8 +1234,8 @@ def _call_llm_vpa(
                 )
             elif hasattr(e, 'body'):
                 err_response = f" | body={_redact_secrets(str(e.body)[:500])}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("VPA: could not extract the error response body: %s", e)
         logger.error("LLM VPA failed for %s: %s: %s%s", code, err_type, err_msg, err_response)
         # P1.6: unified error envelope.
         return _error_result(

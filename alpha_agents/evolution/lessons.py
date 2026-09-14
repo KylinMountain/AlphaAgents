@@ -255,6 +255,7 @@ def _collect_playbook_candidates(today: str) -> dict:
     Cluster counts are research inputs, not holdout evidence. Active capacity
     does not constrain quarantine, and no slot is freed or weight assigned.
     """
+    from alpha_agents.evolution import playbook
     from alpha_agents.evolution.playbook import (
         _AUTO_CREATE_LOOKBACK_DAYS, _AUTO_CREATE_MIN_TOTAL,
         _pattern_from_cluster, _pattern_signature, _query_hit_clusters,
@@ -274,8 +275,13 @@ def _collect_playbook_candidates(today: str) -> dict:
             sig = _pattern_signature(json.dumps(pattern))
             if not sig or sig in existing_sigs:
                 continue
-            name_parts = [str(cluster[key]) for key in ("theme", "vpa_verdict")
+            name_parts = [str(cluster[key]) for key in ("theme",)
                           if cluster.get(key)]
+            if cluster.get("change_pct_band"):
+                name_parts.append(
+                    playbook.CHANGE_BAND_LABELS.get(
+                        cluster["change_pct_band"],
+                        str(cluster["change_pct_band"])))
             if cluster.get("institutional_present"):
                 name_parts.append("institutional")
             name = "Auto: " + "-".join(name_parts)

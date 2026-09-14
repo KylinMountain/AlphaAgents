@@ -206,6 +206,25 @@ class TestStatusLooksBeforeYouLeap:
         cli.main(["status"])
         assert "policy target: " in capsys.readouterr().out
 
+    def test_it_prints_the_decision_parameters_in_force(self, cli, store,
+                                                        capsys):
+        """The values, not only the hash.
+
+        Once a version is in force the decision parameters belong to the
+        version, and the code defaults stop deciding anything — so an edit to
+        those defaults has no effect, and it is invisible unless the mapping in
+        force can be read back. Without this line the difference between
+        "edited and inert" and "edited and working" is unobservable.
+        """
+        assert _freeze(cli, "--decision-json", '{"dim_step": 0.09}') == 0
+        _install(cli)
+        capsys.readouterr()
+
+        assert cli.main(["status"]) == 0
+        out = capsys.readouterr().out
+        assert '"dim_step": 0.09' in out
+        assert '"dim_base": 0.44' in out, "the whole block is in force, not one key"
+
 
 class TestACandidateDeclaresItsOwnParameters:
     """``--decision-json``: how a version that differs from the incumbent exists.

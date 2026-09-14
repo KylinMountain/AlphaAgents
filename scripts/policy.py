@@ -41,9 +41,12 @@ first (``freeze`` / ``install``), then the experiment (``shadow-open`` /
   (the evidence is the transition trail), and deletes nothing.
 
 ``status`` changes nothing and is the intended way to look before you leap: it
-prints, among the rest, how many paired days each experiment has. A verdict
-asked for too early is refused rather than recorded, so the progress meter is
-how an operator knows when asking is worth it.
+prints, among the rest, how many paired days each experiment has and the
+decision parameters in force **as values** — because once a version is installed
+the code defaults stop deciding anything, and an edit to them that has no effect
+must not look like an edit that worked. A verdict asked for too early is refused
+rather than recorded, so the progress meter is also how an operator knows when
+asking is worth it.
 
 "Changes nothing" means no pointer move and no record. Like every other entry
 point it will create the registry's tables and the shadow tables if they do not
@@ -78,6 +81,7 @@ sys.path.insert(0, str(REPO))
 
 from alpha_agents.config import MEMORY_DB_PATH  # noqa: E402
 from alpha_agents.data import policy_registry as registry  # noqa: E402
+from alpha_agents.data import scoring  # noqa: E402
 from alpha_agents.evolution import holdout_gate, policy_sources, shadow  # noqa: E402
 
 
@@ -372,6 +376,14 @@ def _cmd_status(args) -> int:
                      if approval else "(an install — no approval needed)"))
             print("  live configuration still matches: "
                   f"{policy_sources.verify_live(pointer['version_id'])}")
+            # Printed as values, not only as a hash. Once a version is in force
+            # the decision parameters are owned by the version, and the code
+            # defaults stop deciding anything — so "what mapping is the trader
+            # actually applying" has to be answerable without reading the
+            # database by hand. An edit to the defaults that has no effect is
+            # otherwise indistinguishable from an edit that was forgotten.
+            print("  decision parameters in force: "
+                  f"{json.dumps(scoring.in_force_decision_params(), sort_keys=True)}")
 
     versions = registry.versions_for(args.policy_key)
     print(f"  {len(versions)} version(s) on record:")

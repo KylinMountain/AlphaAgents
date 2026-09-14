@@ -638,14 +638,15 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 
 | 命令 | 结果 |
 |---|---|
-| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1894 passed, 18 skipped**（168s；本轮 +13 用例） |
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1895 passed, 18 skipped**（157s；本轮 +14 用例） |
 | `.venv/bin/python scripts/lint_harness.py` | 通过（157 个文件），存量 47 条待偿还（**未扩充**） |
 | `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
 | `cd web && npm run check:render` | **8 个用例全过**（新增 evolve 的 `reachable` 分支） |
 
 `tests/test_policy_cli.py` 新增 `TestTheExperimentIsDrivable`（13 个用例），
 驱动真 `main(argv)` 跑完 `shadow-open → shadow-emit → shadow-score → gate`
-并用 `status` 读进度。**两个变异探针**：把 `Reachability` 的 `open` 钉成 `false`
+并用 `status` 读进度；另加一个用例钉住 `status` 按**值**打印在效的决策参数
+（`install` 之后磁盘常量不再生效，这一行是「改了没用」与「改好了」的区别）。**两个变异探针**：把 `Reachability` 的 `open` 钉成 `false`
 （渲染用例变红：`缺少「至少有一个候选生产者已登记」`）、
 把 `shadow-emit` 的面板换成空列表（面板用例变红）。两处复原后锚点均在。
 
@@ -1085,6 +1086,10 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 3. **`shadow-open` 指向在效版本时打印警告。** 那等于让挑战者用与冠军同一套参数，
    实验就变成拿策略与自己比；这是最容易犯又最难看出来的错误，
    所以它在**开的时候**说，而不是在配对数为 0 的时候让人猜。
+4. **`status` 把在效的决策参数按值打印出来**（不只打哈希）。`install` 之后
+   `confidence_priors` / `dim_step` / `dim_base` 的**所有权从磁盘转到指针**，
+   再改 `scoring.DEFAULT_DECISION_PARAMS` 对行为没有任何影响 —— 如果读不回在效的那一组，
+   「改了没用」与「改好了」在操作者眼里完全一样。这一行就是那条区分。
 
 **D11（渲染用例）同日偿还**：`web/render-check.jsx` 的 evolve 用例此前只有
 `reachable: false` 的合成 payload，而真实页面在 09-13 已经翻到 `true` 那一支。

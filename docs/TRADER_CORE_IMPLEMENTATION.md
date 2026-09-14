@@ -632,6 +632,29 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 `test_the_shipped_registry_holds_exactly_one_candidate` 断言的是**条数**，
 理由同上。
 
+### 第十轮（闭环的操作面 + D11 渲染用例）
+
+2026-09-14：
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **1894 passed, 18 skipped**（168s；本轮 +13 用例） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（157 个文件），存量 47 条待偿还（**未扩充**） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+| `cd web && npm run check:render` | **8 个用例全过**（新增 evolve 的 `reachable` 分支） |
+
+`tests/test_policy_cli.py` 新增 `TestTheExperimentIsDrivable`（13 个用例），
+驱动真 `main(argv)` 跑完 `shadow-open → shadow-emit → shadow-score → gate`
+并用 `status` 读进度。**两个变异探针**：把 `Reachability` 的 `open` 钉成 `false`
+（渲染用例变红：`缺少「至少有一个候选生产者已登记」`）、
+把 `shadow-emit` 的面板换成空列表（面板用例变红）。两处复原后锚点均在。
+
+**一条口径上的自我更正**：`status` 从「不改变任何东西」改成
+**「不动指针、不留记录」** —— 它现在会 `init_schema` 出 shadow 两张表
+（此前只建 policy 四张），严格说不是「什么都没发生」。建表是
+`CREATE TABLE IF NOT EXISTS`，与交易路径第一次落 intent 时触发的同一段 DDL；
+但把那句话写准比保留一句好听的强。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -780,10 +803,11 @@ S6 去掉前视的 re-raise → 吞异常用例变红。
 - **生产里没有发生过晋升。** `gate_decisions` 里没有非 abstain 的生产行。
   「晋升路径可达」由测试证明 —— 且现在用的是**出厂候选**而不是测试里临时登记的桩 ——
   它证明的仍然是**机制通**，不是**生产里跑过**。
-- **影子跑仍然没有生产入口。** `scripts/policy.py` 现在有 `freeze` / `install`
-  与原有的四个动词，但**没有**「开一条影子跑」或「按日推进 `emit_for_date`」的命令，
-  `emit_for_date` 的调用者仍然只有测试。开跑要先由人调 `shadow.open_run`，
-  且必须先 `freeze` 一个**与在效版本不同**的版本 —— 否则影子量的是它自己。
+- **影子跑有生产入口了，但没人跑过。** `scripts/policy.py` 现在有 `shadow-open` /
+  `shadow-emit` / `shadow-score` / `gate` 四个动词，`status` 也带上了每条实验的
+  `paired/needed` 进度。所以「开一条实验、按日喂它冠军的选股、评分、问闸门要裁决」
+  是一条命令序列（见 §14.6）。**但生产里一条 run 都没开过**：`shadow_runs` 表不存在，
+  `status` 会打印「no shadow run has been opened」。有动词与有人跑是两件事。
 - **闸门没有生产调用者，所以 D7 的标题仍然成立。** `run_gate` 的调用者只有测试；
   `alpha_agents/pipeline/` 与 `alpha_agents/server/` 都不引用 `holdout_gate`。
   闸门从「永远触发不了」变成了「正确、可绑定候选、但没人调」—— 这是进步，
@@ -914,9 +938,10 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 
 ## 14. 第 0 步与路线 B（Phase 4 闭环可运行，2026-09-13）
 
-记录日期：2026-09-13。计划见
-[成熟度计划](exec-plans/completed/2026-09-13-forecast-maturity-trading-days.md) 与
-[闭环计划](exec-plans/completed/2026-09-13-evolution-loop-runnable.md)。
+记录日期：2026-09-13（§14.6 于次日补上）。计划见
+[成熟度计划](exec-plans/completed/2026-09-13-forecast-maturity-trading-days.md)、
+[闭环计划](exec-plans/completed/2026-09-13-evolution-loop-runnable.md) 与
+[操作面计划](exec-plans/completed/2026-09-14-evolution-operator-surface.md)。
 
 这一节把两支切片写在一起，因为它们是同一个决定的两半：**先把判据说准，再把闭环接上**。
 两件事都不是「加功能」，都是**取消一个谎**。
@@ -1020,7 +1045,8 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
   本轮的交付物是**能跑**，不是**跑过**：往生产注册表写第一个版本、开第一条影子 run
   是操作决定，需要人拿着 CLI 做，且必须先 freeze 一个与在效版本不同的版本。
 - **影子跑仍然没有生产入口**（无 `open_run` / `emit_for_date` 的 CLI 动词）——
-  见 §12 的边界清单。
+  见 §12 的边界清单。**（本行已被 §14.6 推翻：2026-09-14 补上了四个动词，
+  但生产里仍然一条 run 都没开。）**
 - **没有实现 `apply(version_id)`**（把版本参数写回磁盘）。在指针决定参数的模型里
   它不是必需品：提升之后行为已经改变，磁盘常量退化为「未安装时的默认值」。
 - **`check:render` 的 evolve 用例仍只用 `reachable: false` 的合成 payload**，
@@ -1029,5 +1055,47 @@ README 的 Phase 5 行、`ARCHITECTURE.md` 的 `server/` 行、设计 §14 的 P
 - **`_require_matches_live` 没动。** 它对「提示词被手改而没开新版本」的拦截仍然有效，
   也是 rollback 安全性的依据；本轮只把「指针控制的来源」从它管辖的范围里按
   `knowledge` 的先例分出来（staging），没有放松其它四个。
+
+### 14.6 操作面：把实验接到同一个审计入口上（2026-09-14）
+
+`dd24c67` 让「闭环可运行」对**记录**成立，但对**实验**不成立：
+`shadow.open_run` / `shadow.emit_for_date` / `holdout_gate.run_gate` 的调用者
+**都只有测试**，所以那条链只能靠写 Python 跑 —— 而一套只有测试调用者的机制，
+在操作上与没有机制是同一件事。D7 的标题（「闸门没有调用者」）说的正是这个。
+
+`scripts/policy.py` 增四个动词，现在按执行顺序是九个：
+
+| 动词 | 作用 | 写什么 |
+|---|---|---|
+| `shadow-open` | 开一条实验，绑定一个冻结版本 | 一行 `shadow_runs` |
+| `shadow-emit` | 为某一天写挑战者的预测（面板=冠军当天的选股） | `shadow_predictions` upsert |
+| `shadow-score` | 给窗口已收口的预测补分数，报出「已评分/窗口未收/已删失」 | `shadow_predictions` 的评分列 |
+| `gate` | 要一份裁决并**记录**它（不动指针） | 一行 `gate_decisions` |
+
+三处刻意的设计决定：
+
+1. **`gate` 没有 `--dry-run`。** 能做的 dry-run 只有两种：真调用（那就写了），
+   或在 CLI 里重实现一遍资格判定（窗口 / 开启的 run 数 / 样本量）——后者正是本仓库
+   反复修的「同一个问题两个答案」。改为把进度表放进 `status`：**配对天数 `paired/needed`**
+   就是「现在问值不值」的那个数。
+2. **`--producer` 必填、不设默认。** 默认基线会让「本想测候选、结果拿到基线」的实验
+   看起来正常（裁决 `baseline_only`，晋升只接受 `candidate_policy`）；默认候选则跳过
+   §11 的第一个问题。也不在 argparse 里用 `choices`——那是第二份登记表，
+   由 `shadow.open_run` 拒绝并列出已登记的名字。
+3. **`shadow-open` 指向在效版本时打印警告。** 那等于让挑战者用与冠军同一套参数，
+   实验就变成拿策略与自己比；这是最容易犯又最难看出来的错误，
+   所以它在**开的时候**说，而不是在配对数为 0 的时候让人猜。
+
+**D11（渲染用例）同日偿还**：`web/render-check.jsx` 的 evolve 用例此前只有
+`reachable: false` 的合成 payload，而真实页面在 09-13 已经翻到 `true` 那一支。
+现在两个分支各一个用例，断言用的是**各分支自己的文案**
+（「至少有一个候选生产者已登记」vs「本构建不可达」），不是「可达」——
+后者是前者的子串，会被**另一个分支**满足。变异探针（把 `open` 钉成 `false`）
+确认新用例会红。矩阵从 7 个用例变 8 个。
+
+**仍然没做，且不是本切片能做的**：没有自动调度（没有东西把 `shadow-emit` /
+`shadow-score` 挂到每个交易日），生产里也仍然一条 run 都没开。
+**「有动词」与「有人跑」是两件事** —— `status` 里那句
+「no shadow run has been opened」就是这条边界的证据。
 
 

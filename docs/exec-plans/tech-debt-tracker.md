@@ -118,11 +118,12 @@ and an operator can create the first record. That also removes the "a promotion
 would be a no-op" defect this entry did not know about: the decision parameters
 are read from the version in force, so moving the pointer changes behaviour.
 
-The original title still holds for a second reason: `run_gate` has no production
-caller. Nothing in `pipeline/` or `server/` schedules it, and there is still no
-verb that opens or advances a shadow run, so the gate went from "can never fire"
-to "correct, candidate-bound and never asked" — progress, and still not
-"running in production".
+The original title still holds for a second reason: nothing **schedules**
+`run_gate`. On 2026-09-14 an operator verb was added (`scripts/policy.py gate`,
+with `shadow-open` / `shadow-emit` / `shadow-score` beside it and a `paired/needed`
+progress meter in `status`), so the gate went from "can never fire" to "correct,
+candidate-bound, askable by hand and never asked" — progress on every axis except
+the one the title names. Still not "running in production".
 **Note.** This is the one debt item that is scheduled work rather than
 housekeeping; it is listed here so it cannot be mistaken for "already handled"
 by anyone reading the old claim that selection "早就有了".
@@ -219,23 +220,36 @@ first, running the real predicate and the real `score_prediction` over a
 synthetic `daily_kline` rather than stubbing either.
 
 ### D11 — The evolve page's "reachable" branch has no render case
+
+**Paid 2026-09-14.** `render-check.jsx` now carries one evolve case per branch of
+`Reachability`, asserting each branch's own copy. The analysis is kept because
+the assertion choice is the interesting part.
+
 **Cost.** `cd web && npm run check:render` is the only check that can fail on a
 workspace rendering the wrong thing, and its evolve case feeds a hand-built
 payload with `reachable: false`. On 2026-09-13 the build flipped to
 `reachable: true` (a candidate producer was registered), so the branch the real
-page now takes — the "可达" banner and the non-warning KPI note — has **no case
-in the matrix**. The check still passes, because it asserts about its own
-synthetic payload; this is a coverage gap rather than a wrong claim, and the
+page now takes — the "可达" banner and the non-warning KPI note — had **no case
+in the matrix**. The check still passed, because it asserts about its own
+synthetic payload; this was a coverage gap rather than a wrong claim, and the
 `reachable: false` case is worth keeping for the same reason.
 **Fix.** A second evolve case with `candidate_producers: ['remap_confidence']`
 and `reachable: true`, asserting the reachable copy appears **and** that
 `本构建不可达` does not — the pair, since a "must appear" assertion is
-satisfiable by a coincidentally correct neighbour string.
+satisfiable by a coincidentally correct neighbour string. In particular the
+`want` list must not contain `可达`: it is a substring of the *other* branch's
+`本构建不可达`, so it would be satisfied by the reachable branch being absent —
+the exact failure mode the pair exists to prevent.
 **Recognise.** Two evolve cases in `render-check.jsx`, one per branch of
-`Reachability`.
+`Reachability`, and a mutation probe (pin `open` to `false`) that turns the new
+case red.
 
 ## Paid
 
+- The evolve page's `reachable` branch had no case in `render-check.jsx` (D11),
+  so the branch the real page takes after the build registered a candidate was
+  never rendered by any check. Paid 2026-09-14 with one case per branch and a
+  mutation probe that turns the new one red.
 - The forecast due test counted calendar days against a trading-day horizon
   (D10), so no forecast could be scored on its declared due date and the
   `matured` label was unreachable — every graded forecast went through

@@ -20,7 +20,7 @@ data yet. A grade can fall — see the note at the end._
 | `tools/exit_signals.py` | **B** | 19 tests; regime rule forward-tested over 24 windows | Patterns kept for display are known-useless |
 | `evolution/playbook.py` | **B** | 13 capacity tests | Clustering lost a dimension (D5) |
 | `data/vector_store.py` | **A** | 21 tests incl. 3000-vector scale and a naive-numpy cross-check | — |
-| `sources/` | **B** | 16 structural tests; all 13 feeds probed live | CLS down upstream; 2 feeds degraded |
+| `sources/` | **B** | 16 structural tests; all 13 feeds probed live | Two feeds degraded (`world_news` RSS, `pizzint`). **The "CLS down upstream" this row used to carry was stale** — corrected 2026-09-15: `get_roll_list` answers `errno=0`, **3,575 财联社电报 items are already in `news_items`**, and CLS's `last_time` parameter is a **time cursor**, so a probe for 2025-01-02 returned 2025-01-01 23:51. |
 | `pipeline/tasks/news_ingest.py` | **B** | Window reads tested; ingest verified live | No test for a multi-hour outage |
 | `data/portfolio.py` + `portfolio_exit.py` + `portfolio_book.py` | **C** | Lifecycle exercised indirectly; the exit slice moved out in Phase 1, the order book's reads and cancels in the pending-order round (22 tests in `test_pending_orders_finishable.py`, six mutation probes) | Service code in the storage layer (D1); an order with no live quote neither checks its thesis nor expires (D13) |
 | `pipeline/tasks/morning_scan.py` | **C** | Imports and window logic tested | The scan itself is not run in tests |

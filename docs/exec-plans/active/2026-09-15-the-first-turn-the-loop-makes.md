@@ -119,7 +119,9 @@
 - **数据账本（2026-09-15 实测）—— 缺口不在许可，在输入。** 用户追问「不能历史跑吗？等几十天还不知有没有用」，
   盘库后发现答案不在纪律里：`market_history.db::daily_kline` 有 **2020-01-02 ~ 2026-09-15、
   1626 交易日 × 5703 只、775 万行**；但 `theme_lines`(45) / `sentiment_phase`(8) **只有 09-08 起 8 天**，
-  新闻**没有任何归档表**，`decision_snapshots` 只有 9 行。
+  新闻**有归档但很浅**：`market_snapshots.db::news_items` **42,753 条 / 20+ 源**，只有 09-07 起 8 天
+  （我第一版在这里写「新闻没有任何归档表」，**是错的**，当时只按表名在 `stocks.db`/`memory.db` 里找）；
+  `decision_snapshots` 只有 9 行。
   **更窄的一点**：`daily_kline` 的列是 `open/high/low/close/volume/turnover_rate/change_pct` ——
   **没有资金流**。而 `theme_score` 的两路原始信号是 `net_flow_yi`（权重 **0.45**，最大）与
   `change_pct`（0.35）。所以连「用价格重放主题门」这条捷径也比看上去窄：
@@ -133,10 +135,23 @@
 - **因此我改口（2026-09-15）：D6 从「并行轨道」升为第一优先。** 影子实验回答的是「管道能不能转一圈」，
   而用户问的是「这套东西有没有用」—— 后者可用历史回答，且 D6 的分级是 **F（从未被评估）**。
   今天能开工的部分：用 6.5 年价格评入场规则里**只吃 OHLCV 的判据**（`w_rel` 那路、退出信号、持有天数）。
-- **唯一能做的长期修复**：从**现在**起把每日决策输入落盘 —— 截面（`concept` / `net_flow_yi` /
-  `change_pct`）+ 新闻窗口 + 主题快照，一张 append-only 表。不落盘，三个月后还是同一句
-  「无历史信号存档」。**注意**：这只能补**开发证据**，晋升证据仍必须前向
-  （`paired_count` 的 `s.date > frozen_at` 是结构约束，见上）。
+- **长期修复不是只能往前存 —— 财联社的历史可以倒着拉回来（2026-09-15 实测）。**
+  `cls_telegraph` 的 `last_time` 参数是**时间游标**（签名参与计算但服务端不校验它是否等于当下），
+  传过去的时间戳即翻页：`last_time = 2025-01-02` 实测返回 **2025-01-01 23:51** 的电报，
+  `errno=0`、免费、无鉴权。东财快讯的 `{size}_{page}` 深分页实测也能回溯到 **2026-08-31**。
+  对比之下：新浪 7x24 只留当天（`page=200` 与 `2000` 返回同一批）、华尔街见闻 `end_time` 被忽略、
+  金十只给最新 50 条。
+  ⇒ 所以正确动作是 **回填财联社历史电报**，把本地 `news_items` 从 8 天扩到任意深，
+  而不是被动地「从今天起落盘」。
+- **但「能拉新闻」≠「能重放决策」，两处不能混淆**：① **板块资金流没有历史接口**
+  （`sector_flow_snapshots` 只有 8 天），而 `net_flow_yi` 是主题门里**权重最大**的一路（0.45）；
+  ② LLM 的选股依赖当时的提示词与**累积记忆**，不可复现，重跑出来的是**新的一次判断**而不是当初那次。
+  所以它解锁的是**开发证据**（§12 明说 historical replay is development evidence），
+  **晋升证据仍必须前向**（`paired_count` 的 `s.date > frozen_at` 是结构约束，见上）。
+- **仍未接线的一批快照表**（顺带发现，`market_snapshots.db` 里 6 张**空表**）：
+  `hm_daily` / `kpl_concept_daily` / `kpl_limit_list_daily` / `lhb_daily` / `lhb_inst_daily` /
+  `margin_daily` / `north_flow_daily` / `stock_fund_flow_daily` —— 表建好了但**没有任何写入者**，
+  和 `predictions.horizon_days` 属同一类（「列/表存在但从未被写入」）。**这是能力，不是数据。**
 - **当前的 `shadow_runs` #1 在结构上到不了 20。** 它的 `report_type='morning'`，而 morning 自
   09-10 起零产出 ⇒ `paired_count` 恒为 0。它本来就不可晋升（baseline），现在连「跑着」都不算，
   只是一条占着编号的记录。**开 #2 之前不必先关 #1**（`shadow-open` 会拒绝同一

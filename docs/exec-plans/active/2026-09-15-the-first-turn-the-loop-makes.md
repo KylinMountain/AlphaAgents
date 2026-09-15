@@ -143,11 +143,22 @@
   金十只给最新 50 条。
   ⇒ 所以正确动作是 **回填财联社历史电报**，把本地 `news_items` 从 8 天扩到任意深，
   而不是被动地「从今天起落盘」。
-- **但「能拉新闻」≠「能重放决策」，两处不能混淆**：① **板块资金流没有历史接口**
-  （`sector_flow_snapshots` 只有 8 天），而 `net_flow_yi` 是主题门里**权重最大**的一路（0.45）；
-  ② LLM 的选股依赖当时的提示词与**累积记忆**，不可复现，重跑出来的是**新的一次判断**而不是当初那次。
-  所以它解锁的是**开发证据**（§12 明说 historical replay is development evidence），
-  **晋升证据仍必须前向**（`paired_count` 的 `s.date > frozen_at` 是结构约束，见上）。
+- **但「能拉新闻」≠「能重放决策」。** ② 这一条最硬：**LLM 的选股依赖当时的提示词与累积记忆，
+  不可复现** —— 重跑出来的是**新的一次判断**，不是当初那次。所以它解锁的是**开发证据**（§12 明说
+  historical replay is development evidence），**晋升证据仍必须前向**（`paired_count` 的
+  `s.date > frozen_at` 是结构约束，见上）。
+- **① 上一版写错了，这里更正：板块资金流是有历史的，而且已经在本机。** 原话是「板块资金流没有
+  历史接口」，**错**。`~/Projects/alphaquant/data/tushare.db` 里已有：
+  - `moneyflow_concept_dc`（东财板块资金流）**32 万行，2024-01-02 起**，列含 **`net_amount`**
+    与 **`pct_change`** —— 正是 `theme_score` 的两路原始输入（`net_flow_yi` / `change_pct`）；
+  - `moneyflow_stock`（个股资金流，含 `net_mf_amount`）**756 万行，2020-01-02 → 2026-09-15**，
+    与 `daily_kline` **完全同期**；
+  - `plate_members_dc`（板块→成分股，概念 69,682 / 行业 17,407 / 地域 5,523）与 `stock_concepts`。
+  **一处必须声明的边界**：`moneyflow_concept_dc` 逐年覆盖不均 —— **2024 年只有 86 个板块 /
+  20,812 行（残），2025 起才是完整的 1012–1057 个板块**。所以：
+  **2025 起可忠实重放主题门；2020–2024 只能用「概念成分股 × 个股净流入聚合」当代理，
+  而那不是东财自己的板块分解，必须标为代理。**
+  ⇒ 主题门重放不是「做不到」，而是「2025 起忠实、2020–2024 用代理」。
 - **仍未接线的一批快照表**（顺带发现，`market_snapshots.db` 里 6 张**空表**）：
   `hm_daily` / `kpl_concept_daily` / `kpl_limit_list_daily` / `lhb_daily` / `lhb_inst_daily` /
   `margin_daily` / `north_flow_daily` / `stock_fund_flow_daily` —— 表建好了但**没有任何写入者**，

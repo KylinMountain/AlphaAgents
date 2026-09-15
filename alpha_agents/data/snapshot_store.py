@@ -931,6 +931,36 @@ def read_news(sources: list[str] | None, as_of: str,
     } for r in rows]
 
 
+def news_count(source: str) -> int:
+    """How many rows this source holds. Cheap enough to call at start-up."""
+    return int(_get_conn().execute(
+        "SELECT COUNT(*) FROM news_items WHERE source = ?", (source,),
+    ).fetchone()[0])
+
+
+def oldest_news_published_at(source: str) -> str | None:
+    """The earliest ``published_at`` stored for this source, or ``None``.
+
+    ``read_news`` and ``read_latest_news`` both order newest-first and neither
+    has an ascending mode; a walk that resumes *backwards through an archive*
+    needs the other boundary — the oldest row it already holds — to know where
+    to continue from. Comparing the stored oldest against ``min(published_at)``
+    of the next page is also how such a walk detects that it has stopped making
+    progress.
+
+    The ``LIKE`` guard is the same one ``read_latest_news`` applies: a row still
+    holding a source's raw format ('Wed, 26 Aug') cannot be ordered against
+    normalised ones, and ``MIN`` over a mixed column would answer with the wrong
+    row rather than fail.
+    """
+    row = _get_conn().execute(
+        "SELECT MIN(published_at) AS oldest FROM news_items "
+        "WHERE source = ? AND published_at LIKE '____-__-__ __:__:__'",
+        (source,),
+    ).fetchone()
+    return (row["oldest"] or None) if row else None
+
+
 def migrate_news_timestamps() -> int:
     """Rewrite legacy published_at values into the canonical shape.
 

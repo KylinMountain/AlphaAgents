@@ -197,5 +197,73 @@ class TestReplayEodCutDate(unittest.TestCase):
         self.assertIsNone(effective_eod_cut_date())
 
 
+class TestNewsBoundaryForABackwardsWalk(unittest.TestCase):
+    """``oldest_news_published_at`` exists so a walk can resume backwards.
+
+    ``read_news`` and ``read_latest_news`` both order newest-first and neither
+    has an ascending mode, so a backfill walking an upstream archive has no way
+    to ask "where did I stop?" without this reader. It is the frontier for a
+    walk that moves backwards in time.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        os.environ["_SNAPSHOT_TEST_DIR"] = self._tmp
+        import alpha_agents.data.snapshot_store as store
+        store.SNAPSHOTS_DB_PATH = Path(self._tmp) / "snapshots.db"
+        if hasattr(store._local, "conn"):
+            store._local.conn.close()
+            del store._local.conn
+        self.store = store
+
+    def tearDown(self):
+        import shutil
+        if hasattr(self.store._local, "conn"):
+            self.store._local.conn.close()
+            del self.store._local.conn
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    SOURCE = "财联社电报(历史回填)"
+
+    def _save(self, published: str, title: str = "flash") -> int:
+        return self.store.save_news(self.SOURCE, [
+            {"title": title, "summary": "s", "time": published, "url": ""}])
+
+    def test_count_and_oldest_track_what_was_written(self):
+        self._save("2024-05-01 09:00:00")
+        self._save("2022-03-02 10:00:00")
+        self._save("2023-07-09 11:00:00")
+        self.assertEqual(self.store.news_count(self.SOURCE), 3)
+        self.assertEqual(self.store.oldest_news_published_at(self.SOURCE),
+                         "2022-03-02 10:00:00")
+
+    def test_an_unknown_source_answers_with_nothing(self):
+        """A walk that has not started must read as "no frontier", not as an
+        error and not as an arbitrary row."""
+        self.assertEqual(self.store.news_count("没见过这个来源"), 0)
+        self.assertIsNone(self.store.oldest_news_published_at("没见过这个来源"))
+
+    def test_a_raw_timestamp_does_not_win_the_minimum(self):
+        """Why the reader carries the ``LIKE`` guard.
+
+        ``save_news`` normalises on write, but a database that predates that
+        migration still holds raw feed stamps, and ``'Wed, 26 Aug 2026'`` sorts
+        below every normalised value on its first character. Without the guard,
+        ``MIN`` answers with the wrong row instead of failing — and a resuming
+        walk would restart from 2026 while believing it had reached its floor.
+        """
+        self._save("2024-05-01 09:00:00")
+        self.store._get_conn().execute(
+            "INSERT OR IGNORE INTO news_items "
+            "(source, published_at, title, summary, url, hash, captured_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (self.SOURCE, "Wed, 26 Aug 2026 05:00:00 GMT", "raw", "", "",
+             "raw-format-hash", "2026-09-15 20:00"),
+        )
+        self.assertEqual(self.store.oldest_news_published_at(self.SOURCE),
+                         "2024-05-01 09:00:00")
+        self.assertEqual(self.store.news_count(self.SOURCE), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

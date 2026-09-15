@@ -242,3 +242,7 @@ reports/
 # Agent workspace state, never part of the project
 /.workbuddy/
 /.workbuddy-ai/
+
+# Research scratch (2026-09-15): kept on this machine only, untracked from git
+# and stripped from history. scripts/research/ is a different tree (tech-debt D12).
+/research/

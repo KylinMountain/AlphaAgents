@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D15, D16, D17.**_
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D15, D16, D17, D18.**_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -179,6 +179,43 @@ was every version except the incumbent reporting as drifted, because the
 pointer-controlled sources were read from the system instead of from the version.
 This one is one key, on one source, with a nameable reason, and it is real.
 
+### D18 — Review grades before it archives, so a window that shut today is graded tomorrow
+
+**Added 2026-09-15, found by asking when the first Brier lands.** Inside
+`run_review`, `_score_due_predictions()` is step 0 (line 658) and
+`market_history.update_daily()` — the call that writes *today's* bar into
+`daily_kline` — is near the end (line 808). So the grading pass reads an archive
+whose newest bar is *yesterday*: on 2026-09-15 the 09-08 batch still measures
+`have=5, need=6`, and it can only be graded by the **next** day's review, after
+tonight's tail end has written the 09-15 bar in.
+**Cost.** Every forecast is graded one trading day later than the window it
+declares, so the earliest possible Brier is the run *after* the close that shut
+it. On its own that is latency, not wrongness — the score, when it lands, is for
+the right window. The sharper cost is what it does to prediction: the Learn page
+reports the market's own calendar ("还差 1 个交易日"), and reading that as "one
+day from now" is off by one, because the arithmetic and the schedule are not the
+same clock. It also means the D6 recogniser ("check `brier > 0` once the 09-15
+data is in") is satisfied *after* tonight's archive, not tonight's grading.
+**A second half, same shape.** `update_daily()` only ever asks its source for
+**today** (`_fetch_batch(codes, today, today)`) and returns early if today
+already has rows. There is no catch-up for yesterday: if the source does not
+have today's bar at 15:30, or the fetch fails, that trading day is a permanent
+hole in `daily_kline` until someone runs `scripts/backfill_tushare.py` by hand —
+and a hole in the market calendar is what `evidence_window_closed` reads as
+"not closed", so every window spanning it stays unripe for ever.
+**Recognise.** `grep -n "_score_due_predictions\|update_daily" review.py` — the
+first is at ~658, the second at ~808. Or: `SELECT MAX(date) FROM daily_kline`
+right after a 15:30 review that just scored nothing, and compare with the date of
+the run.
+**Fix.** Move the two archive calls (`run_daily_archive`, `update_daily`) above
+the scoring step, so one run can grade what its own close matured. Not done in
+this round: it changes what the first grading run sees, and whether the EOD
+source has a final bar at 15:30 sharp is a question about the upstream, not
+about this repository — a fetch that lands early and writes a partial day is
+worse than a day of latency. The catch-up half is a separate, smaller fix
+(ask for the last N trading days, not just today) and does not depend on that
+answer.
+
 ### D2 — `data/daily_archive.py` orchestrates fetches
 
 **Paid 2026-09-14 — and the fix written here was wrong.** This entry said "Move
@@ -325,6 +362,15 @@ the market window not covering the horizon, or the due-date filter.
 the market's calendar: D10 was fixed on 2026-09-13, so the due test no longer
 fires early and no forecast is censored for a window that is still open. What
 remains is the wait for the 2026-09-15 close.
+**Status 2026-09-15 (11:20).** Still 0 Brier, and the recogniser above is now
+**one day early**: the 09-15 close does mature the 09-08 batch on the market's
+calendar, but `run_review` grades before it archives today's bar (see **D18**),
+so the first Brier can only land in the **2026-09-16** review. The narrower
+condition to check is therefore `SUM(brier IS NOT NULL) > 0` after the 09-15 row
+exists in `daily_kline` **and** a review has run since — i.e. on the evening of
+2026-09-16. If it is still 0 then, it is a code bug, and D18's second half (a
+hole in `daily_kline`, which `evidence_window_closed` reads as "not closed") is
+the first place to look.
 
 ### D7 — The champion/challenger gate has no caller (paid 2026-09-14)
 **Cost.** `evolution/holdout_gate.py` is tested (24 tests) and correct, but

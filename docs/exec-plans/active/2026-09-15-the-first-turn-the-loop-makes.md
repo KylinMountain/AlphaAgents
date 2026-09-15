@@ -84,6 +84,24 @@
   ⇒ D15 的门槛**直接就是实验进度条的分母**。抬到 50 = 把首圈实验拉长约 2.5 倍
   （按早盘历史速度：20 条约 8 个交易日、50 条约 19 个；两者都还要再加上每笔等自己窗口收口的时间，
   因为只有**打完分**的配对才计入）。
+- **「历史不能用来晋升」是结构强制的，不是规矩。** `paired_count` 的 SQL 里有
+  `AND s.date > <version.frozen_at>`（`shadow.py:725`）：样本必须**晚于版本冻结日**。
+  版本今天才冻结 ⇒ 冻结之前的任何一天都**永远不可能满足这个条件**。
+  用历史晋升 = 把冻结日改到过去 = 伪造一条「我当时就冻结了」的声明，正是设计 §2 禁止的事。
+  设计 §12 原话：*"Historical replay is development evidence, and forward paper trading is
+  necessary but still not proof of executable real-market returns."* 历史能当**开发证据**
+  （重放、账目对账、机制验证 —— 仓库里 `scripts/replay_*.py` 就是干这个的），
+  **不能给策略颁发晋升证据**。
+- **时间下限由窗口长度决定，不由门槛决定。** 每笔预测要 `DEFAULT_HORIZON_DAYS = 5` 个交易日
+  **+1 根 bar** 才收口（`need = horizon + 1`），而样本要求双方 `brier IS NOT NULL`。
+  所以第 0 天发出的预测，要到**第 6 个交易日**才一起变成样本 ⇒
+  **「攒够样本」的下限 ≈ 6–7 个交易日**，与门槛是 20 还是 50 基本无关。
+  门槛与账本决定的是**第 6 天之后还要几天**：快账本（`intraday_signal` ~40 条/日）第 7 天就够；
+  慢账本（`morning` ~2.7 条/日）约第 13 天（门槛 20）或第 24 天（门槛 50）。
+- **当前的 `shadow_runs` #1 在结构上到不了 20。** 它的 `report_type='morning'`，而 morning 自
+  09-10 起零产出 ⇒ `paired_count` 恒为 0。它本来就不可晋升（baseline），现在连「跑着」都不算，
+  只是一条占着编号的记录。**开 #2 之前不必先关 #1**（`shadow-open` 会拒绝同一
+  `(policy_version_id, report_type, producer)` 的重复 open，但 #2 是不同的 producer + 不同版本）。
 
 ## 风险
 

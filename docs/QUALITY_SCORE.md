@@ -14,7 +14,7 @@ data yet. A grade can fall — see the note at the end._
 | Area | Grade | Basis | Gap |
 |---|---|---|---|
 | `data/scoring.py` | **A** | 27 tests; verified end to end on real history | — |
-| `evolution/holdout_gate.py` | **B** | 24 tests, plus the candidate-bound and evidence-scope groups in `test_gate_candidate_bound.py` and `TestTheDeclaredFloorAgainstTheRepositorysRule` | **Its floor is not the repository's floor.** It abstains below 20 paired samples while golden principles §7 says n < 50 does not ship, and a version declaring 20 lets a promotion through in the gap (D15). It *is* called now — `pipeline/tasks/shadow_run.py` asks it once per experiment — but every verdict so far is an abstention over an experiment that has not started. |
+| `evolution/holdout_gate.py` | **B** | `test_holdout_gate.py` (44 tests today) plus the candidate-bound and evidence-scope groups in `test_gate_candidate_bound.py` and `TestTheDeclaredFloorAgainstTheRepositorysRule` | Its floor and the repository's rule now name the same number: D15 was closed 2026-09-15 by **lowering the rule to 20**, not by raising the code. What stays thin is the evidence, not the gate — it *is* called now (`pipeline/tasks/shadow_run.py` asks it once per experiment), but every verdict so far is an abstention over an experiment that has not started. |
 | `evolution/principle_scoring.py` | **A** | 16 tests incl. decay weighting | Needs graded predictions to act on |
 | `data/decision_context.py` | **A** | 19 tests; replay verified | No history to replay |
 | `tools/exit_signals.py` | **B** | 19 tests; regime rule forward-tested over 24 windows | Patterns kept for display are known-useless |

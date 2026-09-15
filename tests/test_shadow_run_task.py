@@ -190,11 +190,17 @@ class TestItAsksTheGateOnce:
     def test_it_does_not_ask_again_the_next_day(self, store, experiment,
                                                monkeypatch):
         """One verdict at the bar is the stopping rule. A second look would be
-        the same evidence counted twice."""
+        the same evidence counted twice.
+
+        The bar is ``n`` — the pairs the verdict compared — and this verdict
+        reaches it while reporting a single day, which is the shape that used to
+        be read as short before D15 settled the unit.
+        """
         calls = self._ready(monkeypatch, experiment, verdicts=[{
             "policy_version_id": experiment["target"], "run_id": experiment["run"],
             "outcome": "promote",
-            "validation_days": holdout_gate.MIN_VALIDATION_SAMPLES}])
+            "n": holdout_gate.MIN_VALIDATION_SAMPLES,
+            "validation_days": 1}])
         report = asyncio.run(run_shadow_run())
         assert calls == []
         assert "已裁决：promote" in report
@@ -203,33 +209,37 @@ class TestItAsksTheGateOnce:
     def test_a_person_looking_early_does_not_suppress_the_ask(
             self, store, experiment, monkeypatch):
         """A manual `gate` before the count is reached is short of the bar, so
-        the preregistered question still gets asked."""
+        the preregistered question still gets asked.
+
+        Both numbers are short here — a manual look that saw three pairs over
+        three days — because what stops the scheduled question is the *count*,
+        not which unit that count happens to be printed in.
+        """
         calls = self._ready(monkeypatch, experiment, verdicts=[{
             "policy_version_id": experiment["target"], "run_id": experiment["run"],
-            "outcome": "insufficient", "validation_days": 3}])
+            "outcome": "insufficient", "n": 3, "validation_days": 3}])
         asyncio.run(run_shadow_run())
         assert calls == [experiment["target"]]
 
-    def test_the_stopping_rule_asks_again_while_the_two_units_disagree(
+    def test_a_verdict_that_reaches_the_sample_bar_ends_the_asking(
             self, store, experiment, monkeypatch):
-        """D16, demonstrated rather than described.
+        """D16, closed 2026-09-15: one satisfied verdict ends the asking.
 
-        The stopping rule compares two different units: ``remaining`` counts
-        paired samples, ``asked_already`` counts validation days. A verdict that
-        satisfies the first bar while reporting fewer days than the bar does
-        **not** stop the asking, so the same experiment is asked about again —
-        and again, every run, until the day count catches up. That is the
-        "near-identical ``insufficient`` row every day" this module's docstring
-        says was the thing it was written to avoid.
+        This replaces the test that asserted the defect. The stopping rule used
+        to compare two different units — ``remaining`` counted paired samples
+        while ``asked_already`` counted validation days — so a verdict resting on
+        twenty pairs from a single day looked short of a twenty-*day* bar, and
+        the same experiment was asked about again every run until the day count
+        caught up. D15 settled the unit (twenty **paired samples**), so both
+        sides compare pairs now.
 
-        This test asserts the defect, not the contract; it is named for the
-        disagreement so that reading it cannot look like approval. When D16 is
-        paid, replace it with one showing a satisfied verdict ends the asking.
-
-        The ``_ready`` stub cannot see any of this: it hands back a verdict whose
-        ``n`` and ``validation_days`` both equal ``needed``, so the two units
-        coincide and the disagreement is invisible — which is how it survived a
-        test class called ``TestItAsksTheGateOnce``.
+        The verdict here reaches the sample bar while reporting one day: exactly
+        the shape that used to slip through, and the ``_ready`` stub cannot
+        produce it because it hands back ``n`` and ``validation_days`` both equal
+        to ``needed``. The old test's docstring said "when D16 is paid, replace it
+        with one showing a satisfied verdict ends the asking" — this is that.
+        A mutation probe (putting ``validation_days`` back on the right-hand
+        side) turns it red.
         """
         calls = self._ready(monkeypatch, experiment, verdicts=[{
             "policy_version_id": experiment["target"],
@@ -237,7 +247,7 @@ class TestItAsksTheGateOnce:
             "n": holdout_gate.MIN_VALIDATION_SAMPLES,
             "validation_days": 1}])
         asyncio.run(run_shadow_run())
-        assert calls == [experiment["target"]], (
+        assert calls == [], (
             "asked again although a verdict already reached the sample bar")
 
     def test_it_still_asks_when_the_gate_is_ready_but_the_panel_is_empty(

@@ -36,9 +36,14 @@ reaches what the gate requires. Two reasons, and they are the same reason:
   ``run_gate("daily_playbook", today, today)`` call was removed for.
 
 So the rule is mechanical: ask when ``paired >= needed`` and the newest verdict
-on that version is still short of the bar. A person looking early (via
-``scripts/policy.py gate``) does not suppress it, because their verdict's
-``validation_days`` will be short of the bar too.
+on that version is still short of the **same** bar. Both sides of that
+comparison are paired samples — ``needed`` is
+``holdout_gate.MIN_VALIDATION_SAMPLES`` and the verdict's ``n`` is the number of
+pairs it compared. Until 2026-09-15 the second side was ``validation_days``, so
+an experiment passed the sample bar long before the day bar and the gate was
+asked every day in between (D16). A person looking early (via
+``scripts/policy.py gate``) does not suppress the scheduled question: their
+verdict's ``n`` is short of the bar too, and ``gate`` shares the unit.
 
 Nothing here can fail the day. The shadow branch is graded and never traded, so
 a broken experiment must not take the review with it: every step degrades to a
@@ -72,10 +77,18 @@ def _position_line(row: dict, verdict: dict | None) -> str:
     distinct dates those came from. This line used to append 交易日 to the first
     one, so one morning of twenty picks read as twenty trading days of evidence
     — in the report a person actually reads to decide whether to act.
+
+    The bar a *recorded verdict* is compared against is the same unit: the
+    verdict's own ``n`` (paired samples) against ``needed``. Until 2026-09-15
+    this compared ``validation_days`` instead, so a verdict resting on twenty
+    pairs from one morning looked short of a twenty-*day* bar and the experiment
+    kept asking (D16).
     """
-    if verdict is not None and (verdict.get("validation_days") or 0) >= row["needed"]:
+    if verdict is not None and (verdict.get("n") or 0) >= row["needed"]:
         return (f"• run #{row['run_id']} 已裁决：{verdict['outcome']}"
-                f"（{verdict['validation_days']} 个验证日）—— 下一步是人工 approve")
+                f"（n={verdict['n']} 个配对样本 / "
+                f"{verdict.get('validation_days')} 个验证日）"
+                "—— 下一步是人工 approve")
     if row["remaining"]:
         return (f"• run #{row['run_id']} 配对进度 {row['paired']}/{row['needed']}"
                 f" 个配对样本（覆盖 {row['scored_days']} 个交易日），"
@@ -93,18 +106,18 @@ async def _ask_the_gate(row: dict, verdict: dict | None, today: str) -> str:
     """
     from alpha_agents.evolution import holdout_gate
 
-    # Two different units compared against one threshold: ``remaining`` counts
-    # paired samples, this counts validation days, and an experiment passes the
-    # first bar long before the second. The stopping rule therefore asks the
-    # gate *every day* in between — exactly the "near-identical insufficient row
-    # every day" this module's docstring says it was written to avoid. The tests
-    # could not see it because the stubbed verdict gives ``n`` and
-    # ``validation_days`` the same value as ``needed``, so the two units
-    # coincided. Recorded as D16 and deliberately **not** fixed here: both
-    # candidate fixes answer a question this round was told to leave alone —
-    # whether the preregistered sample is 20 samples or 20 days (D15).
+    # Both sides of this comparison are now **paired samples**. Until
+    # 2026-09-15 the second was ``validation_days``: an experiment passed the
+    # sample bar long before the day bar, so the gate was asked *every day* in
+    # between, writing a near-identical ``insufficient`` row each time — exactly
+    # the "governance in shape only" this module's docstring says it was written
+    # to avoid. The tests could not see it, because the stubbed verdict gave
+    # ``n`` and ``validation_days`` the same value as ``needed`` and the two
+    # units coincided. Fixed with D15 (2026-09-15), whose answer settled the
+    # unit: the preregistered sample is 20 *paired samples*, so pairs compare
+    # with pairs and nothing else does.
     asked_already = (verdict is not None
-                     and (verdict.get("validation_days") or 0) >= row["needed"])
+                     and (verdict.get("n") or 0) >= row["needed"])
     if asked_already or row["remaining"]:
         return _position_line(row, verdict)
     try:

@@ -488,12 +488,17 @@ class TestTheExperimentIsDrivable:
         assert (f"0/{holdout_gate.MIN_VALIDATION_SAMPLES} paired sample(s) over "
                 "0 scored day(s), 0 of 2 forecast(s) scored") in out
 
-    def test_status_names_the_promotion_floor_and_its_conflict(self, cli, store,
-                                                              capsys):
+    def test_status_names_the_promotion_floor_and_reports_no_conflict(
+            self, cli, store, capsys):
         """The floor a promotion is re-checked against belongs to the *version*,
-        and the repository's own rule is stated in samples. They disagree
-        today; the disagreement is printed, not discovered later by whoever
-        cites a verdict at n = 20.
+        and the repository's rule is stated in samples beside it.
+
+        They agree today — D15 was closed on 2026-09-15 by lowering the rule to
+        20 — so the assertion that matters is the *absence* of the complaint.
+        Before that they disagreed and this command printed "nothing refuses it";
+        a report that printed the rule only when it was violated would make
+        "they agree" and "the rule was never read" the same output, so the rule
+        line is asserted positive and the complaint negative.
         """
         self._seed(cli, store, capsys)
         capsys.readouterr()
@@ -502,8 +507,8 @@ class TestTheExperimentIsDrivable:
         assert (f"version #1 declares {holdout_gate.MIN_VALIDATION_SAMPLES} "
                 "paired sample(s)") in out
         assert f"gate abstains below {holdout_gate.MIN_VALIDATION_SAMPLES}" in out
-        assert f"n >= {holdout_gate.GOVERNANCE_MIN_SAMPLES}" in out
-        assert "nothing refuses it" in out
+        assert f"repository rule: n >= {holdout_gate.GOVERNANCE_MIN_SAMPLES}" in out
+        assert "nothing refuses it" not in out
 
     def test_a_version_at_the_governance_floor_reports_no_gap(
             self, cli, store, capsys, monkeypatch):

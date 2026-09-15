@@ -110,27 +110,33 @@ tests assert the creation day itself is training.
 
 ## 7. Small samples do not ship
 
-**Rule.** No conclusion with n < 50 reaches production code. State n and
+**Rule.** No conclusion with n < 20 reaches production code. State n and
 the number of independent windows next to any claimed effect.
 
 **Why.** A first pass here on six sparse windows (n = 7–17) ranked three
 exit signals in the exact reverse of the dense run.
 
-**Enforced by.** Review checklist; `lint_docs.py` requires research docs
-to state sample sizes.
+**Enforced by.** The promotion gate. `holdout_gate.MIN_VALIDATION_SAMPLES = 20`
+refuses a verdict below twenty **paired samples**, and `policy_registry`
+re-checks the same number out of the *frozen version's* own `rules` block, so a
+version cannot loosen its own floor. Review checklist; `lint_docs.py` requires
+research docs to state sample sizes.
 
-**Not enforced by the code, and that is a named gap rather than an oversight.**
-The one automated path that ships a conclusion — promoting a policy version —
-re-checks `n` against a floor the *frozen version* declares
-(`holdout_gate.MIN_VALIDATION_SAMPLES`, 20 today, read out of that version's own
-`rules` block by `policy_registry`). A verdict at n between 20 and 49 therefore
-satisfies the gate, satisfies the version in force, and contradicts this rule.
-Nothing refuses it. `holdout_gate.GOVERNANCE_MIN_SAMPLES` quotes the number so a
-report can compare the two, `holdout_gate.promotion_floor_gap` names the
-difference, and `scripts/policy.py status` prints it on every run. Closing it
-for real means raising the constant — which turns every version already frozen
-into a drifted one, since a behaviour-changing edit after freezing is a new
-candidate — so it is an operator's decision, not a patch.
+**The bar was 50 until 2026-09-15, and it was lowered deliberately.**
+Three documents declared n < 50 while the code abstained at 20, so a verdict at
+n in [20, 50) satisfied the gate and satisfied the version in force while
+contradicting this rule — and nothing refused it (tech-debt D15). Closing that
+gap had two directions, and the one taken was to **lower the rule to meet the
+code**: raising `MIN_VALIDATION_SAMPLES` is an edit to a behaviour source, so it
+would have marked **every version already frozen** as drifted, while lowering
+`GOVERNANCE_MIN_SAMPLES` moves nothing a trader does.
+
+What 50 was buying — that a handful of lucky pairs cannot ship a policy — is
+still bought, by the gate refusing below 20 and by §12's insistence that any
+number here is a *minimum governance condition, not sufficient evidence of
+improvement*. What it costs is real and belongs in the open: twenty paired
+samples is a weak basis for a claim, and a promotion at 20 carries
+correspondingly more uncertainty than one at 50.
 
 ---
 

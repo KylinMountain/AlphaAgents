@@ -57,22 +57,31 @@ logger = logging.getLogger(__name__)
 # what this floor compares against.
 MIN_VALIDATION_SAMPLES = 20
 
-# The floor the repository's own rule declares — golden principles §7, "No
-# conclusion with n < 50 reaches production code". This is **not** a gate
-# threshold and this module does not enforce it: a verdict at n in
-# [MIN_VALIDATION_SAMPLES, GOVERNANCE_MIN_SAMPLES) satisfies the gate *and*
-# satisfies the version in force, while contradicting §7. Nothing refuses it.
-# :func:`promotion_floor_gap` exists so that state is reportable rather than
-# assumed away.
+# The floor the repository's own rule declares — golden principles §7.
+# **On 2026-09-15 the operator set it to 20: the same number the gate
+# enforces.**
 #
-# It is a named constant instead of a number quoted in prose because a report
-# has to compare a *version's* declared floor against it, and a report that
-# parses markdown to find its own threshold has a second source of truth.
+# Until then §7 said n < 50 while this module abstained at 20 and the promotion
+# path re-checked a version's *own* declared floor, so a verdict at n in
+# [20, 50) satisfied the gate, satisfied the version in force, and contradicted
+# §7 — and nothing refused it (tech-debt D15). The gap was closed by **lowering
+# the rule to meet the code**, not by raising the code to meet the rule.
+# The direction matters: raising ``MIN_VALIDATION_SAMPLES`` is an edit to a
+# behaviour source (it is in ``policy_sources._RULE_SOURCES``), so it would have
+# marked **every version already frozen** as drifted. Lowering this number moves
+# nothing a trader does.
+#
+# It stays a separate name because ``promotion_floor_gap`` keeps one job: a
+# *version* can declare a floor below the repository's rule (install predates
+# this constant, and a hand-built version can carry anything), and that is still
+# worth saying out loud. It is a named constant rather than a number quoted in
+# prose because a report that parses markdown to find its own threshold has a
+# second source of truth.
 #
 # Deliberately absent from ``policy_sources._RULE_SOURCES``. That tuple declares
 # which constants are *behaviour*; hashing this one into every version would
 # report a drift the moment it changed while nothing a trader does had moved.
-GOVERNANCE_MIN_SAMPLES = 50
+GOVERNANCE_MIN_SAMPLES = 20
 
 # Brier degradation tolerated before rejecting. Not zero: a candidate
 # should not be blocked by rounding.
@@ -230,22 +239,23 @@ def promotion_floor_gap(declared: int | None,
     version, not of the code in front of you. That is why the number is passed
     in and not read here.
 
-    The gap is real and narrow: a verdict at n in [20, 50) passes the gate,
-    passes the version's own declared floor, and contradicts §7 of the golden
-    principles. Raising ``MIN_VALIDATION_SAMPLES`` to 50 would enforce §7 in
-    code and turn every version already frozen into a drifted one, because a
-    behaviour-changing edit after freezing is a new candidate — so the honest
-    state is "declared and unenforced", and this function exists so that state
-    is visible instead of assumed away. Deciding between the two is an
-    operator's call, not this module's.
+    Until 2026-09-15 this reported a real gap: §7 declared n < 50 while the gate
+    abstained at 20, so a verdict in [20, 50) satisfied everything except the
+    rule the repository wrote down. The operator closed it by **lowering the
+    rule to 20** (see ``GOVERNANCE_MIN_SAMPLES``), so nothing fires for a
+    version declaring 20 or more. What survives is the narrower and still-live
+    case: a version declaring a floor *below* the rule — an older install, or a
+    hand-built version — where promotion would re-check a number the repository
+    does not stand behind.
 
     ``when`` names the thing being judged, so the complaint reads as a sentence
     about a version or about an open experiment.
     """
     if declared is None:
         return [f"{when} declares no promotion floor, so the repository's "
-                f"n < {GOVERNANCE_MIN_SAMPLES} rule (GOLDEN_PRINCIPLES §7) is "
-                "the only boundary there is — and no code enforces it"]
+                f"n >= {GOVERNANCE_MIN_SAMPLES} rule (GOLDEN_PRINCIPLES §7) is "
+                "the only boundary there is — the gate applies the same number, "
+                "but nothing recorded what this version would re-check"]
     if declared < GOVERNANCE_MIN_SAMPLES:
         return [f"{when} declares a promotion floor of {declared} paired "
                 f"sample(s), below the repository's "

@@ -141,8 +141,8 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   要 **20 个配对样本**的前向证据（单位是 `(日期, 代码)` 对，不是天数；见 D15），
   而影子 run 的时钟 2026-09-14 16:00 才开（`#1`，baseline 生产者，**不可晋升**），
   配对进度 `0/20`。**开 run 是人的动作**，且下一个要开的必须是**候选** ——
-  baseline 跑多久都晋升不了。逐项见 §12 与 §14.6 / §14.7 / §14.11；
-  tech-debt 记为 D6 / D7 / D15 / D16 / D17。
+  baseline 跑多久都晋升不了。逐项见 §12 与 §14.6 / §14.7 / §14.11 / §14.13；
+  tech-debt 记为 D6 / D17（D7、D15、D16 均已偿，见 §14.13 与债表 Paid）。
 - **产品整合**（Phase 5）—— **2026-09-13 已交付 V1 + V2 + V3，见 §13**。
   三个读模型、三个端点、三个前端工作台都已存在，`/api/portfolio` 已改为委托同一个投影。
   **但「页面能打开」不是「页面有事实」。** 生产库上三个工作台的状态各不相同，而且
@@ -199,14 +199,15 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
   `INTRADAY_HORIZON_DAYS` 并同时喂给预报与论点。
   **仍然不要顺手补 `horizon_days=5`**：模型真的没说时预报保持未声明，这正是 `_deadline_for`
   拒绝替调用方假设的那件事，也是 `legacy_horizon` 这个标签还剩下的一点意思。
-- **`n < 50 不上线` 没有任何代码在强制。** `GOLDEN_PRINCIPLES.md` §7 声明它，
-  `TRADER_CORE_DESIGN.md` §12 说它是「the repository's requirement」，README 说它是「诚实门槛」
-  —— 三处都在说仓库有这条规则，而代码里只有 `holdout_gate.MIN_VALIDATION_SAMPLES = 20`，
-  且晋升重检读的是**冻结版本自己声明的**那个值（`policy_registry._require_gate_cites`）。
-  于是 n 落在 20–49 的裁决同时满足闸门与在效版本、却违反 §7，**没有任何东西拦它**。
-  2026-09-14 修的是**可见性而不是行为**（§14.11）：`GOVERNANCE_MIN_SAMPLES` 把这个数字引进代码、
-  `promotion_floor_gap` 说出差异、`status` 每次打印。真正关上它要把常数提到 50，而**那会让所有已
-  冻结版本立刻变 drifted**（冻结后的行为性改动 = 新候选），所以这是一个待定的操作者决定。
+- **`n < 50 不上线` 的缺口 —— 2026-09-15 已收口（D15）。** 上一版这里记的是「三处文档声明 50、
+  代码只执法 20，n 落在 20–49 的裁决无人拦」。收口的方向是**把规则降到 20 去就代码**，不是反过来：
+  `GOVERNANCE_MIN_SAMPLES` 从 50 改为 20，`GOLDEN_PRINCIPLES` §7 / 设计 §12 / README 三处
+  一并改成 20。**没有动 `MIN_VALIDATION_SAMPLES`** —— 它是行为来源（在
+  `policy_sources._RULE_SOURCES` 里），抬它才会让**所有已冻结版本立刻变 drifted**；
+  而 `GOVERNANCE_MIN_SAMPLES` **不在**那个元组里，改它不动任何交易行为，所以「回滚目标消失」
+  那个风险也随之不存在。代价如实记下：**仓库的诚实门槛确实降低了**，20 个配对样本是弱依据。
+  换掉的是「文档说的和代码做的不一致、且没人执法」这个状态。
+  `promotion_floor_gap` 保留，抓仍然成立的那种情形：某个版本自己声明的门槛低于 20。
 
 **Phase 2 主动不做（非目标，不是遗漏）**
 
@@ -1504,6 +1505,15 @@ README 写「本仓库 `n<50 不上线` 的规则把诚实门槛定在 50」—�
 - `scripts/policy.py status` 每次打印「版本声明的门槛 / 闸门弃权线 / 差多少」三行。
   与 `--producer` 必填、`gate` 无 `--dry-run` 同一个立场：不替操作者做决定。
 
+**收口（2026-09-15）：** 操作者定了 **20**，于是这条缺口按「**把规则降到 20 去就代码**」关闭，
+而不是按上面预想的那条路（把常数抬到 50）。两条路效果相同、代价相反：抬常数是改行为来源、
+会漂移所有已冻结版本；降规则不动任何交易行为。落地：`GOVERNANCE_MIN_SAMPLES` 50 → 20，
+`GOLDEN_PRINCIPLES` §7 / 设计 §12 / README 三处一并改成 20，缺口与「没有东西拦它」那两句
+不再成立（正确表述见上面 §7 与 D15 的 Paid 记录）。**本文提到的
+`test_the_rule_is_a_quotation_and_not_a_threshold` 已改名为
+`test_the_band_the_old_gap_left_open_is_gone`**，断言的也从「缺口存在」翻成「缺口已关闭」——
+这正是它 docstring 里预告的那次翻面。
+
 **3. 等待期曾经在产生期限不对的证据（本轮唯一的真 bug）。** 见 §7 的更正：生产库 232 行
 `predictions` 的 `horizon_days` / `deadline` 全为 NULL，于是每一笔预报按**全局 5 天**兜底评分、
 被标成 `legacy_horizon`；而同一笔决策的论点里，`intraday_monitor` 硬编码了
@@ -1610,6 +1620,39 @@ T3 之前的形状（缺四个提案列），`candidate_transitions` 整张表�
 `TestWindowProgress` 2 条；check:render 新用例不计入 pytest）；`lint_harness` 167 文件、
 存量仍 13 条；`lint_docs` 通过；`web` 三条（lint / build / check:render）全过，
 渲染矩阵 10 用例 OK。
+
+### §14.13 门槛从 50 落到 20，停止规则的两种口径合并（2026-09-15）
+
+操作者定了**样本门槛 = 20**，于是 D15 按一条本仓库从未走过的方向收口：**把规则降到代码，
+而不是把代码抬到规则**。这个方向就是全部要点，因为它决定代价：
+
+- **抬代码（本计划初稿的选项，被拒）**：`MIN_VALIDATION_SAMPLES` 在
+  `policy_sources._RULE_SOURCES` 里，是**行为来源**；改它会把**每一个已冻结版本**判为
+  drifted，并顺带抹掉 `rollback` 的可选目标（drifted 的版本不能被回滚到）。
+- **降规则（实际采用）**：`GOVERNANCE_MIN_SAMPLES` **刻意不在**那个元组里，改它不动任何交易行为。
+  **`MIN_VALIDATION_SAMPLES` 一个字节都没动** ⇒ `drifted()` 仍为空，上面那两样代价**未付**。
+
+落地：`GOVERNANCE_MIN_SAMPLES` 50 → 20；`GOLDEN_PRINCIPLES` §7、本文档 §12、`README` 三处声明
+一并改成 20，且 §7 **写明这是降低自我要求**、20 个配对样本是弱依据 —— 不许把它读成一项成就。
+`promotion_floor_gap` 保留，因为仍有真事可报：**版本**自己声明的门槛低于 20。
+
+**顺带发现并修掉的一处可见性回退。** `status` 原先只在**有缺口时**才打印仓库规则那一行，
+于是「两者一致」与「规则根本没被读过」在输出里长得一模一样 —— 正是这份报告存在的目的所要防的形态。
+`_print_promotion_floor` 现在**恒定**打印三行：版本声明的门槛、闸门的弃权线、仓库规则。
+
+**D16 同时结清**：`shadow_run.py` 的停止规则原先把 `remaining`（配对样本数）与
+`verdict["validation_days"]`（天数）比同一个 `needed`，于是实验在样本线上早就过关、
+闸门**每天**被问一次 —— 正是该模块 docstring 说它写出来要避免的形态。D15 定了单位
+（20 个**配对样本**），所以两侧都改成配对样本（`verdict["n"]`）。原先那条「断言缺陷」的用例
+按它自己 docstring 的指示翻了面，改名
+`test_a_verdict_that_reaches_the_sample_bar_ends_the_asking`。
+
+验证：**2008 passed / 18 skipped**（净增 1：`TestTheDeclaredFloorAgainstTheRepositorysRule`
+删 1 条、加 2 条）；`lint_harness` **167 文件、存量仍 13 条**（`lint_baseline.txt` 未新增行）；
+`lint_docs` 通过。**变异探针取证**：把 `shadow_run.py` 的比较改回 `validation_days` →
+`test_shadow_run_task.py` **恰好两条变红**（`test_it_does_not_ask_again_the_next_day` 与翻面后
+那条），复原后 16 passed。另：`tests/test_policy_cli.py` 里断言「冲突被打印」的那条改名并翻转成
+断言**没有**冲突（`"nothing refuses it" not in out`），同时新增正向断言——仓库规则那一行确实被打印。
 
 
 

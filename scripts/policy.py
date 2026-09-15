@@ -398,11 +398,14 @@ def _declared_floor(version_id: int) -> int | None:
 
 
 def _print_promotion_floor(version_id: int) -> None:
-    """Print the two numbers that decide whether a promotion is even possible.
+    """Print the numbers that decide whether a promotion is even possible.
 
-    Both, always, and then the gap between the version's floor and the rule the
-    repository declares, because those are three different values in two
+    All of them, always, and then any gap between the version's floor and the
+    rule the repository declares, because those are values that can live in two
     different units and the operator's next action depends on which one binds.
+    The rule is printed whether or not it is violated: printing it only alongside
+    a complaint would make "the two agree" and "the rule was never consulted"
+    look identical, which is the failure this whole report exists to prevent.
     """
     declared = _declared_floor(version_id)
     print("  promotion floor: "
@@ -411,6 +414,8 @@ def _print_promotion_floor(version_id: int) -> None:
              else f"version #{version_id} declares none"))
     print(f"  gate abstains below {holdout_gate.MIN_VALIDATION_SAMPLES} paired "
           "sample(s) (holdout_gate.MIN_VALIDATION_SAMPLES, live code)")
+    print(f"  repository rule: n >= {holdout_gate.GOVERNANCE_MIN_SAMPLES} "
+          "paired sample(s) (GOLDEN_PRINCIPLES §7)")
     for gap in holdout_gate.promotion_floor_gap(
             declared, when=f"version #{version_id}"):
         print(f"    ! {gap}")

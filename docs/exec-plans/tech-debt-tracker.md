@@ -25,7 +25,10 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D15, D16, D17, D18.**_
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D17, D18** (D15 and D16 were both opened and paid
+on 2026-09-15, in one round: the operator set the sample floor at 20 and the rule
+was lowered to match, and that same answer — the preregistered unit is a *paired
+sample* — is what fixed the stopping rule's two-unit comparison)._
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -100,7 +103,7 @@ hit still lands. The durable fix — routing these through one fixture that
 patches every namespace binding the name — is a bigger change than the debt is
 worth today.
 
-### D15 — The repository's sample floor is declared in three places and enforced against a fourth number
+### D15 — The repository's sample floor is declared in three places and enforced against a fourth number (paid 2026-09-15)
 
 **Added 2026-09-14.** `GOLDEN_PRINCIPLES.md` §7 declares "No conclusion with
 n < 50 reaches production code"; `TRADER_CORE_DESIGN.md` §12 calls it "the
@@ -114,19 +117,22 @@ version in force, and contradicts §7, and nothing refuses it.
 the only path that ships a conclusion. Worse than missing: three documents
 asserting it is enforced makes it the last thing anyone would go looking for.
 **Recognise.**
-`tests/test_holdout_gate.py::TestTheDeclaredFloorAgainstTheRepositorysRule::test_the_rule_is_a_quotation_and_not_a_threshold`
-drives a real `promote` verdict at n = 25 — below the rule, above the gate.
-**Made visible, not closed, 2026-09-14.** `GOVERNANCE_MIN_SAMPLES = 50` quotes
-the number in code, `promotion_floor_gap()` names the difference, and
-`scripts/policy.py status` prints all three values (version's floor, gate's
-abstention line, the rule). The fix that would close it — raising the constant
-to 50 — is deliberately not taken here: `MIN_VALIDATION_SAMPLES` is in
-`policy_sources._RULE_SOURCES`, so changing it marks **every version already
-frozen** as drifted, and the version in force is the only one there is.
-A behaviour-changing edit after freezing is supposed to be a new candidate, so
-that is an operator's call with a cost attached, not a patch.
+`tests/test_holdout_gate.py::TestTheDeclaredFloorAgainstTheRepositorysRule`
+drives a real `promote` verdict at n = 25 — below the old rule, above the gate.
+**Paid 2026-09-15, by operator decision, in the direction this entry did not
+anticipate.** The operator set the floor at **20** — the code's number — so the
+rule was **lowered to meet the code** rather than the code raised to meet the
+rule. `GOVERNANCE_MIN_SAMPLES` went 50 → 20; it is deliberately absent from
+`policy_sources._RULE_SOURCES`, so this drifted no version, and the cost this
+entry priced ("every version already frozen becomes drifted", plus the lost
+rollback target that follows from it) never had to be paid at all.
+`GOLDEN_PRINCIPLES` §7, `TRADER_CORE_DESIGN` §12 and `README` now all say 20, and
+§7 states plainly that the honesty bar was lowered and what that costs.
+`promotion_floor_gap` survives for the case that is still real: a **version**
+declaring a floor below the rule. The demonstrating test was renamed to
+`test_the_band_the_old_gap_left_open_is_gone` and now asserts the closure.
 
-### D16 — The daily stopping rule compares paired samples against validation days
+### D16 — The daily stopping rule compares paired samples against validation days (paid 2026-09-15)
 
 **Added 2026-09-14.** `pipeline/tasks/shadow_run.py` decides whether to ask the
 gate with two conditions in two units: `row["remaining"]` counts paired
@@ -144,15 +150,22 @@ stub returns a verdict whose `n` and `validation_days` **both** equal `needed`,
 so the two units coincide and the disagreement is invisible. The defect survived
 a test class named `TestItAsksTheGateOnce`.
 **Recognise.**
-`test_the_stopping_rule_asks_again_while_the_two_units_disagree` asserts the
-defect, and the probe "the stopping rule is made unit-consistent" turns it red —
-so the test detects the disagreement rather than the fix, on purpose.
-**Fix, and why it is not taken here.** Either compare `verdict["n"]` against
-`needed` (pairs with pairs) or make the floor count days. Both *are* the D15
-question — whether the preregistered sample is 20 samples or 20 days — and each
-trades this anti-pattern for another: pairs alone lets one morning's picks end
-the experiment, days alone needs the gate's own threshold to move, which drifts
-every version already frozen. Decide D15 first; this follows from it.
+`test_the_stopping_rule_asks_again_while_the_two_units_disagree` asserted the
+defect, and the probe "the stopping rule is made unit-consistent" turned it red —
+so the test detected the disagreement rather than the fix, on purpose.
+**Paid 2026-09-15, by following D15.** Both candidate fixes *were* the D15
+question — whether the preregistered sample is 20 samples or 20 days — and the
+operator answered it: **20 paired samples**. Pairs therefore compare with pairs.
+`asked_already` now reads `verdict["n"]`, and so does `_position_line`, so a
+verdict resting on twenty pairs from a single morning ends the asking instead of
+looking short of a twenty-*day* bar. The demonstrating test was flipped, as its
+own docstring instructed, to
+`test_a_verdict_that_reaches_the_sample_bar_ends_the_asking`; two sibling cases
+that had been leaning on the mixed unit now state `n` explicitly instead of
+leaving it absent (absent read as zero, which happened to give the right answer
+for the wrong reason). Evidence: putting `validation_days` back on the
+right-hand side turns exactly two cases red —
+`test_it_does_not_ask_again_the_next_day` and the flipped one.
 
 ### D17 — The version in force no longer matches the running configuration
 
@@ -584,6 +597,20 @@ the next person does not "fix a bug" in one copy only.
 
 ## Paid
 
+- The daily stopping rule compared a count of paired samples against a count of
+  validation days (D16), so an experiment passed the sample bar long before the
+  day bar and the gate was asked every run in between — the "near-identical
+  insufficient row every day" the module was written to avoid. Paid 2026-09-15
+  once D15 settled the unit: both sides compare **paired samples** now, and
+  reverting that turns exactly two cases red.
+- The repository's sample floor was declared in three places and enforced against
+  a fourth (D15). Closed 2026-09-15 by **lowering the rule from 50 to 20** to meet
+  the code, not by raising the code to meet the rule: the gate's constant is a
+  behaviour source, so raising it would have drifted every version already frozen
+  — and taken the rollback target with it — while the rule constant moves nothing
+  a trader does. `GOLDEN_PRINCIPLES` §7, `TRADER_CORE_DESIGN` §12, `README` and
+  `GOVERNANCE_MIN_SAMPLES` now all say 20, and §7 states plainly that the honesty
+  bar was lowered and what that costs.
 - Four files were past the 1200-line limit (D4). Nine modules now, none over it,
   and three of the five cuts changed no caller at all — the moved names are
   re-exported by the file they left. Two further cuts were measured and rejected:

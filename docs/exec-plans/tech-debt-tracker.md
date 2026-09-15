@@ -25,10 +25,12 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D17, D18** (D15 and D16 were both opened and paid
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and paid
 on 2026-09-15, in one round: the operator set the sample floor at 20 and the rule
-was lowered to match, and that same answer — the preregistered unit is a *paired
-sample* — is what fixed the stopping rule's two-unit comparison)._
+was lowered to match; that same answer — the preregistered unit is a *paired
+sample* — is what fixed the stopping rule's two-unit comparison; and the
+configuration actually running was frozen as version #2 while the pointer stayed
+where it was)._
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -167,7 +169,7 @@ for the wrong reason). Evidence: putting `validation_days` back on the
 right-hand side turns exactly two cases red —
 `test_it_does_not_ask_again_the_next_day` and the flipped one.
 
-### D17 — The version in force no longer matches the running configuration
+### D17 — The version in force no longer matches the running configuration (paid 2026-09-15)
 
 **Added 2026-09-14, found by re-running `status`.** `scripts/policy.py status`
 prints `live configuration still matches: False` for version #1. It matched when
@@ -182,11 +184,19 @@ every "is the incumbent still the incumbent" question has a wrong answer, and §
 ("a behaviour-changing edit after freezing creates a new candidate") has not been
 honoured for a change that did go in.
 **Recognise.** `scripts/policy.py status` → `live configuration still matches`.
-**Fix.** `freeze --by <you> --reason "the theme gate, frozen after the fact"` —
-moves no pointer, needs no evidence, and puts the configuration actually running
-on record as a version. Deliberately not run in this round: it decides what the
-next candidate is, which is the operator's call, and the pointer cannot move to
-it until a verdict exists anyway.
+**Paid 2026-09-15** with `freeze --by evilkylin --reason "the theme gate, frozen
+after the fact"`, after backing the database up (`data/memory.db.bak-20260915-192259`)
+and checking `--dry-run` first. It moved no pointer, as designed. Version #2
+(`d9c28e312eef55e9`) now declares the full decision block **including
+`theme_gate`**, while #1's block simply does not contain that key — so the thing
+this entry was about is now visible in the record instead of only in prose.
+Verified: `verify_live(2) is True`, `verify_live(1) is False`, `integrity: clean`,
+and `status` still prints `live configuration still matches: False` because the
+pointer is still on #1 — which is the correct state until a verdict exists.
+`drifted()` returns `[1]`, so **#1 can no longer be rolled back to**; #2 is the
+first clean version and becomes the rollback target once promoted. Freezing it
+also decided what the next candidate is, which this entry said was the
+operator's call.
 **Not to be confused with** the drift the staging bug used to produce. That one
 was every version except the incumbent reporting as drifted, because the
 pointer-controlled sources were read from the system instead of from the version.
@@ -597,6 +607,14 @@ the next person does not "fix a bug" in one copy only.
 
 ## Paid
 
+- The version in force no longer matched the running configuration (D17): a
+  theme-gate commit added a key to the decision block three hours after `install`
+  ran, so every "is the incumbent still the incumbent" question had a wrong
+  answer. Paid 2026-09-15 by freezing the configuration that is actually running
+  as version #2 — no pointer move, no evidence needed. #1's block simply lacks
+  the `theme_gate` key while #2's carries it, so the gap is now visible in the
+  record; and because #1 reports drifted, #2 is the first clean version and the
+  rollback target once promoted.
 - The daily stopping rule compared a count of paired samples against a count of
   validation days (D16), so an experiment passed the sample bar long before the
   day bar and the gate was asked every run in between — the "near-identical

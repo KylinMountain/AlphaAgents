@@ -5,8 +5,8 @@
 
 ## 目标
 
-让闭环转第一圈真实证据。四件事；**第 1、2 步已于 2026-09-15 完成并落地**（见决策记录与验收），
-剩下第 3、4 步：
+让闭环转第一圈真实证据。四件事；**第 1、2、3 步已于 2026-09-15 完成并落地**（见决策记录与验收），
+只剩第 4 步 —— 而它卡在一个**待你决定**的参数上（见决策记录的待定项）：
 
 1. **定样本门槛（D15）—— 已定 = 20，已收口。** `GOLDEN_PRINCIPLES` §7、`TRADER_CORE_DESIGN` §12、
    `README` 三处原先声明 `n < 50`，而代码只执法 20，于是 n 落在 20–49 的裁决
@@ -45,20 +45,30 @@
       `GOLDEN_PRINCIPLES` §7、`TRADER_CORE_DESIGN` §12、`README` 三处都写 20；
       `promotion_floor_gap(MIN_VALIDATION_SAMPLES - 10, when=…)` 返回 1 条，
       `promotion_floor_gap(20)` 返回 `[]`；`tests/test_holdout_gate.py` 全绿。
-- [x] **D15**：`MIN_VALIDATION_SAMPLES` **未被改动** ⇒ `policy_registry.drifted()` 仍为空，
-      没有任何已冻结版本因这次收口漂移。
+- [x] **D15**：`MIN_VALIDATION_SAMPLES` **未被改动** ⇒ **没有任何已冻结版本因为这次收口而漂移**。
+      （更正一处我写错的断言：本行初稿写的是「`drifted()` 仍为空」——**没有实测就写下的，而且错了**。
+      冻结 #2 之后实测 `drifted() == [1]`：#1 是 drifted 的，但原因是 **D17**（主题门在它冻结之后
+      才进代码默认值），与本轮收口无关，`MIN_VALIDATION_SAMPLES` 也确实没动过。）
 - [x] **D16（2026-09-15 完成）**：`_ask_the_gate` 的 `asked_already` 与 `_position_line`
       都比 `verdict["n"]`（配对样本），不再比 `validation_days`；模块 docstring 同步改写。
       原「断言缺陷」的用例按它自己 docstring 的指示翻面为
       `test_a_verdict_that_reaches_the_sample_bar_ends_the_asking`；两个原本依赖混用单位的
       兄弟用例改为显式写出 `n`。**变异探针取证**：把比较改回 `validation_days` →
       `test_shadow_run_task.py` **恰好两条变红**，复原后 16 passed。
-- [ ] **D17**：`freeze --dry-run` 先打印 diff，再真跑 → `status` 的版本数 **1 → 2**。
-- [ ] **D17**：`policy_sources.verify_live(2) is True` 且 `verify_live(1) is False`。
-- [ ] **D17**：`scoring.in_force_decision_params()["theme_gate"]` 与 #2 声明的整块逐值相等
-      （`w_flow 0.45 / w_rel 0.35 / w_confirm 0.20 / admit_score 0.50 / cancel_score 0.35`）。
-- [ ] **D17**：`status` 的 `live configuration still matches` **仍为 `False`** ——
+- [x] **D17（2026-09-15 完成）**：先备份 `data/memory.db.bak-20260915-192259`，
+      再 `freeze --dry-run` 看它只报 content hash、确认不动指针，然后真跑 →
+      `status` 的版本数 **1 → 2**（#2 `d9c28e312eef55e9`、`frozen 2026-09-15 by evilkylin`、
+      `integrity: clean`）。`freeze` 自己打印「the pointer did not move」。
+- [x] **D17**：实测 `verify_live(2) is True`、`verify_live(1) is False`。
+- [x] **D17**：`#2` 声明的 decision 块**含 `theme_gate` 整块**，且与
+      `scoring.in_force_decision_params()["theme_gate"]` 逐值相等；
+      **`#1` 的块里根本没有 `theme_gate`** —— D17 那句话现在直接印在记录里，
+      不再只存在于文档的叙述中。
+- [x] **D17**：`status` 的 `live configuration still matches` **仍为 `False`** ——
       这一条断言的是「**指针没动**」，不是「修好了」。
+- [x] **D17**：三行门槛都打印出来了（`version #1 declares 20 paired sample(s)` /
+      `gate abstains below 20` / `repository rule: n >= 20`），
+      顺带在生产库上验证了本轮对 `_print_promotion_floor` 的修改生效。
 - [ ] **实验**：`shadow_runs` 有 2 条；#1 仍是 `constant_0.5`，#2 是
       `producer='remap_confidence'`、`status='open'`、`policy_version_id=2`。
 - [ ] **实验**：`shadow.scope_for("remap_confidence") == policy_registry.SCOPE_CANDIDATE`，
@@ -113,10 +123,14 @@
 
 ## 风险
 
-- ~~抬门槛会让 #1 变成 drifted ⇒ 回滚目标暂时消失~~ —— **已解除，代价未付**。
-  这条风险是为「抬代码到 50」定价的；最终选了降规则，`MIN_VALIDATION_SAMPLES` 一个字节都没动，
-  所以 `drifted()` 仍为空，`rollback` 的可选目标不受影响。留在记录里是因为它解释了
-  为什么当初把「先定门槛」排在第 3 步之前 —— 那个顺序约束现在也一并解除了。
+- **「抬门槛 ⇒ 回滚目标消失」的代价未付，但同样的处境换个原因已经存在。**
+  本计划初版为「抬代码到 50」定价了这条风险：`policy_registry.drifted()` 的 docstring
+  写明「an older version that drifted cannot be rolled back to either」。最终选了降规则，
+  `MIN_VALIDATION_SAMPLES` 一个字节没动，所以**这条代价确实没付**。
+  但冻结 #2 之后实测 `drifted() == [1]` —— **#1 本来就是 drifted 的**，原因是 D17
+  （主题门在它冻结之后才进代码默认值），与本轮改动无关。所以「此刻没有可回滚目标」是真的，
+  只是原因不同：**#2 是记录里第一个干净版本**，它一旦晋升就成为往后回滚的目标。
+  **信号**：晋升 #2 之前不要指望 `rollback` 能回到 #1，它会因为 drifted 被拒。
 - **门槛降到 20 意味着首次晋升建立在弱证据上。** 20 个配对样本不足以支撑一个自信的结论，
   这是这个决定的已知代价，文档三处都写明了。**信号**：第一次晋升之后，
   想要更硬的结论只能靠后续的候选实验，不能靠把 20 重新解释成 50。

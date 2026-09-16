@@ -394,6 +394,12 @@ function Attribution({ sec }) {
 }
 
 /* ── 改账审计：one door's trail ─────────────────────────────────── */
+const INTENT_LABEL = {
+  accepted: '已受理',
+  rejected: '已拒绝',
+  pending: '待裁决',
+}
+
 function IntentTrail({ sec }) {
   const v = sec?.value || {}
   const never = v.never_decided || []
@@ -402,7 +408,7 @@ function IntentTrail({ sec }) {
       <div className="health-group">
         {Object.entries(v.by_status || {}).map(([status, n]) => (
           <div className="health-source" key={status}>
-            <span className="name">{status}</span>
+            <span className="name">{INTENT_LABEL[status] || status}</span>
             <span>{n}</span>
           </div>
         ))}
@@ -433,12 +439,21 @@ function IntentTrail({ sec }) {
                   <span className={`stage-chip ${
                     r.status === 'accepted' ? 'stage-main'
                       : r.status === 'rejected' ? 'stage-fade' : 'stage-sprout'}`}>
-                    {r.status}
+                    {INTENT_LABEL[r.status] || r.status}
                   </span>
                 </td>
                 <td>{r.code || DASH}</td>
                 <td>{r.information_cutoff || DASH}</td>
-                <td style={{ color: 'var(--text-2)' }}>{r.reject_reason || DASH}</td>
+                {/* 拒绝原因可能是一整句异常文本（D26 之前是 OperationalError
+                    的全文），一行放不下时截断、悬停看全文：让长错误不能把
+                    前面几列挤歪，也不能被静默丢掉。 */}
+                <td style={{
+                  color: 'var(--text-2)', maxWidth: 280,
+                  overflow: 'hidden', textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }} title={r.reject_reason || undefined}>
+                  {r.reject_reason || DASH}
+                </td>
               </tr>
             ))}
           </tbody>

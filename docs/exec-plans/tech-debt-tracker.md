@@ -393,13 +393,13 @@ being a consistency check on the record rather than on the direction. Each trade
 `payload["trades"]` now carries its own `supports` flag, so the counts can be re-derived
 from the record instead of taken on trust.
 
-### D39 — The corpus check answers "did it change" but not "what changed"
+### D39 — The corpus check asks whether a file changed, on a machine where production changes it
 
-The 120-day run's summary reported `共享语料 size+mtime 未变 **否**`. The check is
-right to exist — a replay that mutates the shared corpus makes every run
-irreproducible — but `run.json` records only `corpus_untouched: false`. It does not
-name the file, the before value or the after value, so **the artifact cannot be
-diagnosed after the fact**. The only way to find out is to run another window and watch.
+The 120-day run's summary reported `共享语料 size+mtime 未变 **否**`. The check is right to
+exist — a replay that mutates the shared corpus makes every run irreproducible — but
+`run.json` records only `corpus_untouched: false`. It names no file and no values, so **the
+artifact cannot be diagnosed after the fact**; the only way to find out is to run another
+window and watch. That was done, and the answer was not the one the boolean implies.
 
 That was done, and the first conclusion drawn from it was **wrong**. A 5-day window left
 all three files byte- and mtime-identical and reported 是 — but a second 120-day window,
@@ -419,17 +419,32 @@ AlphaAgents/data/market_snapshots.db   1385369600 → 1385422848   (+53,248 byte
 mtime 2026-09-17 00:10:17 — inside run 2's window
 ```
 
-So the event is real, reproducible across long runs, and **not** per-day (the 5-day probe
-left the file alone). What is *not* established is who writes it: the replay is one
-candidate, and the scheduled snapshot writers in this repository (`snapshot_store`,
-`tushare_store`, `global_sentiment`) are another. Establishing it needs the same
-`stat`-by-hand that produced the line above — which is the whole point, since the artifact
-should have said it.
+So the event is real and reproducible across long runs. **The writer is not the replay**,
+and that was checked rather than argued: a shared corpus file is a symlink, so
+`corpus_access.is_shared` is true, so it is opened `mode=ro` and the schema is skipped —
+`tests/test_corpus_access.py` pins both halves. A read-only SQLite connection cannot grow
+a database by 53 KB.
 
-**Remedy.** Have `_corpus_fingerprint` keep the per-file `(size, mtime)` it measured and
-write the diff into `run.json`, naming the file that moved. A check that can only say
-"something is different" costs a rerun, a guess and a manual `stat` to interpret; a check
-that names the file costs nothing.
+It is **live production ingestion**. The same file, read minutes later:
+
+```
+news_items   rows=989,927   captured_at=2026-09-17 07:33
+```
+
+07:33 is minutes before the query and hours after the run: the news feed is written
+continuously by the scheduled pipeline on this machine.
+
+Which means the check **cannot pass on a live box**, and its failure was never a fact about
+the replay. Three readings of one boolean, in order — the replay mutates the corpus; then
+the concurrent test suite did it; then a scheduled snapshot writer did it. The first two
+were wrong, each cost a run or a `stat`, and the first made it into a committed document.
+
+**Remedy, revised.** The question worth asking is not "is this file unchanged" — on a
+machine where production is ingesting, the honest answer is always no. It is "did *the
+replay* write". That is directly checkable: assert that the replay's handle on a shared
+file is read-only, or that no write was attempted, instead of comparing `size` and `mtime`
+of a file another process owns. If the fingerprint is kept at all it should name the file
+and both values, and be scoped to files production does not write.
 
 ### D40 — One event loop per day, one shared client, so every day's first request fails and is retried
 

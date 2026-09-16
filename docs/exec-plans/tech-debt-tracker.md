@@ -133,7 +133,7 @@ which is the argument for the runner existing at all.
 the comment at `portfolio.py:748` says why: the phase is a fact about the market, not about
 this book, so it needs no lock. **No test yet** — a deadlock test needs a timeout harness,
 and the honest statement is that the fix is *unproven at the test layer*, not covered.
-(Working-tree line numbers; whole entry is uncommitted as of writing.)
+(Line numbers as committed in `3494559`, which paid D27–D29.)
 
 ### D28 — A negative budget aborted a trader's whole pending-order cycle (paid 2026-09-16)
 

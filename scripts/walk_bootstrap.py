@@ -13,6 +13,8 @@ So the isolation is a **split**, not a snapshot:
     corpus (shared by reference, read-only)   →  market_history.db, the news
                                                  store, the instrument list
     trader state (created empty, never shared) →  memory.db
+    evidence (created empty, never shared)     →  llm_journal/ — the run's own
+                                                 model exchanges
 
 The design already says historical replay is a *separate run and ledger*; this
 script is the mechanical part of that sentence.
@@ -26,10 +28,17 @@ What it refuses to do
   ``episodes``, ``outcomes``, ``policy_versions``, ``pending_settlements``)
   unless ``--force`` is passed. A replay directory that has already run is not
   something to silently wipe.
-* It does not check that the run *stays* read-only on the shared corpus. The
-  corpus is linked, so a replay that ingests would write through the link. That
-  is a named gap (M0 item 1 in the T+1 plan), not something this script can
-  enforce; it prints what it shared so the operator can see it.
+* It does not have to check that the run *stays* read-only on the shared corpus:
+  the links it plants are exactly what ``alpha_agents.data.corpus_access`` treats
+  as "shared", and a shared file is opened ``mode=ro``, so a write raises at the
+  SQLite layer rather than reaching the live corpus. (Before D22 these links were
+  a convention and the sentence here admitted as much. Corrected rather than
+  deleted: "shared by reference" and "cannot be written" are different claims,
+  and only the second one is true now.)
+* It does not keep an old recording. A replay's directory also holds its own LLM
+  journal (``llm_journal/``, see ``alpha_agents.llm_journal``), and bootstrap
+  clears it: starting a fresh run while last run's answers sat in the same
+  directory would let ``replay-recorded`` serve the wrong run's conversations.
 
 Usage
 -----
@@ -42,12 +51,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.config import PROJECT_ROOT  # noqa: E402
 from alpha_agents.data.memory_store import _SCHEMA  # noqa: E402
 
@@ -109,6 +120,26 @@ def _link_corpus(source: Path, target: Path) -> None:
     os.symlink(source, target)
 
 
+def _clear_journal(target: Path) -> list[str]:
+    """Remove a previous run's recordings, naming every file removed.
+
+    Not decoration. ``replay-recorded`` serves a run's answers by position from
+    ``llm_journal/<run_id>.jsonl``, so bootstrapping a fresh run into a directory
+    that still held the previous run's journal would let the new run answer from
+    the old conversations — evidence that is *wrong* rather than absent, which is
+    the one outcome this plan exists to prevent.
+
+    Only removes a real directory inside the target; a symlink is left alone and
+    named by its presence in the returned list, not followed.
+    """
+    directory = target / llm_journal.JOURNAL_DIRNAME
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    dropped = sorted(child.name for child in directory.iterdir())
+    shutil.rmtree(directory)
+    return dropped
+
+
 def bootstrap(target: Path, corpus: Path, *, force: bool = False) -> dict:
     """Materialise a replay data directory and report exactly what it did."""
     if not corpus.is_dir():
@@ -123,6 +154,7 @@ def bootstrap(target: Path, corpus: Path, *, force: bool = False) -> dict:
         )
 
     target.mkdir(parents=True, exist_ok=True)
+    dropped_journal = _clear_journal(target)
 
     fresh = []
     for name in STATE_FILES:
@@ -144,6 +176,8 @@ def bootstrap(target: Path, corpus: Path, *, force: bool = False) -> dict:
         "fresh": fresh,
         "shared": shared,
         "missing": missing,
+        "journal": str(target / llm_journal.JOURNAL_DIRNAME),
+        "journal_dropped": dropped_journal,
         "state_rows": trader_state_rows(target / "memory.db"),
     }
 
@@ -169,14 +203,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"replay data dir: {report['target']}")
     print(f"  fresh (empty, never inherited): {', '.join(report['fresh'])}")
-    print(f"  shared by reference (read-only by convention): "
+    print(f"  shared by reference (each opens read-only): "
           f"{', '.join(report['shared']) or 'none'}")
     if report["missing"]:
         print(f"  absent from the corpus: {', '.join(report['missing'])}")
     print(f"  trader rows in the new state: {report['state_rows'] or 'none'}")
+    if report["journal_dropped"]:
+        print(f"  recordings cleared: {', '.join(report['journal_dropped'])}")
+    print(f"  llm journal: {report['journal']}/")
     print()
-    print("Run the replay with the data dir pointed here:")
-    print(f"  ALPHAAGENTS_DATA_DIR={report['target']} …")
+    print("Run the replay with the data dir pointed here, and say whether this")
+    print("pass is allowed to call the model:")
+    print(f"  ALPHAAGENTS_DATA_DIR={report['target']}")
+    print("  ALPHAAGENTS_LLM_MODE=record            # first pass: writes the journal")
+    print("  ALPHAAGENTS_LLM_MODE=replay-recorded   # later passes: answers from it")
     return 0
 
 

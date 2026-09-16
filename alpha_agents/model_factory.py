@@ -18,6 +18,7 @@ import logging
 from agents import ModelSettings, OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
+from alpha_agents import llm_journal
 from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -76,12 +77,20 @@ def model_identity() -> dict:
 
 def create_model() -> OpenAIChatCompletionsModel:
     """The chat model every agent runs on."""
-    # Not instrumented for usage: this client is handed to an Agent, and
+    # Not instrumented for *usage*: this client is handed to an Agent, and
     # the tracing hook already counts every generation the SDK makes
     # through it. Wrapping it too would bill each agent turn twice.
+    #
+    # Instrumented for the *journal*, which is a different question. Usage is
+    # a number for a dashboard; the journal is what makes a walk-forward
+    # replayable, because an LLM is sampled and two runs of the same 2020
+    # window otherwise disagree for reasons that have nothing to do with 2020.
+    # In the default ``live`` mode this hands back the very object below —
+    # same identity, no proxy, no file — so the production path is unchanged.
     client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
     return OpenAIChatCompletionsModel(
-        model=AGENT_MODEL or DEFAULT_MODEL, openai_client=client,
+        model=AGENT_MODEL or DEFAULT_MODEL,
+        openai_client=llm_journal.journaled(client),
     )
 
 

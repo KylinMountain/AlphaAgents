@@ -26,15 +26,16 @@ measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
 `scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
-paid on 2026-09-15, in one round. **D19–D23 were opened *and* paid on 2026-09-16**, all
-five from an external review of the T+1 plan and all five fixed the same day: D19 was a
+paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
+from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
 applied to buying power); D20 was the absence of date-versioned limit rules; D21 was that a
 replay would have inherited the live trader's memory; D22 was that nothing stopped a replay
-writing into the shared history; and D23 was that nothing decided fills at all, so the first
+writing into the shared history; D23 was that nothing decided fills at all, so the first
 walk would have improvised an intraday path and a capacity cap from the fill day's own
-volume. Their entries below carry the payment records; none of the five ever reached this
-list as debt.)_
+volume; and D24 was that nothing recorded a model exchange, so re-running the same window
+re-sampled the model instead of reproducing it. Their entries below carry the payment
+records; none of the six ever reached this list as debt.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -70,6 +71,51 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D24 — Nothing recorded the model exchanges, so a re-run of the same window was a re-sample (paid 2026-09-16)
+
+**Added 2026-09-16, from the external review of the T+1 plan** — its P1-2, and M0 item 6. The
+plan's own §6 had already drawn the line: saving the decision's input snapshot tells you what
+the agent was shown, not that a second run reaches the same judgement. Nothing in the code
+wrote down a model exchange, so M2's "same window, news filter on and off" would have compared
+the filter *plus two samples*, and every walk-forward number would have been irreproducible by
+construction.
+**Paid 2026-09-16** with `alpha_agents/llm_journal.py` and 32 tests.
+`ALPHAAGENTS_LLM_MODE` is `live` (the default; nothing written), `record`, or
+`replay-recorded`. The seam is the client: `model_factory.create_model` passes its
+`AsyncOpenAI` through `journaled()`, which hands back **the same object** in live mode and a
+thin proxy otherwise. One JSON object per call lands in
+`<DATA_DIR>/llm_journal/<run_id>.jsonl` — so it follows a `walk_bootstrap` replay directory
+and cannot read the live journal — carrying `request_json` / `response_json`, both hashes,
+`model_provider` / `model_id` **and** `response_model` (under OpenRouter's fallback chain a
+different model answers, and a different model is a different trader), `policy_hash` /
+`knowledge_snapshot_id` from `policy_sources.collect()`, plus `tool_calls` and `tool_results`.
+Replay is positional and never falls through to the provider.
+**Two traps found by reading the SDK, not by testing it.** `with_options` returns a *new*
+client with new resource objects, and the retry loop calls `self._client.with_options(
+max_retries=0)` and then `create` on the **result** — a plain delegating proxy would have
+recorded nothing while every line of the run looked fine. The proxy re-wraps instead, and one
+test drives that exact path through the SDK's own switch. Separately, the wrapper's resource
+had to be named `chat` rather than `_chat`: named `_chat` it fell out of `__dict__`,
+`__getattr__` handed back the inner client's resource, and the journal stayed empty. Twenty
+tests caught it on the first run.
+**Failures are records too.** A retried call is two exchanges, and a journal holding only the
+successful one would hand attempt #2's answer to a replay asking for attempt #1. A raising
+call is written as `llm_error` and re-raised on replay, **advancing the cursor**, because the
+failure *is* the answer to that call.
+**Where it refuses, and why each refusal is the point.** Streaming raises in both recording
+modes rather than capturing a truncated answer (nothing in this repository streams). A request
+that differs from the recording raises with the first differing key, instead of being answered
+anyway. A truncated journal is a broken recording, not a shorter one. The first write of a
+process **replaces** the run's journal and says how many lines it dropped — appending would let
+a second run of the same window answer from the first run's recording, which is evidence that
+is *wrong* rather than absent. And a value with no JSON form is named by its type rather than
+passed through `repr`, which carries a memory address; the mutation probe prints the two
+addresses that made the fingerprint differ.
+**Not covered, named rather than implied:** the digest, embedding and VPA clients have their
+own call paths and are not journaled.
+**Not yet demonstrated:** that a whole replay reproduces intents, fills and episodes. The
+mechanism is pinned call by call; the end-to-end claim needs M1's runner.
 
 ### D23 — A T+1 walk had no execution model, so nothing stopped it inventing an intraday path (paid 2026-09-16)
 

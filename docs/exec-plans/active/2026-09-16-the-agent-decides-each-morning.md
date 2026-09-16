@@ -51,7 +51,7 @@ A 股把**可用**与**可取**分开：T 日卖出的钱**当天就能继续买
 
 ## 二、M0 —— Evidence Contract（评审建议新增，先于一切）
 
-六件事，全部是「让历史证据可信」的前置条件。**进度：5/6**（2026-09-16 当天；只剩 LLM 记录）。
+六件事，全部是「让历史证据可信」的前置条件。**进度：6/6**（2026-09-16 当天全部完成）。
 
 - [x] **语料只读**（D22）—— 新增 `alpha_agents/data/corpus_access.py`：**symlink 就是「共享」的
       事实标记**，共享文件以 `mode=ro` 打开，写入在 SQLite 层**硬失败**
@@ -76,7 +76,20 @@ A 股把**可用**与**可取**分开：T 日卖出的钱**当天就能继续买
       `capacity_shares(adv20)` 与「截至 D-1」的 `average_daily_volume`，并有测试断言该字段
       **不存在**——为了图方便把它加回来会红，而不是静默通过。历史不足 20 日返回 `None`，
       不给一个更短的均值当代理。
-- [ ] **记录 LLM 的 request / response / tool results / policy 与 memory 哈希** —— 见 §6。**未做**。
+- [x] **记录 LLM 的 request / response / tool results / policy 与 memory 哈希**（D24）——
+      `alpha_agents/llm_journal.py`：`ALPHAAGENTS_LLM_MODE` 取 `live`（默认，不落盘）/
+      `record` / `replay-recorded`。缝在**客户端**：`create_model` 把 `AsyncOpenAI` 过
+      `journaled()`，live 模式下**返回同一个对象**。每条记录落在
+      `<DATA_DIR>/llm_journal/<run_id>.jsonl`（因此跟随 `walk_bootstrap` 的回放目录），含
+      `request_json`/`response_json`、双向 hash、`model_provider`/`model_id` **与
+      `response_model`**（OpenRouter 降级链下换模型 = 换交易员）、`policy_hash`/
+      `knowledge_snapshot_id`、`tool_calls`/`tool_results`。**两个只有读 SDK 才能发现的坑**：
+      `with_options` 返回**新客户端**（重试路径正是调它的返回值），朴素委托会让记录**静默为空**；
+      包装资源必须叫 `chat` 而非 `_chat`，否则被 `__getattr__` 透传掉。**失败的调用也记录**
+      （否则重试后的序列在重放时全体错位）。流式、请求漂移、截断日志、追加旧记录——全部**拒绝
+      而不静默兜底**。**未覆盖并如实命名**：digest / embedding / VPA 三个客户端不在其中。
+      **尚未证明**：整段重放能逐行复现 intents/fills/episodes——机制已按调用点钉住，
+      端到端要等 M1 的 runner。
 
 ## 三、回放的状态从哪里开始（修订 1 在这里错得最重）
 
@@ -153,6 +166,18 @@ D 日总量只作**事后流动性诊断**输出。
 并分两个模式：`--llm-mode live` 与 `--llm-mode replay-recorded`。
 否则 M2 的「有新闻 / 无新闻」对照里会混进两次 LLM 的随机差异。
 
+**落地形态（D24）**：字段是 `run_id` · `seq` · `model_provider` · `model_id` ·
+`response_model` · `request_json` · `response_json` · `request_hash` · `response_hash` ·
+`policy_hash` · `knowledge_snapshot_id`（**取不到时写一句 `policy_error` 的原因，
+不是一个像 hash 的占位**）· `tool_calls` · `tool_results` · `omitted` · `lossy`。
+模式通过 `ALPHAAGENTS_LLM_MODE` 取 `live` / `record` / `replay-recorded`。
+`response_model` 是**实际回答的那个模型**：OpenRouter 降级链下换模型 = 换交易员。
+
+**两个上面列过、但没有落进日志的字段，如实说明。** `observation_hash` 属于**组装 prompt 的
+那个 runner**（M1），日志层拿不到它——而且它已被 `request_hash` 覆盖：观测一变，请求就变，
+hash 就变。`decision_json`（模型的最终决定）同样是 runner 层的事。日志记的是**交换**，不是
+决定；把两者塞进同一条记录，只会让「请求变了」和「决定变了」再也分不开。
+
 **以及一句必须写进任何历史报告的话**：今天的模型权重本身已经见过 2020–2025 的公开事件，
 所以历史 agent 的收益曲线**不是干净的 point-in-time alpha 回测**。它用来调机制、发现坏规则、
 做消融、筛候选，但报告上要标 **`mechanistic walk-forward ≠ point-in-time model backtest`**。
@@ -205,7 +230,9 @@ D 日总量只作**事后流动性诊断**输出。
 - [ ] **严格时间束**：D 09:00 的上下文里没有 D 的 close/high/low/volume；新闻必须 `<= information_cutoff`
 - [ ] **universe 也要 as-of**：未上市、当日停牌、当时不属于候选池的证券不得被选中
 - [ ] **LLM record/replay**：存档 request/response/tools 后，`replay-recorded` 模式能逐行复现
-      intents / fills / episodes
+      intents / fills / episodes —— **机制已就位（D24，32 条测试按调用点钉住：不碰网络、
+      逐次同答案、耗尽/漂移/流式/截断全部拒绝），端到端那一句尚未证明**：它需要 M1 的 runner
+      先存在，才有 intents / fills / episodes 可复现。
 - [ ] **不得绕过账本**：agent 的任何交易都必须留下 `TradeIntent`；禁止为历史方便直接改账
 - [ ] **对抗性新闻**：正文里放 `"Ignore previous instructions..."` 不能突破输出 schema
 

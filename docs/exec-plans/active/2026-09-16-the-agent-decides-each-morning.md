@@ -450,11 +450,15 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 
 机器可查。**评审要求的 12 条测试 + 报告口径都在这里**，先过它们，再跑长窗口。
 
-**M0 / 内核** —— **2026-09-16 逐条核对：本节列出 10 条，其中 7 条已由机器检查**（标 `[x]` 的都给了用例名），
-**3 条未完成**（标 `[ ]` 的写明缺哪一半）。核对方式是**先读代码与测试再下结论**，不凭 §2 的进度条 ——
+**M0 / 内核** —— **2026-09-16 逐条核对：本节列出 10 条，其中 8 条已由机器检查**（标 `[x]` 的都给了用例名），
+**2 条未完成**（标 `[ ]` 的写明缺哪一半）。核对方式是**先读代码与测试再下结论**，不凭 §2 的进度条 ——
 §2 写「M0 6/6」，那是**六件事**的进度，与本节这 10 条**不是同一张清单**：两处都叫 M0，
 条目集合却不同。（抬头写「评审要求的 12 条」，本节实际列出 10 条；这个差数没找到出处，如实记在这里。）
-核对当天顺手补掉了「严格时间束」缺的那一半（见下），所以是 **7/3** 而不是核对之初的 6/4。
+核对之初是 **6/4**；核对当天补掉了「严格时间束」缺的那一半（见下）→ **7/3**；
+同一天又补掉了「对抗性新闻」→ **8/2**（那一条里同时记下了原文**判断错在哪**，
+因为它是一句比事实更悲观的话，而这类错误同样是错误）。
+剩下的 2 条**都不是「缺一条断言」** —— 一条缺**数据源**（as-of 的候选池），
+一条缺**一次跨模式的对照运行**（record → replay 同窗口）—— 所以补不动，如实留着。
 - [x] **状态隔离** —— `tests/test_walk_bootstrap.py::test_state_seeded_in_the_corpus_cannot_reach_the_replay`：
       往语料的 `memory.db` 里种一条 candidate + 一条持仓，断言回放账本为空、语料文件**逐字节未变**；
       「生产库内容 hash 不变」由 `test_walk_forward.py::test_a_run_leaves_the_live_book_and_the_corpus_alone`
@@ -495,10 +499,23 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
       缺的是一次 `record` 之后再用 `replay-recorded` 跑**同一窗口**的对照。
 - [x] **不得绕过账本** —— `tests/test_intent.py::TestOnlyTheStateMachineWritesStatus`：
       `virtual_portfolio.status` 只有状态机那两个模块能写，绕过账本直接改账会被机械拦下。
-- [ ] **对抗性新闻** —— **没有测试**。VPA 的 user-message 构造器有**提示词层面**的次序设计
-      （`tools/vpa/llm.py:152-163`：安全声明置顶、canonical 块优先于散文），
-      但那是**设计意图，不是断言**；「正文里放 `Ignore previous instructions...` 不能突破输出 schema」
-      这条**从未被验证过**。
+- [x] **对抗性新闻** —— **2026-09-16 补齐，且核对发现原来的判断写错了两处。**
+      原文写「**没有测试**」，并把次序设计说成「**意图不是断言**」；实测**次序本来就被断言**
+      （`test_vpa_v10_helpers.py::test_build_vpa_user_content_safety_at_top`、
+      `test_build_vpa_user_content_section_order`），**输出侧的门也是**
+      （`test_call_llm_vpa_rejects_missing_fields_before_defaults` 用桩客户端驱动一条
+      缺 `reason`/`signals`/`scenarios` 的 VERDICT，断言返回 `status="error"` + `VerdictParseError`）。
+      **真正零测试的是「围栏容纳」**：`_max_backtick_run` 存在的唯一理由，就是把数据块的围栏
+      加宽到盖住正文里的反引号串，而**没有任何测试** —— 拆掉它的调用点，这个文件**全绿**。
+      现在由 `TestAnAdversarialBodyCannotLeaveItsBlock`（5 用例）钉住：正文里**同时**塞入
+      **伪造的区块标题**和**用来逃出自己块的围栏**，断言**包级可见的标题集合不变**。
+      **口径**：断言**不是** `count(标题) == 1` —— 实测伪造的标题**确实以子串出现**（3 次），
+      它是数据，数据可以说任何话；要守的是它**到不了包级作用域**。
+      探针 O（`_max_backtick_run` 返回 0，围栏退回 3 个反引号）让 4 条变红，报的正是
+      「an adversarial body forged a packet-level section header」；
+      探针 P（把 `analysis_meta` 块挪到安全声明之前）只让 1 条变红。
+      **这条钉住的是代码侧的两端 —— payload 出不了它的块、schema 不合法的回复变成 error ——
+      不是「模型不会被说服」。后者不可断言，也不该假装断言。**
 
 **M1** —— **4 条全部由 `tests/test_walk_forward.py`（16 用例）机器检查，2026-09-16。**
 在这之前 runner **零测试**：`tests/` 下没有任何文件导入它，所以它的第一次真实执行是打在生产历史上

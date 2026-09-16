@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30, D31** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -220,6 +220,37 @@ side is wrong on its own.**
 moves the summary onto the ledger's vocabulary. It is not a one-line change: the alert reason is
 also what the live UI shows, so the two surfaces have to be reconciled rather than one renamed.
 `_cancel_class`'s docstring names this gap at the point of use.
+
+### D31 — Nothing mechanical detects a declared defence that no test would miss
+
+**Added 2026-09-16, after the fourth instance.** This repository has a recurring defect class:
+**a defence is written, documented and wired — and no test would go red if it were removed.**
+
+| # | the defence | how it was found |
+|---|---|---|
+| 1 | the pending-order expiry path | dead code; nothing called it |
+| 2 | `intents.policy_ref` | always empty; there was no registry to reference |
+| 3 | `learning_candidates`' four proposal columns | written, never read |
+| 4 | `_max_backtick_run`'s fence widening (**paid** 2026-09-16) | the acceptance list said "no tests"; the truth was narrower — the *ordering* was asserted, the *containment* was not |
+
+**Cost.** Each instance reads as finished work. The function exists, the docstring explains what
+it prevents, the call site is real — and deleting the call site leaves the suite green. The
+failure is silent in the direction that matters: it makes the repo **look** defended.
+
+Instance 4 is the clearest illustration of why the *record* matters as much as the code: the
+acceptance list had it as *"零实现、零测试"* when two of its three parts were already asserted
+and only the third was empty. **The list was wrong in the pessimistic direction** — and that is
+its own kind of wrong, because it sends the next person to build something that already exists.
+
+**Recognition rule** — this is the part worth keeping. For any function whose docstring names a
+defence, ask: *"if I delete this, which test goes red?"* If the answer is "none", the defence is
+a comment with a body. Instance 4 is now covered by
+`tests/test_vpa_v10_helpers.py::TestAnAdversarialBodyCannotLeaveItsBlock` (6 cases; probes O and P).
+
+**Not paid, and no fix proposed.** *"Does this function's stated purpose have an assertion?"* is
+not a syntactic property, and the four instances share no shape — two are database columns, one
+is a code path, one is a private helper. A lint rule is not obviously available. The recognition
+rule above is what this entry can offer: a question to ask during review, not a check to run.
 
 ### D25 — A candidate can walk the whole lifecycle on an empty evidence list
 

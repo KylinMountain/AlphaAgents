@@ -25,15 +25,13 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D19, D20** (D15, D16 and D17 were all
-opened and paid on 2026-09-15, in one round: the operator set the sample floor at 20 and
-the rule was lowered to match; that same answer — the preregistered unit is a *paired
-sample* — is what fixed the stopping rule's two-unit comparison; and the configuration
-actually running was frozen as version #2 while the pointer stayed where it was.
-**D19 and D20 arrived on 2026-09-16 from an external review of the T+1 plan**: D19 is a
-wrong market rule already sitting in the kernel — the cash-side T+1 rule is the
-*withdrawal* rule applied to buying power — and D20 is the absence of date-versioned limit
-rules, which a walk-forward starting in 2020 needs before ChiNext changes on 2020-08-24)._
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
+paid on 2026-09-15, in one round. **D19 and D20 were opened *and* paid on 2026-09-16**,
+both from an external review of the T+1 plan and both fixed the same day: D19 was a wrong
+market rule already sitting in the kernel — the cash-side T+1 rule was the *withdrawal*
+rule applied to buying power — and D20 was the absence of date-versioned limit rules,
+which a walk-forward starting in 2020 needs before ChiNext changed on 2020-08-24. Their
+entries below carry the payment records; neither ever reached this list as debt.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -70,7 +68,7 @@ one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
 
-### D20 — Market rules are not versioned by date, so a 2020 replay would apply today's limits
+### D20 — Market rules are not versioned by date, so a 2020 replay would apply today's limits (paid 2026-09-16)
 
 **Added 2026-09-16, from the external review of the T+1 plan.**
 `config.TRADABLE_PREFIXES` defaults to `60,000,001,002,003,300,301` — main boards **and
@@ -79,19 +77,26 @@ the only limit-related code counts what happened (`market_data.get_limit_up_pool
 `market_history.compute_limit_up_stats`) rather than deciding what may happen.
 **Cost.** 深交所 moved ChiNext's daily limit from 10% to **20% on 2020-08-24**, so a
 walk-forward beginning in 2020 that assumes ±10% is wrong on one side of that date for
-every `300`/`301` name — and those are in the default universe. `ST` names are ±5%, and
-newly listed names are exempt for their first days. The design already requires this to
-be a service ("market and fee rules must be versioned by instrument and effective
-date"); the code does not have one.
-**Recognise.** A test asking the rule for a ChiNext code on 2020-08-21 and again on
-2020-08-24 and asserting different limits, plus one asserting ±5% for an `ST` name on
-both dates. Neither can pass today, because there is nothing to call.
-**Fix.** Add `market_rules(code, date) -> {price_limit_pct, no_limit, lot_size, …}`
-keyed on instrument **and** effective date, with the rule table in one place: main
-boards ±10%; ChiNext ±10% until 2020-08-24 then ±20%; STAR ±20% (not in the default
-universe); `ST` ±5%; first days of listing exempt.
+every `300`/`301` name — and those are in the default universe. The design already
+requires this to be a service ("market and fee rules must be versioned by instrument
+and effective date"); the code does not have one.
+**Paid 2026-09-16** with `alpha_agents/data/market_rules.py` and 22 tests in
+`tests/test_market_rules.py`. The entry's own sketch was wrong in one place and the
+exchange explainer corrected it: ChiNext risk-warned names are **5% before the reform
+and 20% after it** — they follow their board, they do not inherit the main board's 5%.
+`market_rules(code, date, *, name=…, listed_trading_days=…)` returns a
+`MarketRule(price_limit_pct, lot_size, reason, unchecked)`:
+main boards ±10% (±5% risk-warned); ChiNext ±10% before 2020-08-24 then ±20%;
+ChiNext's first five sessions uncapped; unknown boards **raise** rather than default.
+What it cannot determine it *names* in `unchecked` — `st_status` when no name is passed
+(risk-warning lives in the name, not the code) and `listing_day_exemption` when no
+listing age is passed — because a silent 10% for a risk-warned name is exactly the kind
+of guess this debt was about.
+**Not encoded, on purpose:** a 2026-07-06 change of the main-board ST limit to ±10% is
+reported by secondary sources only; it needs an exchange notice. STAR, BSE and funds
+have different rules and are refused rather than guessed.
 
-### D19 — The cash-side T+1 rule is the withdrawal rule applied to buying power
+### D19 — The cash-side T+1 rule is the withdrawal rule applied to buying power (paid 2026-09-16)
 
 **Added 2026-09-16. Found by the external reviewer of the T+1 plan; confirmed here in
 the code and against the market rule.**
@@ -114,10 +119,22 @@ read as 可用 when it is 可取) and broker material summarising 沪深 as
 **Recognise.** `tests/test_cash_settlement_semantics.py` — three tests that **assert the
 defect**, named so they cannot be read as approval, with the citations in the module
 docstring.
-**Fix.** Leave the share side alone (shares bought on T are sellable on T+1 — that part is
-right). Split the cash side: proceeds are *usable* on T and *withdrawable* on T+1.
-`get_available_capital` stops subtracting the pending total; whatever reports withdrawable
-cash keeps doing so. Then flip those three tests.
+**Paid 2026-09-16.** The share side was left alone — shares bought on T are sellable on
+T+1, and that part was right. The cash side was split: `get_available_capital` no longer
+subtracts the pending total, so a sale's proceeds are spendable the day they arrive, and
+`get_total_capital`'s documented identity loses its `pending` term
+(`total = available + invested + reservations`).
+The in-transit figure was **kept**, because it still answers a different question — how
+much of the cash cannot yet leave the account — and it turned out to have no reporting
+consumer at all, so the trade read model's settlement section now reports it as
+`cash_in_transit` (with `pending_settlements` added to that section's declared needs).
+**Three tests encoded the old rule and were flipped, not deleted**; the one that mattered
+asserted *"released proceeds must raise available cash"*, and now asserts that release
+changes withdrawability and not buying power — proving the fixture first, so the equality
+is not vacuous. `tests/test_cash_settlement_semantics.py` replaced its three
+assert-the-defect cases with the contract, and the docstrings that described the old rule
+(`portfolio`, `memory_schema`, `test_trader_ledger`) now describe the correct one.
+Full suite after the change: **2030 passed / 18 skipped**.
 
 ### D13 — A pending order with no live quote neither checks its thesis nor expires
 
@@ -659,6 +676,16 @@ the next person does not "fix a bug" in one copy only.
 
 ## Paid
 
+- **A market rule the repository got wrong, and a rule it never had (D19, D20)** — both
+  found by an external review of the T+1 plan on 2026-09-16 and paid the same day. Sale
+  proceeds were withheld from buying power for a day: the *withdrawal* rule applied to
+  *spending*, which forbade selling one name and buying another the same day, where the
+  A-share rule is 可用 on T and 可取 on T+1. And no executable price-limit rule existed at
+  all, while the default universe includes ChiNext, whose limit moved 10% → 20% on
+  2020-08-24. The second is now `data/market_rules.py`, sourced from the exchange's own
+  explainer — which also corrected the entry's sketch, since ChiNext risk-warned names
+  follow their board (5% before the reform, 20% after) rather than the main board's 5%.
+  Both are errors a walk-forward would otherwise have reproduced faithfully.
 - The version in force no longer matched the running configuration (D17): a
   theme-gate commit added a key to the decision block three hours after `install`
   ran, so every "is the incumbent still the incumbent" question had a wrong

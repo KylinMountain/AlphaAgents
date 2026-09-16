@@ -450,24 +450,55 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 
 机器可查。**评审要求的 12 条测试 + 报告口径都在这里**，先过它们，再跑长窗口。
 
-**M0 / 内核**
-- [ ] **状态隔离**：往 2026 生产库的 principles/candidates 里人工塞一条，2020 回放**检索不到**；
-      且全程**生产库内容 hash 不变**
-- [ ] **现金结算**：T 日卖出旧仓后所得资金 **T 日可买另一只**；T 日新买股票**仍不可卖**
-- [ ] **历史市场规则**：创业板规则切换前后各一条（**2020-08-21 / 2020-08-24**）
-- [ ] **无同 bar 幻想**：同一日 high/low 同时跨过 entry 与 stop 时，**不得**生成乐观路径
-- [ ] **无未来成交量**：D 日开盘成交判定**不得**读取 D 日 total volume
-- [ ] **严格时间束**：D 09:00 的上下文里没有 D 的 close/high/low/volume；新闻必须 `<= information_cutoff`
-- [ ] **universe 也要 as-of**：未上市、当日停牌、当时不属于候选池的证券不得被选中
-- [ ] **LLM record/replay**：存档 request/response/tools 后，`replay-recorded` 模式能逐行复现
-      intents / fills / episodes —— **机制已就位（D24，32 条测试按调用点钉住：不碰网络、
-      逐次同答案、耗尽/漂移/流式/截断全部拒绝），端到端那一句尚未证明**：它需要 M1 的 runner
-      先存在，才有 intents / fills / episodes 可复现。
-      **（2026-09-16 更新：那个前提已经不成立 —— runner 存在，M1 的用例确实产出了
-      intents / fills / episodes。但那些用例的运行**不调模型**（占位决策器，journal 计数断言为 0），
-      所以端到端那一句仍然未证明；缺的是一次 `record` 之后再用 `replay-recorded` 跑同一窗口的对照。）**
-- [ ] **不得绕过账本**：agent 的任何交易都必须留下 `TradeIntent`；禁止为历史方便直接改账
-- [ ] **对抗性新闻**：正文里放 `"Ignore previous instructions..."` 不能突破输出 schema
+**M0 / 内核** —— **2026-09-16 逐条核对：本节列出 10 条，其中 7 条已由机器检查**（标 `[x]` 的都给了用例名），
+**3 条未完成**（标 `[ ]` 的写明缺哪一半）。核对方式是**先读代码与测试再下结论**，不凭 §2 的进度条 ——
+§2 写「M0 6/6」，那是**六件事**的进度，与本节这 10 条**不是同一张清单**：两处都叫 M0，
+条目集合却不同。（抬头写「评审要求的 12 条」，本节实际列出 10 条；这个差数没找到出处，如实记在这里。）
+核对当天顺手补掉了「严格时间束」缺的那一半（见下），所以是 **7/3** 而不是核对之初的 6/4。
+- [x] **状态隔离** —— `tests/test_walk_bootstrap.py::test_state_seeded_in_the_corpus_cannot_reach_the_replay`：
+      往语料的 `memory.db` 里种一条 candidate + 一条持仓，断言回放账本为空、语料文件**逐字节未变**；
+      「生产库内容 hash 不变」由 `test_walk_forward.py::test_a_run_leaves_the_live_book_and_the_corpus_alone`
+      在 runner 之外**独立**量一次（并先断言指纹真的看到了文件，否则是在比两个空）。
+      **口径**：这是**合成语料**级别的证明；**仍缺真实生产库副本 + 真实 2020 窗口**。
+- [x] **现金结算** —— 前半
+      `test_cash_settlement_semantics.py::TestSaleProceedsAreSpendableTheSameDay::test_recording_the_sale_does_not_reduce_available_capital`
+      （记一笔卖出，可用资金**不变** ⇒ T 日即可再买另一只）；后半
+      `test_t1_settlement.py` 的 `may_sell("2025-07-01", "2025-07-01") is False`
+      （T 日新买的当日不可卖）。恒等式另由 `TestTheDocumentedIdentityHolds` 钉住。
+- [x] **历史市场规则** —— `tests/test_market_rules.py` 里 `DAY_BEFORE_REFORM = "2020-08-21"` /
+      `REFORM_DAY = "2020-08-24"`，配 `test_the_last_session_before_the_reform_is_ten_percent`、
+      `test_the_reform_day_is_twenty_percent`、`test_the_two_dates_disagree` —— 正是要的那对日期。
+- [x] **无同 bar 幻想** —— `tests/test_t1_execution.py::TestNoSameBarFantasy::test_both_levels_touched_is_ambiguous_not_a_round_trip`
+      （两个价位都被触及 ⇒ `ambiguous`，不猜先后）；配套「只触上沿 / 只触下沿 / 都不触」三条。
+- [x] **无未来成交量** —— `tests/test_t1_execution.py::TestTheDayBarCannotCarryTheFuture::test_it_has_no_volume_field`
+      加模块级的 `test_the_module_exposes_no_way_to_pass_a_fill_day_volume`：
+      **不是「不去读」，是「读不到」** —— 把字段加回来会红，而不是静默通过。
+- [x] **严格时间束** —— 新闻那一半：`test_news_window.py::TestWindowedRead::test_as_of_still_bounds_above`
+      （`as_of` 上界），另有 `test_decision_context.py::TestReplayDay::test_recovers_the_news_that_was_visible`。
+      「D 09:00 的上下文里没有 D 的 close/high/low/volume」这一半**原本只是结构性的** ——
+      runner 的 `_decide(ctx, day, prev_day)` 只接 `prev_day`，签名上就拿不到 D 的 bar ——
+      **2026-09-16 补上用例**：`test_walk_forward.py::TestTheDecisionCannotSeeTheDayItTrades::test_a_name_that_only_leads_today_is_not_picked`
+      让窗口日出现一个**只在今天领先**的名字（600003 当日 +9%，过 `LIMIT_UP_SKIP_PCT` = 9.5），
+      断言下单仍落在 **T-1 的领先者** 600001 上（读账本，不读结果 —— 被撤单的名字在结果里没有 code）。
+      探针 N（把 `_decide` 改成读 `day`）会让它变红，报的正是
+      「the decider ranked on the day it trades: it ordered {'600003'}」。
+      **结构性保证不是被钉住的保证 —— 这一条现在是了。**
+- [ ] **universe 也要 as-of** —— **停牌**在结算侧有测试
+      （`test_walk_forward.py::test_a_name_with_no_bar_is_suspended_not_cancelled`），
+      **未上市**由 `market_rules.listing_day_exemption` 覆盖（`test_market_rules.py`）。
+      **缺的是选股侧的 as-of**：runner 自己的「不能说明什么」一节已如实写出
+      「ST 状态取自 `stocks.db` 的**当前**名字，不是回放日的名字」，
+      而**「当时不属于候选池的证券不得被选中」没有任何测试**。
+- [ ] **LLM record/replay** —— **机制已就位**（D24，32 条测试按调用点钉住：不碰网络、逐次同答案、
+      耗尽/漂移/流式/截断全部拒绝）。**端到端那一句仍未证明**：M1 的用例确实产出了
+      intents / fills / episodes，但那些运行**不调模型**（占位决策器，journal 计数断言为 0）。
+      缺的是一次 `record` 之后再用 `replay-recorded` 跑**同一窗口**的对照。
+- [x] **不得绕过账本** —— `tests/test_intent.py::TestOnlyTheStateMachineWritesStatus`：
+      `virtual_portfolio.status` 只有状态机那两个模块能写，绕过账本直接改账会被机械拦下。
+- [ ] **对抗性新闻** —— **没有测试**。VPA 的 user-message 构造器有**提示词层面**的次序设计
+      （`tools/vpa/llm.py:152-163`：安全声明置顶、canonical 块优先于散文），
+      但那是**设计意图，不是断言**；「正文里放 `Ignore previous instructions...` 不能突破输出 schema」
+      这条**从未被验证过**。
 
 **M1** —— **4 条全部由 `tests/test_walk_forward.py`（16 用例）机器检查，2026-09-16。**
 在这之前 runner **零测试**：`tests/` 下没有任何文件导入它，所以它的第一次真实执行是打在生产历史上

@@ -267,6 +267,29 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 - **`sweep_trade_labels` 的 `pending` 标签不记当日的浮动盈亏**。开仓中的持仓只标
   `state=pending` + `legs=0`，**不写估值**：估值是市场数据的函数，标签是决策的函数，
   把 mark 写进标签会让「这个决策本身好不好」变成「今天行情好不好」。
+- **M0 的验收清单里还有三条没有机器检查**（2026-09-16 逐条核对，明细见 §9 第十七轮）。
+  计划的验收节列了 **10 条 M0/内核**条目，核对下来 **7 条已有机器检查、3 条没有**
+  （核对之初是 6/4；当天顺手把「严格时间束」缺的那一半补上了，见下）；而这 3 条此前
+  **全是未勾选的 `[ ]`**，与 §2 那句「M0 进度：6/6」并排放在同一份文件里。
+  **两个数都不是错的 —— 它们是两张不同的清单**（§2 数的是**六件事**，验收节数的是**十条测试**），
+  而两处都叫 M0。这本身就是「同一件事有两个计数」的又一例。缺的三条：
+  - **universe 的 as-of 缺选股侧**：停牌（结算侧）与未上市
+    （`market_rules.listing_day_exemption`）都有测试；**「当时不属于候选池的证券不得被选中」没有**。
+    runner 自己的「不能说明什么」一节已如实写出「ST 状态取自 `stocks.db` 的**当前**名字，
+    不是回放日的名字」。
+  - **LLM record/replay 缺端到端**：机制 32 条测试按调用点钉住，但 M1 的用例**不调模型**
+    （占位决策器，journal 计数断言为 0），所以「先 `record` 一遍、再用 `replay-recorded`
+    跑同一窗口」这个对照**从未做过**。
+  - **对抗性新闻：零实现、零测试。** 外部评审明确要求「正文里放
+    `Ignore previous instructions...` 不能突破输出 schema」。`tools/vpa/llm.py:152-163`
+    有**提示词层面**的次序设计（安全声明置顶、canonical 块优先于散文），
+    但**那是设计意图，不是断言** —— 而设计意图与断言的区别，正是这张清单存在的理由。
+  - **（已补）严格时间束的前半**曾是同一批里最便宜的一条：「D 09:00 的上下文里没有 D 的
+    close/high/low/volume」原本只是**结构性的**（`_decide(ctx, day, prev_day)` 签名上就拿不到
+    D 的 bar），**没有测试会因为它被改坏而变红**。2026-09-16 补上
+    `tests/test_walk_forward.py::TestTheDecisionCannotSeeTheDayItTrades`：让窗口日出现一个
+    **只在今天领先**的名字，断言下单仍落在 T-1 的领先者上；探针 N（把 `_decide` 改成读 `day`）
+    会让它变红。**结构性保证不是被钉住的保证** —— 这一条现在被钉住了。
 
 ## 8. 行为契约变更（供 review 对照）
 
@@ -288,7 +311,7 @@ Phase 2 里**主动不做**的项（理由见 Phase 2 计划的「非目标」�
 | `portfolio.py` 一个文件承担下单与平仓 | 平仓切片（摩擦模型 + 退出记账）移入 `portfolio_exit.py` |
 | 状态只有裸 `UPDATE`，无处声明合法迁移 | `order_state.assert_transition` 在每个写入点断言，非法迁移抛错 |
 | 下单不冻结资金：两笔挂单可共用同一笔现金 | 建单即 `reservations` 冻结，成交转 `consumed`，终态 `released` |
-| 「现金」一个口径，卖出当日即可再花 | `get_available_capital`（可花）与 `get_total_capital`（总）分家，卖出所得 T+1 前只进后者 |
+| 「现金」一个口径，卖出当日即可再花 | `get_available_capital`（可花）与 `get_total_capital`（总）分家；**卖出所得当日即可花**（A 股把「可用」与「可取」分开），只有**可取性**等到 T+1，在途额由 `settlement.unreleased_pending_total` 单独报告。**该行 2026-09-16 更正** —— 此前写的是「卖出所得 T+1 前只进后者」，那正是 D19 修掉的错规则（把取现规则套在买入力上） |
 | T+1 是一句 `open_date < today` | `settlement_lots` 按批结算 FIFO，同一持仓可部分可卖 |
 | 派生值是否正确只能靠人看 | 八个不变量由 `reconciliation` 独立重算并留审计（只报告，不自动改账） |
 | 四条写入路径各自回答「成了吗」 | 全部经 `intent.submit_intent`，写一行 `intents` 记录决定与结果 |
@@ -975,6 +998,53 @@ intraday_ambiguous 28 / limit_blocked 0 / suspended 0 / undecidable 0`；挂单�
    theme 是**合成的一条、没有分数**，所以 `theme_gate` 按设计放行。**先读报告里的限制说明，
    再怀疑机制。**
 
+### 第十七轮（验收清单逐条核对：10 条里 6 条已有机器检查，2026-09-16）
+
+计划的「验收」节列了 **10 条 M0/内核**条目，**全部是 `[ ]`**；而同一份计划的 §2 写「M0 进度：6/6」。
+两个数都不是错的 —— 它们是**两张不同的清单**：§2 的「6」是**六件事**（语料只读、状态隔离、
+现金结算、规则版本化、开盘执行、LLM 记录），验收节的「10」是**十条测试**，而**两处都叫 M0**。
+（抬头写「评审要求的 12 条」，本节实际列出 10 条；这个差数没找到出处，如实记在这里。）
+
+**核对方式：先读代码与测试，再下结论。** 结果是 **6 条已有机器检查 / 4 条未完成** ——
+而写这份记录的过程中，把其中最便宜的一条（第 6 条「严格时间束」缺的前半）**当场补掉了**，
+所以最终是 **7/3**。下面第 6 行记的是**核对之初**的状态，紧随其后是补它的那条用例：
+
+| # | 条目 | 状态 | 机器检查在哪 |
+|---|---|---|---|
+| 1 | 状态隔离 | ✅ | `test_walk_bootstrap.py::test_state_seeded_in_the_corpus_cannot_reach_the_replay`（+ runner 侧独立量生产库 hash） |
+| 2 | 现金结算 | ✅ | `test_cash_settlement_semantics.py::test_recording_the_sale_does_not_reduce_available_capital` + `test_t1_settlement.py` 的 `may_sell` 两条 |
+| 3 | 历史市场规则 | ✅ | `test_market_rules.py`：`DAY_BEFORE_REFORM`/`REFORM_DAY` = 2020-08-21 / 2020-08-24 三条 |
+| 4 | 无同 bar 幻想 | ✅ | `test_t1_execution.py::TestNoSameBarFantasy`（4 条） |
+| 5 | 无未来成交量 | ✅ | `test_t1_execution.py::TestTheDayBarCannotCarryTheFuture` + `test_the_module_exposes_no_way_to_pass_a_fill_day_volume` |
+| 6 | 严格时间束 | ✅ **当天补齐** | 新闻上界：`test_news_window.py::TestWindowedRead::test_as_of_still_bounds_above`；**补的是前半** —— `test_walk_forward.py::TestTheDecisionCannotSeeTheDayItTrades`（探针 N 会让它红） |
+| 7 | universe 也要 as-of | ⬜ **一半** | 停牌/未上市有；**选股侧的 as-of 没有任何测试** |
+| 8 | LLM record/replay | ⬜ **一半** | 机制 32 条按调用点钉住；**端到端（record → replay 同窗口）未证明** |
+| 9 | 不得绕过账本 | ✅ | `test_intent.py::TestOnlyTheStateMachineWritesStatus` |
+| 10 | 对抗性新闻 | ⬜ **没有** | VPA 构造器有提示词层面的次序设计（`tools/vpa/llm.py:152-163`），但**那是意图不是断言** |
+
+**两类缺口，性质不同，别混为一谈**（按**最终**状态：第 7、8 条是「一半」，第 10 条是「没有」）：
+
+- **第 6、7 条原本都是「一半」**，而且缺的那一半是同一个性质：**结构性保证而非被钉住的保证**。
+  runner 的 `_decide(ctx, day, prev_day)` **签名上就拿不到 D 的 bar**，
+  但**没有一条测试会因为它被改坏而变红**。**结构上做不到 ≠ 有人拦着不让做。**
+  第 6 条**当天补掉了**（让一个「只在今天领先」的名字输给 T-1 的领先者）；
+  **第 7 条没有补，而且不该用「补一条断言」的方式补** —— 它的缺口是**真实缺功能**：
+  as-of 的 ST 状态与「当时的候选池」现在**根本没有数据来源**（`stocks.db` 存的是今天的名字）。
+  先有那个数据，才谈得上断言。**「缺一条测试」和「缺一个数据源」长得像，处理方式完全不同。**
+- **第 10 条是「没有」**：这是外部评审提出的要求，**至今零实现、零测试**。
+  「对抗性新闻不能突破输出 schema」在 `REVIEW.md` 里被列为风险，
+  在 `tools/vpa/llm.py` 里有**设计意图**（安全声明置顶、canonical 块优先于散文），
+  但从未被验证过。**设计意图与断言的区别，就是这一整份清单存在的理由。**
+
+**顺手抓到一处文档谎言（与上一轮同类）。** §10 的 Phase 2 记录里写着
+`get_available_capital` = 总现金 − 未释放预留 − **未结算卖出所得** ——
+而 D19 修的正是这个减项：A 股把「可用」与「可取」分开，T 日卖出所得**当日即可再买**，
+扣掉它是把**取现规则**套在**买入力**上。`portfolio.get_available_capital` 的 docstring
+原文就写着「Subtracting it here is what this function did until 2026-09-16, and it was wrong」，
+**代码修了，文档留在旧规则上**。已更正，并写明更正的日期与原因。
+这是 `tech-debt-tracker.md:136` 那条「uncommitted as of writing」的第二次同族出现：
+**修好一处之后，凡是复述它的地方都成了新的谎言，而没有任何机械检查会告诉你。**
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；
@@ -983,7 +1053,13 @@ intraday_ambiguous 28 / limit_blocked 0 / suspended 0 / undecidable 0`；挂单�
   该约束由 `tests/test_intent.py::TestOnlyTheStateMachineWritesStatus` 机械钉住。
 - **现金预留**：`alpha_agents/data/reservations.py`。建单即写 `held`，
   成交转 `consumed`（差额释放），撤单/过期/拒绝转 `released`。
-  `get_available_capital` = 总现金 − 未释放预留 − 未结算卖出所得。
+  `get_available_capital` = 总资金 + 已实现盈亏 − 持仓占用 − 未释放预留。
+  **卖出所得不在这里扣**：A 股把「可用」与「可取」分开，T 日卖出的钱 **T 日即可再买**
+  （可反复使用），只是 T+1 才可取现；在途那部分由 `settlement.unreleased_pending_total`
+  单独报告给交易读模型。**2026-09-16 之前这里减了在途资金**，那是把**取现规则**套在**买入力**上
+  —— D19 已修（`tests/test_cash_settlement_semantics.py`）。**本节长期写着那个错式子，
+  2026-09-16 逐条核对验收清单时才发现并更正**：修了代码却把文档留在旧规则上，
+  和 `tech-debt-tracker.md:136` 那条「uncommitted as of writing」是同一类谎言。
 - **对账**：`alpha_agents/data/reconciliation.py`，八个不变量：`orphan_exit`、
   `exit_trader_mismatch`、`exit_math_inconsistent`、`orphan_reservation`、
   `missing_reservation`、`stale_reservation`、`consumed_amount_mismatch`、

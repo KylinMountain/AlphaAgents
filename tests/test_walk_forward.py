@@ -230,6 +230,22 @@ def _csv_rows(path: Path) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
+def _ordered_codes(replay: Path) -> set[str]:
+    """Every code this run put an order on, whatever became of the order.
+
+    Read from the book rather than from ``result``: a code the run *considered*
+    and then cancelled leaves no fill, and its cancel is counted by reason
+    without a code. The question here is what the decider chose, so the book is
+    the only place that still knows.
+    """
+    con = sqlite3.connect(f"file:{replay / 'memory.db'}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT DISTINCT code FROM virtual_portfolio").fetchall()
+    finally:
+        con.close()
+    return {row[0] for row in rows}
+
+
 # ── 1. the production book is untouched ─────────────────────────────────────
 
 
@@ -408,6 +424,42 @@ class TestTheAmbiguousCountIsEmitted:
         assert report["meta"]["placeholder_decider_called_no_model"] is True
         assert report["meta"]["production_db_unchanged"] is True
         assert report["meta"]["corpus_untouched"] is True
+
+
+# ── 5. the decision cannot see the day it trades ────────────────────────────
+
+
+class TestTheDecisionCannotSeeTheDayItTrades:
+    """The strict time envelope, pinned instead of merely structural.
+
+    The acceptance list asks that "the D 09:00 context contains no D
+    close/high/low/volume". In the runner that holds *by construction*:
+    ``_decide(ctx, day, prev_day)`` ranks on ``prev_day``'s bars, so the window
+    day's bar is not in scope at the point the order is chosen. But nothing went
+    red if that changed — and **a structural guarantee is not a pinned one**.
+    The cheapest way to tell the two apart is to make today's bars disagree
+    loudly with yesterday's and see which one the pick follows.
+
+    The check is decisive rather than suggestive: on the window day ``600003``
+    rises 9%, which clears ``LIMIT_UP_SKIP_PCT`` (9.5) and would win the ranking
+    outright, while on the previous session it is the *weakest* of the three.
+    If the decider ever ranked on the day it trades, the order would move to
+    ``600003`` and this test would say so.
+    """
+
+    def test_a_name_that_only_leads_today_is_not_picked(self, tmp_path):
+        series, instruments = _normal()
+        series["600003"][_START] = _bar(open_=10.90, high=10.90, low=10.90,
+                                        close=10.90, change_pct=9.0)
+        replay, _ = _prepare(tmp_path, series, instruments)
+        result = _run(replay)
+
+        ordered = _ordered_codes(replay)
+        assert ordered, "no order was placed, so this would prove nothing"
+        assert ordered == {_PICKED}, (
+            f"the decider ranked on the day it trades: it ordered {ordered}, "
+            f"and 600003 is the name that leads on {_START}")
+        assert _fills(result, "600003") == []
 
 
 # ── the summary closes its own arithmetic ───────────────────────────────────

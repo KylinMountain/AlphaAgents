@@ -196,7 +196,16 @@ def _read_intents() -> tuple[dict, int]:
 
 
 def _read_settlement() -> tuple[dict, int]:
-    """Cash committed to live orders, and shares still inside T+1."""
+    """Cash committed to live orders, shares inside T+1, and cash in transit.
+
+    **Cash in transit is reported, not hidden.** Settlement separates 可用 from
+    可取 — sale proceeds are spendable the day they arrive and only withdrawable
+    the day after — so buying power includes this money while the balance that
+    can leave the account does not. It used to be subtracted from available
+    capital instead, which applied the withdrawal rule to buying power and so
+    forbade selling one name and buying another the same day (tech-debt D19).
+    Reporting it here is what keeps the two figures distinguishable.
+    """
     from alpha_agents.data import memory_store
     conn = memory_store._get_conn()
     reservations = [dict(r) for r in conn.execute(
@@ -208,7 +217,12 @@ def _read_settlement() -> tuple[dict, int]:
         "  MIN(settle_date) earliest, MAX(settle_date) latest "
         "FROM settlement_lots").fetchone()
     lots = dict(row) if row is not None else {}
-    return {"reservations": reservations, "lots": lots}, (
+    transit = conn.execute(
+        "SELECT COUNT(*) n, COALESCE(SUM(net_amount), 0) amount, "
+        "  MIN(settle_date) earliest, MAX(settle_date) latest "
+        "FROM pending_settlements WHERE released = 0").fetchone()
+    return {"reservations": reservations, "lots": lots,
+            "cash_in_transit": dict(transit) if transit is not None else {}}, (
         sum(int(r["n"] or 0) for r in reservations) + int(lots.get("lots") or 0))
 
 
@@ -240,8 +254,10 @@ def snapshot() -> dict:
                 "action", "status", "evidence_json", "information_cutoff")),),
             read=_read_intents)),
         "settlement": section(conn, Section(
-            source="reservations + settlement_lots",
+            source="reservations + settlement_lots + pending_settlements",
             needs=(Need("reservations", ("state", "amount", "consumed_amount")),
-                   Need("settlement_lots", ("settle_date", "remaining_shares"))),
+                   Need("settlement_lots", ("settle_date", "remaining_shares")),
+                   Need("pending_settlements", ("released", "net_amount",
+                                                "settle_date"))),
             read=_read_settlement)),
     }, code={"book_route": "/api/portfolio"})

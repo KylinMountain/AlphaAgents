@@ -4,11 +4,17 @@ Each test names the failure it exists to prevent. Before the ledger existed
 every one of these passed on broken behaviour: cash ignored realised P&L
 entirely, and a trimmed position's final exit overwrote the earlier legs.
 
-The cash-side T+1 rule (S4) splits "owns" from "can spend": the proceeds
-of a sale land in ``pending_settlements`` and only reach
-``get_available_capital`` after their settle date. The tests below assert
-both halves — ``get_total_capital`` moves the moment the trade closes,
-``get_available_capital`` moves once the cash has settled.
+Cash settlement splits **可用** from **可取**, not "owns" from "can spend": the
+proceeds of a sale are spendable **on the day of the sale** and only become
+*withdrawable* on T+1, and ``pending_settlements`` records them for that second
+purpose. The tests below assert both halves — ``get_total_capital`` and
+``get_available_capital`` both move the moment the trade closes, and releasing
+the in-transit row later changes only what can leave the account.
+
+This file described the opposite until 2026-09-16, because the code did the
+opposite: a sale withheld the proceeds from buying power for a day, which is the
+*withdrawal* rule applied to spending and forbade selling one name and buying
+another the same day. See tech-debt D19.
 """
 
 import sqlite3
@@ -65,27 +71,31 @@ def _settle_all(conn):
 
 
 def test_cash_includes_realised_profit(conn):
-    """A winning trader can spend what it made — after T+1.
+    """A winning trader can spend what it made, on the day it made it.
 
-    Old behaviour: cash was ``capital − open positions``, so profit from a
-    closed trade was invisible and the account never grew. S4 adds a
-    second clock: on the day of the sale the proceeds are in transit
-    (total grew, available did not), and the next day available catches
-    up.
+    Two old behaviours are guarded here. Cash was ``capital − open positions``,
+    so profit from a closed trade was invisible and the account never grew;
+    then a cash-side T+1 rule withheld the proceeds for a day, which the A-share
+    rule does not do — proceeds are 可用 on T and only 可取 on T+1 (D19).
+
+    So the gain is spendable the moment the sale settles, and releasing the
+    in-transit row the next day changes only what can leave the account.
     """
     before = _cash(conn)
     pos = _open(conn, price=100.0)
     assert _cash(conn) < before          # the buy ties the money up
 
     assert close_position(pos, close_price=110.0, close_reason="止盈触发")
-    # Day T: the trader owns the gain, but the cash is at the broker.
+    # Day T: the trader owns the gain, and can already spend it.
     assert get_total_capital(DEFAULT_TRADER) > before
-    assert _cash(conn) < before, \
-        "sale proceeds must not be spendable on the day of the sale"
+    assert _cash(conn) > before, \
+        "sale proceeds are spendable on the day of the sale"
 
-    # T+1: the cash has landed and the profit is spendable.
+    # T+1: releasing the in-transit row must not change spending power.
+    spendable_on_sale_day = _cash(conn)
     _settle_all(conn)
-    assert _cash(conn) > before
+    assert _cash(conn) == pytest.approx(spendable_on_sale_day), \
+        "withdrawability changed, buying power did not"
 
 
 def test_cash_includes_realised_loss(conn):
@@ -96,7 +106,9 @@ def test_cash_includes_realised_loss(conn):
 
     # The loss is visible in total immediately — the trader knows.
     assert get_total_capital(DEFAULT_TRADER) < before
-    # And once the (smaller) proceeds settle, spendable cash is down too.
+    # And spendable cash is down immediately too: the (smaller) proceeds are
+    # usable on the sale day, so there is nothing left to wait for.
+    assert _cash(conn) < before
     _settle_all(conn)
     assert _cash(conn) < before
 

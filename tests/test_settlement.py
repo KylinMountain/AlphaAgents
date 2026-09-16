@@ -539,11 +539,17 @@ class TestThePortfolioPathCreatesAndConsumesLots:
         # we did not accidentally store only the gain.
         assert pend > exit_row["net_amount"]
 
-    def test_releasing_settlements_returns_cash_to_available(
+    def test_releasing_settlements_moves_cash_from_in_transit_to_withdrawable(
             self, store, traders_dir, theme):
-        """Before release, available excludes the proceeds; after, it
-        includes them. This is the end-to-end statement of the whole
-        cash-side rule."""
+        """The end-to-end statement of the cash-side rule, corrected 2026-09-16.
+
+        The proceeds of a sale are spendable **on the day of the sale**, so
+        releasing them later must not change available cash — what changes is
+        how much can leave the account. This test used to assert ``after >
+        before``, i.e. that the withdrawal rule also governed buying power,
+        which forbade selling one name and buying another the same day. See
+        tech-debt D19.
+        """
         _write(traders_dir, "slow", SLOW)
         oid = P.create_pending_order(
             code="600000", name="A", theme="t", order_date="2026-01-05",
@@ -552,12 +558,16 @@ class TestThePortfolioPathCreatesAndConsumesLots:
         P._fill_order(P.get_pending_orders("slow")[0],
                       fill_price=10.0, fill_date="2026-01-05")
         PE.close_position(oid, close_price=11.0, close_reason="止盈触发")
-        before = P.get_available_capital("slow")
+
+        in_transit = S.unreleased_pending_total(_db(), "slow")
+        available_before = P.get_available_capital("slow")
+        assert in_transit > 0, "the sale must leave cash in transit"
+
         S.release_due_settlements(_db(), "2099-12-31")
         _db().commit()
-        after = P.get_available_capital("slow")
-        assert after > before, \
-            "released proceeds must raise available cash"
+
+        assert P.get_available_capital("slow") == pytest.approx(available_before), \
+            "released proceeds must NOT change available cash: they were spendable already"
         assert S.unreleased_pending_total(_db(), "slow") == 0.0
 
 

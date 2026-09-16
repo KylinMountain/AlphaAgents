@@ -189,7 +189,7 @@ def account_capital() -> float:
 
 
 def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
-    """Remaining cash for one trader, after every commitment has spoken.
+    """Cash this trader can **spend right now**, after every commitment speaks.
 
     The pot, plus what this trader has actually realised on closed
     positions, minus what is still tied up in its open book *and* minus
@@ -205,9 +205,19 @@ def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
     the un-absorbed part of any consumed row. Released rows contribute
     nothing — the cash is back.
 
-    Cash-side T+1 is subtracted here too: sales settled today don't
-    become spendable until exit_date + 1. ``unreleased_pending_total``
-    is the cash the trader has earned but the broker is still holding.
+    **Sale proceeds are deliberately not subtracted, because that is the
+    A-share rule.** Settlement separates 可用 from 可取: selling on T makes the
+    proceeds usable *immediately* — spendable on a further purchase the same
+    day, repeatedly — and only withdrawable on T+1. This function answers "what
+    can I spend", so cash in transit counts. The part that cannot yet leave the
+    account is ``settlement.unreleased_pending_total``, and the trade read model
+    reports it separately.
+
+    Subtracting it here is what this function did until 2026-09-16, and it was
+    wrong: it applied the *withdrawal* rule to *buying power*, so a day with any
+    sale could not also buy, and turnover, exposure, the cash curve and drawdown
+    all shifted. Citations and the replacement contract are in tech-debt D19 and
+    ``tests/test_cash_settlement_semantics.py``.
 
     Legacy aggregate results are included as compatibility estimates,
     never reconstructed fills. This is not yet a fee-at-fill cash ledger.
@@ -215,8 +225,7 @@ def get_available_capital(trader_id: str = DEFAULT_TRADER) -> float:
     return (trader_capital(trader_id)
             + trade_ledger.realized_total(_get_conn(), trader_id)
             - get_invested_capital(trader_id)
-            - reservations.unconsumed_total(_get_conn(), trader_id)
-            - settlement.unreleased_pending_total(_get_conn(), trader_id))
+            - reservations.unconsumed_total(_get_conn(), trader_id))
 
 
 def get_total_capital(trader_id: str = DEFAULT_TRADER) -> float:
@@ -225,19 +234,20 @@ def get_total_capital(trader_id: str = DEFAULT_TRADER) -> float:
     ``capital + realized`` — the mandate plus everything won or lost.
     The decomposition against ``get_available_capital`` is::
 
-        total = available + invested + reservations + pending
+        total = available + invested + reservations
 
     i.e. the only things separating "owns" from "can spend" are the open
-    book (cash converted to shares at cost), the cash earmarked against
-    pending orders, and the sale proceeds still in transit under the
-    cash-side T+1 rule. Nothing is double-counted: a sale moves cash
-    from ``available`` to ``pending`` and total does not move at all —
-    which is the point, the trader has not gained anything from the sale
-    that it did not already have.
+    book (cash converted to shares at cost) and the cash earmarked against
+    pending orders. Sale proceeds are **not** part of that separation: they are
+    spendable the day they arrive and merely become *withdrawable* a day later
+    (the A-share 可用/可取 split described in ``get_available_capital``), so the
+    in-transit figure is not a difference between owning and spending and does
+    not appear above.
 
     Reports that say "what do I actually have" read this. Trading
     decisions must read ``get_available_capital`` instead: sizing
-    against ``total`` would spend money the broker is still holding.
+    against ``total`` would spend money already earmarked for a pending
+    order.
     """
     return (trader_capital(trader_id)
             + trade_ledger.realized_total(_get_conn(), trader_id))

@@ -376,13 +376,16 @@ CREATE INDEX IF NOT EXISTS idx_settlement_lots_trader
 CREATE INDEX IF NOT EXISTS idx_settlement_lots_settle
     ON settlement_lots(settle_date);
 
--- T+1 cash-side settlement. When shares are sold the proceeds are not
--- available for new positions until exit_date + 1 day. Each leg of
--- position_exits gets one row here; release_due_settlements flips
--- ``released=1`` once the date passes so get_available_capital can
--- treat the cash as spendable. Before release the cash is counted in
--- get_total_capital but excluded from get_available_capital, which is
--- what the plan means by "available_cash 与 total_cash 正式分家".
+-- Cash-side settlement, and the 可用/可取 split. Selling on T makes the
+-- proceeds spendable **immediately** — the A-share rule — and only
+-- withdrawable on T+1. Each leg of position_exits gets one row here;
+-- release_due_settlements flips ``released=1`` once the settle date
+-- passes. The row therefore answers "how much of this trader's cash
+-- cannot leave the account yet", NOT "how much it cannot spend": this
+-- table used to be subtracted from get_available_capital, which applied
+-- the withdrawal rule to buying power and forbade sell-then-buy on the
+-- same day (tech-debt D19, fixed 2026-09-16). The trade read model
+-- reports it as ``cash_in_transit``.
 CREATE TABLE IF NOT EXISTS pending_settlements (
     id INTEGER PRIMARY KEY,
     exit_id INTEGER NOT NULL,

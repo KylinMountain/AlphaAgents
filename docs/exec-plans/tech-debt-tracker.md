@@ -26,15 +26,15 @@ measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
 `scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
-paid on 2026-09-15, in one round. **D19, D20, D21 and D22 were opened *and* paid on
-2026-09-16**, all four from an external review of the T+1 plan and all four fixed the same
-day: D19 was a wrong market rule already sitting in the kernel — the cash-side T+1 rule was
-the *withdrawal* rule applied to buying power; D20 was the absence of date-versioned limit
-rules, which a walk-forward starting in 2020 needs before ChiNext changed on 2020-08-24;
-D21 was that a replay would have inherited the live trader's memory, with no way to point it
-elsewhere; and D22 was that nothing stopped a replay writing into the shared history.
-Their entries below carry the payment records; none of the four ever reached this list as
-debt.)_
+paid on 2026-09-15, in one round. **D19–D23 were opened *and* paid on 2026-09-16**, all
+five from an external review of the T+1 plan and all five fixed the same day: D19 was a
+wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
+applied to buying power); D20 was the absence of date-versioned limit rules; D21 was that a
+replay would have inherited the live trader's memory; D22 was that nothing stopped a replay
+writing into the shared history; and D23 was that nothing decided fills at all, so the first
+walk would have improvised an intraday path and a capacity cap from the fill day's own
+volume. Their entries below carry the payment records; none of the five ever reached this
+list as debt.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -70,6 +70,33 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D23 — A T+1 walk had no execution model, so nothing stopped it inventing an intraday path (paid 2026-09-16)
+
+**Added 2026-09-16, from the external review of the T+1 plan** — its P0-3 and P0-4, and
+M0 item 5. My plan's leakage table said "T+1 开到收的**全路径**" while the same plan argued
+there is no minute path; both sentences were mine and only one could be true. And nothing in
+the code decided fills, so the first walk would have improvised: a limit resolved from
+high/low, and a capacity cap judged from the fill day's own volume.
+**Cost.** Both errors flatter the strategy: a stop and a target touched in one session
+become a profitable round trip instead of an unanswered question, and an order fills because
+the day *later* turned out liquid enough.
+**Paid 2026-09-16** with `alpha_agents/data/t1_execution.py` and 27 tests. Execution is
+open-only. Market orders settle at the open and are **refused when the open is the limit**
+in the direction with no counterparty (一字板 — the case A-share backtests get most
+expensively wrong). Limits settle from the open and low/high, which *is* decidable for a
+single resting order. **Two levels in one session come back `ambiguous`** rather than
+resolved: the review's own example (`open=10.30, high=10.50, low=9.40`, entry 10.00, stop
+9.50) is one of the tests.
+**The fill day's volume is unreadable because it is unspellable.** `DayBar` has no volume
+field; sizing reads `capacity_shares(adv20)` and `average_daily_volume` over the sessions
+*before* the fill; a test asserts the field's absence, so adding it for convenience fails
+and forces the conversation rather than passing quietly. `average_daily_volume` returns
+`None` for a short history instead of a shorter average — the caller asked for ADV20.
+**Found by its own tests, worth recording:** the first version compared the open against the
+limit with one direction for both sides, so a **sell was refused whenever the open sat at or
+above the down limit** — that is, almost always. The test covering a limit-up sell caught it,
+and a mutation probe confirms it still would.
 
 ### D22 — Nothing stopped a replay from writing into the shared history (paid 2026-09-16)
 

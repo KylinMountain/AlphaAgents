@@ -85,10 +85,3 @@ export function useDashboard(intervalMs = 20000) {
 
   return { ...data, failed, loading, reload: load }
 }
-
-/** Aggregate hit rate across the returned review rows. */
-export function summarizeReviews(reviews) {
-  const total = reviews.reduce((a, r) => a + (r.predictions_count || 0), 0)
-  const hit = reviews.reduce((a, r) => a + (r.correct_count || 0), 0)
-  return { total, hit, accuracy: total ? hit / total : null, days: reviews.length }
-}

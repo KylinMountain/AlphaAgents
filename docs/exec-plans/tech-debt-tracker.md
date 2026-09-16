@@ -25,12 +25,15 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and paid
-on 2026-09-15, in one round: the operator set the sample floor at 20 and the rule
-was lowered to match; that same answer — the preregistered unit is a *paired
-sample* — is what fixed the stopping rule's two-unit comparison; and the
-configuration actually running was frozen as version #2 while the pointer stayed
-where it was)._
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D19, D20** (D15, D16 and D17 were all
+opened and paid on 2026-09-15, in one round: the operator set the sample floor at 20 and
+the rule was lowered to match; that same answer — the preregistered unit is a *paired
+sample* — is what fixed the stopping rule's two-unit comparison; and the configuration
+actually running was frozen as version #2 while the pointer stayed where it was.
+**D19 and D20 arrived on 2026-09-16 from an external review of the T+1 plan**: D19 is a
+wrong market rule already sitting in the kernel — the cash-side T+1 rule is the
+*withdrawal* rule applied to buying power — and D20 is the absence of date-versioned limit
+rules, which a walk-forward starting in 2020 needs before ChiNext changes on 2020-08-24)._
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -66,6 +69,55 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D20 — Market rules are not versioned by date, so a 2020 replay would apply today's limits
+
+**Added 2026-09-16, from the external review of the T+1 plan.**
+`config.TRADABLE_PREFIXES` defaults to `60,000,001,002,003,300,301` — main boards **and
+ChiNext**. There is no *executable* price-limit rule anywhere in `data/` or `tools/`:
+the only limit-related code counts what happened (`market_data.get_limit_up_pool`,
+`market_history.compute_limit_up_stats`) rather than deciding what may happen.
+**Cost.** 深交所 moved ChiNext's daily limit from 10% to **20% on 2020-08-24**, so a
+walk-forward beginning in 2020 that assumes ±10% is wrong on one side of that date for
+every `300`/`301` name — and those are in the default universe. `ST` names are ±5%, and
+newly listed names are exempt for their first days. The design already requires this to
+be a service ("market and fee rules must be versioned by instrument and effective
+date"); the code does not have one.
+**Recognise.** A test asking the rule for a ChiNext code on 2020-08-21 and again on
+2020-08-24 and asserting different limits, plus one asserting ±5% for an `ST` name on
+both dates. Neither can pass today, because there is nothing to call.
+**Fix.** Add `market_rules(code, date) -> {price_limit_pct, no_limit, lot_size, …}`
+keyed on instrument **and** effective date, with the rule table in one place: main
+boards ±10%; ChiNext ±10% until 2020-08-24 then ±20%; STAR ±20% (not in the default
+universe); `ST` ±5%; first days of listing exempt.
+
+### D19 — The cash-side T+1 rule is the withdrawal rule applied to buying power
+
+**Added 2026-09-16. Found by the external reviewer of the T+1 plan; confirmed here in
+the code and against the market rule.**
+A-share settlement separates **可用** from **可取**: the proceeds of a sale on T are
+**usable immediately** — spendable on a further purchase the same day, repeatedly — and
+become **withdrawable** on T+1. This repository applies the withdrawal rule to buying
+power: `portfolio.get_available_capital` subtracts
+`settlement.unreleased_pending_total`, and `settlement.record_pending` stamps the row with
+`next_settle_date(exit_date)`, so sale proceeds are withheld from available capital for a
+day.
+**Cost.** On a paper trader that never transfers cash out, buying power is understated on
+**every day with a sale**: selling one name and buying another the same day is forbidden,
+so turnover, exposure, the cash curve and drawdown are all distorted. It is also exactly
+the kind of error a "one execution path" reproduces faithfully — which is why it belongs
+here rather than as a replay-only workaround.
+**Sources checked 2026-09-16.** 中国证监会河南证监局 investor-protection case
+("投资者卖出股票成交后T+1日方可取出资金" — the dispute was precisely this confusion,
+read as 可用 when it is 可取) and broker material summarising 沪深 as
+"T日卖出资金T日可用，T+1日可提现".
+**Recognise.** `tests/test_cash_settlement_semantics.py` — three tests that **assert the
+defect**, named so they cannot be read as approval, with the citations in the module
+docstring.
+**Fix.** Leave the share side alone (shares bought on T are sellable on T+1 — that part is
+right). Split the cash side: proceeds are *usable* on T and *withdrawable* on T+1.
+`get_available_capital` stops subtracting the pending total; whatever reports withdrawable
+cash keeps doing so. Then flip those three tests.
 
 ### D13 — A pending order with no live quote neither checks its thesis nor expires
 

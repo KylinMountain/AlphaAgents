@@ -833,6 +833,56 @@ pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失
 与 `PROMPT_VERSION` 的 sha256、`bars.py` 的 13 个函数全部与原文相同，已比对验证），
 但**范围沟通是失误**：该先问一句「D4 里有两个 VPA 文件，动不动」。
 
+### 第十五轮（M1 验收：走前回放第一次由机器检查，2026-09-16）
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/bin/python -m pytest tests/ -q`（**全量，不 ignore**） | **2206 passed, 18 skipped**（138s；改动前 2199 → **+7，正是新增的 7 个用例**） |
+| `.venv/bin/python scripts/lint_harness.py` | 通过（**172 个文件**，含新文件），存量 **13 条**（与上一轮同） |
+| `.venv/bin/python scripts/lint_docs.py` | 知识库校验通过 |
+
+新增 `tests/test_walk_forward.py`（7 用例），把 M1 的四条验收从散文变成机器检查。
+**在这之前 runner 零测试**：`git grep -l walk_forward HEAD -- tests/` **为空**，
+所以它第一次真实执行打在生产历史上 —— D27 / D28 就是这么被找到的。
+
+**五条变异探针全部按预期变红**（逐条还原，还原后三个文件的 sha256 与改动前逐字节相同）：
+
+| 探针 | 改坏什么 | 变红的用例 |
+|---|---|---|
+| A | `entry_verdict` 的涨停分支永不触发 | `test_an_open_at_the_up_limit_does_not_fill` |
+| B | 「当日无 bar」判成 `no_fill` 而非 `suspended` | `test_a_name_with_no_bar_is_suspended_not_cancelled` |
+| C | `_range_overlaps_zone` 恒为假 | `test_a_touch_the_open_missed_is_counted_and_written_out` |
+| D | 去掉重跑前的 store 句柄重置 | `test_two_runs_agree_row_for_row` |
+| E | `_refuse_production` 不再拒绝生产目录 | `test_the_runner_refuses_the_production_directory` |
+
+**探针 D 是实质性的**：去掉那句重置，第二次运行读到的是第一次留下的持仓
+（成交从 600001 变成 600002 / 600003）。「同一窗口重跑两次」这件事**依赖测试自己丢掉
+store 的 thread-local 连接** —— `bootstrap` 重建 `memory.db` 换的是 inode，
+旧连接还指着那个已被删除的文件。
+
+**三处口径更正，都是当场量出来的**：
+
+1. **`--orders-file` 不存在。** 计划里第 3 条原设想用它构造「一字涨停 / 停牌」场景，
+   而 `walk_forward.py` 的 argparse 没有这个参数。场景改由语料构造（一字板 =
+   `open == round(前收×1.10, 2)`；停牌 = 当日无 bar），计划里已写明。
+2. **`intraday_ambiguous` 早就被输出了。** 第 4 条缺的是**断言**而非机制：
+   `walk_forward.py:667` 的 `exits_ambiguous` 与 `:757` 的 CSV 列一直都在。
+   把「没有输出」当待办，会让人去重写一段已经正确的东西。
+3. **一条我自己写错的前提。** 对照用例最初写成「比涨停低一分 → 会成交」，实测**不会成交**：
+   pullback 的区间上限是 `1.005 × 前收 ≈ 10.0`，涨停是 `11.00`，低一分按算术就在区间之外。
+   改成断言拒绝的**理由**变了（`limit_blocked` → `no_fill`）—— 那才是
+   「一字板是精确的、不是模糊的」真正的含义。
+
+**顺手清掉一处文档谎言**：`tech-debt-tracker.md:136` 仍写
+"(Working-tree line numbers; whole entry is uncommitted as of writing.)"，
+而 D27 整条早已随 `3494559` 提交。改为引用该提交号。
+
+**交接前提本身是错的，值得单独记一笔。** 收到的交接文说「`HEAD == origin/main`、
+13 个文件全在工作区」，实测工作区**干净**、`HEAD` 领先 `origin/main` **3 个提交**
+（`3494559` D26–D29、`1408dc9` M1 runner、`9404d0f` 持仓页读数），且 D26–D29
+**早已在 tracker 里**。三个提交已推送（`b8bef21..9404d0f`）。
+**「没提交」和「没推送」是两件事**：交接文把前者当风险报出来，却漏掉了后者 —— 而后者才是真的。
+
 ## 10. Phase 2 逐项交付（S1–S6）
 
 - **订单状态机**：`alpha_agents/data/order_state.py` 声明唯一状态集与合法迁移；

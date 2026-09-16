@@ -401,27 +401,35 @@ irreproducible — but `run.json` records only `corpus_untouched: false`. It doe
 name the file, the before value or the after value, so **the artifact cannot be
 diagnosed after the fact**. The only way to find out is to run another window and watch.
 
-That was done, and the replay is not the cause:
+That was done, and the first conclusion drawn from it was **wrong**. A 5-day window left
+all three files byte- and mtime-identical and reported 是 — but a second 120-day window,
+run afterwards with **nothing else on the machine**, reported 否 again:
 
 ```
-$ stat -f "%z %m %N" <three corpus files>          # before
-1130078208  1789554051  alphaquant/data/market_history.db
-1385369600  1789573942  AlphaAgents/data/market_snapshots.db
-$ ALPHAAGENTS_LLM_MODE=record uv run python scripts/walk_forward.py \
-      --target /tmp/walk-probe5 --start 2025-07-01 --days 5 --decider placeholder
-共享语料 size+mtime 未变    是
-$ stat -f "%z %m %N" <same three files>           # after — identical, every field
+run 1 (120d, 23:38–23:50)   corpus_untouched false   a test suite was running concurrently
+run 2 (120d, 23:57–00:15)   corpus_untouched false   nothing else running
+probe (5d)                  corpus_untouched true    three files identical, every field
 ```
 
-So the 120-day window's `否` came from something outside the replay, and the most
-likely candidate is the full test suite that was running concurrently and reads the
-same data directories. **"Most likely" is the problem**: with the file and both values
-recorded, that would have been a one-line answer instead of a paragraph of inference.
+The first write-up here blamed the concurrent test suite. Run 2 falsified that, and finding
+the real file took a manual `stat` on a guess about which directory was watched:
+
+```
+AlphaAgents/data/market_snapshots.db   1385369600 → 1385422848   (+53,248 bytes)
+mtime 2026-09-17 00:10:17 — inside run 2's window
+```
+
+So the event is real, reproducible across long runs, and **not** per-day (the 5-day probe
+left the file alone). What is *not* established is who writes it: the replay is one
+candidate, and the scheduled snapshot writers in this repository (`snapshot_store`,
+`tushare_store`, `global_sentiment`) are another. Establishing it needs the same
+`stat`-by-hand that produced the line above — which is the whole point, since the artifact
+should have said it.
 
 **Remedy.** Have `_corpus_fingerprint` keep the per-file `(size, mtime)` it measured and
 write the diff into `run.json`, naming the file that moved. A check that can only say
-"something is different" costs a rerun to interpret; a check that names the file costs
-nothing.
+"something is different" costs a rerun, a guess and a manual `stat` to interpret; a check
+that names the file costs nothing.
 
 ### D40 — One event loop per day, one shared client, so every day's first request fails and is retried
 

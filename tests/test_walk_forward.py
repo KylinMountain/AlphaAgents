@@ -233,12 +233,14 @@ def _csv_rows(path: Path) -> list[dict]:
 
 
 class TestTheProductionBookIsUntouched:
-    def test_a_run_leaves_the_live_book_byte_for_byte(self, tmp_path):
+    def test_a_run_leaves_the_live_book_and_the_corpus_alone(self, tmp_path):
         """M1 #1, measured outside the runner as well as by it.
 
         The runner computes this itself and reports it; the assertion here is
         made from the file, so a runner that reported the wrong thing would
-        still be caught.
+        still be caught. The shared corpus is checked the same way and in the
+        same test, because the two claims are one claim: a run reads history
+        and writes only its own book.
         """
         assert _PRODUCTION_MEMORY.exists(), (
             "no production book to protect; this test would prove nothing")
@@ -255,6 +257,13 @@ class TestTheProductionBookIsUntouched:
         assert after == before
         assert result["production"]["unchanged"] is True
         assert result["production"]["hash_before"] == result["production"]["hash_after"]
+
+        fingerprint = result["corpus"]["before"]
+        assert fingerprint["market_history.db"] is not None, (
+            "the corpus fingerprint saw no history file, so 'untouched' below "
+            "would be comparing two absences")
+        assert result["corpus"]["untouched"] is True
+        assert result["corpus"]["before"] == result["corpus"]["after"]
 
     def test_the_runner_refuses_the_production_directory(self):
         """The guard behind #1, stated where it can fail loudly."""
@@ -394,3 +403,4 @@ class TestTheAmbiguousCountIsEmitted:
 
         assert report["meta"]["placeholder_decider_called_no_model"] is True
         assert report["meta"]["production_db_unchanged"] is True
+        assert report["meta"]["corpus_untouched"] is True

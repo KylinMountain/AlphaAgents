@@ -473,10 +473,16 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 在这之前 runner **零测试**：`tests/` 下没有任何文件导入它，所以它的第一次真实执行是打在生产历史上
 的 —— D27（成交路径自死锁）与 D28（负预算掐断整个挂单循环）就是这么被找到的。
 - [x] 生产库内容 hash 跑前跑后不变（与 M0 第一条合跑一次即可）
-      —— **只兑现了 hash 那一半**。`test_a_run_leaves_the_live_book_byte_for_byte` 在 runner
-      之外独立量一次生产库 sha256（runner 自己也报这个数，两处都断言，报错了也拦得住）。
-      M0 那半「往生产库塞一条、回放检索不到」**没有做**：它要往生产库写入，而测试沙箱
-      禁止任何指向 `data/` 的连接 —— 那半得拿生产库的副本在子进程里跑，属另一支。
+      —— `test_a_run_leaves_the_live_book_and_the_corpus_alone`：在 runner 之外**独立**量一次
+      生产库 sha256（runner 自己也报这个数，两处都断言，报错了也拦得住），并同时断言
+      共享语料的 size/mtime 指纹前后相同 —— 这两条是一件事：跑一次只写自己的账本。
+      两处都先断言「指纹真的看到了文件」，否则「前后相同」是在比两个空。
+      **M0 那半（「往生产库塞一条、回放检索不到」）不在本文件里，但它并不是没做** ——
+      它在 `tests/test_walk_bootstrap.py::test_state_seeded_in_the_corpus_cannot_reach_the_replay`：
+      往语料的 `memory.db` 里塞一条 candidate + 一条持仓，断言回放账本为空、
+      且语料文件逐字节未变（那个文件的模块 docstring 原文引的就是这条评审要求）。
+      **仍然缺的是**：拿**真实生产库的副本** + 真实 2020 窗口跑一次 —— 现在拿到的是
+      合成语料级别的证明，不是生产数据级别的。（本节初稿写成「没有做」，是没查就下的结论。）
 - [x] 同一窗口在 `replay-recorded` 下重跑两次，成交明细逐行相同
       —— `test_two_runs_agree_row_for_row`。**口径**：M1 的占位决策器**不调模型**，
       所以这条钉住的是时钟、结算与账本（并断言 journal 记录数为 0）；模型那一半是 D24

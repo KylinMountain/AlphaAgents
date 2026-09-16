@@ -845,7 +845,7 @@ pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失
 **在这之前 runner 零测试**：`git grep -l walk_forward HEAD -- tests/` **为空**，
 所以它第一次真实执行打在生产历史上 —— D27 / D28 就是这么被找到的。
 
-**五条变异探针全部按预期变红**（逐条还原，还原后三个文件的 sha256 与改动前逐字节相同）：
+**七条变异探针全部按预期变红**（逐条还原，还原后源文件的 sha256 与改动前逐字节相同）：
 
 | 探针 | 改坏什么 | 变红的用例 |
 |---|---|---|
@@ -854,13 +854,19 @@ pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失
 | C | `_range_overlaps_zone` 恒为假 | `test_a_touch_the_open_missed_is_counted_and_written_out` |
 | D | 去掉重跑前的 store 句柄重置 | `test_two_runs_agree_row_for_row` |
 | E | `_refuse_production` 不再拒绝生产目录 | `test_the_runner_refuses_the_production_directory` |
+| F | `_corpus_fingerprint` 全返回 `None` | `test_a_run_leaves_the_live_book_and_the_corpus_alone`（防空转守卫） |
+| G | 让 `corpus_after` 与 `corpus_before` 不同 | 同上 + `test_a_touch_the_open_missed_is_counted_and_written_out` |
+
+F / G 是**回补探针**：初版交付里有个自己留的洞 —— runner 会算 `corpus_untouched`，
+而我只断言了 `production_db_unchanged`，从没检查前者。补上后配这两条探针，
+F 证明「指纹真的看到了文件」那句不是装饰，G 证明「前后相同」这句真的会响。
 
 **探针 D 是实质性的**：去掉那句重置，第二次运行读到的是第一次留下的持仓
 （成交从 600001 变成 600002 / 600003）。「同一窗口重跑两次」这件事**依赖测试自己丢掉
 store 的 thread-local 连接** —— `bootstrap` 重建 `memory.db` 换的是 inode，
 旧连接还指着那个已被删除的文件。
 
-**三处口径更正，都是当场量出来的**：
+**四处口径更正，都是当场量出来的**：
 
 1. **`--orders-file` 不存在。** 计划里第 3 条原设想用它构造「一字涨停 / 停牌」场景，
    而 `walk_forward.py` 的 argparse 没有这个参数。场景改由语料构造（一字板 =
@@ -872,6 +878,14 @@ store 的 thread-local 连接** —— `bootstrap` 重建 `memory.db` 换的是 
    pullback 的区间上限是 `1.005 × 前收 ≈ 10.0`，涨停是 `11.00`，低一分按算术就在区间之外。
    改成断言拒绝的**理由**变了（`limit_blocked` → `no_fill`）—— 那才是
    「一字板是精确的、不是模糊的」真正的含义。
+4. **另一条我自己写错的结论，在回补时才发现。** 我先把「M0 那半（往生产库塞一条、
+   回放检索不到）**没有做**」写进了计划，**没有先查**。查了之后是：`tests/test_walk_bootstrap.py`
+   的模块 docstring 原文引的就是那条评审要求，而
+   `test_state_seeded_in_the_corpus_cannot_reach_the_replay` 正是在测它（塞一条 candidate +
+   一条持仓进语料的 `memory.db`，断言回放账本为空且语料文件逐字节未变）。
+   计划里那句话已改成准确版本：**已证的是合成语料级别，仍缺真实生产库副本 + 真实 2020 窗口**。
+   **「没做」和「我没查」是两回事，而写进文档时它们长得一样** —— 这和本轮开头
+   交接文那个「没提交 vs 没推送」是同一类错误的两个方向。
 
 **顺手清掉一处文档谎言**：`tech-debt-tracker.md:136` 仍写
 "(Working-tree line numbers; whole entry is uncommitted as of writing.)"，

@@ -7,9 +7,11 @@ Scale: **A** covered by tests and validated against data · **B** tested,
 not validated · **C** works, thinly tested · **D** known gaps · **F** not
 trustworthy.
 
-_Last updated 2026-09-14. The original rows were last reviewed 2026-09-07;
-the trader-core rows were added 2026-09-12 and none of them has production
-data yet. A grade can fall — see the note at the end._
+_Last updated 2026-09-16. The original rows were last reviewed 2026-09-07;
+the trader-core rows were added 2026-09-12 and were re-measured on 2026-09-16 —
+**most of them now hold production rows**, which is not the same as being
+validated (see the note above the trader-core table). A grade can fall — see
+the note at the end._
 
 | Area | Grade | Basis | Gap |
 |---|---|---|---|
@@ -35,30 +37,40 @@ data yet. A grade can fall — see the note at the end._
 _Two rows were revisited on 2026-09-14 and nothing else here was re-derived._
 _The `evolution/holdout_gate.py` row was re-checked after Phase 4 delivered U1–U5_
 _and again when the round that made the sample floor reportable landed: the gate_
-_is scheduled now, and its own floor is 20 against the repository's declared 50_
-_(D15). The `data/portfolio*` row was revisited when the pending-order round_
+_is scheduled now, and its own floor is 20. **On 2026-09-15 the operator set the_
+_repository's rule to 20 as well** — D15 was paid by lowering the rule to meet the_
+_code rather than raising the code, so the floor and the rule now name the same_
+_number. The `data/portfolio*` row was revisited when the pending-order round_
 _added a module and a test file to it. The rest of the grades are still_
 _2026-09-12's._
 
 **None of these can be A yet, and that is a statement about the sample, not
-the code.** Every area below is tested; none has been validated against data,
-because the tables are empty in `data/memory.db`. Test counts are collected,
-not estimated.
+the code.** Every area below is tested; none has been validated against data.
+Test counts are collected, not estimated.
+
+**Re-measured 2026-09-16: most of the tables named below are no longer empty** —
+`decision_snapshots` 13, `reservations` 14, `intents` 48, `settlement_lots` 5,
+`episodes` 19, `outcomes` 179, `learning_candidates` 2; `reconciliation_runs` is
+still 2 and `position_exits` is still 0. **The grades stay unchanged on purpose**
+— rows are not validation, and each gap below names evidence rather than
+population. What moved is the *measurement*, and a dated measurement left
+standing is the defect this table's own notes warn about, so every Gap cell now
+carries the date it was taken.
 
 | Area | Grade | Basis | Gap |
 |---|---|---|---|
-| `data/attribution.py` | **B** | 19 tests | `decision_snapshots`: 0 rows |
-| `data/trade_ledger.py` | **B** | 27 tests | `position_exits`: 0 rows |
+| `data/attribution.py` | **B** | 19 tests | `decision_snapshots`: 0 rows at grading → **13** (2026-09-16) |
+| `data/trade_ledger.py` | **B** | 27 tests | `position_exits`: **still 0 rows** (2026-09-16) — the ledger has never recorded an exit leg |
 | `data/order_state.py` | **B** | 20 tests; "only two writers" asserted | `rejected` / `cancel_pending` still have no writer |
-| `data/reservations.py` | **B** | 20 tests | 0 rows |
-| `data/settlement.py` | **B** | 35 tests | 0 rows |
-| `data/intent.py` | **B** | 27 tests | 0 rows |
+| `data/reservations.py` | **B** | 20 tests | 0 rows at grading → **14** (2026-09-16) |
+| `data/settlement.py` | **B** | 35 tests | 0 rows at grading → `settlement_lots` **5** (2026-09-16) |
+| `data/intent.py` | **B** | 27 tests | 0 rows at grading → **48** (2026-09-16) |
 | `data/clock.py` | **B** | 21 tests (`test_kernel_clock.py`) | never exercised on a real replay |
-| `data/reconciliation.py` | **B** | 17 tests | only 2 runs recorded against the real book |
-| `data/episodes.py` | **B** | 28 tests | 0 rows |
-| `data/outcomes.py` | **B** | 40 tests | 0 rows — and `predictions.brier` is still NULL on all 202 rows, so calibration remains empty (§8.5 of `DESIGN_REVIEW.md` still stands) |
-| `data/learning_candidates.py` | **B** | 59 tests | 0 rows; `evidence_episode_ids` is empty at all 5 production call sites |
-| `data/knowledge_snapshots.py` | **B** | 53 tests | the table does not exist in `data/memory.db` yet — no production run since it landed |
+| `data/reconciliation.py` | **B** | 17 tests | only 2 runs recorded against the real book (unchanged 2026-09-16) |
+| `data/episodes.py` | **B** | 28 tests | 0 rows at grading → **19** (2026-09-16) |
+| `data/outcomes.py` | **B** | 40 tests | 0 rows at grading → **179** (2026-09-16); `predictions.brier` is still NULL on all **310** rows, so calibration remains empty (§8.5 of `DESIGN_REVIEW.md` still stands) |
+| `data/learning_candidates.py` | **B** | 59 tests | 0 rows at grading → **2** (2026-09-16); `evidence_episode_ids` is still empty at all 5 production call sites |
+| `data/knowledge_snapshots.py` | **B** | 53 tests | the table **now exists** in `data/memory.db` with 0 rows — created by a read model's `init_schema` the first time the page was opened, which is that layer's documented behaviour |
 
 ## How to move a grade
 

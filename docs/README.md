@@ -7,6 +7,38 @@ A document's **role** matters more than its date. A normative design is
 correct to describe a target that does not exist yet; a status record is
 wrong the moment it lags the code.
 
+## If you are reviewing this project from outside
+
+Read these **in this order**. Each answers a different question, and reading
+them out of order produces confident answers to the wrong question.
+
+| # | Read | Why this one | Size |
+|---|---|---|---|
+| 1 | [`DESIGN_REVIEW.md`](DESIGN_REVIEW.md) — **start with its header** | Written for exactly this purpose: what we want reviewed, the honest negative results, the known defects, and the questions we cannot answer ourselves. Its header declares which sections are a dated snapshot and which still stand. | ~570 lines |
+| 2 | [`exec-plans/active/`](exec-plans/) — the plans in flight | What is being worked on **right now**, with machine-checkable acceptance criteria. A review that skips these reviews yesterday's project. | ~200 lines each |
+| 3 | [`TRADER_CORE_DESIGN.md`](TRADER_CORE_DESIGN.md) **§2 and §14 only** | §2 is the product definition (what Trade, Learn and Evolve each mean); §14 is the five phases and what each phase's completion means. Do **not** read the rest of the design as a description of what exists. | those two sections |
+| 4 | [`TRADER_CORE_IMPLEMENTATION.md`](TRADER_CORE_IMPLEMENTATION.md) **§7 only** | The list of things this project decided **not** to pretend: what is deliberately unbuilt, and why. | that section |
+| 5 | [`exec-plans/tech-debt-tracker.md`](exec-plans/tech-debt-tracker.md) `## Open` | Every open item with its cost and how it is recognised — so a reviewer can tell "known and priced" from "missed". | Open section |
+| 6 | [`QUALITY_SCORE.md`](QUALITY_SCORE.md) | Where the evidence is thin, area by area, with the specific gap that caps each grade. Every Gap cell carries the date it was measured. | ~80 lines |
+| 7 | [`GOLDEN_PRINCIPLES.md`](GOLDEN_PRINCIPLES.md) | The non-negotiable invariants — and, more usefully, **what checks each one**. | ~170 lines |
+| 8 | [`REVIEW.md`](REVIEW.md) | The review mode this repository asks for and the output format it expects. | ~85 lines |
+
+Only if the review touches code, add [`AGENTS.md`](../AGENTS.md) (how to work in
+this repo, acceptance criteria, evidence rules) and
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) (layer map, databases, the trading day).
+
+**If you only have time for three things:** 1, 2 and 4. The first is what we
+want to know; the second is what is actually moving; the third is what we are
+not pretending to have.
+
+**What to ignore, and why.** `exec-plans/completed/` is an archive — its links
+and module names are not maintained, and it described the world at the time.
+The dated studies under *Research inputs* above are the evidence behind
+decisions, not descriptions of current behaviour.
+[`strategy_evaluation_2026-09.md`](strategy_evaluation_2026-09.md) is worth
+reading for its **method and its negative results**, not for its state: it is
+the one place the exit side was measured against market history.
+
 ## Authoritative — read these before acting
 
 | Question | Document | Role |

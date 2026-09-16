@@ -3,25 +3,50 @@
 > 写给外部评审者。文档日期 **2026-09-11**。所有数字来自当天的真实数据库查询，
 > 不是设计意图，也不是估算。有多少写多少，包括难看的部分。
 
-> **2026-09-12 状态：这是一份时间点快照，不是活文档。** 读它之前先分清两类内容：
+> **2026-09-16 状态：这是一份时间点快照，不是活文档。读它之前先分清三类内容。**
 >
-> - **§7「当前真实状态」已过期。** 它是 2026-09-11 的查询结果，而 Phase 1–3
->   （见 [`TRADER_CORE_DESIGN.md`](TRADER_CORE_DESIGN.md) §14）在那之后交付，
->   新增了 `position_exits` / `intents` / `decision_snapshots` / `reservations` /
->   `settlement_lots` / `episodes` / `outcomes` / `learning_candidates` 等表。
->   现在是什么状态，读 [`TRADER_CORE_IMPLEMENTATION.md`](TRADER_CORE_IMPLEMENTATION.md)。
-> - **§6 的实测负面结果、§8.1–8.3 的缺陷形态、§8.8 的样本期缺陷仍然成立** ——
->   它们是研究结论，不随代码变动而失效。
-> - **§8.5「校准曲线还是空的」仍然成立。** 2026-09-12 复查：`predictions` 202 行，
->   `brier` 全为 NULL。卡点依然是样本量，不是代码。
-> - **§8.1 与 §7 里的 `MIN_THEME_STRENGTH = 4` 已于 2026-09-14 退役。** 那个常数
->   连同它的诊断一起被采纳：下单门槛改成一个**截面标准化过的当日主线分**
->   （`theme_lines.trend_score`，0–1），准入与撤销读**两个不同的数**（迟滞带），
->   四个参数进 `scoring.DEFAULT_DECISION_PARAMS["theme_gate"]` 由策略指针控制。
->   实现与取舍见 `docs/exec-plans/completed/2026-09-14-theme-signal-as-a-score.md`。
->   §8.1 的结论（「这个阈值从未被验证过」）因此**不再是缺陷形态，而成了待验证的
->   假设** —— 门槛现在是版本间的差异，可以走冻结→影子→闸门那条路验。
-> - 本文在文档体系里的位置见 [`README.md`](README.md) 的 Research inputs 一节。
+> **已过期：**
+>
+> - **§7「当前真实状态」是 2026-09-11 的查询结果。** Phase 1–3 在它之后交付，新增了
+>   `position_exits` / `intents` / `decision_snapshots` / `reservations` / `settlement_lots` /
+>   `episodes` / `outcomes` / `learning_candidates` 等表，而**这些表现在都有行**。
+>   逐表读数见 [`QUALITY_SCORE.md`](QUALITY_SCORE.md) 的 trader-core 表（每个 Gap 带测量日期）。
+>   现在是什么状态，读 [`TRADER_CORE_IMPLEMENTATION.md`](TRADER_CORE_IMPLEMENTATION.md)、
+>   [`exec-plans/tech-debt-tracker.md`](exec-plans/tech-debt-tracker.md) 与
+>   [`exec-plans/active/`](exec-plans/)。
+> - **§8.1 与 §7 里的 `MIN_THEME_STRENGTH = 4` 已于 2026-09-14 退役。** 下单门槛改成一个
+>   **截面标准化过的当日主线分**（`theme_lines.trend_score`，0–1），准入与撤销读**两个不同的数**
+>   （迟滞带），参数进 `scoring.DEFAULT_DECISION_PARAMS["theme_gate"]` 由策略指针控制。
+>   取舍见 `exec-plans/completed/2026-09-14-theme-signal-as-a-score.md`。
+>   §8.1 的结论（「这个阈值从未被验证过」）因此**从缺陷形态变成待验证的假设**。
+> - **「样本门槛是 50」整句作废。** 2026-09-15 操作者把仓库规则定为 **20**，与代码执法的一致
+>   （D15 以「**降规则**」而非「抬代码」收口，因为抬代码会漂移所有已冻结版本）。
+>
+> **仍然成立（研究结论，不随代码变动失效）：** §6 的实测负面结果、§8.1–8.3 的缺陷形态、
+> §8.8 的样本期缺陷。**§8.5「校准曲线还是空的」仍然成立**：2026-09-16 复查，
+> `predictions` **310** 行、`brier` **全为 NULL**。卡点依然是样本量，不是代码。
+>
+> **2026-09-13 → 09-16 之间新增的三件事，评审时应当知道：**
+>
+> 1. **新闻历史现在有了。** `data/market_snapshots.db` 里的 `财联社电报(历史回填)`
+>    **935,850 条**，覆盖 **2020-01-01 → 2026-09-15**，与 `daily_kline` 的窗口精确重合。
+>    回填方式与实测边界（含「付费栏目只发给贴近当下的游标」这一条）记在
+>    `exec-plans/active/2026-09-15-the-first-turn-the-loop-makes.md`。
+>    **§8.6「55 万条分时快照一次都没用于日内决策」因此有了新的答案**：日内决策**不能**重放，
+>    因为没有历史分钟数据；能重放的是日频。这不是懒惰，是数据。
+> 2. **入口侧第一次被量了。** `scripts/evaluate_entry_path.py` 在 2025-01 → 2026-09 上给出
+>    主题门的分离读数（264,420 板块-日）：**下沿分得开、上沿没有梯度**，量级小到可能是噪声。
+>    这是**初步读数、不是结论**；边界（缺 `strength`、只测门不测 LLM 选股、付费栏目缺口）
+>    写在计划文档与 `QUALITY_SCORE.md` 里。§8.1 那个「待验证的假设」因此有了第一份数据。
+> 3. **有一个 T+1 日频提案在评审中**
+>    （`exec-plans/active/2026-09-16-the-agent-decides-each-morning.md`）：把主模式从盘中改成日频，
+>    让历史可回放。**它自己写明「加速的是学习与候选筛选，不是晋升」** ——
+>    `paired_count` 的 `s.date > frozen_at` 使历史永远替代不了前向证据。
+>    **如果要挑一件事重点评，评这个提案的价值最大。**
+>
+> 本文在文档体系里的位置见 [`README.md`](README.md) 的 Research inputs 一节。
+> **若你是被邀请来评审的外部读者，先读 [`README.md`](README.md) 的
+> 「If you are reviewing this project from outside」一节** —— 那里给了阅读顺序与「可以忽略什么」。
 
 ---
 

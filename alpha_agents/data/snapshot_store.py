@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from alpha_agents.config import DATA_DIR
+from alpha_agents.data import corpus_access
 from alpha_agents.data.snapshot_schema import _SCHEMA  # re-exported; see snapshot_schema.py
 
 logger = logging.getLogger(__name__)
@@ -34,14 +35,23 @@ _write_lock = threading.Lock()
 
 
 def _get_conn() -> sqlite3.Connection:
-    """Thread-local connection to snapshots DB."""
+    """Thread-local connection to snapshots DB.
+
+    The schema is applied only to a file we own: a replay shares the news corpus
+    by symlink, and creating tables in shared history is a write. Reads work
+    either way; writes raise, because ``corpus_access`` opens a shared file
+    read-only.
+    """
     conn = getattr(_local, "conn", None)
     if conn is None:
         SNAPSHOTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(SNAPSHOTS_DB_PATH, check_same_thread=False,
-                               isolation_level=None)
+        shared = corpus_access.is_shared(SNAPSHOTS_DB_PATH)
+        conn = corpus_access.connect(SNAPSHOTS_DB_PATH,
+                                     check_same_thread=False,
+                                     isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.executescript(_SCHEMA)
+        if not shared:
+            conn.executescript(_SCHEMA)
         _local.conn = conn
     return conn
 

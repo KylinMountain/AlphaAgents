@@ -15,6 +15,7 @@ from pathlib import Path
 import baostock as bs
 
 from alpha_agents.config import DATA_DIR, no_proxy
+from alpha_agents.data import corpus_access
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +44,23 @@ CREATE INDEX IF NOT EXISTS idx_kline_date ON daily_kline(date);
 
 
 def _get_conn() -> sqlite3.Connection:
+    """Thread-local connection to the price history.
+
+    A replay shares this file by symlink, and a shared file is opened read-only
+    by ``corpus_access`` — so the WAL pragmas and the schema script are skipped
+    for one: both write, and neither is the replay's business on history it does
+    not own.
+    """
     conn = getattr(_local, "hist_conn", None)
     if conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        shared = corpus_access.is_shared(DB_PATH)
+        conn = corpus_access.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(_SCHEMA)
+        if not shared:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(_SCHEMA)
         _local.hist_conn = conn
     return conn
 

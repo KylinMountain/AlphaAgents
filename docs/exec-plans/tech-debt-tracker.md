@@ -26,14 +26,15 @@ measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
 `scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
-paid on 2026-09-15, in one round. **D19, D20 and D21 were opened *and* paid on
-2026-09-16**, all three from an external review of the T+1 plan and all three fixed the
-same day: D19 was a wrong market rule already sitting in the kernel — the cash-side T+1
-rule was the *withdrawal* rule applied to buying power; D20 was the absence of
-date-versioned limit rules, which a walk-forward starting in 2020 needs before ChiNext
-changed on 2020-08-24; and D21 was that a replay would have inherited the live trader's
-memory, with no way to point it elsewhere. Their entries below carry the payment records;
-none of the three ever reached this list as debt.)_
+paid on 2026-09-15, in one round. **D19, D20, D21 and D22 were opened *and* paid on
+2026-09-16**, all four from an external review of the T+1 plan and all four fixed the same
+day: D19 was a wrong market rule already sitting in the kernel — the cash-side T+1 rule was
+the *withdrawal* rule applied to buying power; D20 was the absence of date-versioned limit
+rules, which a walk-forward starting in 2020 needs before ChiNext changed on 2020-08-24;
+D21 was that a replay would have inherited the live trader's memory, with no way to point it
+elsewhere; and D22 was that nothing stopped a replay writing into the shared history.
+Their entries below carry the payment records; none of the four ever reached this list as
+debt.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -69,6 +70,29 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D22 — Nothing stopped a replay from writing into the shared history (paid 2026-09-16)
+
+**Added 2026-09-16, from the external review of the T+1 plan** — M0 item 1, and the
+remaining half of its state-isolation P0. `walk_bootstrap.py` shares the corpus by symlink
+and *prints* that it is read-only, but a symlink is writable: `market_history` and
+`snapshot_store` opened their file read-write whatever it was, so a replay that ran an
+ingest step would have appended 2020 rows to the corpus the live pipeline also reads.
+**Cost.** The failure is silent and cumulative. Nothing in the run reports it, and the next
+reader — the live pipeline included — trusts a corpus that has quietly acquired a replay's
+rows. It also makes a replay indistinguishable from live capture after the fact, which is
+the opposite of what the split was for.
+**Paid 2026-09-16** with `alpha_agents/data/corpus_access.py`. A symlink **is** the marker
+of "shared", and a shared file is opened `mode=ro`, so a write raises
+`sqlite3.OperationalError: attempt to write a readonly database` — an enforced stop instead
+of a convention. Both stores skip the WAL pragma **and** the schema script when the file is
+shared (both write, and neither is a replay's business on history it does not own); a file
+we own behaves exactly as before, so the live pipeline still ingests normally.
+**Recognise.** `tests/test_corpus_access.py` pairs every refusal with a read that must
+succeed — a read-only connection that also could not read would satisfy "writes are
+refused" while being useless — and closes by asserting that the links `walk_bootstrap`
+creates are exactly the paths this treats as shared, so the two mechanisms cannot drift
+apart while both look correct in isolation.
 
 ### D21 — A replay would have inherited and overwritten the live trader's memory (paid 2026-09-16)
 

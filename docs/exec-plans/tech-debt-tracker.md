@@ -26,12 +26,14 @@ measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
 `scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
-paid on 2026-09-15, in one round. **D19 and D20 were opened *and* paid on 2026-09-16**,
-both from an external review of the T+1 plan and both fixed the same day: D19 was a wrong
-market rule already sitting in the kernel — the cash-side T+1 rule was the *withdrawal*
-rule applied to buying power — and D20 was the absence of date-versioned limit rules,
-which a walk-forward starting in 2020 needs before ChiNext changed on 2020-08-24. Their
-entries below carry the payment records; neither ever reached this list as debt.)_
+paid on 2026-09-15, in one round. **D19, D20 and D21 were opened *and* paid on
+2026-09-16**, all three from an external review of the T+1 plan and all three fixed the
+same day: D19 was a wrong market rule already sitting in the kernel — the cash-side T+1
+rule was the *withdrawal* rule applied to buying power; D20 was the absence of
+date-versioned limit rules, which a walk-forward starting in 2020 needs before ChiNext
+changed on 2020-08-24; and D21 was that a replay would have inherited the live trader's
+memory, with no way to point it elsewhere. Their entries below carry the payment records;
+none of the three ever reached this list as debt.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -67,6 +69,36 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D21 — A replay would have inherited and overwritten the live trader's memory (paid 2026-09-16)
+
+**Added 2026-09-16, from the external review of the T+1 plan** — its first P0, and the
+first of its twelve required tests. The plan proposed starting history from a copy of the
+production `data/`, which gives *file* isolation and not *temporal* isolation: the fresh
+copy would still hold 2026's principles, lessons, frozen policy and candidates, so a run
+dated 2020 would reason with a 2026 brain. And there was no override to avoid it —
+`config.DATA_DIR` was `PROJECT_ROOT / "data"` with no environment exit — so a walk could
+not be pointed elsewhere even deliberately.
+**Cost.** The whole value of a historical walk is showing what a trader would have done
+with what it knew. A brain from the future does not invalidate the run loudly; it makes it
+look good. The same hardcoded path also sends a replay's ledger writes into the production
+book.
+**Paid 2026-09-16.** `config._data_dir()` resolves `ALPHAAGENTS_DATA_DIR` and otherwise
+falls back to `data/`, with a test that a **blank** value falls back too rather than
+resolving to `Path('')` — an empty variable in a shell profile must not point every store
+at the working directory. `scripts/walk_bootstrap.py` materialises a replay directory as a
+**split, not a snapshot**: `memory.db` is created empty from the live schema and is never
+linked, while `market_history.db` / `market_snapshots.db` / `stocks.db` are **shared by
+reference**, which is the reviewer's own model — corpus read-only, state fresh. It refuses
+to bootstrap into a directory that already holds trader state without `--force`, and it
+prints what it shared rather than leaving it implicit.
+**The review's test #1 is now `tests/test_walk_bootstrap.py`**: a 2026 candidate and a
+2026 position are seeded into the corpus, and the replay's state must contain neither —
+with the corpus file checked byte-identical afterwards and the fixture proven first, so
+the isolation claim cannot pass vacuously.
+**Still open, and named rather than implied:** nothing yet *enforces* that a run treats
+the shared corpus as read-only. That is M0 item 1 in the T+1 plan; today it is a
+convention plus a printed list.
 
 ### D20 — Market rules are not versioned by date, so a 2020 replay would apply today's limits (paid 2026-09-16)
 

@@ -3,7 +3,27 @@ from contextlib import contextmanager
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+
+#: Where the databases and caches live.
+#:
+#: Overridable on purpose. A walk-forward replay must **not** run against
+#: production: inheriting ``data/memory.db`` would hand a 2020 replay the 2026
+#: trader's principles, candidates and policy — knowledge leakage, not merely
+#: state pollution — and it would write into the live book besides. Point
+#: ``ALPHAAGENTS_DATA_DIR`` at a directory of the replay's own (see
+#: ``scripts/walk_bootstrap.py``) and every store below follows.
+#:
+#: The resolver is a function rather than a bare ``os.environ.get`` so a test can
+#: ask what a given environment would produce without reloading this module —
+#: reloading it would fight the suite's own storage isolation.
+def _data_dir(environ: "os._Environ | dict | None" = None) -> Path:
+    raw = (environ if environ is not None else os.environ).get(
+        "ALPHAAGENTS_DATA_DIR")
+    return Path(raw) if raw else PROJECT_ROOT / "data"
+
+
+DATA_DIR = _data_dir()
+
 PROMPTS_DIR = PROJECT_ROOT / "alpha_agents" / "prompts"
 
 DB_PATH = DATA_DIR / "stocks.db"

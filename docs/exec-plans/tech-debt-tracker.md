@@ -78,6 +78,133 @@ one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
 
+### D36 — A throttled provider queues instead of answering, so the run stalls with nothing in the log (paid 2026-09-16)
+
+Found by running a 120-day window against a free-tier key. After about seven
+sessions the run stopped advancing. The log's last line was the openai-agents
+tracing warning, and there was no `429`, no `Retrying request`, nothing — for
+three minutes, while `curl` to the same endpoint answered a small request in
+0.55 s.
+
+The cause is a behaviour rather than a bug: when the tokens-per-minute budget is
+spent, some providers **hold the request** instead of rejecting it. `AsyncOpenAI`
+was constructed with no `timeout`, so the SDK's own ten minutes applied, and its
+default `max_retries=2` would have followed with two more attempts — thirty
+minutes for one simulated session, with the report unable to say why. Compare the
+180-day window, where the same key answered `429` and the retry path *was*
+visible: two failure shapes for one condition, and only one of them logs.
+
+**Paid on both sides, because either alone leaves the other:**
+
+- `create_model(timeout=...)` is now opt-in, so the default production path is
+  byte-for-byte what it was. The runner passes `--model-timeout` (default 120 s).
+  A timed-out call is a `decide`-stage failure, which — because of D34 — costs
+  the decision and not the day.
+- `--pace-seconds` sleeps after each simulated session. The budget is spent by
+  the *prompt*, so the queue arrives sooner the bigger the panel is: asking for
+  one call per session as fast as the provider answers is what exhausts it.
+  Measured on this key, ~7 sessions at panel 40 / news 60 before it started.
+
+**What this does not fix**: a paced run is slower, and a queued provider still
+costs a day's decision. It bounds the damage and names it; it does not turn a
+free tier into a fast one.
+
+### D33 — A declared guard no caller could reach, because the candidate set was already filtered (paid 2026-09-16)
+
+The fourth instance of this repository's most expensive family — *a promise with
+no path to it* — and the first one this file did not catch in review, because it
+was introduced **by the fix for the previous instance**.
+
+M0 asked for the universe to be as-of on the *selection* side. The rule was
+written as one gate, `_eligibility`, returning six reasons. Two of them —
+`not_listed` and `no_prior_bar` — could never fire:
+
+```
+both call sites:   for code, row in bars_prev.items():
+                       if _eligibility(ctx, code, day, prev_day) is not None:
+```
+
+A set drawn from T-1 bars can only contain listed names, so `not_listed` was
+`False` for every row, and `no_prior_bar` was tautologically `False`. Measured on
+the real corpus for a 2020 window: **1,986 codes had not listed yet, and every
+single one of them also lacked a T-1 bar** — so the old loop excluded them *by
+accident*, and the rule the ticket was about could not be tested at all. The
+branch was not merely untested; it was unreachable, and a counter that can never
+increment is the same lie as a column that can never be written.
+
+**Paid** by iterating the whole instrument table instead, which changes nothing
+about which names are rankable (no T-1 bar ⇒ nothing to rank on either way, so
+the panel is identical) and changes everything about attribution: every exclusion
+is now counted. On a 2025-07-01 window that reads
+`eligibility:not_listed 409`, `eligibility:board 3702`, `eligibility:st 1122`.
+
+Same family, same commit, third instance in one function: `Corpus.adv20`'s
+docstring promised `None` when fewer than twenty sessions exist, and the code
+averaged whatever it found — handing a name listed the previous session an
+"ADV20" that was one bar, i.e. a stand-in average, from the function whose own
+docstring says the caller asked not to be handed one. Six codes in a 2025 window,
+many more in a 2020 one. **Paid** by enforcing `>= 20`.
+
+Pinned by `TestASecurityThatHadNotListedCannotBeSelected` (2 cases) and the
+counter assertions in `TestTheObservationIsAttributable`. Probes: deleting the
+`not_listed` branch → both cases red, reporting `no_prior_bar`; `first < day` →
+`first <= day` → both red.
+
+**The generalisable rule**, which is what makes this worth a number: *a guard is
+not reachable because it is written, and not even because it is called — it is
+reachable when the input it filters can contain something it rejects.* Check the
+candidate set, not the call site.
+
+### D34 — A model failure took the day's settlement down with it (paid 2026-09-16)
+
+Found by running a 180-day window against a rate-limited provider, not by reading
+the code. The decider and the settlement shared one `try`:
+
+```
+try:
+    placed = _run_decider(...)      # ← 429 here
+    entries = _settle_entries(...)  # never ran
+    exits = _settle_exits(...)      # never ran
+    equity = _value(...)            # never ran
+except Exception:
+    errors.append(...); continue
+```
+
+So every provider rate limit **removed a trading session from the book**: pending
+orders were never filled, exits were never processed, and no equity row was
+written. The curve had a hole exactly where the market had a day — and a hole in
+an equity curve reads as "nothing happened", which is a *different* fact from
+"we could not decide". Fourteen such days in that window.
+
+The two failures are different facts and are now two `try` blocks: a failure to
+decide costs the decision (`placed = []`, the book still settles), a failure to
+settle costs the day. The error record carries a `stage`, and the summary line
+says which — the old label read `结算过程抛错的交易日 14`, which sends a reader to
+the settlement code, which was not where any of the fourteen faults were.
+
+Pinned by `TestADecisionFailureCostsOnlyTheDecision`. Probe: making a decide
+failure `continue` again → red.
+
+### D35 — The same observation was re-written every day, and every copy was true (paid 2026-09-16)
+
+The first version of the learning step distilled whenever `n >= 4`, with no
+requirement of *new* evidence. Once the fourth position closed, every subsequent
+day wrote another copy of the same sentence: measured on the first 180-day
+window, **11 candidates for 2 distinct facts**.
+
+Nothing else would have caught it, and that is the point: every row was *correct*.
+`save_candidate` cannot dedupe them either — `source_date` is part of the
+fingerprint, so "the same observation on a later day" is by construction a
+different row, and `ON CONFLICT DO NOTHING` never fires. The cost is that
+`counts()` stops meaning anything and the loop looks busier than it is, which is
+exactly the failure mode a learning system must not have: an inflated record of
+how much it has learned.
+
+**Paid** by distilling only on a day when something actually closed.
+
+Pinned by `TestTheObservationIsWrittenOnlyWhenSomethingWasLearned` (2 cases).
+Probe: removing the gate → 1 red.
+
 ### D26 — Every close intent failed on a database the command columns never reached (paid 2026-09-16)
 
 **Added 2026-09-16, from the UI.** The user sent a screenshot of the 改账审计 table in which 48
@@ -188,6 +315,176 @@ decision: averaging down had quietly stopped moving the stop. The column is now 
 not the same thing. 8 tests in `tests/test_trailing_stop.py` plus one in `test_intent.py`; three
 mutation probes (a silent `.get()`, a baked-in fallback, a removed clamp) each turn a specific
 test red. Against the live row the repair takes `24,705,832.43 → 15.01 → 17.45` (peak `18.37`).
+
+### D37 — The file-size rule is enforced only inside the package, so the largest file in the repository is unguarded
+
+**Added 2026-09-16, while checking whether `scripts/walk_forward.py` needed splitting.**
+`AGENTS.md` lists "File size. 1200 lines" among the non-negotiable invariants and says
+they are "enforced mechanically by `scripts/lint_harness.py` (run in CI)". It does not
+say *where*. `lint_harness.py`'s `main()` defaults its roots to `[REPO / PACKAGE]` —
+`alpha_agents/` — and `.github/workflows/harness.yml` invokes it with no arguments. So
+`scripts/`, `tests/` and `research/` are outside the scan, and the rule reads as a gate
+everywhere while being one in exactly one directory.
+
+Measured, not inferred:
+
+```
+$ uv run python scripts/lint_harness.py
+✅ harness lint 通过 (173 个文件)，存量 13 条待偿还
+
+$ wc -l scripts/walk_forward.py
+    1801 scripts/walk_forward.py
+
+$ uv run python scripts/lint_harness.py scripts/
+❌ 70 处新增违规 (duplication=53, file-size=1, silent-except=14, undefined-name=2)
+```
+
+The one `file-size` line is `walk_forward.py` itself. The other 69 are pre-existing and
+concentrated in the exploratory `scripts/research/` — 53 duplications, 14 silent
+`except: pass` — so widening the default root is a cleanup project, not a one-line
+change, and it cannot be done by adding to `lint_baseline.txt` without breaking the
+"a baseline that can grow is not a baseline" rule.
+
+**Remedy.** Split `scripts/walk_forward.py` by responsibility (corpus access and panel
+construction are the natural seam; the day loop, decider, settlement, learning and
+reporting are the other side), *then* widen the default root. Deliberately **not done**
+in the same change as the fix for D38: the seam cross-references `Context` and
+`_knowledge_block` in both directions, and moving ~400 lines of the module the replay
+depends on deserves its own plan and its own verification pass.
+
+**Until then**, `docs/GOLDEN_PRINCIPLES.md` §10 and `AGENTS.md` state the scope out
+loud, so the claim matches the mechanism. A rule with a hole is survivable; a rule that
+claims to have no hole is not.
+
+### D38 — The support count beside the medians was the group size, and half the citations pointed the wrong way (paid 2026-09-16)
+
+Found by running a 120-day window and reading the one observation it produced, rather
+than by any test. `_distil` states a falsifiable proposition — *a candidate up more on
+T-1 did worse* — and reports how many trades support it. The test was:
+
+```python
+return (t["t1_change"] > cut) != (t["return_pct"] > 0)
+```
+
+On the 2025-07-01 window **all four** closed trades lost money, so `return_pct > 0` was
+`False` for every one of them and the expression collapsed to `t1_change > cut`. The
+"2 笔支持、2 笔反对" in the claim was therefore the two group sizes and nothing else: an
+arithmetic identity that cannot disagree with the medians printed beside it, which is
+precisely why it read as confirmation.
+
+It also inverted two of the four citations. The window's best trade — lowest T-1 change
+(6.76%), smallest loss (-4.96%) — is the proposition holding, and it was filed as
+*opposing*.
+
+**Paid** by comparing each trade's return against the **window's median realised
+return** instead of against zero, so the verdict is about relative return and survives a
+window where every trade shares a sign. Same window, before → after:
+
+```
+before:  supporting [11, 12]   opposing [1, 6]
+after:   supporting [1, 11]    opposing [6, 12]
+```
+
+Three tests in `tests/test_walk_forward.py`
+(`TestASupportCountMustBeAboutReturnsNotGroupMembership`), one of which moves a single
+return across the window median while holding every T-1 change fixed and requires that
+trade to change sides. Probe: restoring `> 0` turns exactly 2 of the 3 red, the third
+being a consistency check on the record rather than on the direction. Each trade in
+`payload["trades"]` now carries its own `supports` flag, so the counts can be re-derived
+from the record instead of taken on trust.
+
+### D39 — The corpus check answers "did it change" but not "what changed"
+
+The 120-day run's summary reported `共享语料 size+mtime 未变 **否**`. The check is
+right to exist — a replay that mutates the shared corpus makes every run
+irreproducible — but `run.json` records only `corpus_untouched: false`. It does not
+name the file, the before value or the after value, so **the artifact cannot be
+diagnosed after the fact**. The only way to find out is to run another window and watch.
+
+That was done, and the replay is not the cause:
+
+```
+$ stat -f "%z %m %N" <three corpus files>          # before
+1130078208  1789554051  alphaquant/data/market_history.db
+1385369600  1789573942  AlphaAgents/data/market_snapshots.db
+$ ALPHAAGENTS_LLM_MODE=record uv run python scripts/walk_forward.py \
+      --target /tmp/walk-probe5 --start 2025-07-01 --days 5 --decider placeholder
+共享语料 size+mtime 未变    是
+$ stat -f "%z %m %N" <same three files>           # after — identical, every field
+```
+
+So the 120-day window's `否` came from something outside the replay, and the most
+likely candidate is the full test suite that was running concurrently and reads the
+same data directories. **"Most likely" is the problem**: with the file and both values
+recorded, that would have been a one-line answer instead of a paragraph of inference.
+
+**Remedy.** Have `_corpus_fingerprint` keep the per-file `(size, mtime)` it measured and
+write the diff into `run.json`, naming the file that moved. A check that can only say
+"something is different" costs a rerun to interpret; a check that names the file costs
+nothing.
+
+### D40 — One event loop per day, one shared client, so every day's first request fails and is retried
+
+`t1_decider.propose_sync` is `asyncio.run(propose(**kwargs))` — deliberately, so the
+synchronous day loop keeps its shape and `await` never enters a `replay_as_of` block.
+But `Context.model` is built **once** for the whole window, so one `AsyncOpenAI` client
+is shared across ~120 separate event loops. httpx pools connections bound to the loop
+that opened them; on a fresh loop the first request reuses a dead one.
+
+Measured on the 120-day window — every quantity matches the hypothesis and nothing else
+does:
+
+```
+days 120   "Retrying request" 120   POST 120   HTTP 200 120   non-200 0
+only host ever contacted: api.siliconflow.cn/v1/chat/completions
+```
+
+One retry per day, exactly; no HTTP response ever accompanies the failed attempt (so it
+fails at the transport layer, before a status exists); the retry always succeeds; and
+only one host is contacted, which rules out the obvious alternative — a trace-export or
+credential probe against OpenAI's own API.
+
+**Not yet fixed.** It costs ~0.4 s and one wasted request per simulated day, and every
+day still succeeds, so it is wasteful rather than wrong. The fix is one loop for the
+whole window (`loop.run_until_complete` per day) rather than `asyncio.run` per day.
+It was left alone deliberately: it is a change to the model-call path, and bundling it
+with the D38 fix would leave one verification run unable to say which change did what.
+Its acceptance criterion is checkable and cheap — **the same 120-day window should
+report 0 retries instead of 120.**
+
+### D41 — The provider is ambient, so the same command is not the same run
+
+The 120-day verification run of this window was launched with the identical command
+line that had worked an hour earlier and died on the first day:
+
+```
+openai.OpenAIError: Missing credentials. Please pass an `api_key` ...
+```
+
+Two separate reasons, both worth stating:
+
+1. **`uv run` does not load `.env` here.** `uv run python -c "os.environ.get('AGENT_API_KEY')"`
+   prints `(absent)`; `UV_ENV_FILE=.env uv run ...` prints a 46-character key. So the
+   key arrives only when something injects it.
+2. **`.env` now points somewhere else than the run used.** With `UV_ENV_FILE=.env`,
+   `AGENT_BASE_URL` resolves to `https://api.novita.ai/openai` — the provider D-something
+   already measured as returning 403 `NOT_ENOUGH_BALANCE`. The successful run's journal
+   says `model_id Qwen/Qwen2.5-7B-Instruct`, `model_provider api.siliconflow.cn`.
+
+The journal recording the provider is what makes this recoverable — the artifact says
+which model answered even though the command does not. But the repo's own principle is
+that *which model answers is behaviour*, so a run whose provider depends on ambient
+environment is not reproducible from its command.
+
+**Remedy.** The invocation should pin the provider, and the plan or summary should carry
+it. Until then, the working invocation for a replay on this box is:
+
+```
+AGENT_BASE_URL=https://api.siliconflow.cn/v1 \
+AGENT_MODEL=Qwen/Qwen2.5-7B-Instruct \
+AGENT_API_KEY=$SILICONFLOW_API_KEY \
+ALPHAAGENTS_LLM_MODE=record uv run python scripts/walk_forward.py ...
+```
 
 ### D30 — The summary counts one vocabulary and the book records another, so its labels lead nowhere
 

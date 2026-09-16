@@ -170,4 +170,14 @@ nothing looked wrong.
 **Why.** A file an agent cannot hold in context gets edited blindly, and
 blind edits are where duplication starts.
 
-**Enforced by.** `lint_harness.py`.
+**Enforced by.** `lint_harness.py` — **within `alpha_agents/`**, which is the
+only root it scans when given no arguments, and CI gives it no arguments.
+
+That scope is a hole, and not a theoretical one. `scripts/walk_forward.py`
+is **1801 lines** and no check fails. Passing `scripts/` explicitly reports
+it, and alongside it 69 pre-existing violations of the other rules — 53 of
+them duplicated helpers in the exploratory `scripts/research/`. So widening
+the default root is a cleanup project, not a one-line change, and the
+honest thing to do meanwhile is say the scope out loud. Tracked as D37 in
+`docs/exec-plans/tech-debt-tracker.md`, with the split of
+`walk_forward.py` as its remedy.

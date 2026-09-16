@@ -432,6 +432,49 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 所以 M3 的闭环**终点是「已验证 + 归档 +（可选）存在一个变体文件」**，指针仍由人拨。
 可交付的形态是 **「闭环可运行、晋升仍需授权」**——不是「自动演化已交付」。
 
+### 8.10 第一版实现（2026-09-16）：三个环节接在哪里，终点停在哪里
+
+**跑起来了**，位置在 `scripts/walk_forward.py`，每个交易日收盘后一次 `_learn`，下一个交易日开盘前一次
+`_knowledge_block`。
+
+**环节一 —— 打标。** `outcome_labels.sweep_trade_labels(conn, as_of=day)`。这不是新机制，是**把它接上**：
+40 天窗口跑完时 `episodes` 有 16 行、`episode_events` 63 行（内核早就在写），
+而 `outcomes` **0 行** —— 因为从来没有人调用那个 sweeper。打标之后每个平仓仓位有一条
+带 `available_at` 的 `trade` 标签，"这个结果什么时候变得可知" 才有答案。
+
+**环节二 —— 提炼。** `_distil` 写的是一条**可证伪、且由市场数据打分**的命题，就是决策器自己的那条：
+*T-1 涨得更多的候选，实际收益更差*（与「按 T-1 涨幅排序」所假设的方向相反）。
+一笔交易在「入场涨幅」与「实现收益」**符号相左**时支持它，相同时反对它。
+**没有任何模型被问它怎么看自己**：命题是两个桶的中位数，特征从语料按订单自己的 T-1 重读 ——
+"效用只能来自市场数据" 这条规则在这里是**构造性**成立的，不是靠承诺。
+`supporting` / `opposing` 两个列表**永远都写**，空也写：`save_candidate` 拒绝缺键，
+理由是对的 ——「查过、没有」必须能与「没人查」区分。
+
+**环节三 —— 让下一天看得见。** `_knowledge_block` 把本交易员**自己的**观察读进提示词的
+`{knowledge}`。这里有一个必须说清楚的偏离：**生产里规则只能经已批准的 knowledge snapshot 到达决策**
+（`feedback.inject_principles`），而回放里没有快照，所以生产里这一块是空的、代理会做出和从前一样的决定。
+回放喂回去的**不是规则，是这个交易员关于自己已平仓交易的带日期的笔记** —— 是交易员会翻的交易日记，
+不是对它职责的改动。**闸门属于「晋升」（笔记变成规则），不属于「交易员记得自己身上发生过什么」。**
+完全没有反馈的闭环不是保守的闭环，是**不是闭环**。这条偏离写进了报告的「不能说明什么」一节。
+
+**终点停在哪里。** 全部候选停在 `observation`，**管线不调用 `advance_candidate`** ——
+`learning_candidates` 的设计注记明确要求 `status` 不被管线驱动，晋升是有审计的人的动作（§8.2）。
+而且 n 远低于 50，它本来也不可能是别的东西。**所以这一版能诚实地说的是
+「闭环可运行、证据被记下并引用、晋升仍需授权」，不是「它自己进化了」。**
+
+**两个跑出来才知道的事实。**
+
+1. **第一版每天都在写同一条观察。** 判据只有 `n >= 4`，没有「今天有没有新证据」，
+   于是第四次平仓之后**每一天**都写一份同样的句子 —— 180 天窗口实测
+   **11 条候选对应 2 个不同事实**，而且每一条都**是真的**，所以别的东西都不会报警。
+   `save_candidate` 也去不了重：`source_date` 是指纹的一部分，"同一条观察在更晚的一天" 按构造就是另一行。
+   修法是只在**当天有平仓**时提炼。钉住它的是
+   `TestTheObservationIsWrittenOnlyWhenSomethingWasLearned`（2 用例）；探针「去掉新证据闸门」→ 1 条变红。
+2. **闭环以交易员的速度闭合，不是以回测的速度。** 决策器每天最多 2 单、仓位按周持有，
+   所以平仓本来就稀疏：120 天窗口的第四次平仓落在**第 47 个交易日**。
+   这不是缺陷，是**"交易 → 学习 → 进化" 这件事本身的节奏**，也是为什么历史回放只能**筛选**候选：
+   它把候选快速证伪，而通过筛选的那些仍然要花掉 20 个前向配对样本（§8.4）。
+
 ## 里程碑
 
 **M0 — Evidence Contract**（见 §2 的六项）。
@@ -487,16 +530,48 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
       探针 N（把 `_decide` 改成读 `day`）会让它变红，报的正是
       「the decider ranked on the day it trades: it ordered {'600003'}」。
       **结构性保证不是被钉住的保证 —— 这一条现在是了。**
-- [ ] **universe 也要 as-of** —— **停牌**在结算侧有测试
+- [x] **universe 也要 as-of** —— **2026-09-16 补齐选股侧。** 停牌在结算侧有测试
       （`test_walk_forward.py::test_a_name_with_no_bar_is_suspended_not_cancelled`），
-      **未上市**由 `market_rules.listing_day_exemption` 覆盖（`test_market_rules.py`）。
-      **缺的是选股侧的 as-of**：runner 自己的「不能说明什么」一节已如实写出
-      「ST 状态取自 `stocks.db` 的**当前**名字，不是回放日的名字」，
-      而**「当时不属于候选池的证券不得被选中」没有任何测试**。
-- [ ] **LLM record/replay** —— **机制已就位**（D24，32 条测试按调用点钉住：不碰网络、逐次同答案、
-      耗尽/漂移/流式/截断全部拒绝）。**端到端那一句仍未证明**：M1 的用例确实产出了
-      intents / fills / episodes，但那些运行**不调模型**（占位决策器，journal 计数断言为 0）。
-      缺的是一次 `record` 之后再用 `replay-recorded` 跑**同一窗口**的对照。
+      **未上市**由 `market_rules.listing_day_exemption` 覆盖（`test_market_rules.py`）；
+      缺的是选股侧，现在有了：`market_history.first_bar_dates()` 给出
+      `code → 语料里第一个交易日`，`Corpus.is_listed(code, day)` 是 `first_bar < day`，
+      两个决策器共用同一个 `_eligibility` 闸门。
+      **这条闸门原本是死代码，而且是量出来的**：两个调用点都遍历 T-1 的 bar，
+      而「T-1 有 bar」就蕴含「已上市」，于是 `not_listed` 对每一行都返回 `None`。
+      实测 2020 窗口有 **1,986** 个 code 尚未上市，而它们**全部**也没有 T-1 bar ——
+      所以旧循环里它们是**碰巧**被排除的，规则本身无法被测试。
+      改成遍历**整个 instrument 表**之后闸门可达、每个排除理由都被计数：2025-07-01 窗口
+      实测 `eligibility:not_listed 409`、`eligibility:board 3702`、`eligibility:st 1122`。
+      面板**内容不变**（没有 T-1 bar 的名字本来也排不了名），变的是「universe 缩小」
+      从**缺席**变成了**数字**。
+      **边界**锚在**决策日**且**严格小于**：当日上市（IPO）没有前收盘，排不了名也定不了价；
+      前一日上市的有前收盘、09:00 已在交易，在池内。
+      钉住它的是两条测试：`test_a_name_listed_on_the_window_day_is_counted_not_listed`
+      （断言**计数器**，不是「没被选中」—— T-1 排序规则下后者构造性成立，断言它是废话）
+      与 `test_the_boundary_is_the_decision_day_not_short_history`。
+      探针：「删掉 `not_listed` 分支」→ 这两条变红，报的是 `no_prior_bar`；
+      「`first < day` 改成 `<=`」→ 同样两条变红。
+      顺带修掉同族第三处：`adv20` 的 docstring 写着「不足二十个交易日返回 `None`」，
+      代码却对**任何**长度取均值 —— 昨天上市的名字会拿到一个「一根 bar 的 ADV20」，
+      正是它自己 docstring 说调用方不要的东西。2025 窗口只涉及 6 个 code，2020 窗口则不然。
+- [x] **LLM record/replay** —— **2026-09-16 端到端证明。** 机制（D24，32 条测试按调用点钉住：
+      不碰网络、逐次同答案、耗尽/漂移/流式/截断全部拒绝）之外，现在有了真正的对照跑：
+      同窗口先 `record` 再 `replay-recorded`，**`fills.csv` / `settlement.csv` / `equity.csv` /
+      `events.csv` 逐字节相同**，journal 重放后 sha256 不变
+      （`ade0882234ca52decf9b9d2e66ca551d1bba891d407b8ad6312dd941609f40bd`），
+      `run.json` 只差 provenance（`generated_at` / `llm_mode` / `model_calls_made` /
+      `model_journal_total` / `model_usage_detail` / `limitations`）。
+      **声明与实测的双向核对**：占位决策器不得新增 journal 记录、`record` 必须新增、
+      `replay-recorded` 必须**不新增且原有非空**；`--decider llm` 在 `live` 下直接 `SystemExit`
+      （live 不记录，同窗口两次会因采样而不同，两个实验臂就没法比）。
+      这三条由 `TestTheDeclarationAndTheMeasurementMustAgree`（5 用例）钉住。
+      第一版判据是 `journal_after > 0`，而**正确的 replay 会判否**（它读一个已经非空的 journal
+      且不新增）—— 这是**跑出来**的，record 那一遍是过的。
+      **诚实边界**：runner 自身的确定性由 `TestTheLearningStepIsAFunctionOfTheDaysBook`
+      用占位决策器钉住（不碰网络），journal 自己的 record/replay 由 `test_llm_journal`
+      按调用点钉住。**跨过 openai-agents `Runner` 的桩模型端到端测试没有写** ——
+      那需要伪造 SDK 的 Model 协议，测试会比被测的东西更脆。端到端的依据是**真跑了一遍**，
+      记在 `TRADER_CORE_IMPLEMENTATION.md` §9。
 - [x] **不得绕过账本** —— `tests/test_intent.py::TestOnlyTheStateMachineWritesStatus`：
       `virtual_portfolio.status` 只有状态机那两个模块能写，绕过账本直接改账会被机械拦下。
 - [x] **对抗性新闻** —— **2026-09-16 补齐，且核对发现原来的判断写错了两处。**
@@ -581,12 +656,33 @@ exit 0，口径三项全「是」，结算抛错 0 天；期末 equity `1,000,22
       （付费栏目不可回放——回填报废了这条；见另一计划）
 
 **M3**（§8；每条都机器可查，且**成对**——只有单向用例的那几条等于没测）
-- [ ] 生成的 candidate **带真实 supporting/opposing episode IDs**，不是一段散文 lesson：
+- [x] 生成的 candidate **带真实 supporting/opposing episode IDs**，不是一段散文 lesson：
       至少一条候选的 `supporting` 非空，且**每个 id 都能经 `candidates_citing(episode_id)` 反查回来**
-- [ ] `opposing` 的**空与缺不同**：断言写的是「查过、没有」，而不是默认值——
+      —— **2026-09-16 补齐**，`TestTheObservationIsAttributable::test_a_note_cites_the_episodes_it_came_from`：
+      断言 `candidates_citing(101..104)` 各自恰好返回这一条，且 `cited_as == ["supporting"]`。
+      端到端的依据是**真跑**：120 天窗口里每条观察都带着它引用的 episode 号写进 `{knowledge}`。
+- [x] `opposing` 的**空与缺不同**：断言写的是「查过、没有」，而不是默认值——
       把 `opposing: []` 与「这个字段从没被填过」区分开的用例
+      —— **2026-09-16 补齐**，两条：`test_a_note_cites_the_episodes_it_came_from` 断言
+      `evidence_episode_ids == {"supporting": [101,102,103,104], "opposing": []}`
+      （空列表**被写下来**），`test_opposing_evidence_is_stated_not_omitted` 断言两个桶都非空时
+      `candidates_citing(102)` 的 `cited_as == ["opposing"]`。
+      写入侧本来就有 `_episode_citations` 拒绝缺键，这两条钉的是**读回来之后**仍然分得清。
+- [x] **支持的计数必须是关于收益的，不是分组规模** —— **2026-09-16 加，因为跑出来的第一条观察
+      就是反例。** 四笔全部亏钱时 `(t1 > cut) != (return_pct > 0)` 退化成 `t1 > cut`：
+      「2 笔支持、2 笔反对」就是两个分组的大小，一个不可能与旁边中位数不一致的恒等式；
+      而且把窗口里最好的一笔（T-1 最低、亏损最小）记成了**反对**。
+      用例：`TestASupportCountMustBeAboutReturnsNotGroupMembership` 三条 ——
+      一条钉住亏损窗口里的两侧归属，一条把单笔收益挪过窗口中位而 T-1 全部不动、要求那笔换边，
+      一条断言 `payload["trades"]` 逐笔带 `supports` 使计数可从记录重推。
+      探针：把 `> ret_med` 退回 `> 0` → 恰好 2 条红（第 3 条钉的是记录自洽，不是判据方向）。
 - [ ] **生命周期真的走过**：`learning_candidates.status` 出现过 `observation` 以外的值，
       且每次迁移的 `actor` 在一个**代码拥有的名字集合**里（断言它不是模型输出的一部分）
+      —— **刻意未做，不是未完成。** `learning_candidates` 的设计注记明确要求 `status` 不被管线驱动，
+      `advance_candidate` 是它唯一的写者，晋升是**有审计的人的动作**（§8.2）。
+      让回放自己走这一步，等于把「证据驱动未来的策略变更」偷换成「回放自己批准自己」——
+      而那正是这一阶段要建立的东西。这一条要等**人**在真实的前向窗口上拨指针（Phase 4 的 U4）。
+      能诚实说的是：**管线不写 `status` 这件事本身是可查的**（`readmodels/learn.py` 的注记 + 本版无调用点）。
 - [ ] **D25 已修**：带空证据的候选**不得**离开 `observation`；且证据是 **EvidenceBundle**——
       声明的 `search_scope` / `matching_rule` / `eligible` 计数与实际重放一致，
       `opposing: []` 只在声明过搜索时被接受（负向用例 + 变异探针）

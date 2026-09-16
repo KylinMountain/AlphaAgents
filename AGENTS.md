@@ -25,6 +25,14 @@ Start with `docs/README.md` for which document is authoritative for what, and
 Enforced mechanically by `scripts/lint_harness.py` (run in CI). Violating
 one fails the build; the error message tells you how to fix it.
 
+**Scope, stated because it is easy to assume otherwise:** the harness scans
+`alpha_agents/` — that is its default root and CI passes it no arguments.
+`scripts/`, `tests/` and `research/` are **not** scanned. So rule 4 in
+particular is a convention outside the package, not a gate: the largest
+file in this repository is `scripts/walk_forward.py` at 1801 lines and
+nothing fails. Passing `scripts/` explicitly reports it plus 69 other
+pre-existing violations. See D37 in `docs/exec-plans/tech-debt-tracker.md`.
+
 1. **Layer direction.** `data → sources → tools → evolution → pipeline →
    agents → server`. Never import backwards. Cross-cutting (`config`,
    `http_client`, `notify`) may be imported from anywhere.

@@ -455,6 +455,31 @@ def _classify(ctx, day: str, pending: list[dict]):
     return price_map, counts, events
 
 
+def _cancel_class(reason: str) -> str:
+    """The cancel's *kind*, with the instance's numbers dropped.
+
+    An alert's reason is written for a human reading one line about one order:
+    ``价格涨走(7.51)`` names the price. Used as a grouping key it becomes a
+    class of one, so on the 2025-07-01 window six run-aways ranked *below* three
+    expiries and never reached the summary at all — the outcome this repository
+    spent a week making visible, hidden again by a string format. The ASCII
+    parenthetical is the instance; what precedes it is the reason.
+
+    The **full-width** parentheses in ``到期未到价（5天）`` are left alone on
+    purpose: five days and seven days are different reasons, not one reason
+    with a different number. Only the detail is aggregated away.
+
+    **This key is not the ledger's spelling.** The book records its own, longer
+    wording — ``价格已涨走(7.51远超介入上限6.01)`` where the alert says
+    ``价格涨走``, ``挂单到期未到价（挂5天，期限5天）`` where it says
+    ``到期未到价（5天）``. Measured on the 2025-07-01 window, **three of the four
+    reasons this line prints** matched no row in the book by that label (only
+    ``资金不足`` did, as the head of a longer string). The detail does survive,
+    but the label to search it by does not; that gap is D30.
+    """
+    return reason.split("(", 1)[0].strip()
+
+
 def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
     price_map, counts, events = _classify(ctx, day, pending)
     alerts = P.check_pending_orders(price_map, today=day, trader_id=ctx.trader)
@@ -471,7 +496,7 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
                     cap is not None and (alert.get("shares") or 0) > cap),
                 "reason": "open in entry zone"})
         else:
-            cancels.append(alert.get("reason", ""))
+            cancels.append(_cancel_class(alert.get("reason", "")))
     return {"counts": counts, "events": events, "fills": fills,
             "cancels": Counter(cancels)}
 
@@ -834,10 +859,25 @@ def _max_drawdown(values: list[float]) -> float:
 
 
 def _top_reasons(counter: Counter, limit: int = 3) -> str:
+    """The busiest cancel reasons, and **what was left out of them**.
+
+    Truncating a list for a summary is fine. A truncated list that reads as a
+    complete one is not: the line prints a total, the parts add up to less than
+    it, and a reader has no way to tell a missing reason from a miscount. On the
+    2025-07-01 window that was 47 cancels against parts summing to 41 — and the
+    six that were missing were missing for the class-of-one reason ``_cancel_class``
+    fixes, so the two defects were the same six events seen from two directions.
+    Naming the remainder is what makes the line self-checking.
+    """
     if not counter:
         return "无"
-    return "；".join(f"{reason[:34]}×{n}"
-                     for reason, n in counter.most_common(limit))
+    ranked = counter.most_common()
+    text = "；".join(f"{reason[:34]}×{n}" for reason, n in ranked[:limit])
+    rest = ranked[limit:]
+    if rest:
+        text += (f"；**另有 {sum(n for _, n in rest)} 条未列出**"
+                 f"（{len(rest)} 个原因）")
+    return text
 
 
 # ── cli ─────────────────────────────────────────────────────────────────────

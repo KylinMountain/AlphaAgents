@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -188,6 +188,38 @@ decision: averaging down had quietly stopped moving the stop. The column is now 
 not the same thing. 8 tests in `tests/test_trailing_stop.py` plus one in `test_intent.py`; three
 mutation probes (a silent `.get()`, a baked-in fallback, a removed clamp) each turn a specific
 test red. Against the live row the repair takes `24,705,832.43 → 15.01 → 17.45` (peak `18.37`).
+
+### D30 — The summary counts one vocabulary and the book records another, so its labels lead nowhere
+
+**Added 2026-09-16, while fixing the walk-forward's cancel line.** `walk_forward` builds its
+`挂单撤销` breakdown from the **alert** reasons `portfolio.check_pending_orders` returns, and an
+alert's reason is a short paraphrase written for a human reading one line about one order. The
+**ledger** records a different, longer string in `virtual_portfolio.close_reason`. The two agree
+for some families and diverge for others, and nothing maps one onto the other.
+
+**Measured** on the 2025-07-01 window (fresh replay directory, 30 sessions): **47** cancelled
+rows and **44 distinct** `close_reason` strings — the book is deliberately per-instance. Asking
+the book for each label the summary prints:
+
+| summary label | count shown | rows in the book matching that string |
+|---|---|---|
+| `资金不足` | 36 | **36** ✓ (the book's string is a longer one beginning with it) |
+| `价格涨走` | 6 | **0** ✗ (the book says `价格已涨走(…)`) |
+| `到期未到价（5天）` | 3 | **0** ✗ (the book says `挂单到期未到价（挂5天，期限5天）`) |
+| `到期未到价（7天）` | 2 | **0** ✗ (same shape, `挂7天`) |
+
+**Cost.** The summary is the artifact a person audits from, and **three of its four labels cannot
+be found in the book at all**; `挂单到期未到价` matches 5 rows, which merges the 5-day and 7-day
+cases the summary separates. So the line cannot be reconciled against the ledger by its own
+vocabulary — the detail survives (D30 is not data loss), but the index into it does not. This is
+the same shape as the rest of this file: **a number and its evidence disagree, and neither
+side is wrong on its own.**
+
+**Not paid.** The fix is a design choice with two honest shapes — have the alert carry the
+`close_reason` it wrote, or have the runner read the class back from the book — and either one
+moves the summary onto the ledger's vocabulary. It is not a one-line change: the alert reason is
+also what the live UI shows, so the two surfaces have to be reconciled rather than one renamed.
+`_cancel_class`'s docstring names this gap at the point of use.
 
 ### D25 — A candidate can walk the whole lifecycle on an empty evidence list
 

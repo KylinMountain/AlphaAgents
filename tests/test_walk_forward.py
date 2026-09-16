@@ -37,6 +37,7 @@ import hashlib
 import sqlite3
 import sys
 import threading
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -369,7 +370,10 @@ class TestANameThatCouldNotTradeDoesNotFill:
         assert _fills(result, _PICKED) == []
         assert _statuses(result, _PICKED) == [S.SUSPENDED]
         assert S.SUSPENDED in S.STILL_WAITING
-        assert _PICKED not in result["cancels"]
+        # "not cancelled" has to be asked of the counter's *values*, not of its
+        # keys: the keys are reasons, so ``_PICKED not in result["cancels"]``
+        # would hold whatever happened. Nothing was cancelled here at all.
+        assert not result["cancels"], result["cancels"]
 
 
 # ── 4. the ambiguous count is emitted ───────────────────────────────────────
@@ -404,3 +408,157 @@ class TestTheAmbiguousCountIsEmitted:
         assert report["meta"]["placeholder_decider_called_no_model"] is True
         assert report["meta"]["production_db_unchanged"] is True
         assert report["meta"]["corpus_untouched"] is True
+
+
+# ── the summary closes its own arithmetic ───────────────────────────────────
+
+
+class TestTheSummaryNamesWhatItLeftOut:
+    """Found by running the runner, not by reading it.
+
+    The 30-session window on real history (2025-07-01 → 2025-08-11) printed
+    ``挂单撤销 47（资金不足×36；到期未到价（5天）×3；到期未到价（7天）×2）``
+    — a total, and parts summing to 41. Neither half was right, and the two
+    halves are one defect seen twice: the six missing cancels *were* the
+    run-aways, and they were missing because each was a class of one (the class
+    below). With the key fixed they outrank ``到期未到价（5天）``, and with the
+    remainder named the line closes:
+
+    ``挂单撤销 47（资金不足×36；价格涨走×6；到期未到价（5天）×3；另有 2 条未列出（1 个原因））``
+    """
+
+    def test_a_truncated_breakdown_names_the_remainder(self):
+        # That window's measured distribution, not an illustration of one.
+        counter = Counter({"资金不足": 36, "价格涨走": 6,
+                           "到期未到价（5天）": 3, "到期未到价（7天）": 2})
+        text = walk_forward._top_reasons(counter)
+
+        assert "资金不足×36" in text, "the reasons it does show must still show"
+        assert "价格涨走×6" in text, "a class of six must outrank a class of three"
+        assert "另有 2 条未列出" in text
+        assert "1 个原因" in text
+        # The line and its remainder now account for the whole counter. The
+        # second assertion is the defect itself: the top three used to be
+        # printed alone, and 36 + 3 + 2 is not 47.
+        assert 36 + 6 + 3 + 2 == sum(counter.values())
+        assert 36 + 3 + 2 != sum(counter.values())
+
+    def test_a_breakdown_that_fits_says_nothing_about_a_remainder(self):
+        text = walk_forward._top_reasons(Counter({"资金不足": 4, "价格涨走": 1}))
+        assert text == "资金不足×4；价格涨走×1"
+        assert "未列出" not in text
+
+    def test_no_cancels_at_all(self):
+        assert walk_forward._top_reasons(Counter()) == "无"
+
+
+class TestTheInstanceIsCountedAsItsClass:
+    """The second half of the same defect.
+
+    ``价格涨走(7.51)`` is a sentence about one order, not a category. Counted
+    verbatim it made every run-away a class of one, so a category of three never
+    surfaced in a summary that ranks by count.
+    """
+
+    def test_a_price_in_the_reason_does_not_make_a_class_of_one(self):
+        assert walk_forward._cancel_class("价格涨走(7.51)") == "价格涨走"
+        assert walk_forward._cancel_class("价格涨走(30.32)") == "价格涨走"
+
+    def test_a_full_width_parenthetical_is_part_of_the_reason(self):
+        """Five days and seven days are different reasons, not one with a number."""
+        assert walk_forward._cancel_class("到期未到价（5天）") == "到期未到价（5天）"
+        assert walk_forward._cancel_class("到期未到价（7天）") == "到期未到价（7天）"
+
+    def test_a_reason_with_no_parenthetical_is_untouched(self):
+        for reason in ("资金不足", "无关联主线", "主线不存在", "组合回撤触及上限"):
+            assert walk_forward._cancel_class(reason) == reason
+
+    def test_the_thesis_date_is_the_instance(self):
+        assert walk_forward._cancel_class("论点已失效(2026-09-01)") == "论点已失效"
+
+
+def _cancelled_reasons(replay: Path) -> list[str]:
+    """What the kernel actually wrote on the cancelled orders.
+
+    Read-only, and through the sandbox connection, because the question is what
+    reached the book rather than what the caller passed.
+    """
+    con = sqlite3.connect(f"file:{replay / 'memory.db'}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT close_reason FROM virtual_portfolio WHERE status = 'cancelled'"
+        ).fetchall()
+    finally:
+        con.close()
+    return [row[0] for row in rows]
+
+
+class TestACancelIsCountedByItsKindAndRecordedByItsInstance:
+    """The wiring, driven through the runner rather than called directly.
+
+    ``TestTheInstanceIsCountedAsItsClass`` tests ``_cancel_class`` as a function,
+    and a function test is exactly the shape that lets an **unwired** function
+    pass: delete the call in ``_settle_entries`` and every one of those four
+    assertions still holds while the summary goes back to counting
+    ``价格涨走(7.51)`` as a class of one. That is the same "declared but never
+    called" defect this repository has already paid for three times, so the
+    wiring gets its own test on a real cancel.
+
+    The scenario is a run-away: the order's zone tops out at ``10.05``, and the
+    session opens at ``10.80`` — above the ``1.05 ×`` run-away bar, below the
+    ``11.00`` one-way limit. That is the cheapest deterministic cancel to build,
+    because it needs no theme row, no thesis and no expiry clock.
+    """
+
+    def test_a_runaway_is_summarised_as_its_kind(self, tmp_path):
+        """The whole chain: alert reason → counter key → ``summary.txt``.
+
+        Asserting the helper's return value would still leave ``_summary`` free
+        to print the raw counter, so the last assertion reads the file the run
+        actually wrote.
+        """
+        series, instruments = _normal()
+        series[_PICKED][_START] = _bar(open_=10.80, high=10.90, low=10.70,
+                                       close=10.85, change_pct=8.5)
+        replay, _ = _prepare(tmp_path, series, instruments)
+        result = _run(replay)
+        walk_forward.write_report(result, tmp_path / "out")
+
+        assert result["cancels"], (
+            "no cancel was produced, so this test would pass against a runner "
+            "that normalised nothing")
+        assert set(result["cancels"]) == {"价格涨走"}, (
+            f"the counter kept the instance: {dict(result['cancels'])}")
+        assert "(" not in "".join(result["cancels"]), (
+            "an ASCII parenthetical survived into a grouping key, which is what "
+            "made each run-away a class of one")
+        assert walk_forward._top_reasons(result["cancels"]) == "价格涨走×1"
+
+        summary = (tmp_path / "out" / "summary.txt").read_text(encoding="utf-8")
+        assert "价格涨走×1" in summary, (
+            f"the summary line did not reach the report:\n{summary}")
+        assert "价格涨走(10.80)" not in summary, (
+            "the report still prints the instance, so the fix never reached "
+            "the page a reader sees")
+
+    def test_the_instance_still_survives_on_the_order_row(self, tmp_path):
+        """Aggregating the key must not aggregate the record.
+
+        The summary is allowed to add up; the evidence is not allowed to. If
+        normalisation reached the write path too, the line would read tidily and
+        "which price ran away?" would have no answer anywhere.
+        """
+        series, instruments = _normal()
+        series[_PICKED][_START] = _bar(open_=10.80, high=10.90, low=10.70,
+                                       close=10.85, change_pct=8.5)
+        replay, _ = _prepare(tmp_path, series, instruments)
+        _run(replay)
+
+        reasons = _cancelled_reasons(replay)
+        assert len(reasons) == 1, reasons
+        assert reasons[0].startswith("价格已涨走("), (
+            f"the row lost its detail: {reasons[0]!r}")
+        assert "10.80" in reasons[0], (
+            f"the row no longer names the price that ran away: {reasons[0]!r}")
+        assert "10.05" in reasons[0], (
+            f"the row no longer names the limit it ran away from: {reasons[0]!r}")

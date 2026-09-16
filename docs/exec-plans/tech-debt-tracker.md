@@ -103,6 +103,92 @@ unique constraint permits). Verified against a **copy** of the live database: th
 probe confirmed it dies on the legacy `UNIQUE` constraint, which is the distinction this entry
 is about, not merely on a missing column.
 
+**The code fix did not end the outage, and that is the second half of the lesson.** A migration
+runs when a process *opens* the database, so a process that started before the migration was
+committed never runs it. The two live processes started 09-15 11:02 and the fix was committed
+09-16 13:13, so closes kept failing until they were restarted — the last `no such column` is
+14:58:39. The tests were green the whole time: the migration is correct and covered, and nothing
+re-ran it. **A migration is not paid until the running processes have been restarted**, and that
+applies to every schema-shaped fix in this list. Applied to production 09-16 17:10 by restarting
+both processes (`run-v2`, `web --no-monitor`); the columns now exist, the row counts are
+unchanged, `quick_check` returns `ok`, and a close books — `position_exits` was empty before and
+holds a `command_id` row after.
+
+### D27 — The fill deadlocked against a lock it was already holding (paid 2026-09-16)
+
+**Found by M1's first walk-forward fill, which hung.** `_fill_order` held `_write_lock` and
+then asked for the market's exposure cap. The cap is computed by `get_sentiment_cycle`,
+which on a cache miss *writes* the phase it just computed — and that write takes
+`_write_lock`. `_write_lock` is a plain `threading.Lock`, not an `RLock`, so the frame
+waited forever on a lock it already held: a self-deadlock with no error, no timeout and no
+log line.
+
+**Why production never showed it.** The 15:30 review pre-computes the next day's phase, so
+in the live book the cache is always warm and the miss path never runs. A fresh walk-forward
+directory has no phase, so M1's first fill took the branch the live system **cannot** reach.
+The bug was reachable only from the replay side, and the live side had been hiding it —
+which is the argument for the runner existing at all.
+
+**Paid 2026-09-16** by hoisting the read above the lock. The placement is load-bearing and
+the comment at `portfolio.py:748` says why: the phase is a fact about the market, not about
+this book, so it needs no lock. **No test yet** — a deadlock test needs a timeout harness,
+and the honest statement is that the fix is *unproven at the test layer*, not covered.
+(Working-tree line numbers; whole entry is uncommitted as of writing.)
+
+### D28 — A negative budget aborted a trader's whole pending-order cycle (paid 2026-09-16)
+
+**Found by the walk-forward on 2025-07-08.** The per-order budget was
+`min(available, max_per_stock, max_for_theme, sentiment_room, cluster_cap)`, and **every term
+in it can be negative**: `available` after a realized loss, `max_for_theme` once the theme
+line is over its cap, `cluster_cap` once a correlated cluster is. `min()` over a set that
+includes negatives is not a budget — it is the largest debt.
+
+**The cost was out of proportion to the arithmetic.** The negative value reached
+`_calc_shares`, produced a **negative share count**, and `consume_reservation` refused a
+negative cost by **raising**. That raise aborted the entire pending-order cycle for the
+trader, so one un-fundable order skipped every order behind it — a book-wide stall caused by
+one negative number.
+
+**Paid 2026-09-16** by flooring the *result* at `0.0` (`portfolio.py:796`), because "no room"
+already has a spelling in this function: `shares == 0` is the refusal the code below already
+knows how to say. A `max(0, ...)` on the theme term was already present and was not enough —
+the floor has to be on the sum, since the sum is what goes negative. **No test yet**, same
+caveat as D27.
+
+### D29 — The trailing stop measured its own output and diverged geometrically (paid 2026-09-16)
+
+**Found 2026-09-16**, reading the book during the D26 investigation: `000510 新金路`, entry
+`16.31`, carried a stop of `24,705,832.43` — up from `15,352,643.13` earlier the same day. The
+rule computed its distance as `(open_price - stop_loss) / open_price` and then wrote the result
+back to `stop_loss`, so every cycle multiplied the stop by `peak / open`. The log has the factor
+exactly: `35630.83 / 31635.21 = 1.126303 = 18.37 / 16.31`. Sixty-odd cycles of that is a
+seven-figure stop, and a seven-figure stop on an `18.00` stock reads as *stopped* on every cycle.
+The position could never be held again, and — once D26 was paid — it would have been sold on the
+first cycle that could write an exit.
+
+**Why the existing guards missed it.** They each covered one half, and the pair left a gap. The
+ratchet only ever *raises* a stop, so a corrupted value was preserved by the very guard meant to
+keep stops from loosening; and nothing checked that a stop is below the peak it claims to
+protect. `trailing_stop_pct` was asserted against a hostile *policy* value but not against a
+hostile *stored* value.
+
+**Paid 2026-09-16.** Three changes, each paired with its own test: a frozen
+`virtual_portfolio.initial_stop_loss` written once at the fill, so the distance is measured from
+the entry stop rather than from the rule's last answer; a repair that recomputes a stop sitting
+above the peak *before* the ratchet rather than inside it; and a `min(new_stop, peak_price)` clamp,
+so no input can place a stop above the peak. The derivation was also collapsed into one function,
+`portfolio_book.entry_stop` — the top-up carried its own copy and the two had already drifted.
+
+**The second bug that fix uncovered.** The top-up's `SELECT` listed its columns explicitly and did
+not include `initial_stop_loss`, while its guard read
+`"initial_stop_loss" in pos.keys()` — which tests the *query's* column list, not the table's. The
+guard answered False, the caller *declined*, and a decline is indistinguishable from a policy
+decision: averaging down had quietly stopped moving the stop. The column is now selected, and
+`entry_stop` **raises** when handed a row without it, because a NULL column and an absent one are
+not the same thing. 8 tests in `tests/test_trailing_stop.py` plus one in `test_intent.py`; three
+mutation probes (a silent `.get()`, a baked-in fallback, a removed clamp) each turn a specific
+test red. Against the live row the repair takes `24,705,832.43 → 15.01 → 17.45` (peak `18.37`).
+
 ### D25 — A candidate can walk the whole lifecycle on an empty evidence list
 
 **Added 2026-09-16, while designing M3** (§8 of the T+1 plan). `learning_candidates.save_candidate`

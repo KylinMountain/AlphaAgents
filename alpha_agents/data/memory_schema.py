@@ -159,7 +159,13 @@ CREATE TABLE IF NOT EXISTS virtual_portfolio (
     order_date TEXT NOT NULL,             -- 挂单日
     entry_low REAL,                       -- 介入区间下限
     entry_high REAL,                      -- 介入区间上限
-    stop_loss REAL,                       -- 止损价
+    stop_loss REAL,                       -- 止损价（会被移动止损抬高）
+    -- The stop this position was *opened* with, written once at the fill and
+    -- never raised. ``stop_loss`` above ratchets with the trailing rule, so it
+    -- stops recording where the position started — and a rule that measures its
+    -- distance from the entry stop must not read it back, or it measures its own
+    -- output (D29: the trailing stop diverged to 15,352,643.13 on a 16.31 entry).
+    initial_stop_loss REAL,               -- 开仓止损，写一次，不随移动止损变
     target_price REAL,                    -- 止盈目标价
     expire_days INTEGER DEFAULT 2,        -- 挂单有效天数
     -- Fill fields (set when order triggers)

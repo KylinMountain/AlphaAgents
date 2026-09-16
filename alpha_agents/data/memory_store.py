@@ -108,6 +108,10 @@ def _get_conn() -> sqlite3.Connection:
             # realised exit leg carries it too, so "which idea earned this"
             # survives both a re-opened position and a rewritten thesis.
             "ALTER TABLE virtual_portfolio ADD COLUMN thesis_id INTEGER",
+            # The stop the position opened with, frozen at the fill. The
+            # trailing rule writes to ``stop_loss``, so that column cannot also
+            # be where the entry distance is read from (D29).
+            "ALTER TABLE virtual_portfolio ADD COLUMN initial_stop_loss REAL",
             "ALTER TABLE position_exits ADD COLUMN thesis_id INTEGER",
             # The rare in-between case: command_id present, request_json not.
             # The rebuild above creates both natively, so on a rebuilt table

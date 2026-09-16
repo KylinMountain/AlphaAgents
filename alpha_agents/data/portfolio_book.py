@@ -30,6 +30,62 @@ from alpha_agents.data.memory_store import _get_conn, _write_lock
 logger = logging.getLogger(__name__)
 
 
+def _column(row, name: str):
+    """Read ``name`` off a ``dict`` or a ``sqlite3.Row``.
+
+    An *absent* column raises. ``initial_stop_loss`` is NULL on rows that
+    predate it, and that is a value; confusing the two is what let D29 hide.
+    The old guard read ``"initial_stop_loss" in pos.keys()``, which tests the
+    *query's* column list — so a SELECT that forgot the column made the caller
+    decline silently, and a silent decline looks exactly like a policy call.
+    """
+    keys = row.keys() if hasattr(row, "keys") else row
+    if name not in keys:
+        raise KeyError(
+            f"{name} was not selected — a NULL column and an absent one are "
+            f"not the same thing (D29)")
+    return row[name]
+
+
+def entry_stop(pos, open_price: float, fallback_pct: float | None) -> float:
+    """The stop a position was *opened* with, in price terms. ``0.0`` if unknown.
+
+    Reads ``initial_stop_loss`` — written once, at the fill — and never
+    ``stop_loss``: that column is where the trailing rule writes its own output,
+    so a distance measured from it is a distance the rule measured from itself.
+    On 2026-09-16 that fed back into itself until ``000510 新金路`` carried a
+    stop of ``15,352,643.13`` on a ``16.31`` entry, growing by exactly
+    ``peak / open`` every cycle (D29).
+
+    The fallbacks, in order, are a ``stop_loss`` that still sits at or below the
+    entry (a row from before the column existed and not yet ratcheted past cost),
+    then ``open_price × (1 − fallback_pct)``. The caller supplies that last
+    distance rather than this module choosing one, because the two callers want
+    different answers: the trailing rule always has to name a stop, while a
+    top-up can decline to move one it cannot measure. A fallback baked in here
+    would decide that for them.
+
+    ``None`` for ``fallback_pct`` is that refusal, spelled out: the answer is
+    then ``0.0``, which the top-up reads as "cannot measure it, leave the stop
+    alone". Averaging down narrows risk per share whether or not the stop moves,
+    so declining is safe there — it is a gap, not a decision.
+
+    It lives in the read module because it answers a question about a row, and
+    because two callers deriving it separately is how the two would drift.
+    """
+    if open_price <= 0:
+        return 0.0
+    frozen = _column(pos, "initial_stop_loss")
+    if frozen and 0 < frozen <= open_price:
+        return float(frozen)
+    current = _column(pos, "stop_loss") or 0
+    if 0 < current <= open_price:
+        return float(current)
+    if fallback_pct is None:
+        return 0.0
+    return round(open_price * (1 - fallback_pct), 2)
+
+
 def _cancel_order_unlocked(order_id: int, reason: str) -> None:
     """Cancel a pending order. Caller must already hold _write_lock.
 

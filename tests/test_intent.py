@@ -501,6 +501,44 @@ class TestTheAutomatedTopUpGoesThroughTheDoor:
         assert new_pct == pytest.approx(old_pct, abs=1e-3), \
             "the stop must keep the same distance below the new average"
 
+    def test_a_top_up_declines_when_the_entry_stop_cannot_be_measured(
+            self, store, traders_dir, theme, caplog):
+        """The companion: there is a case where the top-up must *not* move
+        the stop, and "moved it anyway" is what this pins down.
+
+        ``initial_stop_loss`` is NULL on rows that predate the column, and a
+        stop that has ratcheted above cost cannot supply the fraction either.
+        Inventing one (``HARD_STOP_PCT``, say) would be this layer deciding a
+        number it was never given. Averaging down narrows risk per share with
+        or without the stop moving, so leaving it is safe — but it is a gap and
+        not a decision, so it says so.
+        """
+        oid = self._open_and_drop(traders_dir)
+        conn = _db()
+        before = conn.execute(
+            "SELECT shares FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()["shares"]
+        # No recorded entry stop, and a stop that sits above cost: both routes
+        # to the fraction are gone, which leaves the fallback decision exposed.
+        conn.execute("UPDATE virtual_portfolio SET initial_stop_loss = NULL, "
+                     "stop_loss = 12.0 WHERE id = ?", (oid,))
+        conn.commit()
+
+        with caplog.at_level("WARNING", logger="alpha_agents.data.portfolio"):
+            added = P.add_to_position(oid, price=9.4, reason="rule add",
+                                      recalc_stop=True)
+
+        assert added is not None, "the add itself must still go through"
+        assert added["stop_loss"] is None, \
+            "no measurable distance means no new stop, not a made-up one"
+        row = conn.execute(
+            "SELECT stop_loss, shares FROM virtual_portfolio WHERE id = ?",
+            (oid,)).fetchone()
+        assert row["shares"] > before
+        assert row["stop_loss"] == pytest.approx(12.0)
+        assert any("cannot be measured" in r.message for r in caplog.records), \
+            "a declined recalc is a gap in the rule, and a silent gap is how D29 hid"
+
     def test_an_agent_add_does_not_move_the_stop(
             self, store, traders_dir, theme):
         """``recalc_stop`` is the rule's policy, not the agent's: an

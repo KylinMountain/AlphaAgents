@@ -25,6 +25,10 @@ from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_
 # it through this module.
 from alpha_agents.data.theme_gate import resolve_theme, theme_admits, theme_gate
 from alpha_agents.data.trader import DEFAULT_TRADER
+# The entry-zone predicate is shared with the T+1 walk-forward settlement: one
+# reading of a zone, asked of a live quote here and of a session's open there.
+# ``t1_execution`` imports nothing but ``dataclasses``, so this adds no cycle.
+from alpha_agents.data.t1_execution import in_entry_zone
 # The exit slice lives in portfolio_exit: the friction model, the append-only
 # exit legs, and the close path that books them. Re-exported here because entry
 # sizing needs LOT_SIZE and because callers have always reached for
@@ -60,6 +64,7 @@ from alpha_agents.data.portfolio_book import (
     _cancel_order,
     _cancel_order_impl,
     _cancel_order_unlocked,
+    entry_stop,
     get_closed_positions,
     get_open_positions,
     get_pending_orders,
@@ -630,19 +635,11 @@ def check_pending_orders(
         # "未到价" meaning "we could not look".
         expire_days = order.get("expire_days")
 
-        # Check if price is in entry zone
-        triggered = False
-        if entry_low and entry_high:
-            triggered = entry_low <= price <= entry_high
-        elif entry_high:
-            # Only upper bound: buy at or below
-            triggered = price <= entry_high
-        elif entry_low:
-            # Only lower bound: buy at or above (breakout style)
-            triggered = price >= entry_low
-        else:
-            # No zone specified: trigger immediately (market order)
-            triggered = True
+        # Check if price is in entry zone. The predicate is imported rather
+        # than inlined: the walk-forward runner asks the same question of a
+        # session's open, and two copies of one rule is how an entry rule and
+        # a settlement rule drift apart while both still look right.
+        triggered = in_entry_zone(price, entry_low, entry_high)
 
         if triggered:
             fill_alert = _fill_order(order, fill_price=price, fill_date=today)
@@ -748,11 +745,23 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
 
     clock.guard_fill(fill_date, order_id=order["id"], conn=_get_conn())
 
+    # The market's exposure cap is read **before** the write lock, and that
+    # placement is the fix for a deadlock rather than a style choice.
+    #
+    # The phase is a fact about the market, not about this book, so it needs no
+    # lock. Reaching for it under the lock hangs the fill: ``get_sentiment_cycle``
+    # computes and *writes* its phase on a cache miss, that write takes
+    # ``_write_lock``, and ``_write_lock`` is a plain ``threading.Lock`` — so it
+    # waits forever on a lock this frame is already holding. Production hid this
+    # because the 15:30 review pre-computes tomorrow's phase; a fresh walk-forward
+    # directory has no phase, and M1's first fill hung on it. The failure is
+    # silent and unbounded, which is why it is a fix and not a note.
+    sentiment_cap = get_sentiment_exposure_limit(trader_id)
+
     with _write_lock:
-        # Capital checks (including sentiment-based total exposure limit)
-        # Must be inside lock to prevent race conditions with concurrent fills
+        # Capital checks must be inside lock to prevent race conditions with
+        # concurrent fills.
         available = get_available_capital(trader_id)
-        sentiment_cap = get_sentiment_exposure_limit(trader_id)
         invested = get_invested_capital(trader_id)
         sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
 
@@ -774,8 +783,19 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # per-theme cap counted 金属铜 and 小金属概念 as two and would let
         # them take 60% between them while sharing 6 of 10 names.
         cluster_cap = _cluster_room(theme, trader_id)
-        max_amount = min(available, max_per_stock, max(0, max_for_theme),
-                         sentiment_room, cluster_cap)
+        # Floor at zero, and that is a fix rather than formatting. Every term
+        # above can be negative — ``available`` after a realized loss,
+        # ``max_for_theme`` once the line is over its cap, ``cluster_cap`` once
+        # a correlated cluster is — and ``min()`` over them is not a budget.
+        # Unfloored, the negative value reached ``_calc_shares``, produced a
+        # negative share count, and ``consume_reservation`` refused a negative
+        # cost by **raising** — which aborted the whole pending-order cycle for
+        # that trader instead of skipping one order. Found by the walk-forward
+        # on 2025-07-08; no room is a refusal, and ``shares == 0`` below is the
+        # code that already knows how to say so.
+        max_amount = max(0.0, min(available, max_per_stock,
+                                   max(0, max_for_theme), sentiment_room,
+                                   cluster_cap))
 
         # Portfolio drawdown gates *new* risk and never forces an exit.
         # Liquidating at a drawdown level sells the bottom, and in a system
@@ -797,8 +817,9 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             # the book, which is a selection bias in the learning data
             # with nothing to do with the agent's judgement.
             one_lot = fill_price * LOT_SIZE
-            ceiling = min(available, capital * max_pos_pct,
-                          max(0, max_for_theme), sentiment_room, cluster_cap)
+            ceiling = max(0.0, min(available, capital * max_pos_pct,
+                                   max(0, max_for_theme), sentiment_room,
+                                   cluster_cap))
             if one_lot <= ceiling:
                 shares = LOT_SIZE
                 logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"
@@ -854,9 +875,11 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             }
         conn.execute(
             "UPDATE virtual_portfolio SET "
-            "status = ?, open_date = ?, open_price = ?, shares = ? "
+            "status = ?, open_date = ?, open_price = ?, shares = ?, "
+            "initial_stop_loss = ? "
             "WHERE id = ?",
-            (target, fill_date, fill_price, shares, order["id"]),
+            (target, fill_date, fill_price, shares, order.get("stop_loss"),
+             order["id"]),
         )
         # The held reservation is now the actual cost. Entry_high
         # over-estimated; the over-reserve is returned to available.
@@ -970,11 +993,11 @@ def _open_position_impl(
         cur = conn.execute(
             "INSERT INTO virtual_portfolio "
             "(code, name, theme, order_date, open_date, open_price, shares, "
-            " stop_loss, target_price, status, source, reason, trader_id, "
-            " prediction_id, thesis_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
+            " stop_loss, initial_stop_loss, target_price, status, source, reason, "
+            " trader_id, prediction_id, thesis_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
             (code, name, theme, open_date, open_date, open_price, shares,
-             stop_loss, target_price, source, reason, trader_id,
+             stop_loss, stop_loss, target_price, source, reason, trader_id,
              prediction_id, thesis_id),
         )
         position_id = cur.lastrowid
@@ -1034,7 +1057,8 @@ def _add_to_position_impl(position_id: int, *, price: float, reason: str,
         conn = _get_conn()
         pos = conn.execute(
             "SELECT code, name, theme, open_price, shares, reason, trader_id, "
-            "stop_loss FROM virtual_portfolio WHERE id = ? AND status = 'open'",
+            "stop_loss, initial_stop_loss "
+            "FROM virtual_portfolio WHERE id = ? AND status = 'open'",
             (position_id,)).fetchone()
         if not pos or price <= 0:
             return None
@@ -1071,18 +1095,38 @@ def _add_to_position_impl(position_id: int, *, price: float, reason: str,
         # average: averaging down must not widen the risk per share. Only
         # the automated top-up sets it; the agent's own adds leave the
         # stop where the agent put it.
+        #
+        # The anchor comes from ``entry_stop``, the single definition of "the
+        # stop this position was opened with", shared with the trailing rule
+        # instead of re-derived here. Two derivations can disagree, and the
+        # disagreement is invisible until the numbers drift (D29).
+        #
+        # The lookup used to be guarded with ``"initial_stop_loss" in
+        # pos.keys()``, which tests the *query's* column list, not the table's:
+        # when the SELECT above forgot the column the guard answered False and
+        # the stop was silently left un-recalculated — a decline that looked
+        # exactly like a policy decision. The column is selected now, and the
+        # sanity check is on the value.
         new_stop = None
         if recalc_stop:
-            old_stop = pos["stop_loss"] or 0
             old_open = pos["open_price"] or 0
-            if old_open > 0 and old_stop > 0:
-                new_stop = round(
-                    avg * (1 - (old_open - old_stop) / old_open), 2)
+            # ``None`` fallback = "do not invent a distance". Declining here is
+            # safe (averaging down narrows risk per share with or without the
+            # stop moving) but it is a gap, so it says so out loud.
+            anchor = entry_stop(pos, old_open, None)
+            if old_open > 0 and anchor > 0:
+                new_stop = round(avg * (1 - (old_open - anchor) / old_open), 2)
+            else:
+                logger.warning(
+                    "Top-up #%d %s left the stop alone: the entry stop cannot "
+                    "be measured (open=%.3f, stop=%s), so no fraction can be "
+                    "held (D29)",
+                    position_id, pos["code"], old_open, pos["stop_loss"])
         if new_stop is not None:
             conn.execute(
                 "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
-                "stop_loss = ?, reason = ? WHERE id = ?",
-                (total, avg, new_stop,
+                "stop_loss = ?, initial_stop_loss = ?, reason = ? WHERE id = ?",
+                (total, avg, new_stop, new_stop,
                  f"{pos['reason'] or ''} | {reason}"[:300], position_id))
         else:
             conn.execute(

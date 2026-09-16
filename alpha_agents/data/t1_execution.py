@@ -188,3 +188,28 @@ def capacity_shares(adv20: float | None, *,
     if adv20 is None or adv20 <= 0:
         return 0
     return int(adv20 * participation) // lot_size * lot_size
+
+
+def in_entry_zone(price: float, entry_low: float | None,
+                  entry_high: float | None) -> bool:
+    """Is ``price`` inside the order's entry zone?
+
+    **One implementation, two readers.** ``check_pending_orders`` asks this of a
+    live quote; the walk-forward runner asks it of a session's open. Those two
+    used to be the same eight lines in one place and a copy in the other, which
+    is how an entry rule and a settlement rule drift apart while both still look
+    right — the failure this repository keeps naming. The copy was deleted rather
+    than tested for agreement, because a mirror test would only prove the mirror
+    matches my reading of the original, not the original.
+
+    The empty-zone case is a market order and answers ``True``. Bounds are read
+    for **truthiness**, which is the original's behaviour and is load-bearing:
+    a zone of ``(0, 0)`` means "no zone stated", not "buy at zero".
+    """
+    if entry_low and entry_high:
+        return entry_low <= price <= entry_high
+    if entry_high:
+        return price <= entry_high
+    if entry_low:
+        return price >= entry_low
+    return True

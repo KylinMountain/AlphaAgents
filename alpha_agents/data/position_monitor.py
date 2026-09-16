@@ -25,6 +25,10 @@ from alpha_agents.data.memory_store import (
 from alpha_agents.data.portfolio import (
     ADD_POSITION_DROP_PCT, HARD_STOP_PCT, _estimate_net_close_result,
 )
+# Where a position's entry stop is read, from the module that reads rows.
+# Not re-derived here: the top-up path in ``portfolio`` needs the same answer,
+# and two derivations of one rule is how the two drift apart.
+from alpha_agents.data.portfolio_book import entry_stop
 # The two write paths come from the modules that own them, not from
 # ``portfolio``. ``portfolio`` does re-export both names for callers, but
 # it does so at the *bottom* of that file — below the line that imports
@@ -245,14 +249,37 @@ def check_positions(
             holding_days = pos.get("holding_days", 0)
 
         # ── Trailing stop (移动止损) ──
-        # When stock hits new highs, raise stop_loss to protect profits
+        # When stock hits new highs, raise stop_loss to protect profits.
+        #
+        # The distance comes from the stop the position was *opened* with, not
+        # from ``stop_loss``: that column is where this block writes the trailed
+        # stop, so reading it back measures the block's own last answer. The
+        # formula used to do exactly that, and ``new_stop = stop × peak / open``
+        # diverges geometrically — 000510 新金路 ran from a sane stop to
+        # 15,352,643.13 on a 16.31 entry, growing by exactly ``peak / open``
+        # every cycle until it stopped being a price at all (D29). ``open_price``
+        # is the one field this rule cannot move, so it is the anchor.
         stop_loss = pos.get("stop_loss") or 0
         peak_price = open_price * (1 + peak / 100) if open_price else 0
 
+        # A stop above the peak the position has already reached is not a stop
+        # — it is a market sell wearing one, and it is what the divergent
+        # formula left behind. Repaired *before* the ratchet rather than inside
+        # it: the ratchet only ever raises, so a corrupted value would otherwise
+        # be preserved by the very guard meant to keep stops from loosening.
+        if peak_price > 0 and stop_loss > peak_price:
+            repaired = entry_stop(pos, open_price, HARD_STOP_PCT / 100)
+            logger.warning(
+                "止损 %.2f 高于峰值 %.2f（%s %s）：按开仓止损 %.2f 重算 —— "
+                "高于峰值的止损不是止损，是自引用公式留下的坏值（D29）",
+                stop_loss, peak_price, code, pos.get("name", ""), repaired)
+            stop_loss = repaired
+
         if peak_price > open_price and stop_loss > 0:
+            anchor_stop = entry_stop(pos, open_price, HARD_STOP_PCT / 100)
             # Trailing stop = peak price * (1 - trailing_pct)
-            # trailing_pct starts at original stop distance, tightens as profit grows
-            original_stop_pct = (open_price - stop_loss) / open_price if open_price else 0.05
+            # trailing_pct starts at the entry stop distance, tightens as profit grows
+            entry_stop_pct = (open_price - anchor_stop) / open_price if anchor_stop else 0.05
             # Get dynamic trailing stop from sentiment cycle
             try:
                 from alpha_agents.data.sentiment_cycle import get_sentiment_cycle
@@ -260,16 +287,20 @@ def check_positions(
                 _trailing_pct_from_cycle = _cycle["strategy"]["trailing_stop_pct"] / 100
             except Exception:
                 _trailing_pct_from_cycle = 0.05
-            trailing_pct = min(original_stop_pct, _trailing_pct_from_cycle)
+            trailing_pct = min(entry_stop_pct, _trailing_pct_from_cycle)
 
             if current_return >= 5:
                 # Once up 5%+, trail at 5% from peak (lock in most of the gain)
                 new_stop = round(peak_price * (1 - trailing_pct), 2)
             elif current_return >= 3:
-                # Up 3-5%, trail at original stop distance from peak
-                new_stop = round(peak_price * (1 - original_stop_pct), 2)
+                # Up 3-5%, trail at the entry stop distance from peak
+                new_stop = round(peak_price * (1 - entry_stop_pct), 2)
             else:
-                new_stop = stop_loss  # Keep original stop
+                new_stop = stop_loss  # Keep the stop where it is
+
+            # Never above the peak: a stop there is a market sell, and this is
+            # the invariant the divergence violated.
+            new_stop = min(new_stop, peak_price)
 
             if new_stop > stop_loss:
                 logger.info("Trailing stop: %s %s 止损 %.2f → %.2f (峰值%.2f, 当前%.2f)",

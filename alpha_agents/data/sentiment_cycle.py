@@ -13,7 +13,17 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+from alpha_agents.data import clock
+
 logger = logging.getLogger(__name__)
+
+#: Why every "today" below comes from ``clock`` and not from ``datetime``.
+#: ``datetime.now()`` is the wall clock, and under ``evolution.replay_mode``
+#: the wall clock is the one thing that is *not* the simulated day. A phase
+#: computed for the real date and then used to size positions in a 2025 window
+#: is not a stale cache — it is 2026 market state deciding 2025 exposure, the
+#: future leaking in through the risk cap. Live behaviour is unchanged:
+#: ``clock.today()`` is the local date when no replay is active.
 
 # Phase definitions with strategy parameters
 PHASES = {
@@ -235,10 +245,19 @@ def _extract_indicators_from_snapshot(snapshot: dict) -> dict:
     }
 
 
+def _today_date() -> datetime:
+    """The kernel clock as a date object. The one way this module says "today"."""
+    return datetime.strptime(clock.today(), "%Y-%m-%d")
+
+
 def _get_recent_trading_dates(n: int = 5) -> list[str]:
-    """Get the last N trading dates (or calendar dates as approximation)."""
+    """Get the last N trading dates (or calendar dates as approximation).
+
+    Counted back from the kernel clock, so a replay's "recent three days" are
+    the three before the day being replayed rather than three before today.
+    """
     dates = []
-    d = datetime.now()
+    d = _today_date()
     while len(dates) < n:
         d -= timedelta(days=1)
         if d.weekday() < 5:  # Skip weekends
@@ -368,7 +387,7 @@ def compute_and_save_sentiment(target_date: str = "") -> dict:
 
     if not target_date:
         # Determine next trading day
-        today = datetime.now()
+        today = _today_date()
         if today.weekday() == 4:  # Friday → next Monday
             next_day = today + timedelta(days=3)
         elif today.weekday() == 5:  # Saturday → next Monday
@@ -395,20 +414,36 @@ def compute_and_save_sentiment(target_date: str = "") -> dict:
         if breadth:
             ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
 
-    # Backfill if not enough data
+    # Backfill if not enough data.
+    #
+    # Not under replay. ``backfill_snapshots`` fills from the **whole corpus**
+    # — the last N dates that exist, which for a 2025 window are 2026 dates —
+    # and writes them into this run's own snapshot store. That is the future
+    # entering the replay through a side door: the numbers would not be read by
+    # today's phase (the lookup is by date), but the run's state would hold
+    # market facts from after the day it is simulating, and nothing downstream
+    # could tell. It also tries the network when the local fill comes up short,
+    # and a replay that reaches the network is not a replay.
     if len(limit_up_trend) < 2:
-        backfill_snapshots(days=10)
-        limit_up_trend, broken_rates, max_boards, ad_ratios = [], [], [], []
-        for date_str in dates[-3:]:
-            snap = get_snapshot(date_str, "limit_up_pool")
-            if snap:
-                ind = _extract_indicators_from_snapshot(snap)
-                limit_up_trend.append(ind["limit_up_count"])
-                broken_rates.append(ind["broken_rate"])
-                max_boards.append(ind["max_board"])
-            breadth = get_snapshot(date_str, "market_breadth")
-            if breadth:
-                ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
+        from alpha_agents.evolution.replay_mode import is_replay_active
+        if is_replay_active():
+            logger.info(
+                "Replay active: not backfilling snapshots. The replay's own "
+                "snapshot store starts empty by design, and the backfill reads "
+                "dates from outside the replayed window.")
+        else:
+            backfill_snapshots(days=10)
+            limit_up_trend, broken_rates, max_boards, ad_ratios = [], [], [], []
+            for date_str in dates[-3:]:
+                snap = get_snapshot(date_str, "limit_up_pool")
+                if snap:
+                    ind = _extract_indicators_from_snapshot(snap)
+                    limit_up_trend.append(ind["limit_up_count"])
+                    broken_rates.append(ind["broken_rate"])
+                    max_boards.append(ind["max_board"])
+                breadth = get_snapshot(date_str, "market_breadth")
+                if breadth:
+                    ad_ratios.append(breadth.get("advance_decline_ratio", 1.0))
 
     if not limit_up_trend:
         result = {
@@ -417,7 +452,7 @@ def compute_and_save_sentiment(target_date: str = "") -> dict:
         }
     else:
         # Get previous phase for inertia
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = clock.today()
         prev = _load_phase_from_db(today_str)
         previous_phase = prev["phase"] if prev else ""
 
@@ -442,7 +477,7 @@ def get_sentiment_cycle() -> dict:
     Returns:
         {"phase": ..., "confidence": ..., "indicators": ..., "strategy": ...}
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = clock.today()
 
     # Try DB first (set by previous day's review)
     cached = _load_phase_from_db(today)

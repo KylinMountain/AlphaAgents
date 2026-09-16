@@ -9,6 +9,10 @@ wrong the moment it lags the code.
 
 ## If you are reviewing this project from outside
 
+**要一份可以直接转发的单文件交接包？** 用 [`REVIEW_PACKET.md`](REVIEW_PACKET.md) ——
+它把下面这些打包成一封**自包含**的信：项目是什么、现在的实测状态、六个待评问题、
+一个代表性失败、以及「不要看什么」。下面是权威原文，那份是它的导出。
+
 Read these **in this order**. Each answers a different question, and reading
 them out of order produces confident answers to the wrong question.
 

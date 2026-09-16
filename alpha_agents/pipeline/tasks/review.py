@@ -30,6 +30,7 @@ from alpha_agents.data.portfolio import (
     get_open_positions_summary, get_today_changes_summary, get_portfolio_stats,
     format_portfolio_stats,
 )
+from alpha_agents.data.report_store import save_review
 
 logger = logging.getLogger(__name__)
 
@@ -291,14 +292,22 @@ def _update_themes_from_market_data(existing_themes: list[dict]) -> None:
         logger.warning("Theme update from market data failed: %s", e)
 
 
-def _verify_today_predictions(predictions: list[dict]) -> str:
+def _verify_today_predictions(predictions: list[dict]) -> dict:
     """Batch-verify today's predictions: entry_price → close_price.
 
     All computation done in Python — no LLM calls needed.
     Uses: first recommendation's entry_price vs today's actual close price.
+
+    Returns the rendered table **and** the numbers behind it. It used to
+    return only the table, which is why the scheduled task could print a
+    hit rate and archive nothing: the counts lived for one expression and
+    were then discarded. ``total`` is the hit-rate denominator — the rows
+    the market actually priced, with limit-up / limit-down "not filled"
+    rows excluded, because they were never tradeable.
     """
     if not predictions:
-        return "今日无待验证预测"
+        return {"text": "今日无待验证预测", "total": 0, "hits": 0,
+                "neutral": 0, "unreachable": 0, "unique": 0, "accuracy": 0.0}
 
     # Filter out signal-type predictions (涨停确认股 — not actionable recommendations)
     actionable = [p for p in predictions if p.get("report_type") not in ("intraday_signal",)]
@@ -403,7 +412,10 @@ def _verify_today_predictions(predictions: list[dict]) -> str:
         tr = data["hits"] / data["total"] * 100 if data["total"] else 0
         summary += f"  {theme}: {data['hits']}/{data['total']} ({tr:.0f}%)\n"
 
-    return "\n".join(lines) + "\n" + summary
+    return {"text": "\n".join(lines) + "\n" + summary,
+            "total": total_verified, "hits": hits, "neutral": neutral,
+            "unreachable": unreachable, "unique": len(unique),
+            "accuracy": round(hit_rate / 100, 4)}
 
 
 def _format_themes(themes: list[dict]) -> str:
@@ -676,7 +688,8 @@ async def run_review() -> str | None:
 
     logger.info("Review: %d predictions, %d themes", len(pending), len(themes))
 
-    pred_ctx = await asyncio.to_thread(_verify_today_predictions, pending)
+    pred_verdict = await asyncio.to_thread(_verify_today_predictions, pending)
+    pred_ctx = pred_verdict["text"]
     logger.info("Prediction verification done (Python batch)")
 
     # 2. Auto-discover/update themes from real sector data
@@ -827,5 +840,37 @@ async def run_review() -> str | None:
             report += "\n\n" + evolution_report
     except Exception as e:
         logger.warning("Evolution post_review failed: %s", e)
+
+    # Archive the review the Memory page reads. Until 2026-09-16 the only
+    # caller of `save_review` was the manual CLI in
+    # `pipeline/daily_review.py`, so the scheduled 15:30 task wrote a
+    # report, pushed it to the phone, and left `reviews` empty — the page
+    # printed "表在 · 0 行" every single day while a review was in fact
+    # being produced. That is the same shape as the rest of this repo's
+    # defects: a declared store with no writer on the path that runs.
+    #
+    # The numbers come from the same Python pass that built the agent's
+    # context, so the archived row and the report cannot disagree about the
+    # day's hit rate. `unreachable` rides along in `market_data` rather than
+    # in `predictions_count` because it is deliberately outside the
+    # denominator — see `_verify_today_predictions`.
+    try:
+        review_id = await asyncio.to_thread(
+            save_review,
+            date=today,
+            predictions_count=pred_verdict["total"],
+            correct_count=pred_verdict["hits"],
+            accuracy=pred_verdict["accuracy"],
+            review_text=report or "",
+            market_data={"source": "scheduled_review",
+                         "unique": pred_verdict["unique"],
+                         "neutral": pred_verdict["neutral"],
+                         "unreachable": pred_verdict["unreachable"]},
+        )
+        logger.info("Review archived: #%s (%d/%d, %.0f%%)", review_id,
+                    pred_verdict["hits"], pred_verdict["total"],
+                    pred_verdict["accuracy"] * 100)
+    except Exception as e:
+        logger.warning("Review archive failed: %s", e)
 
     return report

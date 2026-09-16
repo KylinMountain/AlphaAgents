@@ -42,15 +42,35 @@ def _read_episodes() -> tuple[dict, int]:
 
 
 def _read_outcomes() -> tuple[dict, int]:
+    """The three label kinds, and the two ways a ``pending`` row can read.
+
+    ``pending`` is not one thing. A label whose evidence window has not
+    closed yet is the store working — that is D10's own calendar, and it is
+    the reason ``available_at`` is stored at all. A label whose window *has*
+    closed with nothing superseding it is a defect: whatever was meant to
+    resolve it never ran. The page has to keep them apart, because
+    "待定 61 条" on its own reads as a backlog and is mostly a calendar.
+
+    ``broken_chains`` is a **count**, not the English sentences
+    ``outcomes.integrity`` writes. Those sentences are a machine's
+    complaints — they are what ``scripts/episode_coverage.py`` prints — and
+    a product page renders Chinese. Both readers take their numbers from
+    the same ``pending_breakdown``, so the figure at the top of the card and
+    the complaint under it cannot drift apart.
+    """
     from alpha_agents.data import memory_store
     from alpha_agents.data import outcomes as oc
     conn = memory_store._get_conn()
     counts = oc.counts(conn)
     rows = sum(sum(states.values()) for states in counts.values())
+    split = oc.pending_breakdown(conn)
     return {
         "counts": counts,
         "pending": oc.pending_labels(conn, limit=200),
-        "integrity": oc.integrity(conn),
+        "breakdown": {"pending": split["pending"],
+                      "overdue": len(split["overdue"]),
+                      "awaiting": len(split["awaiting"])},
+        "broken_chains": len(oc.broken_chains(conn)),
     }, rows
 
 

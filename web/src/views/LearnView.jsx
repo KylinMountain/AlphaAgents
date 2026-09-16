@@ -41,9 +41,15 @@ function Kpi({ label, value, valueClass = '', note }) {
 }
 
 function Row({ label, value, note }) {
+  // The note gets its own line. Inline it collided with the label's own
+  // parentheses and the two ran together into one unreadable aside —
+  // `可定价（带 prob）（其余 251 行无概率，不进 Brier 的账）`.
   return (
     <tr>
-      <td>{label}{note ? <small>（{note}）</small> : null}</td>
+      <td>
+        {label}
+        {note ? <small className="row-note">{note}</small> : null}
+      </td>
       <td className="num">{value ?? DASH}</td>
     </tr>
   )
@@ -109,6 +115,7 @@ function Episodes({ sec }) {
 function Outcomes({ sec }) {
   const v = sec?.value || {}
   const counts = v.counts || {}
+  const b = v.breakdown || {}
   const kinds = Object.keys(counts)
   const states = [...new Set(kinds.flatMap((k) => Object.keys(counts[k] || {})))]
   return (
@@ -134,9 +141,33 @@ function Outcomes({ sec }) {
       </table>
       <div style={{ padding: '0 14px 14px' }}>
         <p className="soft">
-          待定标签 {v.pending?.length ?? 0} 条（还没有后继标签的那一批）。
+          待定标签 {b.pending ?? v.pending?.length ?? 0} 条（还没有后继标签的那一批）。
+          {b.awaiting
+            ? ` 其中 ${b.awaiting} 条是成熟度、不是缺口 —— 证据窗口还没收口，`
+              + 'pending 就是它此刻唯一该有的状态。'
+            : null}
         </p>
-        <Integrity items={v.integrity} />
+        {/* 缺陷与日历分开说。`overdue` 才是「该收尾没收尾」，
+            而 `awaiting` 是设计自己的日历 —— 混成一句话读起来像积压。 */}
+        {b.overdue ? (
+          <div className="ws-integrity">
+            <b>{`窗口已收口却没收尾 ${b.overdue} 条`}</b>
+            <p className="soft">
+              这些标签的 available_at 已经过去，却没有任何后继行 ——
+              该给它们收尾的那一步没跑到。同一份清单用
+              {' '}<code>python scripts/episode_coverage.py</code> 打印。
+            </p>
+          </div>
+        ) : null}
+        {v.broken_chains ? (
+          <div className="ws-integrity">
+            <b>{`标签链断裂 ${v.broken_chains} 条`}</b>
+            <p className="soft">
+              有一条后继行，和被它取代的那一行描述的不是同一个主体 ——
+              于是「这个主体的当前标签」有了两个答案。
+            </p>
+          </div>
+        ) : null}
       </div>
     </WorkspaceCard>
   )

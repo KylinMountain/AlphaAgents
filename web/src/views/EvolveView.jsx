@@ -46,7 +46,7 @@ function Reachability({ code }) {
              style={{ marginBottom: 14 }}>
       <div className="card-title">
         <h3>晋升路径是否可达</h3>
-        <span className={open ? 'up' : 'soft'}>
+        <span className={`ws-reach-verdict${open ? '' : ' is-closed'}`}>
           {open ? '可达' : '本构建不可达'}
         </span>
       </div>

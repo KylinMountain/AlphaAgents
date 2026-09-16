@@ -60,6 +60,11 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
  * down and the tables looked crooked. Numbers sit flush right, under the
  * right edge of their header, in tabular digits. */
 .table th.num,.table td.num{text-align:right}
+/* A row's footnote. It used to be inline and wrapped in its own parens, so
+ * a label that already had parens produced two in a row —
+ * `可定价（带 prob）（其余 251 行无概率，不进 Brier 的账）` read as one
+ * sentence. On its own line the parens are redundant, so they are gone. */
+.row-note{display:block;margin-top:3px;font-size:11.5px;color:var(--muted);font-weight:400}
 .report-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}.report-body{padding:18px}.report-body h2{font-size:20px;margin:5px 0 14px}.report-section{border-top:1px solid var(--border);padding:12px 0}.report-section:first-of-type{border-top:0}.report-section b{font-size:12.5px}.report-section p{margin:5px 0 0;color:var(--text-2);line-height:1.6;font-size:12.5px}.report-nav{padding:14px}.report-nav .item{display:flex;justify-content:space-between;padding:10px;border-radius:9px}.report-nav .item.active{background:var(--blue-soft);color:var(--blue)}
 .memory-grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:14px}.hit-card{padding:18px;text-align:center}.ring{width:128px;height:128px;border-radius:50%;margin:18px auto;background:conic-gradient(var(--blue) 0 73%,var(--surface-3) 73%);position:relative;display:grid;place-items:center}.ring:after{content:"";position:absolute;inset:12px;border-radius:50%;background:var(--surface)}.ring div{position:relative;z-index:2}.ring b{font-size:27px;display:block}.ring span{font-size:11.5px;color:var(--muted)}
 .graph{height:440px;position:relative;background:radial-gradient(circle at 50% 50%,var(--blue-soft),transparent 38%),var(--surface);overflow:hidden}.node{position:absolute;padding:10px 12px;border:1px solid var(--border);border-radius:11px;background:var(--surface);box-shadow:var(--shadow);min-width:145px}.node b{display:block;font-size:12.5px}.node span{font-size:11px;color:var(--muted)}.node.blue{border-color:color-mix(in srgb,var(--blue) 28%,var(--border))}.node.green{border-color:color-mix(in srgb,var(--green) 28%,var(--border))}.node.violet{border-color:color-mix(in srgb,var(--violet) 28%,var(--border))}.edge{position:absolute;height:1px;background:var(--border-strong);transform-origin:left center}
@@ -163,6 +168,13 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
  * verdicts reads the same whether the gate is quiet or unreachable. */
 .ws-reach{border-left:3px solid var(--amber)}
 .ws-reach.ws-reach-open{border-left-color:var(--green)}
+/* The verdict in the card's own header, in the colour of the border under
+ * it. It used to carry `.up` — the A-share *rise* token, which is red — so
+ * a positive verdict rendered red inside a green-bordered card. `.up` and
+ * `.down` mean market direction and nothing else; a verdict is not a price.
+ * Specificity is deliberate: `.card-title span` sets the muted colour. */
+.card-title .ws-reach-verdict{font-weight:650;color:var(--green)}
+.card-title .ws-reach-verdict.is-closed{color:var(--amber)}
 .ws-codefacts{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin-top:10px}
 .ws-codefact{display:contents}
 .ws-codefact .name{font-size:12.5px;color:var(--text-2)}

@@ -134,7 +134,9 @@ const learnSections = {
                   { coverage: { decisions: 0, verdicts: 0, no_verdict: 0,
                                 refused: 0, traded: 0, cancelled: 0,
                                 fill_rate: null }, open: [] }),
-  outcomes: empty('outcomes', { counts: {}, pending: [], integrity: ['示例问题'] }),
+  outcomes: empty('outcomes', { counts: {}, pending: [], broken_chains: 0,
+                                breakdown: { pending: 0, overdue: 0,
+                                             awaiting: 0 } }),
   candidates: partial('learning_candidates + candidate_transitions',
                       ['learning_candidates.evidence_episode_ids',
                        'candidate_transitions']),
@@ -179,6 +181,54 @@ const learnUnpriceable = {
                                   min_remaining_days: null,
                                   archive_readable: true, batches: [] } },
                      100),
+}
+
+/* 三类结果 in the state production is actually in: 61 live pending labels,
+ * 44 of which have a window that has already shut with nothing after them.
+ * The card has to name the 44 as a defect and the other 17 as the design's
+ * own calendar — and it must NOT print the checker's English sentence.
+ * `outcomes.integrity` writes that sentence for
+ * `scripts/episode_coverage.py`, and until 2026-09-16 it was piped straight
+ * into this card. */
+const learnOutcomesSplit = {
+  ...learnSections,
+  outcomes: present('outcomes',
+                    { counts: { forecast: { pending: 44, matured: 64,
+                                            censored: 0, revised: 14 },
+                                trade: { pending: 6, matured: 0,
+                                         censored: 0, revised: 0 },
+                                process: { pending: 0, matured: 0,
+                                           censored: 0, revised: 0 } },
+                      pending: [],
+                      breakdown: { pending: 61, overdue: 44, awaiting: 17 },
+                      /* A key the read model no longer sends, kept on
+                       * purpose. Without it the `reject` list below is
+                       * vacuous — nothing in the payload could produce the
+                       * English, so re-adding `<Integrity items={v.integrity}/>`
+                       * to this card would keep the case green. With it, the
+                       * case fails the moment the passthrough comes back. */
+                      integrity: ['outcome #12 is pending but claims to be '
+                                  + 'available on 2026-09-18, after the kernel '
+                                  + 'clock'],
+                      broken_chains: 0 },
+                    61),
+}
+
+/* The same card with a chain broken and nothing overdue. The two
+ * complaints are separate facts and must not be each other's copy. */
+const learnOutcomesBrokenChain = {
+  ...learnOutcomesSplit,
+  outcomes: present('outcomes',
+                    { counts: { forecast: { pending: 0, matured: 1,
+                                            censored: 0, revised: 0 },
+                                trade: { pending: 0, matured: 0,
+                                         censored: 0, revised: 0 },
+                                process: { pending: 0, matured: 0,
+                                           censored: 0, revised: 0 } },
+                      pending: [],
+                      breakdown: { pending: 0, overdue: 0, awaiting: 0 },
+                      broken_chains: 1 },
+                    1),
 }
 
 const evolveSections = {
@@ -241,6 +291,23 @@ const CASES = [
               states: {}, sections: learnUnpriceable } },
    { want: ['没有一行带概率（prob）的预测', '闸门会一直 abstain'],
      reject: ['成熟度，不是缺口'] }],
+  /* The 三类结果 card, both branches. Added 2026-09-16 with the fix for the
+   * panel that printed `outcome #12 is pending but claims to be available on
+   * …` into a Chinese product page — a machine's complaint, about rows the
+   * checker had wrongly accused. The `reject` list is the actual regression:
+   * the English sentence must not reach the page, and the two complaints
+   * must not render for each other's cause. */
+  ['learn · pending labels split by the calendar', LearnView,
+   { learn: { workspace: 'learn', generated_at: '2026-09-16T04:30:00+00:00',
+              states: {}, sections: learnOutcomesSplit } },
+   { want: ['窗口已收口却没收尾 44 条', '是成熟度、不是缺口',
+            'episode_coverage.py'],
+     reject: ['still pending', 'is pending but claims', '标签链断裂'] }],
+  ['learn · a label chain is broken', LearnView,
+   { learn: { workspace: 'learn', generated_at: '2026-09-16T04:30:00+00:00',
+              states: {}, sections: learnOutcomesBrokenChain } },
+   { want: ['标签链断裂 1 条', '两个答案'],
+     reject: ['窗口已收口却没收尾', '是成熟度、不是缺口'] }],
   ['evolve · absent + partial', EvolveView,
    { evolve: { workspace: 'evolve', generated_at: '2026-09-13T04:30:00+00:00',
                states: {},

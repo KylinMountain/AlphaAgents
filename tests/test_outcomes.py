@@ -24,6 +24,7 @@ The tests are in five groups:
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -334,6 +335,128 @@ class TestTheChainCannotBeRewrittenOrForked:
                           subject_id=pid)
         O.resolve(conn, first, state=O.MATURED)
         assert O.integrity(conn) == []
+
+    # ── The half no test pinned, until 2026-09-16 ─────────────────────
+    #
+    # ``integrity`` has two checks. The cross-subject one above was pinned.
+    # The second — "nothing is left pending on a day it should have
+    # resolved" — was not, and it had been written backwards: it asked
+    # ``available_at > today``, so it accused exactly the rows whose horizon
+    # had *not* arrived (the store working) and said nothing about the rows
+    # whose window had shut (the store stuck). On the live store that was 11
+    # healthy rows named and 44 real ones missed. The tests below pin both
+    # directions, plus the append-only case that must stay quiet, because
+    # "pending" alone is not a defect and neither is "pending with a closed
+    # window" — the defect is "pending, closed window, and nothing after it".
+
+    def test_a_pending_label_whose_horizon_has_not_arrived_is_not_a_complaint(
+            self, store):
+        """The state a pending label is *for*. ``pending`` is documented as
+        "the horizon has not arrived / still open" — so a checker that
+        flags it is flagging the store for doing its job."""
+        pid = _prediction()
+        conn = _db()
+        future = (date.fromisoformat(clock.today())
+                  + timedelta(days=3)).isoformat()
+        O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                  subject_id=pid, available_at=future)
+        assert O.integrity(conn) == []
+
+    def test_integrity_reports_a_pending_label_whose_window_has_closed(
+            self, store):
+        """The defect the inverted predicate could not see: the window shut
+        and nothing supersedes the row, so whatever was meant to resolve it
+        never ran. ``available_at`` is when the label became *knowable* —
+        past that date, pending is silence rather than patience."""
+        pid = _prediction()
+        conn = _db()
+        past = (date.fromisoformat(clock.today())
+                - timedelta(days=2)).isoformat()
+        O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                  subject_id=pid, available_at=past)
+        problems = O.integrity(conn)
+        assert len(problems) == 1, problems
+        assert "still pending" in problems[0], problems[0]
+        assert past in problems[0], problems[0]
+
+    def test_a_superseded_pending_row_is_not_a_complaint(self, store):
+        """The store is append-only, so resolving a label leaves its
+        ``pending`` predecessor behind forever — that is the design, not a
+        leak. The row has a successor, which is the whole difference
+        between history and a loose end."""
+        pid = _prediction()
+        conn = _db()
+        past = (date.fromisoformat(clock.today())
+                - timedelta(days=2)).isoformat()
+        first = O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                          subject_id=pid, available_at=past)
+        O.resolve(conn, first, state=O.MATURED, evidence={"brier": 0.2})
+        assert O.integrity(conn) == []
+        # And it is not counted as outstanding either, so the page's
+        # "待定标签 N 条" and the checker cannot disagree.
+        assert O.pending_breakdown(conn)["pending"] == 0
+
+    def test_integrity_names_both_ends_of_a_broken_chain(self, store):
+        """The complaint is read by someone deciding what to repair, so it
+        has to name two distinct rows. It interpolated the successor's id
+        twice — ``#7 supersedes #7`` — which reads as a self-reference and
+        points at neither end of the break."""
+        pid = _prediction()
+        _prediction(code="600001")
+        conn = _db()
+        first = O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                          subject_id=pid)
+        conn.execute(
+            "INSERT INTO outcomes (kind, state, subject_type, subject_id, "
+            "supersedes_id) VALUES (?, ?, ?, ?, ?)",
+            (O.FORECAST, O.MATURED, "prediction", pid + 1, first))
+        conn.commit()
+        successor = conn.execute(
+            "SELECT MAX(id) m FROM outcomes").fetchone()["m"]
+        problems = O.integrity(conn)
+        assert len(problems) == 1, problems
+        assert f"outcome #{successor} supersedes #{first} but" in problems[0], \
+            problems[0]
+        assert f"#{first} supersedes #{first}" not in problems[0], problems[0]
+
+    def test_the_breakdown_and_the_check_are_the_same_predicate(self, store):
+        """One computation, two readers: the page prints the count and the
+        checker lists the rows. They are allowed to be terse, not to
+        disagree — the same reason the page borrows
+        ``scoring.window_progress`` rather than counting days itself."""
+        conn = _db()
+        past = (date.fromisoformat(clock.today())
+                - timedelta(days=2)).isoformat()
+        future = (date.fromisoformat(clock.today())
+                  + timedelta(days=3)).isoformat()
+        ids = [_prediction(code=f"60000{i}") for i in range(4)]
+        for pid in ids[:2]:
+            O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                      subject_id=pid, available_at=past)
+        O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                  subject_id=ids[2], available_at=future)
+        # A fourth, resolved. Its ``pending`` predecessor stays in the table
+        # forever — that is append-only — and both readers have to leave it
+        # out. Without this row the agreement assertion below is vacuous:
+        # two readers of the same wrong population still agree.
+        done = O.declare(conn, kind=O.FORECAST, subject_type="prediction",
+                         subject_id=ids[3], available_at=past)
+        O.resolve(conn, done, state=O.MATURED, evidence={"brier": 0.2})
+
+        breakdown = O.pending_breakdown(conn)
+        assert breakdown["pending"] == 3, breakdown
+        assert len(breakdown["overdue"]) == 2, breakdown
+        assert len(breakdown["awaiting"]) == 1, breakdown
+        # The table on the page counts the same population the checker
+        # walks — otherwise the panel would print one number above the
+        # other's complaint.
+        assert breakdown["pending"] == sum(
+            c[O.PENDING] for c in O.counts(conn).values())
+
+        complaints = [p for p in O.integrity(conn) if "still pending" in p]
+        assert len(complaints) == len(breakdown["overdue"]), complaints
+        for row in breakdown["overdue"]:
+            assert any(f"outcome #{row['id']} " in p for p in complaints), row
 
 
 # ── 3. The three prohibitions of §9 ───────────────────────────────────

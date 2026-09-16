@@ -342,6 +342,57 @@ def counts(conn: sqlite3.Connection, *,
     return out
 
 
+def broken_chains(conn: sqlite3.Connection) -> list[dict]:
+    """Successors describing a different subject than the row they replace.
+
+    The shape the triggers cannot express, and the reason a checker exists
+    at all: a chain whose links are about different subjects makes "the
+    current label for this subject" ambiguous, which is the one question
+    this table is here to answer.
+    """
+    rows = conn.execute(
+        "SELECT n.id AS successor, o.id AS original, "
+        "n.kind, n.subject_type, n.subject_id, "
+        "o.kind AS old_kind, o.subject_type AS old_type, "
+        "o.subject_id AS old_id FROM outcomes n "
+        "JOIN outcomes o ON o.id = n.supersedes_id "
+        "WHERE n.kind <> o.kind OR n.subject_type <> o.subject_type "
+        "OR n.subject_id <> o.subject_id ORDER BY n.id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def pending_breakdown(conn: sqlite3.Connection) -> dict:
+    """The live pending rows, split by whether their evidence window shut.
+
+    ``awaiting`` is **not** a defect and must not be reported as one: a
+    label whose horizon has not arrived is in the only state it could be
+    in, and that is the design's own calendar (D10) — it is also the whole
+    reason ``available_at`` is stored. ``overdue`` is the defect: the
+    window closed and nothing supersedes the row, so whatever was meant to
+    resolve it never ran.
+
+    ``integrity`` and the read model both read this, so the number the
+    page prints and the number the checker complains about cannot drift —
+    the same reason the page borrows ``scoring.window_progress`` instead
+    of counting days itself.
+    """
+    today = clock.today()
+    rows = conn.execute(
+        "SELECT o.id, o.kind, o.subject_type, o.subject_id, o.available_at "
+        "FROM outcomes o WHERE o.state = ? AND NOT EXISTS "
+        "(SELECT 1 FROM outcomes n WHERE n.supersedes_id = o.id) "
+        "ORDER BY o.id", (PENDING,)).fetchall()
+    overdue: list[dict] = []
+    awaiting: list[dict] = []
+    for row in rows:
+        at = row["available_at"]
+        if at is not None and at < today:
+            overdue.append(dict(row))
+        else:
+            awaiting.append(dict(row))
+    return {"pending": len(rows), "overdue": overdue, "awaiting": awaiting}
+
+
 def integrity(conn: sqlite3.Connection) -> list[str]:
     """Structural complaints about the label store, or an empty list.
 
@@ -351,25 +402,25 @@ def integrity(conn: sqlite3.Connection) -> list[str]:
     every chain is internally consistent (a successor describes the same
     subject as the row it supersedes) and that nothing is left ``pending``
     on a day it should have resolved.
+
+    "Should have resolved" is not "is pending". Until 2026-09-16 this
+    check asked ``available_at > today``, which flags precisely the rows
+    whose horizon has *not* arrived — the store working — and so said
+    nothing about the ones whose window had shut. On the live store that
+    was 11 healthy rows accused and 44 real ones missed, and no test
+    pinned either half.
     """
     problems: list[str] = []
-    for row in conn.execute(
-            "SELECT n.id, n.kind, n.subject_type, n.subject_id, "
-            "o.kind AS old_kind, o.subject_type AS old_type, "
-            "o.subject_id AS old_id FROM outcomes n "
-            "JOIN outcomes o ON o.id = n.supersedes_id "
-            "WHERE n.kind <> o.kind OR n.subject_type <> o.subject_type "
-            "OR n.subject_id <> o.subject_id").fetchall():
+    for row in broken_chains(conn):
         problems.append(
-            f"outcome #{row['id']} supersedes #{row['id']} but describes a "
-            f"different subject ({row['kind']}/{row['subject_type']}"
-            f"#{row['subject_id']} vs {row['old_kind']}/{row['old_type']}"
-            f"#{row['old_id']})")
-    for row in conn.execute(
-            "SELECT id, kind, subject_type, subject_id, state, available_at "
-            "FROM outcomes WHERE state = ? AND available_at IS NOT NULL "
-            "AND available_at > ?", (PENDING, clock.today())).fetchall():
+            f"outcome #{row['successor']} supersedes #{row['original']} but "
+            f"describes a different subject ({row['kind']}/"
+            f"{row['subject_type']}#{row['subject_id']} vs "
+            f"{row['old_kind']}/{row['old_type']}#{row['old_id']})")
+    for row in pending_breakdown(conn)["overdue"]:
         problems.append(
-            f"outcome #{row['id']} is pending but claims to be available on "
-            f"{row['available_at']}, after the kernel clock")
+            f"outcome #{row['id']} ({row['kind']} {row['subject_type']}"
+            f"#{row['subject_id']}) is still pending although its evidence "
+            f"window closed on {row['available_at']} and nothing supersedes "
+            f"it — nothing resolved it")
     return problems

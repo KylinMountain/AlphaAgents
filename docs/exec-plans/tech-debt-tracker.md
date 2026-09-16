@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30, D31** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30, D31, D32** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -251,6 +251,32 @@ a comment with a body. Instance 4 is now covered by
 not a syntactic property, and the four instances share no shape — two are database columns, one
 is a code path, one is a private helper. A lint rule is not obviously available. The recognition
 rule above is what this entry can offer: a question to ask during review, not a check to run.
+
+### D32 — A system fault is stored as a rejection reason, so an outage reads as policy
+
+**Added 2026-09-16, measuring D26's aftermath.** `intent.submit_intent` records two very different
+things in the same column, `intents.reject_reason`:
+
+| what happened | how it is written | example (live DB, 2026-09-16) |
+|---|---|---|
+| the business rules declined a well-formed intent | prose, from `_reject_reason` / `_reject_from_result` | `refused by the order path (duplicate, theme too weak, no capital, or a rejected link)` |
+| the write path **raised** | `f"{type(e).__name__}: {e}"` (`intent.py:490`) | `OperationalError: no such column: command_id` |
+
+The 改账审计 panel prints the column under the heading 拒绝原因, so D26's outage — 68 failed closes,
+all on one missing column — was displayed as 68 ordinary policy rejections. A rejection is a
+*normal verdict*, so nothing downstream asked why all 68 said the same thing; that is the whole
+reason D26 stayed invisible for as long as it did.
+
+**Cost.** The audit trail is the one place a reader goes to ask "why did the system not do this",
+and in an outage it answers with the wrong kind of answer. Worse, it answers *plausibly*.
+
+**Not paid, and the fix needs a decision, not a patch.** Three candidates, none obviously right:
+a `failure_kind` column on `intents` (a schema change for a display concern); a stable marker
+prefixed by the writer (changes what the column means, and the 68 historical rows would never carry
+it); or classifying in `_read_intents` by the `ExceptionClass: ` prefix (a string-sniffing rule that
+is correct today and quietly wrong the first time a policy reason contains a colon). The measured
+fact above is what this entry can offer — that the two populations are distinguishable *in the
+data*, by construction, at the writer.
 
 ### D25 — A candidate can walk the whole lifecycle on an empty evidence list
 

@@ -211,9 +211,25 @@ def get_predictions_by_date(date: str) -> list[dict]:
 
 def save_review(date: str, predictions_count: int, correct_count: int,
                 accuracy: float, review_text: str, market_data: dict) -> int:
-    """Save a daily review result."""
+    """Save a daily review — one row per date.
+
+    Replaced rather than appended, and that changed meaning on 2026-09-16
+    when the *scheduled* 15:30 task started calling this. While the only
+    caller was a human running the CLI once, an append was harmless. A task
+    that runs every day is re-run by things a human does not control — a
+    restart, a retry, a backfill for a past date — and a second row for one
+    date is not a correction, it is a duplicate: the panel would show the
+    same day twice with different numbers, and anything aggregating the
+    table would count both.
+
+    No unique index, deliberately. Adding one requires a migration for any
+    database that already holds a duplicate, and a migration that fails on
+    existing data is how D26 happened. The delete and the insert share one
+    transaction, so a reader never observes the gap.
+    """
     with _lock:
         conn = _get_conn()
+        conn.execute("DELETE FROM reviews WHERE date = ?", (date,))
         cur = conn.execute(
             "INSERT INTO reviews (date, predictions_count, correct_count, accuracy, review_text, market_data) "
             "VALUES (?, ?, ?, ?, ?, ?)",

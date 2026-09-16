@@ -196,6 +196,31 @@ class TestTheScheduledReviewArchivesItself:
         assert md["unreachable"] == 2
         assert md["unique"] == 7
 
+    def test_a_re_run_of_the_task_replaces_its_row(
+            self, both_stores, monkeypatch):
+        """A scheduled task can run twice for one date — a restart, a
+        retry, a backfill. ``reviews`` has no unique constraint on
+        ``date`` (deliberately: adding one needs a migration that fails
+        on any database already holding a duplicate, which is how D26
+        happened), so the *writer* has to be the thing that stays
+        single-valued. Two rows for one date is not a correction; it is
+        the same day printed twice with different numbers."""
+        monkeypatch.setattr(R, "_verify_today_predictions", lambda p: {
+            "text": "第一遍", "total": 4, "hits": 1, "neutral": 0,
+            "unreachable": 0, "unique": 4, "accuracy": 0.25})
+        asyncio.run(R.run_review())
+
+        monkeypatch.setattr(R, "_verify_today_predictions", lambda p: {
+            "text": "第二遍", "total": 4, "hits": 3, "neutral": 1,
+            "unreachable": 0, "unique": 5, "accuracy": 0.75})
+        asyncio.run(R.run_review())
+
+        rows = both_stores.get_recent_reviews(5)
+        assert len(rows) == 1, f"one row per date, got {len(rows)}: {rows}"
+        assert rows[0]["correct_count"] == 3, "the newer numbers win"
+        assert rows[0]["accuracy"] == 0.75
+        assert rows[0]["predictions_count"] == 4
+
 
 class TestTheVerificationReturnsItsCounts:
     """``_verify_today_predictions`` used to return only the rendered table,

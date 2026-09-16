@@ -131,8 +131,14 @@ so the fix is not mistaken for "go fill in the five call sites".** Fill them wit
 the citation stops being empty and starts being wrong.
 
 **How it is recognised.** M3's acceptance requires that a candidate cannot leave `observation` while
-its evidence is empty — as a negative case with a mutation probe, because a static assertion here would
-be satisfied by the very constants that make the bucket empty.
+its evidence is empty — and, per the review of revision 3, non-empty ids are still not enough:
+`supporting = [three ids picked at hand], opposing = []` is schema-legal and proves nothing about
+whether a counter-example search ever ran. The evidence therefore becomes an **EvidenceBundle**
+(declared `search_scope`, a replayable `matching_rule`, eligible/excluded counts, a cutoff — §8.2 of
+the plan), so an empty opposing bucket means *searched the declared set and found none*, and the
+evaluator replays the declared search to check the counts. Still a negative case with a mutation
+probe, because a static assertion here would be satisfied by the very constants that make the bucket
+empty.
 
 ### D24 — Nothing recorded the model exchanges, so a re-run of the same window was a re-sample (paid 2026-09-16)
 

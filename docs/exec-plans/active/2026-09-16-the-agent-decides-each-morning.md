@@ -1,6 +1,6 @@
 # The agent decides each morning, and history can replay it
 
-状态：active（**修订 3 · 2026-09-16** · 依外部评审与 RSI 文献审计重构）· **提案，未实现**
+状态：active（**修订 4 · 2026-09-16** · 依两轮外部评审与 RSI 文献审计重构）· **提案，未实现**
 创建：2026-09-16
 
 > **修订 2 说明。** 修订 1 被外部评审驳回为 **REWORK**（方向通过，证据链不成立）。
@@ -13,6 +13,13 @@
 > 依据是 RSI 文献审计（`docs/self_improvement_roadmap.md`）与一条边界：**Trader 可演化，physics 不可自改**。
 > 复核时发现一个真实缺陷并立为债 **D25**（候选可以带着空证据走到 `validated`）。
 > **§8 仍然只是设计，没有一行代码。**
+>
+> **修订 4 说明（2026-09-16）。** 修订 3 收到外部评审 **PASS WITH CAUTION**，四点全部采纳：
+> 证据升级为 **EvidenceBundle**（§8.2，`opposing: []` 必须声明过搜索才被接受）；
+> **只向前的历史验证**落成硬不变量（§8.4，`max(evidence.cutoff) < evaluation_window.start`，
+> 评估器在代码里拒绝违规请求）；判定改为**三层**（§8.3，诊断分量不参与爬山，防 metric shopping）；
+> **v1 只做第一层递归**（§8.8，六个部件全部冻结，Meta-RSI = M4）。ON/OFF 反事实增加
+> `decision_change_rate` 与 `causal_trace_rate`（§8.6）。D25 的验收同步升级（债表已更新）。
 
 ## 目标
 
@@ -225,7 +232,7 @@ Episode ──▶ Candidate ──▶ BehaviorDelta ──▶ PolicyVariant
 （分析器）   （提议器）     非空且可证伪     （变体：YAML + 冻结版本）
    ▲                                        │
    │      Archive ◀── Retire ◀── 只向前看的评估 ◀┘
-   │                             （评估器：报向量）
+   │                             （评估器：分层判定）
    └── Forward Shadow：唯一不是历史的证据（n ≥ 20）
 ```
 
@@ -236,7 +243,7 @@ Episode ──▶ Candidate ──▶ BehaviorDelta ──▶ PolicyVariant
 | **Analyzer** 分析器 | 从 episode 与结果里读出「哪个决定导致了什么」 | `data/episodes.py`；`data/attribution.py`（`resolve_chain` / `trade_outcome` / 冻结快照）；`evolution/outcome_labels.py`；`evolution/feedback.py`；`scripts/episode_coverage.py` | 逐日**散文** lesson 有；**跨 episode 的模式没有** | 一个把 N 个 episode 折成一条 observation 的接口，输出必须能指名 episode id |
 | **Proposer** 提议器 | 把 observation 变成可证伪候选 | `learning_candidates.save_candidate`（四个字段强制：`claim` / `applicable_context` / `proposed_behavior_delta` / `evidence_episode_ids{supporting,opposing}`）；`lessons.consolidate_principles`（principle）；`playbook._collect_playbook_candidates`（playbook） | **5 个生产调用点全部写空证据桶**（`playbook.py` ×3、`lessons.py` ×2）；原因是输入是散文，不是 T1 episode | 让证据桶有东西可写；提议器**只能**写 `observation` |
 | **Variant** 变体 | 把候选落成一个**有固定 schema 的可评审差异** | `traders/*.yaml`（一交易员一 YAML，两个现存交易员的差异只有 `extra_prompt`）；`policy_registry.freeze`；`policy_sources.collect` 的六来源 | 从候选到 YAML **没有自动路径**，今天靠人手写 | candidate → variant 的路径，且差异**必须进入 policy hash** |
-| **Evaluator** 评估器 | 只用市场事实判定；报**向量**，且边界事前声明 | `holdout_gate.run_gate`（只前向 + 配对 `(date, code)` + `n ≥ 20` + 弃权保 champion）；`scoring.residual_alpha`（G1）；`attribution` | 判定是**一个标量（Brier）**；归因残差还没进判定 | 判定改为向量（§8.3）；标量同时**仍是否决线** |
+| **Evaluator** 评估器 | 只用市场事实判定；报**向量**，且边界事前声明 | `holdout_gate.run_gate`（只前向 + 配对 `(date, code)` + `n ≥ 20` + 弃权保 champion）；`scoring.residual_alpha`（G1）；`attribution` | 判定是**一个标量（Brier）**；归因残差还没进判定 | 分层判定（§8.3）；配对标量**仍在 Level 2** |
 | **Archive** 档案 | 让「试过、被拒」也留下可查痕迹 | `learning_candidates` 生命周期 + `candidate_transitions`（append-only 触发器）+ `gate_decisions`（**拒绝也落行**）+ `knowledge_snapshots` | `advance_candidate` **零生产调用者**（只有测试）；`candidates_citing` 只被一个脚本用 | 让 `observation` 之后的每个状态真的出现过；迁移的 actor 必须是代码（§8.2） |
 | **Forward Shadow** 前向影子 | 唯一能替代历史的证据 | `shadow.open_run` / `emit_for_date` / `score_due`；`PRODUCERS`；`paired_count` | 机制完整，**配对样本 ≈ 0** | 让影子跑到 `n ≥ 20`——这一格是「等日历」，不是「等代码」 |
 
@@ -267,32 +274,80 @@ agent 把自己**错误的**记忆判为正确的概率是 31%–54%，且**换�
 自我授权——**迁移必须由证据触发，不能由日历触发**；日历推进会让 `testing` 变成一个时间戳，
 而不是一个正在被检验的假设。
 
-### 8.3 评估器报的是一个向量，不是一分
+**证据不止「非空」——它是一次有出处的搜索（EvidenceBundle）。** 评审补的这一刀是对的：
+`supporting=[随手 3 个 episode]、opposing=[]` 同样通过 schema，但什么都没证明——
+schema 合法不代表系统**找过反例**。所以 M3 里证据从一列 id 升级为：
+
+```json
+{
+  "supporting_episode_ids": [120, 131],
+  "opposing_episode_ids": [],
+  "search_scope": "2021-01-01 .. 2022-12-30 · 该主线下的全部 episode",
+  "matching_rule": "claim.applicable_context 的可重放匹配谓词",
+  "eligible_episode_count": 412,
+  "excluded_episode_count": 38,
+  "cutoff": "2022-12-30",
+  "generated_at": "…"
+}
+```
+
+于是 `opposing: []` 第一次有了含义：**在事先声明的 eligible set 里找过、没找到**。
+仓库里本来就有那句话——「empty list 和 omitted 是两回事」——这是它的第三层：
+**searched-and-empty 和 never-searched 也是两回事。** `search_scope` 与 `matching_rule`
+同时是防作弊的：评估器按声明**重放**这次搜索，eligible/excluded 数对不上
+⇒ 证据无效（§8.3 的 Level 0），而不是「反例恰好没找到」。
+
+### 8.3 判定分三层，不是一个向量压成一分
 
 理由来自 KTD-Fin（CSI300，2024–2026，548 个交易日，10 个前沿模型）：**被动市场 + 风格贡献了
-+11%~+29%，而 selection alpha 只有 1 个模型接近 0，其余 9 个全负。** 只优化一个标量，学到的就是 beta。
-所以门的判定必须带这十二个分量：
++11%~+29%，而 selection alpha 只有 1 个模型接近 0，其余 9 个全负。** 只优化一个标量，学到的就是
+beta。而评审的那一刀更准：**十二个平级的门，跑久了必然退化成 metric shopping**——Brier 不够好
+就去看 residual alpha，还不行就去看 drawdown、再看 regime 3……评估器自己变成最严重的过拟合源。
+所以分层：
 
-`net_return` · `benchmark_excess` · `max_drawdown` · `turnover` · `exposure` · `market_beta` ·
-`style_exposure`（动量 / 波动 / 流动性 / 反转 / 市值 / 行业）· `selection_alpha` ·
-`regime_robustness` · `n_paired_samples` · `independent_trading_days` · `worst_window`
+| 层 | 内容 | 判定 |
+|---|---|---|
+| **Level 0 — 有效性** | 泄漏检查 · 样本覆盖 · **可复现**（`replay-recorded` 逐行复现，D24）· 执行歧义计数（D23）· **EvidenceBundle 与声明的搜索一致**（§8.2） | 任一失败 ⇒ **INVALID**：不是「差」，是「这次评估不算数」 |
+| **Level 1 — 硬风险否决** | `max_drawdown` · `turnover` · `exposure` · 容量/流动性 | 任一越过**事前声明**的边界 ⇒ **REJECT**（Level 2 再漂亮也拒） |
+| **Level 2 — 改进证据** | 配对 Brier（现有门）· log score · residual alpha（G1）· selection alpha | 决定是否值得继续 |
+
+剩下的 **diagnostics 只用于解释，不参与爬山**：`market_beta` · `style_exposure` · `fill rate` ·
+regime 分解……它们进报告、不进门；一条分量从「诊断」升进「门」必须改这份设计，不许在评估中途改
+——§12 *"Freeze the hypothesis, primary metric, ... stopping rules"* 的意思就是这个清单在评估
+开始前冻结。
+
+**Level 2 内部守现有机制**：配对检验（只前向、配对 `(date, code)`、`n ≥ 20`、弃权即保 champion）。
+晋升需要 **Level 0 通过 AND Level 1 无越界 AND Level 2 不退化**，三者同时成立。
+**验收必须成对写**：一个 Level 2 通过、却在 Level 1 越界的候选**被拒**；一个 Level 2 漂亮、
+但 EvidenceBundle 与声明搜索对不上的候选判 **INVALID**——只有单向用例时，「通过」就是单条件假象。
+另有一条**缺失值纪律**：`NULL`（没测到）与 `0`（测到是零）必须可区分——本仓库已经在
+`gate_decisions` 的 `evidence_scope` 上踩过这个坑：*"A guard whose missing case is the permissive
+one is not a guard."*
 
 这也补上了 §12 要求的 *"Evaluate net equity performance, drawdown and tail risk, exposure, turnover,
-capacity assumptions, fill rate"* ——本计划的**报告口径**一节已经在要求同一批数，M3 只是把它们
+capacity assumptions, fill rate"*——本计划的**报告口径**一节已经在要求同一批数，M3 只是把它们
 从「报表上的数」变成「判定里的数」。
 
-**但「读成一个 Pareto 前沿」不能变成「永远不决定」。** 所以晋升需要**两条同时成立**：
+### 8.4 只向前的历史验证：一条硬不变量
 
-1. **门的配对检验不退化**（现有机制：只前向、配对 `(date, code)`、`n ≥ 20`、弃权即保 champion）；
-2. **向量里没有任何一个分量越过事前声明的边界**（回撤上限、换手上限等，在**评估开始前**冻结——
-   §12 *"Freeze the hypothesis, primary metric, minimum useful effect, ... stopping rules"*）。
+G2 已经写了 "validation 严格晚于 train，且**永不参与反思**"。M3 把它落成可执行的**硬不变量**，
+而不是复述原则：
 
-**验收必须成对写**：一个在配对检验上通过、却在回撤边界上越界的候选**被拒**。
-只有一个方向的用例时，「通过」就是单条件假象。另有一条**缺失值纪律**：
-`NULL`（没测到）与 `0`（测到是零）必须可区分——本仓库已经在 `gate_decisions` 的
-`evidence_scope` 上踩过这个坑：*"A guard whose missing case is the permissive one is not a guard."*
+```text
+max(candidate.evidence.cutoff)  <  evaluation_window.start
+```
 
-### 8.4 Physics 不可自改（边界清单）
+候选来自哪个窗口的反思，验证窗口就必须**整体晚于**那个窗口——否则 walk-forward 会偷偷退化成
+iterative backtest optimization：同一批 2021–2022 的 episode 先被提炼成 candidate C17，再被拿来
+证明 C17 有效。**评估器在代码里拒绝违反这条的评估请求**，不是警告后照跑——一个知道自己违反了
+时间切割还继续的评估器，输出什么都不能信。
+
+历史回放（M1/M2 的 T+1 走前重放）是**筛候选**的（本计划开头那条硬约束），**只向前的是验证**这一步：
+candidate 冻结之后验证窗口才开始，并且 C17 在验证期**不能因为验证表现改自己**——改了就是新候选、
+新边界（§11 的原话）。验证过的 holdout 一旦释放给研究，就不再是干净的验证数据
+（§11："Once a holdout is released for research, it is no longer untouched validation data"）。
+
+### 8.5 Physics 不可自改（边界清单）
 
 用户给的分界采纳，并落成**两条可执行的规则**，不是一句原则：
 
@@ -312,7 +367,7 @@ capacity assumptions, fill rate"* ——本计划的**报告口径**一节已经
 - 需要一条**负向断言**：候选→变体这条路径不能写评估器 / 账本 / 执行 / 结算那几族模块。
   **再配一个变异探针**，否则这条断言很可能是自证的（本仓库已多次踩过静态 grep 自证）。
 
-### 8.5 反事实：ON vs OFF
+### 8.6 反事实：ON vs OFF，以及两个机制指标
 
 唯一能回答「学习到底有没有做事」的实验，是**同一个交易员跑两遍**：一版带记忆与演化（ON），
 一版 `knowledge.snapshot_id = None`（OFF——`policy_sources.knowledge_fingerprint` 已支持显式 `None`）。
@@ -322,7 +377,23 @@ capacity assumptions, fill rate"* ——本计划的**报告口径**一节已经
 不同的选择丢掉，而**不同的选择才是实验的内容**。配对仍在 `(date, code)` 上，但分母必须报出来，
 包括只被一边选中的机会；并按 §12 报 `independent_trading_days`，不是窗口长度。
 
-### 8.6 文献给了什么、没给什么
+评审补的两个指标让这个实验从「比收益」升级成「比机制」——PAST-Bench 的核心正是：headline gain
+相近的 agent，在「是否真的经由保存/检索/更新的机制路径得到提升」上可以完全不同：
+
+**`decision_change_rate`** —— 有多少个未来 decision 因为历史学习而**真的改变**。
+学习没改变任何决定的 run，收益差异是噪声，不是学习在起作用。
+
+**`causal_trace_rate`** —— 每一个变化能否回答完整的一串：
+
+```text
+episode 120 ─▶ candidate 42 ─▶ policy variant 17 ─▶ decision 388 改变 ─▶ outcome 388
+```
+
+这是 Trade → Learn → Evolve 里 **Evolve evidence** 的机器形态：链上任何一环断了
+（episode id 是编的、variant 没进 policy hash、决定没变），trace 就断，`causal_trace_rate` 就掉。
+两个数都进 ON/OFF 报告，**排在收益之前**。
+
+### 8.7 文献给了什么、没给什么
 
 | 引用 | 许可什么 | **不**许可什么 |
 |---|---|---|
@@ -331,13 +402,29 @@ capacity assumptions, fill rate"* ——本计划的**报告口径**一节已经
 | AlphaEvolve（DeepMind） | 自动评估器 + 程序数据库 | 它的前提是进展 *"clearly and systematically measurable"*，**这恰恰是交易域断掉的那一环** ⇒ 本仓库只借「档案」，不借「自动晋升」 |
 | MetaSkill-Evolve `2607.05297` | 两个时间尺度（快=技能 / 慢=演化）与 Analyzer / Retriever / Allocator / Proposer / Evolver 的分工 | 跳过门；分工不等于许可 |
 | PAST-Bench `2608.04003` | 闭环是 save→retrieve→apply→update 四段路径，每段要各自有证据 | 用端到端指标替代分段证据 |
-| KTD-Fin `2605.28359`（CSI300 2024–2026） | 归因（掩码 + Barra 式）揭示模型返回的主要是市场/风格暴露 ⇒ §8.3 的向量 | 用绝对收益当 reward |
+| KTD-Fin `2605.28359`（CSI300 2024–2026） | 归因（掩码 + Barra 式）揭示模型返回的主要是市场/风格暴露 ⇒ §8.3 的分层判定 | 用绝对收益当 reward |
 | AI4AI-Bench `2608.20318`（最好系统 = 最优的 0.250） | 对「一晚上跑完几年就等于有 alpha」的预期校准 | 把 0.25 当成我们也能拿到 |
 | EvolveR `2510.16079`（ICML 2026） | 经验驱动的生命周期；原理库要**去重**（fingerprint 已在做）与**动态打分** | 打分来自模型自己（G3 禁止） |
 
 **这一节的作用是防「引文装饰」**：每一条都写清它许可到哪一步、在哪一步停。
 
-### 8.7 M3 的诚实上限
+### 8.8 v1 只做第一层递归
+
+MetaSkill-Evolve 的快慢两层（改 Trader / 改「怎么改 Trader」）很诱人，M3 **只做第一层**：
+
+```text
+M3 / RSI v1：Analyzer · Retriever · Proposer · Evaluator · 演化规则——全部 frozen，
+只有 trading policy 演化。
+```
+
+先证明 **policy 能经证据改善自己**（§8.6 的两个指标就是证明本身）；「改进算法改进它自己」
+留给 **M4 — Meta Evolution**，不是本计划的一部分。理由是顺序性的：
+candidate → changed decision → better future behavior 这条最基本链路还没有一个样本的实证，
+这时候允许动 Proposer / Retriever，等于一辆还没证明方向盘有效的车，先让它自动改方向盘。
+这也和 §8.7 的文献结论一致：AlphaEvolve 的「自动」建立在可系统度量的进展上——
+而「改进器本身」目前没有可度量的先例。
+
+### 8.9 M3 的诚实上限
 
 `validated` **不激活任何东西**（§10）。激活 = 被收进一个已批准的 knowledge snapshot，或被 promote 的
 policy version。而 §11 写明 *"automatic evaluation success is not permission to promote"*。
@@ -357,7 +444,7 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 否则对照里混进 LLM 随机性。
 
 **M3 — Governed RSI v1**（设计见 **§8**）。把六个已有部件接上线，并给「空证据桶」造一个真实生产者。
-**闭环终点是「已验证 + 归档」，不是「自动晋升」**——指针仍由人拨（§8.7）。
+**闭环终点是「已验证 + 归档」，不是「自动晋升」**——指针仍由人拨（§8.9）。
 
 ## 验收
 
@@ -397,17 +484,25 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
       把 `opposing: []` 与「这个字段从没被填过」区分开的用例
 - [ ] **生命周期真的走过**：`learning_candidates.status` 出现过 `observation` 以外的值，
       且每次迁移的 `actor` 在一个**代码拥有的名字集合**里（断言它不是模型输出的一部分）
-- [ ] **D25 已修**：带空证据的候选**不得**离开 `observation`（负向用例 + 变异探针）
+- [ ] **D25 已修**：带空证据的候选**不得**离开 `observation`；且证据是 **EvidenceBundle**——
+      声明的 `search_scope` / `matching_rule` / `eligible` 计数与实际重放一致，
+      `opposing: []` 只在声明过搜索时被接受（负向用例 + 变异探针）
 - [ ] 历史 candidate **不得**进入生产 active policy；断言**在效指针**所指的 knowledge snapshot
       不含任何由历史 run 产出的条目；历史演化必须在独立 run/policy 命名空间里
-- [ ] **向量判定**：`gate_decisions`（或后继表）里十二个分量**每个都有列**，缺一列即红；
-      且 `NULL`（没测到）与 `0`（测到是零）可区分
-- [ ] **两条同时成立**：一个配对检验通过、但回撤/换手越过事前声明边界的候选**被拒**
-      （正向用例与这条负向用例都要有）
+- [ ] **分层判定**：`gate_decisions`（或后继表）里十二个分量**每个都有列、每个都标了层**
+      （Level 0 / 1 / 2 / diagnostic），缺一列或一列未分层即红；诊断分量**不参与判定**
+      （测：改 beta/style 不改结果）；且 `NULL`（没测到）与 `0`（测到是零）可区分
+- [ ] **Level 1 与 Level 0 都能单独否决**：一个 Level 2 通过、但回撤/换手越过事前声明边界的
+      候选**被拒**；一个 Level 2 漂亮、但 EvidenceBundle 与声明搜索对不上的候选判 **INVALID**
+      （正向用例与两条负向用例都要有）
+- [ ] **时间切割是代码拒绝**：`max(evidence.cutoff) >= evaluation_window.start` 的评估请求
+      **被拒绝**，不是警告后照跑（负向用例）
 - [ ] **physics 不可自改**：负向断言——候选→变体这条路径写不到评估器/账本/执行/结算那几族模块；
       **配变异探针**（静态 grep 断言在本仓库反复被证明会自证）
 - [ ] **ON vs OFF**：`knowledge.snapshot_id = None` 的一版与带记忆的一版，同窗口同面板，
-      由一条命令复现两份结果；输出含**配对分母**（含只被一边选中的机会）与 `independent_trading_days`
+      由一条命令复现两份结果；输出含**配对分母**（含只被一边选中的机会）与 `independent_trading_days`；
+      **且输出 `decision_change_rate` 与 `causal_trace_rate`**——后者要求每条变化能追到
+      `episode → candidate → variant → decision` 的完整链（§8.6）
 - [ ] 生产库内容 hash 跑前跑后不变（与 M0 第一条合跑一次即可）
 
 **报告口径**（评审要求，与设计 §12 一致）——长期报告**不能只有 equity curve**，至少一并输出：
@@ -441,3 +536,7 @@ M3 专属（§8）：
   measurable"*。**不能**把「自动评估通过 ⇒ 自动晋升」写进设计（§8.6）。
 - **`validated` 容易读成「在跑」**：它不激活任何东西（§10）。报告里必须写成
   「已验证、未激活」，否则一个只在档案里的候选会被读成一个正在生效的策略。
+- **metric shopping**：分量一多，评估器自己就成了最严重的过拟合源——Brier 不行看 residual、
+  residual 不行看 drawdown。§8.3 的三层（诊断只解释、不进门）与「清单评估前冻结」就是为它设的。
+- **walk-forward 退化成 iterative backtest optimization**：允许 candidate 回头在产生它的
+  窗口上「验证」自己，走前重放就只剩「重放」没有「走前」。§8.4 的硬不变量就是为它设的。

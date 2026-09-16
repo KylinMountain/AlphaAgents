@@ -104,20 +104,37 @@ function TraderBooks({ traders }) {
  */
 function PositionCard({ pos }) {
   const th = pos.thesis
-  const ret = Number(pos.return_pct)
+  // An open row has no ``return_pct``: that column is written when the
+  // position *ends*, so the headline read 0.0% on every card and a book
+  // holding winners and losers looked break-even. While the position is open
+  // the return is the unrealized one, priced at the last close on disk — and
+  // the card says which, because a number without its as-of reads as live.
+  const unrealized = pos.unrealized_pct != null
+  const ret = unrealized ? pos.unrealized_pct : Number(pos.return_pct ?? 0)
+  const pnl = pos.unrealized_amount
   return (
     <div className="pos-card">
       <div className="pos-head">
         <div>
           <b>{pos.name}</b> <span className="soft">{pos.code}</span>
           {pos.theme ? <span className="stage-chip stage-active">{pos.theme}</span> : null}
+          {pos.trader_name
+            ? <span className="stage-chip stage-fade">{pos.trader_name}</span> : null}
         </div>
-        <b className={trendClass(ret)} style={{ fontSize: 19 }}>{fmtPct(ret)}</b>
+        <div style={{ textAlign: 'right' }}>
+          <b className={trendClass(ret)} style={{ fontSize: 19 }}>{fmtPct(ret)}</b>
+          <div className="soft" style={{ fontSize: 11 }}>
+            {pnl != null
+              ? `${pnl > 0 ? '+' : ''}${Math.round(pnl).toLocaleString()} 元 · ` : ''}
+            {unrealized ? '按最近收盘' : '无市价'}
+          </div>
+        </div>
       </div>
 
       <div className="pos-facts">
         <div><span>成本</span><b>{pos.open_price ?? DASH}</b></div>
         <div><span>股数</span><b>{pos.shares ?? DASH}</b></div>
+        <div><span>现价</span><b>{pos.last_price ?? DASH}</b></div>
         <div><span>峰值</span>
           <b className={trendClass(pos.peak_return_pct)}>{fmtPct(pos.peak_return_pct)}</b>
         </div>
@@ -249,7 +266,7 @@ export default function PortfolioView({ workspace }) {
           <table className="table">
             <thead>
               <tr>
-                <th>标的</th><th>主线</th><th>入场区间</th><th>止损</th>
+                <th>标的</th><th>主线</th><th>交易员</th><th>入场区间</th><th>止损</th>
                 <th>目标价</th><th>下单日</th><th>有效期</th>
               </tr>
             </thead>
@@ -258,6 +275,7 @@ export default function PortfolioView({ workspace }) {
                 <tr key={o.id}>
                   <td><b>{o.name}</b> · {o.code}</td>
                   <td>{o.theme || DASH}</td>
+                  <td>{o.trader_name || o.trader_id || DASH}</td>
                   <td>
                     {o.entry_low != null && o.entry_high != null
                       ? `${o.entry_low} – ${o.entry_high}` : DASH}
@@ -339,7 +357,7 @@ export default function PortfolioView({ workspace }) {
       )}
 
       <WorkspaceCard title="归因链" sec={sections.attribution}
-                     subtitle="每一笔已实现收益都指得出是哪个论点赚的">
+                     subtitle="已实现收益里，有多少指得出是哪个论点赚的">
         <Attribution sec={sections.attribution} />
       </WorkspaceCard>
 
@@ -361,33 +379,70 @@ function Attribution({ sec }) {
   const v = sec?.value || {}
   const exits = v.exits || {}
   const orders = v.orders || {}
+  // The headline is the ledger's own number, so this card and the ledger
+  // cannot disagree. The split is what the chain adds: how much of that
+  // money a thesis can actually be named for. Hiding the unattributable part
+  // would make the chain look complete while the ledger holds a loss the
+  // chain cannot explain.
+  const r = v.realized || {}
+  const u = r.unattributed || {}
+  const rows = v.by_thesis || []
+  const yuan = (n) => `${n > 0 ? '+' : ''}${Math.round(n).toLocaleString()} 元`
   return (
     <div style={{ padding: '0 14px 14px' }}>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>论点</th><th>标的</th><th className="num">退出腿</th>
-            <th className="num">盈利腿</th><th className="num">已实现净额</th>
-            <th>结局</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(v.by_thesis || []).map((t) => (
-            <tr key={t.thesis_id}>
-              <td>#{t.thesis_id}</td>
-              <td>{t.code || DASH}</td>
-              <td className="num">{t.legs}</td>
-              <td className="num">{t.wins}</td>
-              <td className={`num ${trendClass(t.net)}`}>{Math.round(t.net)}</td>
-              <td>{t.thesis_status || DASH}</td>
+      {r.total != null && (
+        <div className="health-group" style={{ marginBottom: 12 }}>
+          <div className="health-source">
+            <span className="name">已实现合计</span>
+            <span className={trendClass(r.total)}>{yuan(r.total)}</span>
+          </div>
+          <div className="health-source">
+            <span className="name">指得出论点的</span>
+            <span className={trendClass(r.attributed)}>{yuan(r.attributed)}</span>
+          </div>
+          <div className="health-source">
+            <span className="name">指不出的（旧仓 / 无论点）</span>
+            <span className={trendClass(u.total || 0)}>{yuan(u.total || 0)}</span>
+          </div>
+        </div>
+      )}
+      {rows.length === 0 ? (
+        <Empty>
+          还没有一笔平仓能指回论点——已实现收益全部来自论点机制上线之前的旧仓
+          {u.positions ? `（${u.positions} 笔）` : ''}。链路是通的，只是还没有第一笔走完它。
+        </Empty>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>论点</th><th>标的</th><th className="num">退出腿</th>
+              <th className="num">盈利腿</th><th className="num">旧仓平仓</th>
+              <th className="num">已实现净额</th>
+              <th>结局</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.thesis_id}>
+                {/* One string, not `#` + value: renderToString separates
+                    adjacent text nodes with a comment, and any assertion on
+                    the rendered row then has nothing to match against. */}
+                <td>{`#${t.thesis_id}`}</td>
+                <td>{t.code || DASH}</td>
+                <td className="num">{t.legs}</td>
+                <td className="num">{t.wins}</td>
+                <td className="num">{t.positions || DASH}</td>
+                <td className={`num ${trendClass(t.total)}`}>{Math.round(t.total)}</td>
+                <td>{t.thesis_status || DASH}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       <p className="soft">
         订单 {orders.orders ?? 0} 笔，其中未挂论点 {orders.without_thesis ?? 0} 笔；
         退出腿 {exits.legs ?? 0} 条，其中无法归因 {exits.unattributed ?? 0} 条。
-        「无法归因」不是舍入误差，是账本与想法之间的缺口，所以单独报出来而不是丢掉。
+        「指不出」不是舍入误差，是账本与想法之间的缺口，所以单独报出来而不是丢掉。
       </p>
     </div>
   )

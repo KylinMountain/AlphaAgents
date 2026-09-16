@@ -39,18 +39,28 @@ const present = (source, value, rows) => ({
 
 const bookValue = {
   pending: [{ id: 1, code: '300684', name: '中石科技', theme: '散热',
+             trader_id: 'pullback', trader_name: '回调派',
              entry_low: 20, entry_high: 21, stop_loss: 19, target_price: 24,
              order_date: '2026-09-11', expire_days: 2 }],
   positions: [
     { id: 9, code: '600460', name: '士兰微', theme: '半导体', open_price: 30,
-      shares: 100, return_pct: 4.2, return_amount: 126, peak_return_pct: 6.1,
-      max_drawdown_pct: -2.0, holding_days: 3, stop_loss: 28,
+      trader_id: 'default', trader_name: '默认交易员',
+      shares: 100, return_pct: null, return_amount: null,
+      last_price: 31.4, unrealized_pct: 4.67, unrealized_amount: 140,
+      peak_return_pct: 6.1, max_drawdown_pct: -2.0, holding_days: 3,
+      stop_loss: 28,
       thesis: { claim: '功率半导体涨价', prob: 0.6, horizon_days: 30,
                 conviction: 0.3, conditions: [{ kind: 'price_below', value: 28,
                                                 note: '', text: '跌破 28' }] } },
+    /* The pair: this one carries no price (a code the local K-line store has
+     * never seen), so it must fall back to the closed-column branch and say
+     * so rather than print a confident 0.0%. */
     { id: 10, code: '301232', name: '飞沃科技', theme: null, open_price: 40,
-      shares: 50, return_pct: -1.1, return_amount: -22, peak_return_pct: 0.5,
-      max_drawdown_pct: -3.2, holding_days: 1, thesis: null },
+      trader_id: 'breakout', trader_name: '突破派',
+      shares: 50, return_pct: -1.1, return_amount: -22,
+      last_price: null, unrealized_pct: null, unrealized_amount: null,
+      peak_return_pct: 0.5, max_drawdown_pct: -3.2, holding_days: 1,
+      thesis: null },
   ],
   closed: [{ id: 3, code: '002409', name: '雅克科技', theme: '半导体',
              status: 'expired', return_pct: -2.78, holding_days: 5,
@@ -69,13 +79,47 @@ const bookValue = {
 
 const tradeSections = {
   book: present('virtual_portfolio (+ theses, traders/)', bookValue, 53),
-  attribution: empty('position_exits → theses',
-                     { by_thesis: [], exits: { legs: 0, unattributed: 0, net: null },
-                       orders: { orders: 117, without_thesis: 40 } }),
+  /* The state production is actually in: no exit leg has ever been written,
+   * so `by_thesis` is empty — but the ledger still holds realised money from
+   * nine positions closed before the thesis mechanism, and those rows count.
+   * That is why this is `present` and not `empty`: a section whose read model
+   * reports rows renders its children, and the ones here exist to name the
+   * gap instead of letting the card read "贡献: 0 元" next to a ledger at
+   * −5,616.78. */
+  attribution: present('position_exits → theses',
+                       { by_thesis: [],
+                         exits: { legs: 0, unattributed: 0, net: null },
+                         orders: { orders: 117, without_thesis: 40 },
+                         realized: { total: -5616.78, attributed: 0,
+                                     unattributed: { legs: 0, legs_net: 0,
+                                                     positions: 9,
+                                                     legacy_net: -5616.78,
+                                                     total: -5616.78 } } },
+                       9),
   intents: empty('intents',
                  { recent: [], by_status: {}, never_decided: [] }),
   settlement: empty('reservations + settlement_lots',
                     { reservations: [], lots: {} }),
+}
+
+/* And the branch where at least one thesis has walked the whole chain. The
+ * pair matters: a table that renders only when rows exist would silently
+ * drop the "指不出" half, and a card that only ever rendered the gap would
+ * never show a working chain. */
+const attributionPresent = {
+  ...tradeSections,
+  attribution: present('position_exits → theses',
+                       { by_thesis: [{ thesis_id: 7, code: '600460', legs: 2,
+                                       wins: 1, net: 812.4, legacy_net: 0,
+                                       positions: 0, total: 812.4,
+                                       thesis_status: 'validated' }],
+                         exits: { legs: 2, unattributed: 0, net: 812.4 },
+                         orders: { orders: 117, without_thesis: 40 },
+                         realized: { total: 812.4, attributed: 812.4,
+                                     unattributed: { legs: 0, legs_net: 0,
+                                                     positions: 0,
+                                                     legacy_net: 0, total: 0 } } },
+                       2),
 }
 
 const tradeBlocked = {
@@ -163,8 +207,23 @@ const CASES = [
   ['trade · book present', PortfolioView,
    { workspace: { workspace: 'trade', generated_at: '2026-09-13T04:30:00+00:00',
                   states: {}, sections: tradeSections } },
-   { want: ['中石科技', '士兰微', '归因链', '改账审计', '资金与结算'],
+   { want: ['中石科技', '士兰微', '归因链', '改账审计', '资金与结算',
+            /* The two unrealized branches must both render: a card priced at
+             * the last close says which day it is from, and a card with no
+             * price at all must not print a confident 0.0% in its place. */
+            '按最近收盘', '无市价',
+            /* Who owns the row — the pending table and the position card. */
+            '交易员', '回调派', '默认交易员',
+            /* Attribution with no rows yet: the ledger's total is still
+             * shown, and the gap is named rather than hidden as 0 元. */
+            '已实现合计', '指不出的（旧仓 / 无论点）',
+            '还没有一笔平仓能指回论点'],
      reject: [ABSENT_HEAD, '整个读模型没到'] }],
+  ['trade · attribution has a thesis', PortfolioView,
+   { workspace: { workspace: 'trade', generated_at: '2026-09-13T04:30:00+00:00',
+                  states: {}, sections: attributionPresent } },
+   { want: ['退出腿', '旧仓平仓', '#7', '已实现合计'],
+     reject: ['还没有一笔平仓能指回论点'] }],
   ['learn · empty + partial', LearnView,
    { learn: { workspace: 'learn', generated_at: '2026-09-13T04:30:00+00:00',
               states: {}, sections: learnSections } },

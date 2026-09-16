@@ -29,6 +29,63 @@ from alpha_agents.server.readmodels import Need, Section, section, workspace
 logger = logging.getLogger(__name__)
 
 
+def _trader_names() -> dict[str, str]:
+    """``trader_id`` → display name, so a row can say who owns it."""
+    try:
+        from alpha_agents.data.trader import load_traders
+        return {t.id: t.name for t in load_traders()}
+    except Exception as e:
+        logger.warning("Trader names unavailable: %s", e)
+        return {}
+
+
+def _last_close(code: str) -> float | None:
+    """The latest close this repository has for ``code``, or ``None``.
+
+    Read from the local K-line store and never from the network: a read model
+    answers from what is on disk, and reaching for a feed here would turn the
+    portfolio page into a scrape. Stale is honest — the card names the day the
+    price is from — a hang is not.
+    """
+    try:
+        from alpha_agents.data.market_history import get_local_history
+        bars = get_local_history(code, days=1)
+    except Exception as e:
+        logger.warning("No local price for %s: %s", code, e)
+        return None
+    if not bars:
+        return None
+    return bars[-1].get("close")
+
+
+def _attach_unrealized(positions: list[dict]) -> list[dict]:
+    """Give each open position the return the page is asked for.
+
+    ``return_pct`` is a *closed* column: it is written when the position ends,
+    so on an open row it is NULL and the card read it as a flat 0.0% — every
+    position looked break-even, which on a book holding winners and losers is
+    not neutrality, it is a hole. The unrealized figure is computed here, from
+    the last close on disk, and carries ``None`` when there is no price rather
+    than a confident zero: "no price" and "no change" are different answers.
+    """
+    names = _trader_names()
+    for p in positions:
+        last = _last_close(p["code"])
+        open_price = p.get("open_price") or 0
+        shares = p.get("shares") or 0
+        if last and open_price > 0:
+            p["last_price"] = last
+            p["unrealized_pct"] = round((last - open_price) / open_price * 100, 2)
+            p["unrealized_amount"] = round((last - open_price) * shares, 2)
+        else:
+            p["last_price"] = None
+            p["unrealized_pct"] = None
+            p["unrealized_amount"] = None
+        tid = p.get("trader_id") or ""
+        p["trader_name"] = names.get(tid, tid) or None
+    return positions
+
+
 def _read_book() -> tuple[dict, int]:
     """The whole book, one call per table it is built from."""
     from alpha_agents.data.portfolio import (
@@ -44,6 +101,11 @@ def _read_book() -> tuple[dict, int]:
     invested = sum((p["open_price"] or 0) * (p["shares"] or 0)
                    for p in positions)
     positions = _attach_theses(positions)
+    positions = _attach_unrealized(positions)
+    names = _trader_names()
+    for o in pending:
+        tid = o.get("trader_id") or ""
+        o["trader_name"] = names.get(tid, tid) or None
     return {
         "pending": pending,
         "positions": positions,
@@ -151,22 +213,100 @@ def book() -> dict:
 
 
 def _read_attribution() -> tuple[dict, int]:
-    """Who earned what: realised legs rolled up by the thesis that named them.
+    """Who earned what: realised P&L rolled up by the thesis that named it.
 
-    An exit leg with no ``thesis_id`` is counted separately rather than
-    dropped. It is not a rounding detail — it is the size of the gap between
-    the ledger and the ideas, and a rollup that hides it would make the
-    attribution chain look complete when it is not.
+    Two sources, and both are needed or the chain under-reports by exactly the
+    amount it cannot explain. An exit leg carries its own ``thesis_id``; a
+    position closed whole carries ``return_amount`` on the position row and no
+    leg at all — and the ledger counts both
+    (``trade_ledger.realized_total`` = legs + legacy). Reading only the legs
+    made this page report a chain worth 0 元 next to a ledger worth
+    −5,616.78 元, which is not a neutral empty state, it is a wrong number.
+
+    The headline total is taken from the ledger itself rather than recomputed,
+    so the page and the ledger cannot disagree: same function, same expression,
+    same number. What the rollup adds is the *split* — how much of that total
+    a thesis can be named for.
+
+    An exit with no ``thesis_id``, or a position closed before the thesis
+    mechanism existed, is counted separately rather than dropped. That is not
+    a rounding detail — it is the size of the gap between the ledger and the
+    ideas, and a rollup that hides it would make the chain look complete when
+    it is not.
     """
     from alpha_agents.data import memory_store
     conn = memory_store._get_conn()
-    per_thesis = [dict(r) for r in conn.execute(
-        "SELECT e.thesis_id, COUNT(*) legs, "
-        "  SUM(e.net_amount) net, SUM(e.return_pct > 0) wins, "
-        "  t.code, t.status AS thesis_status "
+
+    ledger_total: float | None
+    try:
+        from alpha_agents.data import trade_ledger
+        from alpha_agents.data.trader import load_traders
+        ledger_total = float(sum(
+            trade_ledger.realized_total(conn, t.id) for t in load_traders()))
+    except Exception as e:
+        logger.warning("Ledger total unavailable; attribution is legs-only: %s", e)
+        ledger_total = None
+
+    legs_rows = [dict(r) for r in conn.execute(
+        "SELECT e.thesis_id, COUNT(*) legs, SUM(e.net_amount) net, "
+        "  SUM(e.return_pct > 0) wins, t.code, t.status AS thesis_status "
         "FROM position_exits e LEFT JOIN theses t ON t.id = e.thesis_id "
-        "WHERE e.thesis_id IS NOT NULL "
-        "GROUP BY e.thesis_id ORDER BY net DESC").fetchall()]
+        "GROUP BY e.thesis_id").fetchall()]
+    # Same expression as ``trade_ledger.realized_total``'s legacy term: a row
+    # with its own legs contributes only an explicit legacy figure, a row
+    # without them contributes ``return_amount``. Copying the expression rather
+    # than inventing a simpler one is what keeps the split summing to the
+    # headline — the two have to describe the same money. The WHERE keeps out
+    # the rows that contribute nothing (every open and pending position): left
+    # in, they arrived as zero-value rows and the table read as fourteen
+    # theses that had all broken exactly even.
+    legacy_rows = [dict(r) for r in conn.execute(
+        "SELECT p.thesis_id, COUNT(*) positions, "
+        "  SUM(COALESCE(p.legacy_realized_amount, p.return_amount)) legacy_net "
+        "FROM virtual_portfolio p "
+        "WHERE p.legacy_realized_amount IS NOT NULL "
+        "   OR (p.return_amount IS NOT NULL AND NOT EXISTS ("
+        "        SELECT 1 FROM position_exits e WHERE e.position_id = p.id)) "
+        "GROUP BY p.thesis_id").fetchall()]
+
+    merged: dict = {}
+    unattributed = {"legs": 0, "legs_net": 0.0,
+                    "positions": 0, "legacy_net": 0.0}
+    for r in legs_rows:
+        tid = r["thesis_id"]
+        if tid is None:
+            unattributed["legs"] = r["legs"] or 0
+            unattributed["legs_net"] = r["net"] or 0.0
+            continue
+        row = merged.setdefault(tid, {
+            "thesis_id": tid, "code": r.get("code"),
+            "thesis_status": r.get("thesis_status"),
+            "legs": 0, "wins": 0, "net": 0.0, "legacy_net": 0.0,
+            "positions": 0})
+        row["legs"] += r["legs"] or 0
+        row["wins"] += r["wins"] or 0
+        row["net"] += r["net"] or 0.0
+    for r in legacy_rows:
+        tid = r["thesis_id"]
+        if tid is None:
+            unattributed["positions"] = r["positions"] or 0
+            unattributed["legacy_net"] = r["legacy_net"] or 0.0
+            continue
+        row = merged.setdefault(tid, {
+            "thesis_id": tid, "code": None, "thesis_status": None,
+            "legs": 0, "wins": 0, "net": 0.0, "legacy_net": 0.0,
+            "positions": 0})
+        row["positions"] += r["positions"] or 0
+        row["legacy_net"] += r["legacy_net"] or 0.0
+
+    by_thesis = sorted(merged.values(),
+                       key=lambda d: d["net"] + d["legacy_net"], reverse=True)
+    for d in by_thesis:
+        d["total"] = round((d["net"] or 0) + (d["legacy_net"] or 0), 2)
+    unattributed["total"] = round(
+        (unattributed["legs_net"] or 0) + (unattributed["legacy_net"] or 0), 2)
+    attributed = round(sum(d["total"] for d in by_thesis), 2)
+
     totals = dict(conn.execute(
         "SELECT COUNT(*) legs, SUM(thesis_id IS NULL) unattributed, "
         "  SUM(net_amount) net FROM position_exits").fetchone() or {})
@@ -174,10 +314,12 @@ def _read_attribution() -> tuple[dict, int]:
         "SELECT COUNT(*) orders, SUM(thesis_id IS NULL) without_thesis "
         "FROM virtual_portfolio").fetchone() or {})
     return {
-        "by_thesis": per_thesis,
+        "by_thesis": by_thesis,
         "exits": totals,
         "orders": orders,
-    }, int(totals.get("legs") or 0)
+        "realized": {"total": ledger_total, "attributed": attributed,
+                     "unattributed": unattributed},
+    }, len(by_thesis) + int(unattributed["positions"])
 
 
 def _read_intents() -> tuple[dict, int]:

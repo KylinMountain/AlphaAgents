@@ -322,6 +322,198 @@ class TestTheEvolvePayloadCarriesTheGap:
         assert code["promotion_accepts"] == "candidate_policy"
 
 
+class TestOpenPositionsCarryTheReturnAndTheName:
+    """The two things the portfolio card was asked for and did not have.
+
+    ``return_pct`` is a *closed* column: on an open row it is NULL, and the
+    card that read it showed every holding as a flat 0.0% — a hole rendered
+    as break-even. And ``trader_id`` is an opaque string: the page must say
+    *who* placed an order, not what id owns it.
+    """
+
+    def _seed_position(self, code="000001", status="open", open_price=10.0,
+                       shares=100, trader_id=None, return_amount=None):
+        conn = memory_store._get_conn()
+        conn.execute(
+            "INSERT INTO virtual_portfolio (code, name, order_date, status,"
+            " open_date, open_price, shares, trader_id, return_amount)"
+            " VALUES (?, '测试股', '2026-09-14', ?, '2026-09-14', ?, ?, ?, ?)",
+            (code, status, open_price, shares, trader_id, return_amount))
+        conn.commit()
+
+    def _seed_kline(self, code, close, date="2026-09-14"):
+        from alpha_agents.data import market_history
+        mconn = market_history._get_conn()
+        mconn.execute(
+            "INSERT INTO daily_kline (code, date, close) VALUES (?, ?, ?)",
+            (code, date, close))
+        mconn.commit()
+
+    def test_an_open_position_gets_its_return_from_the_last_close(self):
+        from alpha_agents.server.readmodels.trade import book
+        self._seed_position(open_price=10.0, shares=100)
+        self._seed_kline("000001", 11.0)
+
+        pos = book()["positions"][0]
+
+        assert pos["return_pct"] is None      # closed-only column stays NULL
+        assert pos["last_price"] == 11.0
+        assert pos["unrealized_pct"] == 10.0
+        assert pos["unrealized_amount"] == 100.0
+
+    def test_no_local_price_is_none_not_a_confident_zero(self):
+        """'没有市价' and '没有涨跌' are different answers; only one is honest."""
+        from alpha_agents.server.readmodels.trade import book
+        self._seed_position(code="999999")
+
+        pos = book()["positions"][0]
+
+        assert pos["last_price"] is None
+        assert pos["unrealized_pct"] is None
+        assert pos["unrealized_amount"] is None
+
+    def test_positions_and_pending_orders_name_their_trader(self):
+        from alpha_agents.data.trader import load_traders
+        from alpha_agents.server.readmodels.trade import book
+        tid = load_traders()[0].id
+        expected = {t.id: t.name for t in load_traders()}
+        self._seed_position(trader_id=tid)
+        self._seed_position(code="000002", status="pending", trader_id=tid)
+
+        payload = book()
+
+        assert payload["positions"][0]["trader_name"] == expected[tid]
+        assert payload["pending"][0]["trader_name"] == expected[tid]
+
+
+class TestAttributionAddsUpToTheLedger:
+    """The headline is the ledger's own number; the rollup only splits it.
+
+    Reading only ``position_exits`` legs made the page report a chain worth
+    0 元 next to a ledger worth real money: a position closed whole carries
+    ``return_amount`` and no leg at all, and the ledger counts both. The
+    split has to describe the same money the ledger does — and rows that
+    contribute nothing (every open and pending position) must not arrive as
+    zero-value theses that all 'broke exactly even'.
+    """
+
+    def _trader_id(self):
+        from alpha_agents.data.trader import load_traders
+        return load_traders()[0].id
+
+    def _seed_legacy_close(self, return_amount, trader_id,
+                           code="000003", thesis_id=None):
+        """A position closed whole before the thesis mechanism: no legs."""
+        conn = memory_store._get_conn()
+        conn.execute(
+            "INSERT INTO virtual_portfolio (code, name, order_date, status,"
+            " open_date, open_price, shares, close_date, close_price,"
+            " return_pct, return_amount, trader_id, thesis_id)"
+            " VALUES (?, '旧仓', '2026-08-01', 'stopped', '2026-08-01',"
+            " 10.0, 100, '2026-08-10', 9.0, -10.0, ?, ?, ?)",
+            (code, return_amount, trader_id, thesis_id))
+        conn.commit()
+
+    def _seed_exit_leg(self, trader_id, thesis_id, net_amount,
+                       code="000004", return_pct=5.0):
+        """One exit leg through the real write path, not a hand-made row."""
+        from alpha_agents.data import trade_ledger
+        conn = memory_store._get_conn()
+        conn.execute(
+            "INSERT INTO virtual_portfolio (code, name, order_date, status,"
+            " open_date, open_price, shares, close_date, close_price,"
+            " return_pct, return_amount, trader_id, thesis_id)"
+            " VALUES (?, '腿仓', '2026-09-01', 'stopped', '2026-09-01',"
+            " 10.0, 100, '2026-09-05', 10.5, ?, NULL, ?, ?)",
+            (code, return_pct, trader_id, thesis_id))
+        position_id = conn.execute(
+            "SELECT last_insert_rowid()").fetchone()[0]
+        trade_ledger.record_exit(
+            conn, position_id=position_id, trader_id=trader_id, code=code,
+            exit_date="2026-09-05", price=10.5, shares=100,
+            cost_basis=1000.0, gross_amount=1050.0, costs=0.0,
+            net_amount=net_amount, return_pct=return_pct,
+            thesis_id=thesis_id)
+        conn.commit()
+        return position_id
+
+    def _ledger_total(self, conn):
+        from alpha_agents.data import trade_ledger
+        from alpha_agents.data.trader import load_traders
+        return float(sum(trade_ledger.realized_total(conn, t.id)
+                         for t in load_traders()))
+
+    def test_legacy_realized_is_counted_not_dropped(self):
+        from alpha_agents.server.readmodels.trade import _read_attribution
+        tid = self._trader_id()
+        self._seed_legacy_close(-5616.78, tid)
+
+        value, _rows = _read_attribution()
+
+        assert value["realized"]["total"] == -5616.78
+        assert value["realized"]["attributed"] == 0
+        assert value["realized"]["unattributed"]["positions"] == 1
+        assert value["realized"]["unattributed"]["legacy_net"] == -5616.78
+        assert value["by_thesis"] == []
+
+    def test_a_thesis_leg_lands_in_by_thesis_and_the_split_sums(self):
+        from alpha_agents.server.readmodels.trade import _read_attribution
+        conn = memory_store._get_conn()
+        tid = self._trader_id()
+        conn.execute(
+            "INSERT INTO theses (code, name, status) VALUES"
+            " ('000004', '测试论点', 'active')")
+        thesis_id = conn.execute(
+            "SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        self._seed_exit_leg(tid, thesis_id, 250.0)
+        self._seed_legacy_close(-100.0, tid)
+
+        value, _rows = _read_attribution()
+
+        assert value["realized"]["total"] == pytest.approx(150.0)
+        assert self._ledger_total(conn) == pytest.approx(150.0)
+        assert value["realized"]["attributed"] == pytest.approx(250.0)
+        assert value["realized"]["unattributed"]["legacy_net"] == -100.0
+        assert (value["realized"]["attributed"]
+                + value["realized"]["unattributed"]["total"]
+                == pytest.approx(value["realized"]["total"]))
+        assert len(value["by_thesis"]) == 1
+        assert value["by_thesis"][0]["thesis_id"] == thesis_id
+        assert value["by_thesis"][0]["net"] == 250.0
+        assert value["by_thesis"][0]["total"] == 250.0
+
+    def test_open_and_pending_rows_mint_no_zero_value_theses(self):
+        """A row with no money in it is not a thesis that broke even."""
+        from alpha_agents.server.readmodels.trade import _read_attribution
+        tid = self._trader_id()
+        self._seed_position_open(tid)
+        self._seed_position_pending(tid)
+
+        value, rows = _read_attribution()
+
+        assert value["by_thesis"] == []
+        assert value["realized"]["unattributed"]["positions"] == 0
+        assert rows == 0
+
+    def _seed_position_open(self, trader_id, code="000005"):
+        conn = memory_store._get_conn()
+        conn.execute(
+            "INSERT INTO virtual_portfolio (code, name, order_date, status,"
+            " open_date, open_price, shares, trader_id)"
+            " VALUES (?, '持仓', '2026-09-14', 'open', '2026-09-14',"
+            " 10.0, 100, ?)", (code, trader_id))
+        conn.commit()
+
+    def _seed_position_pending(self, trader_id, code="000006"):
+        conn = memory_store._get_conn()
+        conn.execute(
+            "INSERT INTO virtual_portfolio (code, name, order_date, status,"
+            " trader_id) VALUES (?, '挂单', '2026-09-14', 'pending', ?)",
+            (code, trader_id))
+        conn.commit()
+
+
 class TestAnEmptyDatabaseIsALegalAnswer:
     def test_every_workspace_answers_without_raising(self):
         payloads = {name: _snapshot(name) for name in rm.WORKSPACES}

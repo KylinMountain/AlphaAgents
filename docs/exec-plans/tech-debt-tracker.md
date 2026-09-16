@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -35,7 +35,13 @@ writing into the shared history; D23 was that nothing decided fills at all, so t
 walk would have improvised an intraday path and a capacity cap from the fill day's own
 volume; and D24 was that nothing recorded a model exchange, so re-running the same window
 re-sampled the model instead of reproducing it. Their entries below carry the payment
-records; none of the six ever reached this list as debt.)_
+records; none of the six ever reached this list as debt. **D25 was opened the same day, out of the M3
+design (§8 of that plan), and is *not* paid** — a candidate can reach `validated` on an empty evidence
+list, and its fix belongs on the lifecycle transition, not on the five call sites that would be tempted
+to fill the bucket with any id at hand. **D26 was found in the UI the same day and paid the same day**:
+the command columns had entered the `position_exits` DDL without a migration, so every close intent on
+an older database failed and the SQL error was recorded as the intent's rejection reason — a broken
+exit path showing up in the UI as policy.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -71,6 +77,62 @@ prints the 13, not the 7, because one entry can cover several occurrences in
 one file. (Was 26 entries / 47 violations on 2026-09-13, 11 / 17 this morning.)
 
 ## Open
+
+### D26 — Every close intent failed on a database the command columns never reached (paid 2026-09-16)
+
+**Added 2026-09-16, from the UI.** The user sent a screenshot of the 改账审计 table in which 48
+rejected intents carried the same rejection reason: `OperationalError: no such column: command_id`.
+`command_id` and `request_json` had entered the `position_exits` DDL without a migration for tables
+that already existed — `memory_store`'s ALTER list gained `thesis_id` but never the command pair —
+so on any database created before them `find_command` raised on its first read and **every close
+intent failed**. The audit trail recorded the outage as 48 ordinary policy rejections, each with a
+SQL error for a reason.
+
+**Cost.** No position could close anywhere the schema predated the columns, and nothing signalled
+it: the failure mode was not an error page, it was plausible-looking data — a *rejection* is a
+normal verdict, so nothing downstream ever asked why all of them said the same thing.
+
+**Paid 2026-09-16** with a rebuild migration (`memory_store._migrate_position_exits_command`),
+not a plain ALTER, and the difference is the point: the legacy table carries
+`UNIQUE (position_id, exit_date, price, shares)`, which rejects two genuinely independent sales
+that share terms — exactly the case the command ID exists to distinguish. The table is recreated
+from the current DDL and legacy rows copied across (they hold NULL command IDs, which the new
+unique constraint permits). Verified against a **copy** of the live database: the rebuild runs,
+`record_exit` writes, and a same-command retry returns the original row. Three tests in
+`test_trader_ledger.py`; the same-terms one **fails on an ALTER-shaped migration** — mutation
+probe confirmed it dies on the legacy `UNIQUE` constraint, which is the distinction this entry
+is about, not merely on a missing column.
+
+### D25 — A candidate can walk the whole lifecycle on an empty evidence list
+
+**Added 2026-09-16, while designing M3** (§8 of the T+1 plan). `learning_candidates.save_candidate`
+requires the four proposal fields, and `_episode_citations` insists both buckets be *stated* rather
+than omitted — *"an empty list has to be stated, not omitted, or 'we looked and found none' cannot be
+told from 'nobody looked'"*. That check enforces the **shape** of the citation. It does not enforce that
+anything was looked at: `{"supporting": [], "opposing": []}` is a valid citation, and it is what **all
+five production call sites** pass (`playbook.py` ×3, `lessons.py` ×2 — counted 2026-09-16).
+`advance_candidate` then checks only that the *transition* is legal; it never reads
+`evidence_episode_ids`. So a candidate that cites nothing can legally reach `validated`, and
+`candidate_transitions` will record an actor and a reason for each step.
+
+**Cost.** The module's own stated guarantee is that *"a proposal whose evidence is only the cases that
+agree with it is not a hypothesis, it is an advertisement"*. The empty case is weaker than the
+advertisement it guards against, and the empty case is the one every production call site produces.
+This is `holdout_gate`'s `evidence_scope` lesson appearing a second time: *a guard whose missing case
+is the permissive one is not a guard.*
+
+**Why the fix is neither at the write boundary nor now.** Requiring a non-empty `supporting` bucket at
+`save_candidate` would forbid a legitimate `observation` — the lifecycle's entry state exists for
+exactly "we noticed something and have not attributed it yet". The guard belongs on the **transition**,
+and a transition needs a reason to fire: something has to be able to name the decision an episode
+records. Nothing can today, because both proposers read prose lessons rather than T1 episodes — which
+is the gap M3 exists to close. **This entry is here so the gap is not rediscovered as a surprise, and
+so the fix is not mistaken for "go fill in the five call sites".** Fill them with ids from anywhere and
+the citation stops being empty and starts being wrong.
+
+**How it is recognised.** M3's acceptance requires that a candidate cannot leave `observation` while
+its evidence is empty — as a negative case with a mutation probe, because a static assertion here would
+be satisfied by the very constants that make the bucket empty.
 
 ### D24 — Nothing recorded the model exchanges, so a re-run of the same window was a re-sample (paid 2026-09-16)
 

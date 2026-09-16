@@ -316,3 +316,127 @@ def test_legacy_partial_profit_survives_new_exits(conn):
     _settle_all(conn)
     assert _cash(conn) == pytest.approx(
         trader_capital() + row["return_amount"])
+
+
+# ── The pre-command table: closes failed on it, quietly, as policy ────
+#
+# The command columns entered the DDL without a migration, so on any
+# database created before them every close intent died with
+# "no such column: command_id" and that error text became the intent's
+# rejection reason — a broken exit path presenting itself in the UI as a
+# policy decision. See tech-debt D26.
+
+_LEGACY_EXITS_DDL = """
+CREATE TABLE position_exits (
+    id INTEGER PRIMARY KEY,
+    position_id INTEGER NOT NULL,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    exit_date TEXT NOT NULL,
+    price REAL NOT NULL,
+    shares INTEGER NOT NULL,
+    cost_basis REAL NOT NULL,
+    gross_amount REAL NOT NULL,
+    costs REAL NOT NULL,
+    net_amount REAL NOT NULL,
+    return_pct REAL NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    thesis_id INTEGER,
+    UNIQUE (position_id, exit_date, price, shares)
+);
+CREATE INDEX idx_exits_trader ON position_exits(trader_id);
+CREATE INDEX idx_exits_position ON position_exits(position_id);
+"""
+
+
+def _legacy_row(conn, *, position_id=1, net=500.0):
+    conn.execute(
+        "INSERT INTO position_exits (position_id, trader_id, code, exit_date, "
+        "price, shares, cost_basis, gross_amount, costs, net_amount, return_pct, "
+        "reason, thesis_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (position_id, "default", "300475", "2026-04-10", 100.0, 100,
+         9000.0, 10000.0, 0.0, net, 11.11, "trim", None))
+    conn.commit()
+
+
+def _exits_columns(conn):
+    return {r[1] for r in conn.execute("PRAGMA table_info(position_exits)")}
+
+
+def test_pre_command_table_is_rebuilt_with_both_columns():
+    """The rebuild adds the columns the exit path reads and keeps the rows."""
+    from alpha_agents.data import memory_store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_LEGACY_EXITS_DDL)
+    _legacy_row(conn)
+
+    memory_store._migrate_position_exits_command(conn)
+
+    assert {"command_id", "request_json"} <= _exits_columns(conn)
+    row = conn.execute("SELECT * FROM position_exits").fetchone()
+    assert row["net_amount"] == pytest.approx(500.0)
+    assert row["command_id"] is None  # A legacy leg never had one.
+    conn.close()
+
+
+def test_after_rebuild_independent_same_terms_legs_both_survive():
+    """The rebuild replaces the legacy terms-unique constraint, not just the DDL.
+
+    A plain ALTER would add the column and silently keep
+    UNIQUE(position_id, exit_date, price, shares), which rejects two genuinely
+    independent sales with identical terms — the exact case the command ID
+    exists to distinguish. This test is what proves the table was rebuilt:
+    it fails on an ALTER-shaped migration.
+    """
+    from alpha_agents.data import memory_store
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_LEGACY_EXITS_DDL)
+    memory_store._migrate_position_exits_command(conn)
+
+    first = trade_ledger.record_exit(conn, position_id=1, trader_id="default",
+                                     code="300475", exit_date="2026-04-10",
+                                     price=100.0, shares=100, cost_basis=9000.0,
+                                     gross_amount=10000.0, costs=0.0,
+                                     net_amount=10000.0, return_pct=11.11,
+                                     command_id="cmd-a")
+    second = trade_ledger.record_exit(conn, position_id=1, trader_id="default",
+                                      code="300475", exit_date="2026-04-10",
+                                      price=100.0, shares=100, cost_basis=9000.0,
+                                      gross_amount=10000.0, costs=0.0,
+                                      net_amount=10000.0, return_pct=11.11,
+                                      command_id="cmd-b")
+    assert first != second
+    # And a retry of the same command is still the same row, end to end.
+    assert trade_ledger.record_exit(
+        conn, position_id=1, trader_id="default", code="300475",
+        exit_date="2026-04-10", price=100.0, shares=100, cost_basis=9000.0,
+        gross_amount=10000.0, costs=0.0, net_amount=10000.0, return_pct=11.11,
+        command_id="cmd-a") == first
+    conn.close()
+
+
+def test_get_conn_migrates_a_legacy_database_file(monkeypatch, tmp_path):
+    """The migration actually runs on the path a stale install arrives by."""
+    from alpha_agents.data import memory_store
+
+    db = tmp_path / "memory.db"
+    seed = sqlite3.connect(str(db))
+    seed.executescript(_LEGACY_EXITS_DDL)
+    _legacy_row(seed)
+    seed.close()
+
+    monkeypatch.setattr(memory_store, "MEMORY_DB_PATH", db)
+    saved = getattr(memory_store._local, "conn", None)
+    memory_store._local.conn = None
+    try:
+        conn = memory_store._get_conn()
+        assert {"command_id", "request_json"} <= _exits_columns(conn)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_exits").fetchone()[0] == 1
+    finally:
+        memory_store._local.conn = saved

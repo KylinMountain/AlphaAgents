@@ -31,6 +31,54 @@ _local = threading.local()
 _write_lock = threading.Lock()
 
 
+def _migrate_position_exits_command(conn: sqlite3.Connection) -> None:
+    """Rebuild a pre-command ``position_exits`` table to the current schema.
+
+    The command columns entered the DDL without a migration for tables that
+    already existed, so on such a database **every close intent failed** with
+    ``no such column: command_id`` — and the failure text was recorded as the
+    intent's rejection reason, which is how a broken exit path presented
+    itself in the UI as policy (48 rows on 2026-09-16, see D26).
+
+    A plain ALTER would add the column but leave the legacy
+    ``UNIQUE (position_id, exit_date, price, shares)`` constraint in place,
+    and that constraint rejects two genuinely independent sales that happen
+    to share terms — exactly the case the command ID exists to distinguish.
+    So the table is rebuilt from the current DDL and the legacy rows are
+    copied across: they all carry NULL command IDs, which the new unique
+    constraint permits, and the dedup key becomes the command ID the
+    ledger's docstring promises rather than the terms of the sale.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(position_exits)")}
+    if "command_id" in cols:
+        return
+    conn.execute("ALTER TABLE position_exits RENAME TO position_exits_pre_command")
+    try:
+        # IF NOT EXISTS throughout: only position_exits (and its indexes)
+        # are actually missing; everything else is a no-op.
+        conn.executescript(_SCHEMA)
+        conn.execute(
+            "INSERT INTO position_exits "
+            "(id, position_id, trader_id, code, exit_date, price, shares, "
+            "cost_basis, gross_amount, costs, net_amount, return_pct, reason, "
+            "created_at, thesis_id) "
+            "SELECT id, position_id, trader_id, code, exit_date, price, shares, "
+            "cost_basis, gross_amount, costs, net_amount, return_pct, reason, "
+            "created_at, thesis_id FROM position_exits_pre_command"
+        )
+    except Exception:
+        # Best effort only: the rows live in the renamed table either way,
+        # so a failed rollback still leaves the data on disk to recover.
+        try:
+            conn.execute(
+                "ALTER TABLE position_exits_pre_command RENAME TO position_exits")
+        except sqlite3.OperationalError as e:
+            logger.warning("could not restore position_exits after failed "
+                           "rebuild: %s", e)
+        raise
+    conn.execute("DROP TABLE position_exits_pre_command")
+
+
 def _get_conn() -> sqlite3.Connection:
     """Get or create a thread-local connection to memory.db."""
     conn = getattr(_local, "conn", None)
@@ -41,6 +89,11 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        # A database whose position_exits predates the command columns needs a
+        # table rebuild, not an ALTER — see the function's docstring. It runs
+        # before the ALTER loop below so the loop's own position_exits ALTERs
+        # (thesis_id) find the rebuilt table.
+        _migrate_position_exits_command(conn)
         # Schema migrations for older DBs — CREATE IF NOT EXISTS doesn't add
         # columns to existing tables. Each ALTER is wrapped in try/except to
         # ignore "duplicate column" errors on already-migrated DBs.
@@ -56,6 +109,10 @@ def _get_conn() -> sqlite3.Connection:
             # survives both a re-opened position and a rewritten thesis.
             "ALTER TABLE virtual_portfolio ADD COLUMN thesis_id INTEGER",
             "ALTER TABLE position_exits ADD COLUMN thesis_id INTEGER",
+            # The rare in-between case: command_id present, request_json not.
+            # The rebuild above creates both natively, so on a rebuilt table
+            # this is a skipped duplicate.
+            "ALTER TABLE position_exits ADD COLUMN request_json TEXT",
         ):
             try:
                 conn.execute(migration)

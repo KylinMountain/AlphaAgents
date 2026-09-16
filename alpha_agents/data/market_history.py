@@ -110,6 +110,48 @@ def get_available_dates() -> list[str]:
     return [r["date"] for r in rows]
 
 
+def first_bar_dates() -> dict[str, str]:
+    """``code → the earliest session the corpus holds for it``.
+
+    Exists to answer "was this security listed on that date?" — the
+    selection-side half of the universe as-of rule, which had no source
+    at all. There is no dated name table anywhere in this repository
+    (``stocks.db`` holds one *current* row per code, and
+    ``all_quote_snapshots.name`` only starts 2026-09-08), so the corpus
+    itself is the only evidence of when a security began trading.
+
+    Two limits, both named rather than implied:
+
+    * The corpus starts 2020-01-02, so every security listed before then
+      reports that date. That is correct for the question asked — they
+      *were* listed — but it means this cannot distinguish a 1999 listing
+      from a 2019 one.
+    * A security suspended across the corpus's first sessions reports its
+      first *traded* session, which is later than its listing date. That
+      errs toward excluding it, so it can make the universe too small and
+      never too large.
+
+    Read-only, and through ``corpus_access``: a replay shares this file.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT code, MIN(date) AS first_date FROM daily_kline GROUP BY code"
+    ).fetchall()
+    return {r["code"]: r["first_date"] for r in rows}
+
+
+def codes_listed_by(day: str) -> set[str]:
+    """Codes whose first corpus session is **strictly before** ``day``.
+
+    Strictly before, because a bar on ``day`` is a session the decision
+    cannot have seen: the decider stands at 09:00 and the corpus is
+    EOD-indexed. A security that first trades on D is therefore *not*
+    selectable on D — it had no prior close to rank or price against.
+    """
+    return {code for code, first in first_bar_dates().items()
+            if first < day}
+
+
 @lru_cache(maxsize=512)
 def get_latest_trading_day_at_or_before(cut: str) -> str | None:
     """Most recent market-wide trading day in daily_kline with date <= cut.

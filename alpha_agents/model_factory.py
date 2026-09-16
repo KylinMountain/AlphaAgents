@@ -75,8 +75,18 @@ def model_identity() -> dict:
     }
 
 
-def create_model() -> OpenAIChatCompletionsModel:
-    """The chat model every agent runs on."""
+def create_model(timeout: float | None = None) -> OpenAIChatCompletionsModel:
+    """The chat model every agent runs on.
+
+    ``timeout`` is opt-in and defaults to the SDK's own, so the production
+    path is byte-for-byte what it was. It exists because a walk-forward
+    against a rate-limited provider produced the failure it prevents: when a
+    free tier's TPM budget is spent, some providers **queue** the request
+    instead of answering ``429``, and with no client timeout the SDK waits its
+    default ten minutes and then retries twice — thirty minutes for one
+    session, with nothing in the log to say why. Bounding the wait turns that
+    into a named failure the caller already knows how to survive.
+    """
     # Not instrumented for *usage*: this client is handed to an Agent, and
     # the tracing hook already counts every generation the SDK makes
     # through it. Wrapping it too would bill each agent turn twice.
@@ -87,7 +97,8 @@ def create_model() -> OpenAIChatCompletionsModel:
     # window otherwise disagree for reasons that have nothing to do with 2020.
     # In the default ``live`` mode this hands back the very object below —
     # same identity, no proxy, no file — so the production path is unchanged.
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+    extra = {"timeout": timeout} if timeout else {}
+    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL, **extra)
     return OpenAIChatCompletionsModel(
         model=AGENT_MODEL or DEFAULT_MODEL,
         openai_client=llm_journal.journaled(client),

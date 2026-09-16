@@ -7,7 +7,7 @@ temporarily overloaded" after the agent had already done its tool calls,
 which is what fallbacks exist to survive.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from agents import ModelSettings
 
@@ -80,3 +80,35 @@ class TestNoDuplicateFactories:
             and "def _create_model(" in p.read_text(encoding="utf-8")
         ]
         assert offenders == [], f"这些模块又自建了 model: {offenders}"
+
+
+class TestTheTimeoutIsOptIn:
+    """D36: a queued provider must not be able to hold a run for ten minutes.
+
+    The *default* is the load-bearing half. Every agent in the repository builds
+    its client through ``create_model``, so a timeout chosen here would silently
+    change all of them — including the live morning scan, where a slow reasoning
+    model is a normal answer rather than a fault. The runner opts in instead.
+    """
+
+    @staticmethod
+    def _client_kwargs(**call) -> dict:
+        seen: dict = {}
+
+        def _build(**kwargs):
+            seen.update(kwargs)
+            return MagicMock(spec=mf.AsyncOpenAI)
+
+        with patch.object(mf, "AsyncOpenAI", _build):
+            mf.create_model(**call)
+        return seen
+
+    def test_no_timeout_leaves_the_sdk_default_in_place(self):
+        assert "timeout" not in self._client_kwargs()
+
+    def test_a_timeout_is_passed_through(self):
+        assert self._client_kwargs(timeout=90.0)["timeout"] == 90.0
+
+    def test_zero_is_treated_as_no_opinion_not_as_a_deadline(self):
+        """``0`` is falsy, and "fail instantly" is not what a caller means by it."""
+        assert "timeout" not in self._client_kwargs(timeout=0)

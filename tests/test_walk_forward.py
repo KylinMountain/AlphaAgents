@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import sqlite3
 import sys
 import threading
@@ -50,6 +51,8 @@ import walk_bootstrap  # noqa: E402
 import walk_forward  # noqa: E402
 
 from alpha_agents import config as app_config  # noqa: E402
+from alpha_agents import llm_journal  # noqa: E402
+from alpha_agents.data import learning_candidates as LC  # noqa: E402
 from alpha_agents.data import market_history as mh  # noqa: E402
 from alpha_agents.data import t1_settlement as S  # noqa: E402
 
@@ -189,7 +192,9 @@ def _forget_open_handles() -> None:
 def _args(**over) -> argparse.Namespace:
     base = dict(target=None, start=_START, days=1, trader="pullback", picks=1,
                 theme="WALK-TEST", stop_pct=8.0, participation=0.10,
-                run_id="acceptance", out=None, keep_going=False)
+                run_id="acceptance", out=None, keep_going=False,
+                decider="placeholder", panel_size=40, news_limit=60,
+                model_timeout=120.0, pace_seconds=0.0)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -614,3 +619,431 @@ class TestACancelIsCountedByItsKindAndRecordedByItsInstance:
             f"the row no longer names the price that ran away: {reasons[0]!r}")
         assert "10.05" in reasons[0], (
             f"the row no longer names the limit it ran away from: {reasons[0]!r}")
+
+
+# ── 6. the universe as-of, on the side that chooses ─────────────────────────
+
+
+def _listing_on(day: str) -> tuple[dict, dict]:
+    """The three normal names plus a fourth whose corpus history starts ``day``.
+
+    A code with no bar before ``day`` is what an IPO looks like in this
+    corpus, because the first bar is the *only* evidence of listing that
+    exists here: ``stocks.db`` holds one current row per code and this
+    repository has no dated name table anywhere.
+    """
+    series, instruments = _normal()
+    series["600009"] = _series([d for d in _SESSIONS if d >= day], close=10.0)
+    instruments["600009"] = {"name": "丁"}
+    return series, instruments
+
+
+class TestASecurityThatHadNotListedCannotBeSelected:
+    """M0's "universe 也要 as-of", on the side that chooses.
+
+    Suspension was covered on the settlement side and ST by
+    ``market_rules.listing_day_exemption``, but the *selection* side had no
+    as-of at all — ``stocks.db`` holds the current name — so "a security that
+    was not in the pool at the time must not be selected" had no test.
+
+    The rule is ``first_bar < day``: strictly before, anchored on the decision
+    day. It is one gate that both deciders call, and what makes the gate
+    *reachable* is that both iterate the whole instrument table rather than the
+    previous session's bars. A candidate set drawn from T-1 bars can only ever
+    contain listed names, so a gate applied to it returns ``None`` for every
+    row — measured, on the real corpus, as 0 of 1,986 not-yet-listed codes in a
+    2020 window ever reaching it.
+
+    The assertion is on the counter rather than on the order, deliberately.
+    With a T-1 ranking rule a not-yet-listed name has no previous close, so it
+    could not have been ranked anyway: "not selected" is guaranteed by
+    construction and asserting it would be vacuous. The counter is what tells
+    "excluded by the as-of rule" apart from "excluded by accident", and it is
+    what goes to zero if the branch is deleted.
+    """
+
+    def test_a_name_listed_on_the_window_day_is_counted_not_listed(self, tmp_path):
+        series, instruments = _listing_on(_START)
+        replay, _ = _prepare(tmp_path, series, instruments)
+        result = _run(replay)
+
+        counters = result["ctx"].counters
+        assert counters["eligibility:not_listed"] >= 1, (
+            "a code whose first corpus session is the decision day was not "
+            f"excluded by the as-of rule: {dict(counters)}")
+        assert _ordered_codes(replay) == {_PICKED}, (
+            "the ordinary names stopped being selectable, so this run is not "
+            "measuring the rule at all")
+
+    def test_the_boundary_is_the_decision_day_not_short_history(self, tmp_path):
+        """Listed *today* is out; the next session it is in.
+
+        The pair is the whole claim, and it is why the comparison is strict
+        and anchored on ``day``: at 09:00 on D a name that listed on D has no
+        previous close to rank or price against, while one that listed on T-1
+        has both and is trading. An implementation that asked "does it have a
+        long history?" would pass the first half and fail the second.
+        """
+        series, instruments = _listing_on(_START)
+        replay, _ = _prepare(tmp_path, series, instruments)
+        ctx = _run(replay)["ctx"]
+
+        assert ctx.corpus.is_listed("600009", _START) is False
+        assert walk_forward._eligibility(
+            ctx, "600009", _START, _PREV) == "not_listed"
+
+        after = _SESSIONS[22]
+        assert ctx.corpus.is_listed("600009", after) is True, (
+            "the name never becomes listed, so 'listed' is not being measured")
+        assert walk_forward._eligibility(ctx, "600009", after, _START) is None, (
+            "the gate kept refusing a name that has been trading since "
+            "yesterday, so the boundary is not where the docstring says")
+
+
+class TestTheDeclarationAndTheMeasurementMustAgree:
+    """Both directions of one claim: what a run *says* it called a model.
+
+    A placeholder that silently calls a model and a model decider that
+    silently calls nothing are the same lie pointing opposite ways, and the
+    second is the easier one to ship — an empty journal still produces a
+    complete-looking report. The first version of this check compared
+    ``journal_after > 0``, which a **correct** replay fails: a replay reads a
+    journal that is already populated and adds nothing. It was found by
+    running one; the record pass passed.
+    """
+
+    @staticmethod
+    def _ctx(decider: str) -> argparse.Namespace:
+        return argparse.Namespace(decider=decider)
+
+    def test_a_placeholder_that_calls_a_model_is_refused(self):
+        ok, detail = walk_forward._model_usage(
+            self._ctx("placeholder"),
+            {"mode": llm_journal.RECORD, "journal_before": 0, "journal_after": 3})
+        assert ok is False and "3" in detail
+
+    def test_a_record_pass_that_called_nothing_is_refused(self):
+        ok, _ = walk_forward._model_usage(
+            self._ctx("llm"),
+            {"mode": llm_journal.RECORD, "journal_before": 0, "journal_after": 0})
+        assert ok is False, "a record pass with an empty journal recorded nothing"
+
+    def test_a_replay_adds_nothing_and_must_already_hold_something(self):
+        ok, _ = walk_forward._model_usage(
+            self._ctx("llm"),
+            {"mode": llm_journal.REPLAY, "journal_before": 40, "journal_after": 40})
+        assert ok is True, "a correct replay was reported as inconsistent"
+
+        ok, _ = walk_forward._model_usage(
+            self._ctx("llm"),
+            {"mode": llm_journal.REPLAY, "journal_before": 0, "journal_after": 0})
+        assert ok is False, "a replay of an empty journal answered from nothing"
+
+    def test_a_live_model_run_cannot_be_checked_at_all(self):
+        ok, detail = walk_forward._model_usage(
+            self._ctx("llm"),
+            {"mode": llm_journal.LIVE, "journal_before": 0, "journal_after": 0})
+        assert ok is False and llm_journal.LIVE in detail
+
+    def test_a_model_decider_under_live_is_refused_before_it_runs(self, monkeypatch):
+        """Refused, not warned: under ``live`` two arms cannot be compared."""
+        monkeypatch.setenv(llm_journal.MODE_ENV, llm_journal.LIVE)
+        with pytest.raises(SystemExit):
+            walk_forward._assert_model_mode("llm")
+        walk_forward._assert_model_mode("placeholder")
+
+        monkeypatch.setenv(llm_journal.MODE_ENV, llm_journal.RECORD)
+        walk_forward._assert_model_mode("llm")
+        monkeypatch.setenv(llm_journal.MODE_ENV, llm_journal.REPLAY)
+        walk_forward._assert_model_mode("llm")
+
+
+# ── 7. the learning step ────────────────────────────────────────────────────
+
+
+class TestTheObservationIsAttributable:
+    """M3's claim at both ends: the note cites episodes, and the citation reads back.
+
+    The distillation is deliberately not a model's opinion of itself — the
+    claim is a median of realised returns and the feature is re-read from the
+    corpus — so what is testable is the **attribution**: that the episodes it
+    cites are real ids, that both buckets are stated even when one is empty,
+    and that ``candidates_citing`` can enumerate the note from an episode. A
+    candidate whose evidence cannot be walked back to the trades it came from
+    is prose with a foreign key in it.
+    """
+
+    @staticmethod
+    def _ctx() -> argparse.Namespace:
+        return argparse.Namespace(trader="pullback", entry_zone=(0.970, 1.005),
+                                  window_start=_START)
+
+    @staticmethod
+    def _trades(pairs, *, first_episode: int = 101) -> list[dict]:
+        """``(t1_change, realised_return)`` pairs, as ``_closed_trades`` shapes them."""
+        return [{"position_id": i + 1, "code": f"6000{i + 1:02d}",
+                 "episode_id": first_episode + i, "close_date": _START,
+                 "return_pct": ret, "close_reason": "stop", "t1_change": chg}
+                for i, (chg, ret) in enumerate(pairs)]
+
+    def test_too_few_trades_writes_nothing(self):
+        """Three is under the floor, and the floor is why a window can be silent."""
+        before = len(LC.candidates_by_status())
+        assert walk_forward._distil(self._ctx(), _START, self._trades(
+            [(3.0, -1.0), (1.0, 2.0), (2.0, 1.0)])) is None
+        assert len(LC.candidates_by_status()) == before
+
+    def test_a_note_cites_the_episodes_it_came_from(self):
+        ctx = self._ctx()
+        # Bought high and lost, or bought low and won — all four support the
+        # proposition, so the *opposing* list is empty and must say so.
+        out = walk_forward._distil(ctx, _START, self._trades(
+            [(5.0, -3.0), (4.0, -2.0), (0.5, 2.0), (0.2, 1.0)]))
+        assert out is not None
+        assert out["n"] == 4
+        assert (out["supporting"], out["opposing"]) == (4, 0)
+        assert out["high_median"] == -2.5 and out["low_median"] == 1.5
+
+        stored = LC.get_candidate(out["candidate_id"])
+        assert stored["status"] == LC.OBSERVATION, (
+            "the pipeline must not promote: advance_candidate is the only writer")
+        assert "n=4" in stored["claim"], stored["claim"]
+        assert "n≥50" in stored["claim"], (
+            "the claim has to name its own thinness, or a reader takes a "
+            "four-trade observation for a finding")
+        assert json.loads(stored["evidence_episode_ids"]) == {
+            "supporting": [101, 102, 103, 104], "opposing": []}
+
+        for episode_id in (101, 102, 103, 104):
+            citing = LC.candidates_citing(episode_id)
+            assert [c["id"] for c in citing] == [out["candidate_id"]]
+            assert citing[0]["cited_as"] == ["supporting"]
+
+    def test_opposing_evidence_is_stated_not_omitted(self):
+        """§10: evidence that is only the cases that agree is an advertisement."""
+        out = walk_forward._distil(self._ctx(), _START, self._trades(
+            [(5.0, -3.0), (4.0, 2.0), (0.5, 2.0), (0.2, -1.0)]))
+        assert out is not None
+        assert out["supporting"] >= 1 and out["opposing"] >= 1
+
+        stored = LC.get_candidate(out["candidate_id"])
+        cited = json.loads(stored["evidence_episode_ids"])
+        assert cited["supporting"] and cited["opposing"]
+        assert LC.candidates_citing(102)[0]["cited_as"] == ["opposing"]
+
+    def test_the_note_reaches_the_next_day_and_not_the_day_it_was_written(self):
+        """The loop's last arrow, and its one lookahead guard.
+
+        An observation written at the close of D has to be visible to the
+        decision on D+1 and invisible on D. Without the second half, a re-run
+        of a day could decide using knowledge distilled from that day's own
+        result — which is the leak the whole as-of apparatus exists to stop.
+        """
+        ctx = self._ctx()
+        out = walk_forward._distil(ctx, _START, self._trades(
+            [(5.0, -3.0), (4.0, -2.0), (0.5, 2.0), (0.2, 1.0)]))
+        assert out is not None
+
+        assert walk_forward._knowledge_block(ctx, _START) == "", (
+            "the day it was written can see it")
+
+        block = walk_forward._knowledge_block(ctx, _SESSIONS[22])
+        assert "【你自己的交易记录" in block
+        assert "n=4" in block
+        assert "#101" in block and "#104" in block, (
+            f"the block did not name the episodes it rests on:\n{block}")
+
+
+class TestASupportCountMustBeAboutReturnsNotGroupMembership:
+    """The counts beside the medians have to be about returns, not the split.
+
+    Measured on the 2025-07-01 window, where **all four** closed trades lost
+    money. The first version tested ``(t1 > cut) != (return_pct > 0)``;
+    ``return_pct > 0`` was ``False`` for every one of them, so the expression
+    collapsed to ``t1 > cut`` and "2 笔支持、2 笔反对" was nothing but the two
+    group sizes. It could not have disagreed with the medians printed beside
+    it — which is precisely why it read as confirmation.
+
+    It also filed half the citations the wrong way, including the window's
+    best trade: the lowest T-1 change and the smallest loss (-4.96%), which
+    it listed as *opposing* the proposition that trade supports.
+    """
+
+    #: The four closes of the 2025-07-01 window, as the corpus gave them up.
+    _LOSSES = [(6.7633, -4.96), (8.4783, -10.01), (9.4047, -8.91), (9.1102, -6.84)]
+
+    @staticmethod
+    def _ctx() -> argparse.Namespace:
+        return argparse.Namespace(trader="pullback", entry_zone=(0.970, 1.005),
+                                  window_start=_START)
+
+    @staticmethod
+    def _trades(pairs, *, first_episode: int = 101) -> list[dict]:
+        return [{"position_id": i + 1, "code": f"6000{i + 1:02d}",
+                 "episode_id": first_episode + i, "close_date": _START,
+                 "return_pct": ret, "close_reason": "stop", "t1_change": chg}
+                for i, (chg, ret) in enumerate(pairs)]
+
+    def test_a_window_where_every_trade_lost_still_separates_the_two_sides(self):
+        out = walk_forward._distil(self._ctx(), _START, self._trades(self._LOSSES))
+        assert out is not None
+        assert out["n"] == 4
+        # Also 2/2, so the counts alone cannot tell the implementations
+        # apart — the membership is what differs.
+        assert (out["supporting"], out["opposing"]) == (2, 2)
+
+        cited = json.loads(
+            LC.get_candidate(out["candidate_id"])["evidence_episode_ids"])
+        # #101: up 6.76% on T-1 and the smallest loss. The proposition
+        # holding, so it supports.
+        assert 101 in cited["supporting"], (
+            "the smallest loss on the lowest T-1 change supports "
+            f"'up more, did worse'; got {cited}")
+        # #104: the mirror image — up 9.11% on T-1, lost less than typical.
+        assert 104 in cited["opposing"], cited
+
+    def test_the_counts_are_not_simply_the_group_sizes(self):
+        """A verdict that only mirrors the split is not evidence about returns.
+
+        Both groups hold two trades, so a test that reduces to group
+        membership reports 2/2 no matter what the returns did. Moving one
+        return across the window median, leaving every T-1 change alone, has
+        to move that trade's citation with it.
+        """
+        before = json.loads(LC.get_candidate(
+            walk_forward._distil(self._ctx(), _START,
+                                 self._trades(self._LOSSES))["candidate_id"]
+        )["evidence_episode_ids"])
+
+        moved = [(6.7633, -9.5), (8.4783, -10.01),
+                 (9.4047, -8.91), (9.1102, -6.84)]
+        after = json.loads(LC.get_candidate(
+            walk_forward._distil(self._ctx(), _START,
+                                 self._trades(moved))["candidate_id"]
+        )["evidence_episode_ids"])
+
+        assert 101 in before["supporting"], before
+        assert 101 in after["opposing"], (
+            f"a trade that fell from the best return to the worst kept its "
+            f"side: {before} → {after}")
+
+    def test_the_record_carries_each_trades_verdict(self):
+        """The counts are re-derivable from the record, not taken on trust."""
+        out = walk_forward._distil(self._ctx(), _START, self._trades(self._LOSSES))
+        payload = json.loads(
+            LC.get_candidate(out["candidate_id"])["payload_json"])
+        assert len(payload["trades"]) == out["n"]
+        for trade in payload["trades"]:
+            assert isinstance(trade["supports"], bool), trade
+        assert sum(t["supports"] for t in payload["trades"]) == out["supporting"]
+        assert payload["median_return_pct"] == -7.875
+
+
+class TestADecisionFailureCostsOnlyTheDecision:
+    """Found by running a 180-day window against a rate-limited provider.
+
+    Every ``429`` took the whole day down with it: the pending orders were
+    never settled, the exits were never processed and no equity row was
+    written, so the curve had a hole exactly where the market had a session.
+    The two failures are different facts — "the model did not answer" and "the
+    book did not settle" — and they shared one ``try``.
+    """
+
+    def test_a_decider_that_raises_still_settles_the_book(self, tmp_path, monkeypatch):
+        series, instruments = _normal()
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        def _throttled(ctx, day, prev_day):
+            raise RuntimeError("provider throttled")
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _throttled)
+        result = _run(replay, days=2, keep_going=True)
+
+        assert [e["stage"] for e in result["errors"]] == ["decide", "decide"]
+        assert len(result["equity"]) == 2, (
+            "the equity curve has a hole where the market had a session")
+        assert len(result["settlement"]) == 2
+        assert result["equity"][-1]["equity"] > 0
+        # And the failure is named by stage, so "14 errors" cannot be read as
+        # a broken settlement when every one of them was a throttled model.
+        assert "decide:RuntimeError×2" in walk_forward._error_kinds(result["errors"])
+
+
+class TestTheObservationIsWrittenOnlyWhenSomethingWasLearned:
+    """The defect this pins was **measured, not imagined**.
+
+    The first version distilled on every day, gated only on ``n >= 4``. On the
+    first 180-day window that produced **11 candidates for 2 distinct facts**:
+    once the fourth close landed, every following day wrote another copy of the
+    same sentence, and every copy was *true* — which is why nothing else would
+    have caught it. ``save_candidate`` cannot dedupe them either: ``source_date``
+    is part of the fingerprint, so "the same observation on a later day" is by
+    construction a different row. A candidate list that is mostly duplicates
+    makes ``counts()`` meaningless and makes the loop look busier than it is.
+    """
+
+    @staticmethod
+    def _ctx() -> argparse.Namespace:
+        return argparse.Namespace(trader="pullback", entry_zone=(0.970, 1.005),
+                                  window_start=_START, counters=Counter())
+
+    @staticmethod
+    def _one_close(close_date: str) -> list[dict]:
+        return [{"position_id": 1, "code": "600001", "episode_id": 11,
+                 "close_date": close_date, "return_pct": -1.0,
+                 "close_reason": "stop", "t1_change": 3.0}]
+
+    def _learn_with(self, monkeypatch, close_date: str) -> list[str]:
+        calls: list[str] = []
+        monkeypatch.setattr(walk_forward, "_closed_trades",
+                            lambda ctx, day, conn: self._one_close(close_date))
+        monkeypatch.setattr(
+            walk_forward, "_distil",
+            lambda ctx, day, trades: calls.append(day) or None)
+        walk_forward._learn(self._ctx(), _START)
+        return calls
+
+    def test_a_day_with_no_close_does_not_distil_again(self, monkeypatch):
+        assert self._learn_with(monkeypatch, _PREV) == [], (
+            "a day on which nothing closed distilled again, which is how one "
+            "observation becomes eleven")
+
+    def test_a_day_that_closed_something_does(self, monkeypatch):
+        """The companion, or the test above would pass against a dead loop."""
+        assert self._learn_with(monkeypatch, _START) == [_START]
+
+
+class TestTheLearningStepIsAFunctionOfTheDaysBook:
+    """The new risk the loop introduced: it *writes* as it goes.
+
+    A replay has to re-derive the same observations, not merely the same
+    fills — an observation written from wall-clock state or from a stale
+    handle would make the second pass differ while every CSV matched.
+
+    Pinned with the placeholder decider, which calls no model, so this is
+    about the runner's determinism and not the journal's. The journal's own
+    record/replay is pinned call by call in ``test_llm_journal``, and the
+    end-to-end model pass is demonstrated by running one over a real window
+    rather than by this test.
+    """
+
+    def test_two_passes_label_and_distil_identically(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(llm_journal.MODE_ENV, llm_journal.REPLAY)
+        series, instruments = _normal()
+
+        replay, corpus = _prepare(tmp_path, series, instruments)
+        first = _run(replay, days=5)
+        assert first["learning"], "the loop did not run, so this proves nothing"
+
+        _forget_open_handles()
+        walk_bootstrap.bootstrap(replay, corpus, force=True)
+        second = _run(replay, days=5)
+
+        assert second["learning"] == first["learning"]
+        assert (walk_forward._learning_meta(second["learning"])
+                == walk_forward._learning_meta(first["learning"]))
+        # What the run *says* it wrote and what the table holds are one fact.
+        assert len(LC.candidates_by_status(LC.OBSERVATION)) == len(
+            [row for row in second["learning"] if row["distilled"]]), (
+            "the candidate table and the run's own record of what it wrote "
+            "disagree, so one of the two is not the loop's output")

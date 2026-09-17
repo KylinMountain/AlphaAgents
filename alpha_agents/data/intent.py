@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -66,6 +67,49 @@ SUBMITTED = "submitted"
 ACCEPTED = "accepted"
 REJECTED = "rejected"
 INTENT_TERMINAL = frozenset({ACCEPTED, REJECTED})
+
+#: Prefix marking a row whose "rejection" was really a system fault (D32).
+#:
+#: ``intents.reject_reason`` carries two populations a reader must not
+#: confuse: prose from the business rules declining a well-formed intent, and
+#: the text of an exception the write path raised. Stored bare, the second
+#: reads as the first — D26's 68 failed closes, all on one missing column,
+#: were displayed as 68 ordinary policy rejections, and because a rejection
+#: is a *normal* verdict nothing downstream asked why they all said the same
+#: thing. That is why the outage stayed invisible for as long as it did.
+#:
+#: The marker is written by the writer because the writer is the only place
+#: that knows which of the two happened. A reader could guess from the
+#: ``ExceptionClass: `` shape, but a rule that is correct today and quietly
+#: wrong the first time a policy reason contains a colon is not a fix.
+FAULT_PREFIX = "!fault: "
+
+
+def is_fault(reason: str | None) -> bool:
+    """True when ``reject_reason`` records a system fault, not a decision.
+
+    Rows written before the marker existed (D26's 68, and any other outage
+    already in the book) carry no prefix, so they are classified by the
+    documented shape the writer used then — ``ExceptionClass: message``.
+    That legacy rule is scoped to rows that predate the marker, so a policy
+    reason containing a colon cannot be misread going forward.
+    """
+    if not reason:
+        return False
+    if reason.startswith(FAULT_PREFIX):
+        return True
+    return bool(_LEGACY_FAULT_RE.match(reason))
+
+
+_LEGACY_FAULT_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.]*\.)?"
+    r"(?:OperationalError|IntegrityError|ProgrammingError|DatabaseError|"
+    r"InterfaceError|DataError|InternalError|NotSupportedError|"
+    r"ValueError|KeyError|TypeError|AttributeError|RuntimeError|"
+    r"OSError|IOError|PermissionError|TimeoutError|"
+    r"[A-Za-z_][A-Za-z0-9_]*Error|[A-Za-z_][A-Za-z0-9_]*Exception)"
+    r":\s")
+
 _LEGAL_INTENT = {
     SUBMITTED: frozenset({ACCEPTED, REJECTED}),
     ACCEPTED: frozenset(),
@@ -487,7 +531,11 @@ def submit_intent(intent: TradeIntent,
         # would turn "the database refused this sale" into "the sale was
         # declined", which is the silent-exception failure this codebase
         # forbids. The intent row survives so the attempt is visible.
-        msg = f"{type(e).__name__}: {e}"
+        #
+        # The FAULT_PREFIX is what keeps the two populations apart on the
+        # read side (D32): without it this row is indistinguishable from a
+        # policy refusal, and an outage reads as 68 ordinary verdicts.
+        msg = f"{FAULT_PREFIX}{type(e).__name__}: {e}"
         try:
             _finalise(conn, intent_id, REJECTED, msg, None)
         except Exception as inner:

@@ -323,17 +323,29 @@ def _read_attribution() -> tuple[dict, int]:
 
 
 def _read_intents() -> tuple[dict, int]:
-    """The single door's trail: what was asked, and what came back."""
+    """The single door's trail: what was asked, and what came back.
+
+    A row whose ``reject_reason`` records a raised exception is counted as a
+    **fault**, not as a refusal (D32). The panel used to print the exception
+    text under 拒绝原因, so an outage — 68 closes failing on one missing
+    column — rendered as 68 ordinary policy verdicts, and a normal verdict is
+    exactly the thing nobody re-examines.
+    """
     from alpha_agents.data import intent
     rows = intent.history(limit=100)
     never = intent.never_decided()
     counts: dict = {}
+    faults = 0
     for row in rows:
+        if intent.is_fault(row.get("reject_reason")):
+            faults += 1
+            row["fault"] = True
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     return {
         "recent": rows,
         "by_status": counts,
         "never_decided": never,
+        "faults": faults,
     }, len(rows)
 
 

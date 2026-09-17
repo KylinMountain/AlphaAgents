@@ -303,6 +303,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor, set_scheduler
     from alpha_agents.pipeline.tasks.review import run_review
     from alpha_agents.pipeline.tasks.shadow_run import run_shadow_run
+    from alpha_agents.pipeline.tasks.daily_archive import run_daily_archive
     from alpha_agents.pipeline.tasks.night_scan import run_night_scan
     from alpha_agents.pipeline.tasks.weekly_report import run_weekly_report
 
@@ -383,6 +384,23 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task("shadow_run", run_shadow_run, dtime(15, 45),
                             timeout_seconds=300, catch_up_grace_minutes=90))
 
+    # Tushare EOD archive: 17:30, trading days only.
+    #
+    # It had a function and no registration, so seven A-share tables
+    # (`north_flow_daily`, `margin_daily`, `lhb_daily`, `lhb_inst_daily`,
+    # `hm_daily`, `kpl_limit_list_daily`, `kpl_concept_daily`) held zero rows
+    # while their schemas and writers were complete. Nothing scheduled them.
+    #
+    # 17:30 rather than right after the close: Tushare publishes these
+    # endpoints after the exchange's own settlement, and asking at 15:00
+    # returns an empty frame that looks like a permission problem. The
+    # catch-up grace is a full day because the data is dated, not timestamped
+    # — a run that happens tomorrow still archives yesterday correctly.
+    scheduler.add_task(Task(
+        "daily_archive", run_daily_archive,
+        dtime(17, 30), timeout_seconds=900, catch_up_grace_minutes=1440,
+    ))
+
     # Night scan: 20:00, every day (monitors foreign markets)
     scheduler.add_task(Task(
         "night_scan", run_night_scan,
@@ -406,6 +424,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             "intraday": run_intraday_monitor,
             "review": run_review,
             "shadow": run_shadow_run,
+            "archive": run_daily_archive,
             "night": run_night_scan,
             "weekly": run_weekly_report,
         }
@@ -632,7 +651,7 @@ def main() -> None:
     p_run_v2 = subparsers.add_parser("run-v2", help="Run with trading-day scheduler (AlphaAgents 2.0)")
     p_run_v2.add_argument("--now", action="store_true", help="Run morning scan immediately on startup")
     p_run_v2.add_argument("--chat", action="store_true", help="启动交互模式（后台调度+前台对话）")
-    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "shadow", "night", "weekly", "opening"],
+    p_run_v2.add_argument("--task", type=str, choices=["morning", "intraday", "review", "shadow", "night", "weekly", "opening", "archive"],
                           help="Run a single task and exit (for testing)")
     p_run_v2.set_defaults(func=cmd_run_v2)
 

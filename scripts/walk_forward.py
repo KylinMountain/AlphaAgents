@@ -1300,7 +1300,7 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
             "cancels": Counter(cancels)}
 
 
-def _agent_exits(ctx, day: str) -> list[dict]:
+def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
     """Ask the agent what to do with the positions the rules left open.
 
     Runs after ``_settle_exits``, never before: that ordering is what keeps
@@ -1310,9 +1310,22 @@ def _agent_exits(ctx, day: str) -> list[dict]:
     Off unless ``--agent-exits`` is passed, so a run's model-call count is
     something the operator chose rather than a surprise: this doubles it.
 
-    Prices are the **previous session's close**, matching what the buy side
-    is shown at 09:00. Using the replay day's bar would leak the day the
-    decision is being made on — the position's own outcome.
+    ``phase`` is which moment of the session this is, and it decides three
+    things at once — what the agent may **see**, what a fill **settles at**,
+    and therefore what the trade is allowed to know:
+
+    ``"open"``
+        Sees T-1's close (the last price that exists) plus T's open. Fills at
+        T's open. This is the 09:00-09:35 decision.
+
+    ``"close"``
+        Sees T's full OHLCV — the session has happened. Fills at T's close.
+        The user's rule: "收盘前我们看到的基本等于这个数据", so the close
+        decision is taken with the day in hand and settled at its close.
+
+    Getting these two wrong in either direction is the whole risk: a close
+    decision that fills at the open has sold at a price it could only know
+    later, and an open decision shown the close has been told the answer.
     """
     from alpha_agents.pipeline.tasks import exit_decision as ED
 
@@ -1322,13 +1335,36 @@ def _agent_exits(ctx, day: str) -> list[dict]:
     prev = ctx.corpus.previous(day)
     if prev is None:
         return []
-    price_map: dict[str, float] = {}
-    for code, row in ctx.corpus.bars(prev).items():
-        close = row.get("close")
-        if close:
-            price_map[code] = float(close)
+    # **Two maps, and they are not the same number.**
+    #
+    # `mark_map` is what the agent is shown a position is worth, and
+    # `fill_map` is what an exit actually settles at. Using one map for both
+    # was a real lookahead — measured on 600186, the agent decided on 08-20
+    # and booked 11.61, which is 08-19's close, while 08-20 opened at 11.56.
+    # The position was sold at yesterday's price, a free day of information.
+    marks: dict[str, float] = {}
+    fills: dict[str, float] = {}
+    if phase == "close":
+        # The session is over: mark and fill are both the close.
+        for code, row in ctx.corpus.bars(day).items():
+            close = row.get("close")
+            if close:
+                marks[code] = float(close)
+                fills[code] = float(close)
+    else:
+        # 09:00: the last price that exists is T-1's close, and a sell fills
+        # at T's opening auction.
+        for code, row in ctx.corpus.bars(prev).items():
+            close = row.get("close")
+            if close:
+                marks[code] = float(close)
+        for code, row in ctx.corpus.bars(day).items():
+            open_price = row.get("open")
+            if open_price:
+                fills[code] = float(open_price)
+    mark_map, fill_map = marks, fills
 
-    priced = [p for p in positions if price_map.get(p["code"])]
+    priced = [p for p in positions if mark_map.get(p["code"])]
     if not priced:
         logger.info("%s: no priced positions for the agent exit step", day)
         return []
@@ -1379,17 +1415,40 @@ def _agent_exits(ctx, day: str) -> list[dict]:
     # **no tools**: every live tool answers from now, which inside a replay is
     # the future. The buy side passes none for the same reason.
     decisions = ctx.loop.run_until_complete(
-        ED.decide_for_replay(priced, price_map, day=day,
+        ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             mechanical_stops=ctx.mechanical_exits))
+                             mechanical_stops=ctx.mechanical_exits,
+                             phase=phase))
     if not decisions:
         return []
 
     # `apply` is the live executor and is reused deliberately: the buy side
     # already goes through the same intent door as production, and a replay
     # that executed sells differently would not be measuring this system.
-    alerts = ED.apply(decisions, priced, price_map)
+    # The fill map, not the mark map: this is the line that was a lookahead.
+    # A position with no bar today cannot be traded today, so it is dropped
+    # rather than settled at a price that does not exist.
+    tradable = []
+    for p in priced:
+        price = fill_map.get(p["code"])
+        if not price:
+            continue
+        # A one-way board has no counterparty. Checked before the executor
+        # rather than left to it: `exit_decision.apply` calls
+        # `close_position`, which has no price-limit concept at all — it
+        # books whatever price it is handed. So the check has to live on the
+        # path that knows the day's bar, which is here.
+        blocked = _limit_blocks(ctx, day, p["code"], price, side="sell")
+        if blocked:
+            ctx.counters["agent_exit_limit_blocked"] += 1
+            logger.info("%s: %s cannot be sold at %s — %s",
+                        day, p["code"], price, blocked)
+            continue
+        tradable.append(p)
+    if not tradable:
+        return []
+    alerts = ED.apply(decisions, tradable, fill_map)
     fills = []
     for a in alerts:
         if a.get("type") != "agent_exit":
@@ -1422,6 +1481,48 @@ def _agent_exits(ctx, day: str) -> list[dict]:
     ctx.counters["agent_exit_calls"] += 1
     ctx.counters["agent_exits"] += len(fills)
     return fills
+
+
+def _limit_blocks(ctx, day: str, code: str, price: float, side: str):
+    """Why this name cannot transact at ``price`` in ``side``'s direction.
+
+    Returns ``None`` when the trade is possible. The four quadrants are the
+    point, and a symmetric implementation gets two of them wrong:
+
+    * up limit blocks a **buy** (no seller) and allows a **sell**;
+    * down limit blocks a **sell** (no buyer) and allows a **buy**.
+
+    Both moments are checked, and they are different checks: at the open the
+    reference is T-1's close against T's open, at the close it is T-1's close
+    against T's close. A name that opened normally and closed limit-up is
+    sellable at the open and not buyable at the close.
+    """
+    from alpha_agents.data import market_rules
+    from alpha_agents.data import t1_execution as X
+
+    prev = ctx.corpus.previous(day)
+    if prev is None:
+        return "no previous session, so no price limit can be checked"
+    prow = ctx.corpus.bars(prev).get(code)
+    prev_close = prow.get("close") if prow else None
+    if prev_close is None:
+        return "no previous close, so no price limit can be checked"
+    name = (ctx.corpus.instruments.get(code) or {}).get("name") or ""
+    try:
+        rule = market_rules.market_rules(code, day, name=name)
+    except ValueError:
+        return "no market rule for this name"
+    bar = None
+    row = ctx.corpus.bars(day).get(code)
+    if row is not None:
+        bar = X.DayBar(date=day, open=float(row["open"]), high=float(row["high"]),
+                       low=float(row["low"]), close=float(row["close"]))
+    if bar is None:
+        return "no bar today: the instrument did not trade"
+    fill = X.market_at_close(bar, side=side, prev_close=float(prev_close),
+                             limit_pct=rule.price_limit_pct,
+                             limit_rule=rule.reason)
+    return None if fill.status == "filled" else fill.reason
 
 
 def _shares_for_exit(code: str, day: str) -> int | None:
@@ -1785,20 +1886,27 @@ def _run_window(ctx, args) -> dict:
             # contract: a position that gapped through its stop was closed
             # above, so the agent cannot argue a hard line away — it only ever
             # sees survivors.
-            try:
-                with replay_as_of(f"{day} 09:35"):
-                    agent_exits = _agent_exits(ctx, day) if ctx.agent_exits else []
-                if agent_exits:
-                    logger.info("%s: agent exits %s", day,
-                                dict(Counter(f["side"] for f in agent_exits)))
-            except Exception as exc:                  # noqa: BLE001
-                # Holds rather than sells, like every other failure path on
-                # this side. A model outage must not liquidate the book.
-                logger.warning("%s: agent exit step failed (%s: %s) — holding",
-                               day, type(exc).__name__, exc)
-                agent_exits = []
-                errors.append({"date": day, "stage": "agent_exit",
-                               "error": f"{type(exc).__name__}: {exc}"})
+            agent_exits = []
+            for phase, stamp in (("open", f"{day} 09:35"),
+                                 ("close", f"{day} 14:55")):
+                if not ctx.agent_exits:
+                    break
+                try:
+                    with replay_as_of(stamp):
+                        got = _agent_exits(ctx, day, phase)
+                    if got:
+                        logger.info("%s: agent exits (%s) %s", day, phase,
+                                    dict(Counter(f["side"] for f in got)))
+                    agent_exits.extend(got)
+                except Exception as exc:              # noqa: BLE001
+                    # Holds rather than sells, like every other failure path
+                    # on this side. A model outage must not liquidate the
+                    # book.
+                    logger.warning(
+                        "%s: agent exit step (%s) failed (%s: %s) — holding",
+                        day, phase, type(exc).__name__, exc)
+                    errors.append({"date": day, "stage": f"agent_exit:{phase}",
+                                   "error": f"{type(exc).__name__}: {exc}"})
             with replay_as_of(day):
                 equity = _value(ctx, day)
                 # Inside the day's as-of, and after the book is marked: the

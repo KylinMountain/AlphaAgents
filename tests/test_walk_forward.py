@@ -1160,9 +1160,9 @@ class TestTheHardStopIsOutsideTheAgentsReach:
             calls.append(f"settle:{day}")
             return real_settle(ctx, day)
 
-        def _agent(ctx, day):
+        def _agent(ctx, day, phase="open"):
             calls.append(f"agent:{day}")
-            return real_agent(ctx, day)
+            return real_agent(ctx, day, phase)
 
         monkeypatch.setattr(walk_forward, "_settle_exits", _settle)
         monkeypatch.setattr(walk_forward, "_agent_exits", _agent)

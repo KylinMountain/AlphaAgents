@@ -107,6 +107,40 @@ def market_on_open(bar: DayBar, *, side: str, prev_close: float | None = None,
     return Fill(FILLED, bar.open, "market order at the open")
 
 
+def market_at_close(bar: DayBar, *, side: str, prev_close: float | None = None,
+                    limit_pct: float | None = None,
+                    limit_rule: str = "") -> Fill:
+    """A market order into the close, refused when the close is a one-way limit.
+
+    The same rule as :func:`market_on_open`, applied to the closing price,
+    because the two moments have the same economics and different numbers: at
+    the close a limit-up board has no seller and a limit-down board has no
+    buyer.
+
+    **A mirror, not a call with a different price.** Passing ``bar.open`` vs
+    ``bar.close`` into one function would be the smaller change and it would
+    be wrong the moment the two need different reasons — "the open is the up
+    limit" is a lie about a close. The direction is checked per side exactly
+    as above: up blocks a buy, down blocks a sell. Getting that comparison
+    symmetric refuses nearly every ordinary sale, which a test caught once in
+    the open version and which is restated here so the same mistake is not
+    made twice.
+    """
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be 'buy' or 'sell', not {side!r}")
+    if prev_close is not None and limit_pct is not None:
+        if side == "buy" and _reaches_up(bar.close, prev_close * (1 + limit_pct)):
+            return Fill(NO_FILL, None,
+                        f"the close is the up limit ({limit_rule}) — no "
+                        "counterparty for a buy at the close")
+        if side == "sell" and _reaches_down(bar.close,
+                                            prev_close * (1 - limit_pct)):
+            return Fill(NO_FILL, None,
+                        f"the close is the down limit ({limit_rule}) — no "
+                        "counterparty for a sell at the close")
+    return Fill(FILLED, bar.close, "market order into the close")
+
+
 def limit_on_open(bar: DayBar, limit_price: float, *, side: str) -> Fill:
     """A resting limit order, settled from open and low/high alone.
 

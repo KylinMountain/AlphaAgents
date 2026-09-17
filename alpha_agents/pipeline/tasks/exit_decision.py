@@ -99,7 +99,8 @@ def _news_for_theme(theme_name: str) -> list[str]:
 def build_context(positions: list[dict], price_map: dict[str, float],
                   signals: list[dict],
                   news_by_theme: dict[str, list[str]] | None = None,
-                  mechanical_stops: bool = True) -> str:
+                  mechanical_stops: bool = True,
+                  phase: str = "open") -> str:
     """Everything the agent needs to decide, as one block of text.
 
     ``news_by_theme`` overrides the live lookup. That override is not a
@@ -114,18 +115,29 @@ def build_context(positions: list[dict], price_map: dict[str, float],
         if s.get("type") == "signal":
             by_code.setdefault(s["code"], []).append(s["reason"])
 
+    # Which moment this is. The agent must not be told it is 09:00 when the
+    # session is over, or it will reason about a day it already knows and
+    # answer as though the outcome were still open.
+    if phase == "close":
+        lines = ["【现在是收盘前】今天的开盘、最高、最低、收盘、成交量你**都已经"
+                 "看到**，下面给的是今日收盘价。你的卖出以今日收盘价成交。", ""]
+    else:
+        lines = ["【现在是开盘前】你能看到的最后一根日线是**昨日**收盘，"
+                 "今日的开盘、最高、最低、收盘、成交量**你还不知道**。"
+                 "你的卖出以**今日开盘价**成交。", ""]
     if mechanical_stops:
-        lines = [f"【风控硬线】亏损达 -{HARD_STOP_PCT:.0f}% 或主线归档时系统强制平仓，"
-                 f"你的判断不能覆盖这两条。以下持仓都还没触及硬线。", ""]
+        lines.append(f"【风控硬线】亏损达 -{HARD_STOP_PCT:.0f}% 或主线归档时系统强制平仓，"
+                     f"你的判断不能覆盖这两条。以下持仓都还没触及硬线。")
     else:
         # The experiment arm, and it must be stated rather than implied: if
         # the agent believes a stop sits underneath, it will answer as
         # though something else will save it, and the answer stops being a
         # judgement about selling.
-        lines = ["【没有安全网】本次运行**关闭了机械止损与止盈**："
-                 "系统不会替你平仓，不会在 -"
-                 f"{HARD_STOP_PCT:.0f}% 兜底。**卖不卖完全由你决定**，"
-                 "如果你不卖，这个仓位会一直持有到窗口结束或被你自己卖掉。", ""]
+        lines.append("【没有安全网】本次运行**关闭了机械止损与止盈**："
+                     "系统不会替你平仓，不会在 -"
+                     f"{HARD_STOP_PCT:.0f}% 兜底。**卖不卖完全由你决定**，"
+                     "如果你不卖，这个仓位会一直持有到窗口结束或被你自己卖掉。")
+    lines.append("")
 
     for pos in positions:
         code = pos["code"]
@@ -515,8 +527,8 @@ async def run(price_map: dict[str, float], signals: list[dict],
 async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                             *, day: str, news_by_theme: dict[str, list[str]]
                             | None = None, trader=None,
-                            model=None, mechanical_stops: bool = True
-                            ) -> list[dict]:
+                            model=None, mechanical_stops: bool = True,
+                            phase: str = "open") -> list[dict]:
     """The sell side, for a historical replay.
 
     A separate entry point rather than a flag on :func:`run`, because the two
@@ -545,9 +557,12 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
     if not positions:
         return []
 
+    if phase not in ("open", "close"):
+        raise ValueError(f"phase must be 'open' or 'close', not {phase!r}")
     context = build_context(positions, price_map, signals=[],
                            news_by_theme=news_by_theme,
-                           mechanical_stops=mechanical_stops)
+                           mechanical_stops=mechanical_stops,
+                           phase=phase)
     try:
         decisions = await decide(context, trader, model=model, tools=[])
     except asyncio.TimeoutError:

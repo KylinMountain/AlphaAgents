@@ -204,3 +204,83 @@ class TestBothMomentsReachTheModelInOneDay:
 
         src = inspect.getsource(wf._run_window)
         assert "replay_as_of(stamp)" in src
+
+
+class TestTheCloseBuyQuadrant:
+    """The fourth quadrant, and the one that had no path at all.
+
+    An open buy rests a limit and settles at the open; open and close sells
+    fill at their own moment. Buying *into the close* had nothing, so a model
+    that spotted a setup at 14:55 could only write it down for tomorrow — a
+    different trade at a different price.
+    """
+
+    def test_the_buy_prompt_speaks_for_each_moment(self):
+        from alpha_agents.agents import t1_decider as D
+        template = D.load_prompt()
+        common = dict(day="2026-08-20", prev_day="2026-08-19", panel=[],
+                      news=[], book="", knowledge="", trader_note="", picks=2,
+                      template=template)
+        opener = D.build_message(**common, phase="open")
+        closer = D.build_message(**common, phase="close")
+        assert "开盘前 09:00" in opener
+        assert "你全都不知道" in opener
+        assert "以**开盘价**成交" in opener
+        assert "收盘前 14:55" in closer
+        assert "已经全部看到" in closer
+        assert "以今日收盘价成交" in closer
+        assert opener != closer
+
+    def test_the_news_window_matches_the_moment(self):
+        """The open decision reads overnight; the close decision reads the
+        session that just happened."""
+        from alpha_agents.agents import t1_decider as D
+        template = D.load_prompt()
+        common = dict(day="2026-08-20", prev_day="2026-08-19", panel=[],
+                      news=[], book="", knowledge="", trader_note="", picks=2,
+                      template=template)
+        assert "昨夜到今早" in D.build_message(**common, phase="open")
+        assert "今日盘中" in D.build_message(**common, phase="close")
+
+    def test_an_unknown_phase_is_refused_at_render(self):
+        from alpha_agents.agents import t1_decider as D
+        with pytest.raises(D.DeciderError, match="phase must be"):
+            D.build_message(day="2026-08-20", prev_day="2026-08-19",
+                            panel=[], news=[], book="", knowledge="",
+                            trader_note="", picks=2, template=D.load_prompt(),
+                            phase="lunch")
+
+    def test_the_close_buy_checks_the_limit_before_buying(self):
+        """A close at the up limit has no seller. Reused rather than
+        re-implemented, so the close buy cannot drift from the close sell."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._close_buys)
+        assert "market_at_close" in src and 'side="buy"' in src
+
+    def test_the_close_buy_honours_the_stated_zone(self):
+        """`entry_low`/`entry_high` are read as the range the trader accepts
+        rather than as a resting limit — a fill outside its own stated zone
+        would be the system accepting a price the trader said no to."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._close_buys)
+        assert "close_buy_outside_zone" in src
+
+    def test_the_close_buy_books_a_filled_position_not_a_pending_order(self):
+        """A pending order settles at the *next* open, which is exactly the
+        price this decision does not get."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._close_buys)
+        assert "open_position" in src
+        assert "create_pending_order" not in src

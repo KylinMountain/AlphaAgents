@@ -230,10 +230,44 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
     return {"orders": orders, "refused": refused, "parse_error": None}
 
 
+#: The two moments a buy decision can be taken at, and what each may see.
+#:
+#: The user's model: the open decision sees yesterday's close plus today's
+#: open and fills at the open; the close decision sees the whole session and
+#: fills at the close. Slippage is ignored, per the same instruction.
+_SESSIONS = {
+    "open": {
+        "session": "现在站在 **{day} 开盘前 09:00**。",
+        "sight": (
+            "- 你能看到的最后一根日线是 **{prev_day}** 的收盘。"
+            "**今天（{day}）的开盘、最高、最低、收盘、成交量，你全都不知道**，"
+            "也不许猜。\n"
+            "- 你的挂单今天以**开盘价**成交（或按限价判定）。你没有盘中路径。"),
+        "news_cutoff": "{day} 09:00",
+        "news_window": "昨夜到今早（{prev_day} 收盘后 → {day} 09:00）",
+        "fills_how": (
+            "  挂单价是限价：今天开盘价必须落在 `[entry_low, entry_high]` 里"
+            "才会成交。"),
+    },
+    "close": {
+        "session": "现在站在 **{day} 收盘前 14:55**。",
+        "sight": (
+            "- 今天（{day}）的**开盘、最高、最低、收盘、成交量你已经全部看到**，"
+            "下面面板里就是今日收盘数据。\n"
+            "- 你的买入**以今日收盘价成交**。"),
+        "news_cutoff": "{day} 14:55",
+        "news_window": "今日盘中（{day} 09:00 → 14:55）",
+        "fills_how": (
+            "  `entry_low`/`entry_high` 仍然要写：它们记录你**愿意接受的价位区间**，"
+            "系统会用今日收盘价对照这个区间来判定是否成交——收盘价落在区间内才买。"),
+    },
+}
+
+
 def build_message(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str, knowledge: str,
                   trader_note: str, picks: int, template: str,
-                  market: dict | None = None) -> str:
+                  market: dict | None = None, phase: str = "open") -> str:
     """Fill the prompt. Every placeholder must be consumed.
 
     The ``{VOCAB}`` lesson from ``agents/morning.py`` applies: a template
@@ -249,8 +283,14 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
     never called, and the moment the template gained a ``{news}`` section
     every day after it died with ``KeyError: 'news'``.
     """
+    if phase not in _SESSIONS:
+        raise DeciderError(
+            f"phase must be one of {sorted(_SESSIONS)}, not {phase!r}")
+    moment = {k: v.format(day=day, prev_day=prev_day)
+              for k, v in _SESSIONS[phase].items()}
     fields = {"day": day, "prev_day": prev_day, "panel": format_panel(panel),
               "news": format_news(news), "market": format_market(market or {}),
+              **moment,
               "book": book or "（空仓）",
               "knowledge": knowledge or "（还没有任何经验在生效）",
               "trader_note": trader_note or "", "picks": picks}
@@ -277,7 +317,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str = "", knowledge: str = "",
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
-                  max_turns: int = 1, market: dict | None = None) -> dict:
+                  max_turns: int = 1, market: dict | None = None,
+                  phase: str = "open") -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -292,7 +333,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,
         template=template if template is not None else load_prompt(),
-        market=market)
+        market=market, phase=phase)
 
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model)

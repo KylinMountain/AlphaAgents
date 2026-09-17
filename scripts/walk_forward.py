@@ -1065,8 +1065,16 @@ def _build_model(timeout: float | None):
     return create_model(timeout=timeout)
 
 
-def _decide_llm(ctx, day: str, prev_day: str) -> list[dict]:
-    """One model call, then the same intent door the placeholder uses."""
+def _decide_llm(ctx, day: str, prev_day: str,
+                phase: str = "open") -> list[dict]:
+    """One model call, then the same intent door the placeholder uses.
+
+    ``phase`` is which moment of the session this buy decision is taken at.
+    The open arm rests a limit order that settles at tomorrow's... today's
+    open; the close arm fills at today's close and books the position
+    directly, because a pending order would settle at the *next* open — the
+    one price this decision does not get.
+    """
     from alpha_agents.agents import t1_decider
 
     panel = _build_panel(ctx, day, prev_day, ctx.panel_size)
@@ -1089,7 +1097,7 @@ def _decide_llm(ctx, day: str, prev_day: str) -> list[dict]:
         news=_news_window(day, prev_day, ctx.news_limit),
         book=book, knowledge=knowledge, market=market,
         trader_note=ctx.trader_note, picks=ctx.picks,
-        template=ctx.prompt, model=ctx.model, loop=ctx.loop)
+        template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase)
     if verdict["parse_error"]:
         # A reply we could not read is not the same as "it chose nothing",
         # and the two must not share a counter.
@@ -1298,6 +1306,88 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
             cancels.append(_cancel_class(alert.get("reason", "")))
     return {"counts": counts, "events": events, "fills": fills,
             "cancels": Counter(cancels)}
+
+
+def _close_buys(ctx, day: str, prev_day: str, orders: list[dict]) -> list[dict]:
+    """Fill today's close-time buys at today's close.
+
+    The missing quadrant. The other three existed: an open buy rests a limit
+    and settles at the open; open and close sells fill at their own moment.
+    Buying *into the close* had no path at all, so a model that spotted a
+    setup at 14:55 could only write it down for tomorrow — a different trade
+    at a different price.
+
+    Booked as an already-filled position rather than a pending order. A
+    pending order settles at the **next** open, which is precisely the price
+    this decision does not get: the whole point of the close decision is that
+    it already knows today.
+
+    The two levels are still honoured, read as the range the trader will
+    accept rather than as a resting limit: the close must fall inside
+    ``[entry_low, entry_high]``. A buy at a close outside its own stated zone
+    would be the system accepting a price the trader said no to.
+    """
+    from alpha_agents.data import market_rules
+    from alpha_agents.data import portfolio_intent as PI
+    from alpha_agents.data import t1_execution as X
+
+    bars = ctx.corpus.bars(day)
+    prow = ctx.corpus.bars(prev_day) if prev_day else {}
+    by_code = {row["code"]: row for row in
+               _build_panel(ctx, day, day, ctx.panel_size)}
+    fills = []
+    for order in orders:
+        code = order["code"]
+        row = bars.get(code)
+        panel_row = by_code.get(code)
+        if row is None or panel_row is None:
+            # Not offerable today: no bar, or outside the panel. The intent
+            # door records the refusal for the panel case; here it is counted.
+            ctx.counters["close_buy_not_offerable"] += 1
+            continue
+        close = float(row["close"])
+        name = ctx.corpus.instruments[code]["name"]
+        try:
+            rule = market_rules.market_rules(code, day, name=name)
+        except ValueError:
+            continue
+        day_bar = X.DayBar(date=day, open=float(row["open"]),
+                           high=float(row["high"]), low=float(row["low"]),
+                           close=close)
+        prev_close = (prow.get(code) or {}).get("close")
+        got = X.market_at_close(day_bar, side="buy",
+                                prev_close=(float(prev_close)
+                                            if prev_close else None),
+                                limit_pct=rule.price_limit_pct,
+                                limit_rule=rule.reason)
+        if got.status != "filled":
+            # A close at the up limit has no seller. Counted rather than
+            # silently dropped: "it wanted to buy and could not" is a fact
+            # about the window.
+            ctx.counters["close_buy_limit_blocked"] += 1
+            logger.info("%s: close buy of %s blocked — %s", day, code,
+                        got.reason)
+            continue
+        low, high = order.get("entry_low"), order.get("entry_high")
+        if low is not None and close < low or high is not None and close > high:
+            ctx.counters["close_buy_outside_zone"] += 1
+            continue
+        position_id = PI.open_position(
+            code=code, name=name, theme=ctx.theme, open_date=day,
+            open_price=close, stop_loss=order.get("stop_loss"),
+            target_price=order.get("target_price"),
+            source="walk_forward_close", reason=order.get("reason", ""),
+            trader_id=ctx.trader)
+        if position_id is None:
+            ctx.counters["close_buy_refused"] += 1
+            continue
+        fills.append({
+            "date": day, "side": "buy", "code": code, "name": name,
+            "shares": None, "price": close, "amount": None,
+            "capacity_shares": ctx.capacity.get(code),
+            "capacity_oversize": False,
+            "reason": "bought at the close"})
+    return fills
 
 
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
@@ -1785,11 +1875,16 @@ def _decider_note(ctx) -> str:
     return "（**占位用途，不代表任何策略**）"
 
 
-def _run_decider(ctx, day: str, prev_day: str) -> list[dict]:
+def _run_decider(ctx, day: str, prev_day: str,
+                 phase: str = "open") -> list[dict]:
     """Route to the declared decider. One place, so the report cannot
-    describe a decider the run did not use."""
+    describe a decider the run did not use.
+
+    ``phase`` reaches only the LLM decider: the placeholder exists to
+    generate orders mechanically and has no notion of a moment.
+    """
     if ctx.decider == "llm":
-        return _decide_llm(ctx, day, prev_day)
+        return _decide_llm(ctx, day, prev_day, phase)
     return _decide(ctx, day, prev_day)
 
 
@@ -1906,6 +2001,25 @@ def _run_window(ctx, args) -> dict:
                         "%s: agent exit step (%s) failed (%s: %s) — holding",
                         day, phase, type(exc).__name__, exc)
                     errors.append({"date": day, "stage": f"agent_exit:{phase}",
+                                   "error": f"{type(exc).__name__}: {exc}"})
+            # The close-time **buy**, which is the second of the day's two
+            # decisions on the buy side. Runs after the close exits so a
+            # position sold at the close frees its capital for one bought at
+            # the same close.
+            if ctx.decider == "llm" and ctx.agent_exits:
+                try:
+                    with replay_as_of(f"{day} 14:55"):
+                        close_orders = _run_decider(ctx, day, prev_day,
+                                                    phase="close")
+                        close_fills = _close_buys(ctx, day, prev_day,
+                                                  close_orders)
+                    if close_fills:
+                        logger.info("%s: close buys %d", day, len(close_fills))
+                    fill_rows.extend(close_fills)
+                except Exception as exc:              # noqa: BLE001
+                    logger.warning("%s: close buy step failed (%s: %s)",
+                                   day, type(exc).__name__, exc)
+                    errors.append({"date": day, "stage": "close_buy",
                                    "error": f"{type(exc).__name__}: {exc}"})
             with replay_as_of(day):
                 equity = _value(ctx, day)

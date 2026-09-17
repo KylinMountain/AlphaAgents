@@ -65,7 +65,6 @@ export function Blocked({ sec }) {
         {(sec.missing || []).map((m) => <li key={m}><code>{m}</code></li>)}
       </ul>
       {sec.note ? <p className="soft">{sec.note}</p> : null}
-      <p className="soft">来源：<code>{sec.source}</code></p>
     </div>
   )
 }
@@ -78,19 +77,22 @@ export function WorkspaceCard({ title, subtitle, sec, children }) {
         <h3>{title}</h3>
         <SectionMeta sec={sec} />
       </div>
+      {/* The subtitle belongs to the card, so it renders whenever the card
+       * does. It used to render *only* in the empty branch, which is why an
+       * empty card appeared to shout its own heading as a sentence. */}
+      {subtitle ? <p className="card-sub">{subtitle}</p> : null}
       {sec.state === 'unavailable' ? <Blocked sec={sec} />
         : sec.state === 'empty' ? (
+          /* An empty section says one thing to a reader: nothing has been
+           * recorded here yet. It used to also print `sec.source` (raw table
+           * names, e.g. `knowledge_snapshots + knowledge_snapshot_items`) and
+           * `sec.note` — the design rationale, written for whoever maintains
+           * the read model. Neither is actionable for a reader: the
+           * rationale belongs in the read model where the next maintainer
+           * reads it, and the table names stay in the API payload where a
+           * debugger reads them. */
           <div style={{ padding: '10px 14px 14px' }}>
-            <p className="empty-note" style={{ margin: 0 }}>
-              {subtitle || '表在、0 行'}
-              {' '}—— 这是合法状态，不是缺失。
-            </p>
-            {sec.note ? (
-              <p className="soft" style={{ margin: '8px 0 0' }}>{sec.note}</p>
-            ) : null}
-            <p className="soft" style={{ margin: '8px 0 0' }}>
-              来源：<code>{sec.source}</code>
-            </p>
+            <p className="empty-note" style={{ margin: 0 }}>还没有记录。</p>
           </div>
         ) : children}
     </article>

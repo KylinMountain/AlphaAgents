@@ -83,7 +83,7 @@ function Pointer({ sec }) {
   const a = v.active
   return (
     <WorkspaceCard title="什么在生效" sec={sec}
-                   subtitle="active_policy 是指针，不是「最近一次批准的快照」">
+                   subtitle="在效版本是一个指针，不是「最近一次批准的版本」——后者会成为第二个真相来源">
       <table className="table">
         <tbody>
           <tr>
@@ -103,7 +103,7 @@ function Pointer({ sec }) {
             <td className="num">{v.transitions?.length ?? 0}</td></tr>
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         <Integrity items={v.integrity} />
       </div>
     </WorkspaceCard>
@@ -115,7 +115,7 @@ function Shadow({ sec }) {
   const paired = v.paired || {}
   return (
     <WorkspaceCard title="影子实验" sec={sec}
-                   subtitle="challenger 照常出预测并记录，但不驱动任何决策">
+                   subtitle="挑战者照常出预测并记录，但不驱动任何决策">
       <table className="table">
         <tbody>
           <tr><td>影子 run</td><td className="num">{v.runs?.length ?? 0}</td></tr>
@@ -131,7 +131,7 @@ function Shadow({ sec }) {
           </tr>
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         {v.runs?.length ? (
           <table className="table">
             <thead>
@@ -164,7 +164,7 @@ function Gates({ sec }) {
   const v = sec?.value || {}
   return (
     <WorkspaceCard title="闸门裁决" sec={sec}
-                   subtitle="既要看 promoted 也要看 abstained：被记录的拒绝才拦得住下一次提案">
+                   subtitle="既要看晋升也要看弃权：被记录的拒绝才拦得住同一个提案被反复重提">
       <table className="table">
         <tbody>
           <tr><td>裁决总数</td><td className="num">{v.n ?? 0}</td></tr>
@@ -176,7 +176,7 @@ function Gates({ sec }) {
           </tr>
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         {v.decisions?.length ? (
           <table className="table">
             <thead>
@@ -216,7 +216,7 @@ function Knowledge({ sec }) {
   const v = sec?.value || {}
   return (
     <WorkspaceCard title="已批准知识快照" sec={sec}
-                   subtitle="「保留」与「生效」之间的那道可审计关口">
+                   subtitle="已批准的知识快照：批准是可查的事实，生效与否由在效版本指向谁决定">
       <table className="table">
         <tbody>
           <tr><td>快照数</td><td className="num">{v.counts?.snapshots ?? 0}</td></tr>
@@ -231,7 +231,7 @@ function Knowledge({ sec }) {
           </tr>
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         {v.snapshots?.length ? (
           <table className="table">
             <thead>

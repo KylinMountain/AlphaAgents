@@ -242,12 +242,57 @@ export function reportHeadline(text) {
     const m = /^【(.+?)】\s*(.*)$/.exec(body[i])
     if (!m) continue
     // A header alone on its line takes the line under it as its content.
-    const content = m[2] || body[i + 1] || ''
+    // That line is usually a bullet, so its marker has to come off first —
+    // otherwise the card's title reads 「实时市场数据异动：• 🔵暗流涌动…」.
+    const content = (m[2] || body[i + 1] || '').replace(/^[•·*]\s*/, '')
     if (content) return `${m[1]}：${content}`.slice(0, 64)
   }
   const fact = body.find((l) => /[0-9%]/.test(l) && l.length > 8)
   if (fact) return fact.slice(0, 64)
   return body[0] ? body[0].slice(0, 64) : '报告已生成'
+}
+
+/** The report's own section headers and bullets, in order.
+ *
+ * ``reportSummary`` joins every line with a space, which is right for a
+ * one-line teaser and wrong for the report card: the intraday report is
+ * already structured — a 【section】 header followed by `•` bullets — and
+ * flattening it produced the run-on paragraph the card showed, with the
+ * bullets' own markers and em-dashes still embedded in the text.
+ *
+ * Returns ``[{kind, text}]`` where kind is 'header', 'bullet' or 'text'.
+ * A header is only recognised when the line is *entirely* 【…】, so an
+ * inline bracket inside a sentence stays in the body where it belongs.
+ */
+export function reportOutline(text, limit = 6) {
+  const lines = stripMachineBlocks(stripWrappingFence(String(text || '')))
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !/^[\s─━═—–\-=_~*`]{3,}$/.test(l) && !/^```/.test(l))
+    .filter((l) => !/AlphaAgents\s*(分析|期货)?报告/.test(l))
+
+  const out = []
+  for (const line of lines) {
+    if (out.length >= limit) break
+    const header = /^【(.+?)】\s*(.*)$/.exec(line)
+    if (header) {
+      out.push({ kind: 'header', text: header[1] })
+      if (header[2] && out.length < limit) {
+        out.push({ kind: 'bullet', text: header[2] })
+      }
+      continue
+    }
+    // A bullet, with whichever marker the prompts used. `•` and `-` are both
+    // in the wild; the em-dash that follows the fact is kept, because it
+    // separates the observation from the reading.
+    const bullet = /^[•·*]\s*(.+)$/.exec(line) || /^-\s+(\S.+)$/.exec(line)
+    if (bullet) {
+      out.push({ kind: 'bullet', text: bullet[1] })
+      continue
+    }
+    out.push({ kind: 'text', text: line })
+  }
+  return out
 }
 
 /** A short body for a report card: the first few lines that carry content,

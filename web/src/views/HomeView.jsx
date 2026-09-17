@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
 import {
   DASH, bodyOf, fmtAge, fmtClock, fmtPct, fmtYi, reportHeadline,
-  reportStamp, reportSummary, sourceClass, stageOf, trendClass,
-  confidenceLabel,
+  reportOutline, reportStamp, reportSummary, sourceClass, stageOf,
+  trendClass, confidenceLabel,
 } from '../lib/format'
 
 /* The prototype's home screen, on real data.
@@ -186,7 +186,32 @@ export default function HomeView({ themes, stats, news, signals, market, reports
                   ))}
                 </div>
               ) : (
-                <p className="brief-summary">{reportSummary(latestReport.report_text)}</p>
+                /* The report is already structured — 【section】 headers and
+                 * `•` bullets — but `reportSummary` joins every line with a
+                 * space, so the card showed one run-on paragraph with the
+                 * bullet markers still embedded in it. Render the outline
+                 * instead, and fall back to the flattened summary only when
+                 * there is no structure to render. */
+                (() => {
+                  const outline = reportOutline(latestReport.report_text, 6)
+                  const structured = outline.some((n) => n.kind === 'bullet'
+                    || n.kind === 'header')
+                  if (!structured) {
+                    return <p className="brief-summary">{reportSummary(latestReport.report_text)}</p>
+                  }
+                  return (
+                    <div className="brief-outline">
+                      {outline.map((n, i) => (
+                        n.kind === 'header'
+                          ? <div className="brief-outline-head" key={i}>{n.text}</div>
+                          : <div className={`brief-outline-row ${n.kind}`} key={i}>
+                              {n.kind === 'bullet' ? <span className="dot" /> : null}
+                              <span>{n.text}</span>
+                            </div>
+                      ))}
+                    </div>
+                  )
+                })()
               )}
 
               <div className="evidence">

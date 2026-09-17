@@ -291,7 +291,7 @@ export default function PortfolioView({ workspace }) {
         )}
       </article>
 
-      <article className="card table-wrap">
+      <article className="card table-wrap" style={{ marginBottom: 14 }}>
         <div className="card-title" style={{ padding: '14px 14px 0' }}>
           <h3>已结束</h3>
           <span>
@@ -338,7 +338,12 @@ export default function PortfolioView({ workspace }) {
       </article>
 
       {stats?.total_closed > 0 && Object.keys(stats.by_theme || {}).length > 0 && (
-        <article className="card pad" style={{ marginTop: 14 }}>
+        /* marginBottom, like every sibling card, not marginTop. The two
+         * spacing models met here: this card carried its own top margin and
+         * the card below carried a bottom margin on *its* predecessor, so
+         * when 已结束 lost its bottom margin this one fused into 归因链 and
+         * the two read as a single card. One model, applied to every card. */
+        <article className="card pad" style={{ marginBottom: 14 }}>
           <div className="card-title"><h3>按主线</h3><span>近 30 日已平仓</span></div>
           <div className="health-group">
             {Object.entries(stats.by_theme).map(([theme, v]) => (
@@ -389,7 +394,7 @@ function Attribution({ sec }) {
   const rows = v.by_thesis || []
   const yuan = (n) => `${n > 0 ? '+' : ''}${Math.round(n).toLocaleString()} 元`
   return (
-    <div style={{ padding: '0 14px 14px' }}>
+    <div className="card-body">
       {r.total != null && (
         <div className="health-group" style={{ marginBottom: 12 }}>
           <div className="health-source">
@@ -458,8 +463,9 @@ const INTENT_LABEL = {
 function IntentTrail({ sec }) {
   const v = sec?.value || {}
   const never = v.never_decided || []
+  const faults = v.faults || 0
   return (
-    <div style={{ padding: '0 14px 14px' }}>
+    <div className="card-body">
       <div className="health-group">
         {Object.entries(v.by_status || {}).map(([status, n]) => (
           <div className="health-source" key={status}>
@@ -468,6 +474,22 @@ function IntentTrail({ sec }) {
           </div>
         ))}
       </div>
+      {/* A fault is not a verdict (D32). Counting it under 已拒绝 made an
+          outage — 68 closes failing on one missing column — read as 68
+          ordinary policy refusals, and a normal refusal is exactly what
+          nobody re-examines. Named separately, with its own colour. */}
+      {faults ? (
+        <div className="ws-integrity">
+          {/* One string, not `系统故障 ` + value + ` 条`: renderToString
+              separates adjacent text nodes with a comment, so an assertion
+              on the rendered line would have nothing to match against. */}
+          <b>{`系统故障 ${faults} 条`}</b>
+          <p className="soft">
+            这些不是「业务规则拒绝了它」，而是写入路径当场抛错 ——
+            账本因此没被改动。它们和策略裁决是两回事，所以分开计数。
+          </p>
+        </div>
+      ) : null}
       {never.length ? (
         <div className="ws-integrity">
           <b>已提交但未裁决 {never.length} 条</b>
@@ -491,23 +513,28 @@ function IntentTrail({ sec }) {
                 <td>{r.id}</td>
                 <td>{r.action}</td>
                 <td>
-                  <span className={`stage-chip ${
-                    r.status === 'accepted' ? 'stage-main'
-                      : r.status === 'rejected' ? 'stage-fade' : 'stage-sprout'}`}>
-                    {INTENT_LABEL[r.status] || r.status}
-                  </span>
+                  {r.fault
+                    ? <span className="stage-chip stage-sprout">故障</span>
+                    : (
+                      <span className={`stage-chip ${
+                        r.status === 'accepted' ? 'stage-main'
+                          : r.status === 'rejected' ? 'stage-fade' : 'stage-sprout'}`}>
+                        {INTENT_LABEL[r.status] || r.status}
+                      </span>
+                    )}
                 </td>
                 <td>{r.code || DASH}</td>
                 <td>{r.information_cutoff || DASH}</td>
-                {/* 拒绝原因可能是一整句异常文本（D26 之前是 OperationalError
-                    的全文），一行放不下时截断、悬停看全文：让长错误不能把
-                    前面几列挤歪，也不能被静默丢掉。 */}
+                {/* The reason, with the writer's fault marker removed: it is
+                    a storage detail, and printing `!fault: ` on the page is
+                    the same leak as printing a table name. The row's own
+                    故障 chip already says which population it belongs to. */}
                 <td style={{
                   color: 'var(--text-2)', maxWidth: 280,
                   overflow: 'hidden', textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
-                }} title={r.reject_reason || undefined}>
-                  {r.reject_reason || DASH}
+                }} title={faultText(r)}>
+                  {faultText(r) || DASH}
                 </td>
               </tr>
             ))}
@@ -518,12 +545,21 @@ function IntentTrail({ sec }) {
   )
 }
 
+/** The reason as a reader should see it: no storage marker, and a fault
+ *  prefixed with the word for what it was. */
+function faultText(r) {
+  const raw = r.reject_reason
+  if (!raw) return ''
+  if (!r.fault) return raw
+  return `系统故障：${raw.replace(/^!fault:\s*/, '')}`
+}
+
 /* ── 资金与结算：reservations + T+1 lots ────────────────────────── */
 function Settlement({ sec }) {
   const v = sec?.value || {}
   const lots = v.lots || {}
   return (
-    <div style={{ padding: '0 14px 14px' }}>
+    <div className="card-body">
       <table className="table">
         <thead>
           <tr><th>预留状态</th><th className="num">笔数</th>

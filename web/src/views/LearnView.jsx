@@ -71,7 +71,7 @@ function Episodes({ sec }) {
   const c = v.coverage || {}
   return (
     <WorkspaceCard title="决策覆盖" sec={sec}
-                   subtitle="「我们决策了 N 次、成交 M 次」——这个问题在持仓表里答不出来">
+                   subtitle="「决策了多少次、成交了多少次」——这个问题在持仓表里答不出来">
       <table className="table">
         <tbody>
           <Row label="决策数（episode 数）" value={c.decisions} />
@@ -84,9 +84,13 @@ function Episodes({ sec }) {
                value={c.fill_rate == null ? DASH : fmtPct(c.fill_rate * 100)} />
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
+        {/* Plain prose, not markdown. This sentence used to render literal
+            backticks — `no_verdict` — because JSX text is not markdown, so a
+            reader saw the punctuation the author typed for a different
+            renderer. Table and column names are written as code here. */}
         <p className="soft">
-          `no_verdict` 不是「还没发生」：intent 事件在业务规则跑之前就写，
+          「已问未答」不是「还没发生」：intent 事件在业务规则跑之前就写，
           所以它的存在证明这次决策被问过，而行的状态证明它没被回答。
         </p>
         {v.open?.length ? (
@@ -139,7 +143,7 @@ function Outcomes({ sec }) {
           ))}
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         <p className="soft">
           待定标签 {b.pending ?? v.pending?.length ?? 0} 条（还没有后继标签的那一批）。
           {b.awaiting
@@ -148,14 +152,19 @@ function Outcomes({ sec }) {
             : null}
         </p>
         {/* 缺陷与日历分开说。`overdue` 才是「该收尾没收尾」，
-            而 `awaiting` 是设计自己的日历 —— 混成一句话读起来像积压。 */}
+            而 `awaiting` 是设计自己的日历 —— 混成一句话读起来像积压。
+            The copy here is for the reader, not the maintainer: it used to
+            name the shell command that reprints the list
+            (`python scripts/episode_coverage.py`), which is an instruction
+            to whoever is debugging this repository, rendered onto a product
+            page. What the reader needs is what the number means. */}
         {b.overdue ? (
           <div className="ws-integrity">
             <b>{`窗口已收口却没收尾 ${b.overdue} 条`}</b>
             <p className="soft">
-              这些标签的 available_at 已经过去，却没有任何后继行 ——
-              该给它们收尾的那一步没跑到。同一份清单用
-              {' '}<code>python scripts/episode_coverage.py</code> 打印。
+              这些标签的证据窗口已经关闭，却没有任何后继行 ——
+              该给它们收尾的那一步没有跑到。这是一处需要修的缺陷，
+              不是正常的等待。
             </p>
           </div>
         ) : null}
@@ -179,7 +188,7 @@ function Candidates({ sec }) {
   const counts = v.counts || {}
   return (
     <WorkspaceCard title="候选知识（隔离区）" sec={sec}
-                   subtitle="提案、五态生命周期、以及推动它的迁移记录">
+                   subtitle="提案、五个生命周期状态，以及推动状态变化的迁移记录">
       <table className="table">
         <tbody>
           {Object.entries(counts).map(([status, n]) => (
@@ -187,10 +196,12 @@ function Candidates({ sec }) {
           ))}
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
+        {/* The rationale, said to the reader rather than about the code. It
+            used to render `**刻意**` and `advance_candidate` literally. */}
         <p className="soft">
-          这条链**刻意**不由管线驱动：`advance_candidate` 是 status 的唯一写者，
-          只有人或脚本能推进它 —— 「验证不等于授权」的代价就是这里长期为空。
+          这条链刻意不由管线驱动：只有人或脚本能推进候选状态。
+          「验证不等于授权」的代价，就是这里会长期为空。
         </p>
         <Integrity items={v.integrity} />
       </div>
@@ -212,8 +223,13 @@ function Forecasts({ sec }) {
     verdict = { cls: 'thesis-warn',
       text: '没有一行带概率（prob）的预测 —— 评估货币无从产生，闸门会一直 abstain。' }
   } else if (p.ripe_unscored > 0) {
+    /* A defect, and said as one — but to the reader. It used to end
+     * 「复盘的评分步没跑到它们，这是要修的」, which is a note to whoever
+     * maintains the scheduler. The reader needs to know the number is
+     * wrong, not which function failed to run. */
     verdict = { cls: 'thesis-warn',
-      text: `有 ${p.ripe_unscored} 行窗口已收口却还没有 Brier —— 复盘的评分步没跑到它们，这是要修的。` }
+      text: `有 ${p.ripe_unscored} 行窗口已收口却还没有 Brier —— 这些预测的评估货币缺失，`
+            + `下面的命中率不代表它们的真实表现。` }
   } else if (p.unscored > 0 && p.archive_readable === false) {
     verdict = { cls: 'soft',
       text: '行情档案不可读，无法判断这些窗口收口了没有 —— 评分步会按「未收口」拒绝断言。' }
@@ -226,7 +242,7 @@ function Forecasts({ sec }) {
   }
   return (
     <WorkspaceCard title="预测与评估货币" sec={sec}
-                   subtitle="校准曲线是用 brier 画的，不是用命中率画的">
+                   subtitle="校准曲线用 Brier 分数画，不是用命中率画">
       <table className="table">
         <tbody>
           <Row label="预测行数" value={v.rows} />
@@ -239,7 +255,7 @@ function Forecasts({ sec }) {
                value={stats.total ? `${stats.hit_rate}%` : DASH} />
         </tbody>
       </table>
-      <div style={{ padding: '0 14px 14px' }}>
+      <div className="card-body">
         <p className={verdict.cls}>{verdict.text}</p>
         {batches.length ? (
           <table className="table">

@@ -37,11 +37,36 @@ dependencies = [
     # traders/*.yaml — a trading strategy is a config file, see traders/README.md
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    # ── Transitive floors for security advisories ──────────────────────
+    # None of these are imported by this project directly; they arrive
+    # under fastapi/starlette, mcp, akshare, trafilatura and openai-agents.
+    # They are declared anyway because there is a lockfile, so the resolver
+    # only moves a package when a floor asks it to — leaving them unpinned
+    # meant 31 open Dependabot alerts that no `uv sync` would ever clear.
+    #
+    # Each floor is the `first_patched_version` from its advisory, not a
+    # guess: cryptography 50.0.0, urllib3 2.7.0, starlette 1.3.1,
+    # python-multipart 0.0.31, PyJWT 2.13.0, mcp 1.28.1, lxml 6.1.0,
+    # soupsieve 2.8.4, json-repair 0.60.1, pydantic-settings 2.14.2.
+    #
+    # `openai-agents[encrypt]` asks for `cryptography<46`; that extra is not
+    # installed, so the cap does not apply here. If it is ever enabled, this
+    # floor and that cap conflict and the extra has to be reconsidered.
+    "cryptography>=50.0.0",
+    "urllib3>=2.7.0",
+    "starlette>=1.3.1",
+    "python-multipart>=0.0.31",
+    "PyJWT>=2.13.0",
+    "mcp>=1.28.1",
+    "lxml>=6.1.0",
+    "soupsieve>=2.8.4",
+    "json-repair>=0.60.1",
+    "pydantic-settings>=2.14.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest>=9.0.3",
     "pytest-asyncio",
 ]
 

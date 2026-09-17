@@ -538,3 +538,86 @@ class TestTheExperimentIsDrivable:
                                                          capsys):
         assert cli.main(["status"]) == 0
         assert "nothing is under experiment" in capsys.readouterr().out
+
+
+class TestAVariantIsBuiltFromACandidate:
+    """`variant-build` — the operator half of `evolution.variant`.
+
+    Without a verb here the module would be D31's shape: a capability with
+    tests and no caller, which reads as finished work until someone tries to
+    use it. The refusals exit non-zero so a script notices, and the success
+    path must leave the pointer exactly where it was.
+    """
+
+    def _candidate(self, *, with_bundle=True, supporting=(1, 2)):
+        from alpha_agents.data import learning_candidates as LC
+        payload = {"n": 4, "trades": []}
+        if with_bundle:
+            payload["evidence_bundle"] = {
+                "search_scope": "every position closed on or before 2026-01-05",
+                "matching_rule": "t1_change_above_cut XOR return_above_window_median",
+                "eligible": 2, "excluded": 0, "excluded_reasons": {},
+                "cutoff": "2026-01-05",
+            }
+        return LC.save_candidate(
+            entity_type="principle", operation="create", source="unit-test",
+            source_date="2026-01-05", payload=payload,
+            claim="T-1 涨得更多的候选，实际收益更差",
+            applicable_context="pullback，窗口自 2025-07-01 起",
+            proposed_behavior_delta={
+                "field": "t1_change_rank", "direction": "down"},
+            evidence_episode_ids={"supporting": list(supporting), "opposing": []})
+
+    def test_it_builds_a_frozen_version_and_moves_nothing(self, cli, store,
+                                                          capsys):
+        version = TestTheExperimentIsDrivable()._seed(cli, store, capsys)
+        cid = self._candidate()
+        before = registry.active(registry.POLICY_KEY_DEFAULT)
+        capsys.readouterr()
+        assert cli.main(["variant-build", "--candidate", str(cid),
+                         "--parent", str(version), "--by", "kylin"]) == 0
+        out = capsys.readouterr().out
+        assert "variant built" in out
+        assert "frozen, not in force" in out
+        after = registry.active(registry.POLICY_KEY_DEFAULT)
+        assert after["version_id"] == before["version_id"], (
+            "building a variant moved the pointer")
+
+    def test_a_candidate_with_no_evidence_is_refused_non_zero(
+            self, cli, store, capsys):
+        version = TestTheExperimentIsDrivable()._seed(cli, store, capsys)
+        cid = self._candidate(supporting=())
+        capsys.readouterr()
+        assert cli.main(["variant-build", "--candidate", str(cid),
+                         "--parent", str(version), "--by", "kylin"]) == 1
+        assert "cites no episodes" in capsys.readouterr().out
+
+    def test_ids_without_a_declared_search_are_refused(self, cli, store,
+                                                       capsys):
+        version = TestTheExperimentIsDrivable()._seed(cli, store, capsys)
+        cid = self._candidate(with_bundle=False)
+        capsys.readouterr()
+        assert cli.main(["variant-build", "--candidate", str(cid),
+                         "--parent", str(version), "--by", "kylin"]) == 1
+        assert "evidence_bundle" in capsys.readouterr().out
+
+    def test_a_dry_run_writes_nothing(self, cli, store, capsys):
+        version = TestTheExperimentIsDrivable()._seed(cli, store, capsys)
+        cid = self._candidate()
+        before = len(registry.versions_for())
+        capsys.readouterr()
+        assert cli.main(["variant-build", "--candidate", str(cid),
+                         "--parent", str(version), "--by", "kylin",
+                         "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert "would build a variant" in out and "dry run" in out
+        assert len(registry.versions_for()) == before
+
+    def test_a_dry_run_reports_the_refusal_too(self, cli, store, capsys):
+        version = TestTheExperimentIsDrivable()._seed(cli, store, capsys)
+        cid = self._candidate(supporting=())
+        capsys.readouterr()
+        assert cli.main(["variant-build", "--candidate", str(cid),
+                         "--parent", str(version), "--by", "kylin",
+                         "--dry-run"]) == 1
+        assert "refused" in capsys.readouterr().out

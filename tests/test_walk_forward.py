@@ -196,7 +196,7 @@ def _args(**over) -> argparse.Namespace:
                 theme="WALK-TEST", stop_pct=8.0, participation=0.10,
                 run_id="acceptance", out=None, keep_going=False,
                 decider="placeholder", panel_size=40, news_limit=60,
-                model_timeout=120.0, pace_seconds=0.0)
+                model_timeout=120.0, pace_seconds=0.0, agent_exits=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1130,3 +1130,62 @@ class TestTheLearningStepIsAFunctionOfTheDaysBook:
             [row for row in second["learning"] if row["distilled"]]), (
             "the candidate table and the run's own record of what it wrote "
             "disagree, so one of the two is not the loop's output")
+
+
+# ── the agent's sell side: ordering is the contract ─────────────────────────
+
+
+class TestTheHardStopIsOutsideTheAgentsReach:
+    """The one ordering in this runner that protects money.
+
+    `_settle_exits` runs first and closes anything that gapped through its
+    stop; `_agent_exits` is asked about survivors only. Swap them and a model
+    that answers "hold" keeps a position the risk line exists to cut. So the
+    position the agent is *shown* must never include one the stop took, and
+    this is asserted on the day loop rather than on `_agent_exits` alone —
+    the ordering lives in the loop, not in the function.
+    """
+
+    def test_the_exit_step_runs_after_the_mechanical_settlement(
+            self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        real_settle = walk_forward._settle_exits
+        real_agent = walk_forward._agent_exits
+
+        def _settle(ctx, day):
+            calls.append(f"settle:{day}")
+            return real_settle(ctx, day)
+
+        def _agent(ctx, day):
+            calls.append(f"agent:{day}")
+            return real_agent(ctx, day)
+
+        monkeypatch.setattr(walk_forward, "_settle_exits", _settle)
+        monkeypatch.setattr(walk_forward, "_agent_exits", _agent)
+        # A model object, so the placeholder-decider guard does not skip the
+        # step: this test is about order, not about the model.
+        monkeypatch.setattr(walk_forward.Context, "model",
+                            object(), raising=False)
+
+        series, instruments = _normal()
+        replay, _ = _prepare(tmp_path, series, instruments)
+        _run(replay, days=2, agent_exits=True)
+
+        assert calls, "neither settlement nor the exit step ran"
+        for day in {c.split(":")[1] for c in calls}:
+            assert calls.index(f"settle:{day}") < calls.index(f"agent:{day}"), (
+                f"on {day} the agent was asked about positions before the "
+                "mechanical stop had closed them")
+
+    def test_a_placeholder_decider_skips_the_exit_step(self, tmp_path):
+        """`ctx.model` is None without `--decider llm`, so the exit step must
+        refuse rather than let `decide()` build an unjournaled live client."""
+        series, instruments = _normal()
+        replay, _ = _prepare(tmp_path, series, instruments)
+        result = _run(replay, days=2, agent_exits=True, decider="placeholder")
+        assert result["ctx"].counters.get("agent_exit_calls", 0) == 0
+
+    def test_the_flag_defaults_to_off(self):
+        """It doubles the run's model calls, so it is a choice the operator
+        made rather than a surprise on the bill."""
+        assert _args().agent_exits is False

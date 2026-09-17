@@ -1116,6 +1116,119 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
             "cancels": Counter(cancels)}
 
 
+def _agent_exits(ctx, day: str) -> list[dict]:
+    """Ask the agent what to do with the positions the rules left open.
+
+    Runs after ``_settle_exits``, never before: that ordering is what keeps
+    the hard stop outside the model's reach. Everything here is the
+    *discretionary* layer above it.
+
+    Off unless ``--agent-exits`` is passed, so a run's model-call count is
+    something the operator chose rather than a surprise: this doubles it.
+
+    Prices are the **previous session's close**, matching what the buy side
+    is shown at 09:00. Using the replay day's bar would leak the day the
+    decision is being made on — the position's own outcome.
+    """
+    from alpha_agents.pipeline.tasks import exit_decision as ED
+
+    positions = P.get_open_positions(ctx.trader)
+    if not positions:
+        return []
+    prev = ctx.corpus.previous(day)
+    if prev is None:
+        return []
+    price_map: dict[str, float] = {}
+    for code, row in ctx.corpus.bars(prev).items():
+        close = row.get("close")
+        if close:
+            price_map[code] = float(close)
+
+    priced = [p for p in positions if price_map.get(p["code"])]
+    if not priced:
+        logger.info("%s: no priced positions for the agent exit step", day)
+        return []
+
+    news_by_theme = _news_by_theme(ctx, day, prev, {p.get("theme") for p in priced})
+    trader = None
+    try:
+        from alpha_agents.data.trader import get_trader
+        trader = get_trader(ctx.trader)
+    except Exception:                                 # noqa: BLE001
+        trader = None
+
+    # `ctx.model` is None under the placeholder decider, because a placeholder
+    # run makes no model calls. Asking the exit step anyway would make
+    # `decide()` build its own live client — an unjournaled call inside a
+    # replay, which is the exact defect this parameter exists to close.
+    # Refused loudly rather than silently: a run that asked for agent exits
+    # with a placeholder buy side is a misconfiguration, not a quiet no-op.
+    if ctx.model is None:
+        logger.warning(
+            "%s: --agent-exits needs a model, but the decider is %r; "
+            "skipping the exit step rather than building an unjournaled "
+            "client", day, ctx.decider)
+        return []
+
+    # The journaled model, so the call is recorded and reproducible, and
+    # **no tools**: every live tool answers from now, which inside a replay is
+    # the future. The buy side passes none for the same reason.
+    decisions = ctx.loop.run_until_complete(
+        ED.decide_for_replay(priced, price_map, day=day,
+                             news_by_theme=news_by_theme, trader=trader,
+                             model=ctx.model))
+    if not decisions:
+        return []
+
+    # `apply` is the live executor and is reused deliberately: the buy side
+    # already goes through the same intent door as production, and a replay
+    # that executed sells differently would not be measuring this system.
+    alerts = ED.apply(decisions, priced, price_map)
+    fills = []
+    for a in alerts:
+        if a.get("type") != "agent_exit":
+            # trim/add are recorded by the executor and are not full exits;
+            # counting them as sells would overstate the agent's activity.
+            ctx.counters[f"agent_{a.get('type', 'other')}"] += 1
+            continue
+        fills.append({
+            "date": day, "side": "sell", "code": a["code"],
+            "name": a.get("name", ""),
+            "shares": None, "price": a.get("close_price"),
+            "amount": None, "capacity_shares": None,
+            "capacity_oversize": False,
+            "reason": f"agent卖出: {a.get('reason', '')}"[:200],
+        })
+    ctx.counters["agent_exit_calls"] += 1
+    ctx.counters["agent_exits"] += len(fills)
+    return fills
+
+
+def _news_by_theme(ctx, day: str, prev_day: str,
+                   themes: set) -> dict[str, list[str]]:
+    """This day's news, grouped by the theme each flash mentions.
+
+    Read through the replay's own windowed reader — the same one the buy side
+    uses — so the sell side cannot see further than the buy side. The live
+    ``news_index`` search is deliberately not used: it reads by wall-clock
+    offset and does not respect ``replay_mode``, so it would hand the agent
+    flashes published after the day it is deciding on.
+    """
+    out: dict[str, list[str]] = {}
+    names = {t for t in themes if t}
+    if not names:
+        return out
+    items = _news_window(day, prev_day, limit=200)
+    for item in items:
+        text = f"{item.get('title') or ''} {item.get('content') or ''}"
+        for theme in names:
+            if theme and theme in text:
+                out.setdefault(theme, []).append(
+                    f"[{(item.get('published_at') or '')[11:16]}] "
+                    f"{(item.get('title') or '')[:70]}")
+    return {k: v[:3] for k, v in out.items()}
+
+
 def _settle_exits(ctx, day: str) -> dict:
     """Stop and target, at the open, and **only** for positions bought earlier.
 
@@ -1219,6 +1332,10 @@ class Context:
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])
         self.run_id = args.run_id
         self.decider = args.decider
+        #: Whether the sell side gets a model call too. Off by default:
+        #: it doubles the run's model calls, and that should be a choice
+        #: the operator made rather than a surprise on the bill.
+        self.agent_exits = getattr(args, "agent_exits", False)
         self.panel_size = args.panel_size
         self.news_limit = args.news_limit
         #: The window's first session, carried so an observation can name the
@@ -1404,6 +1521,25 @@ def _run_window(ctx, args) -> dict:
                             dict(entries["counts"]))
                 exits = _settle_exits(ctx, day)
                 logger.info("%s: settled exits %s", day, dict(exits["counts"]))
+            # The agent's sell side, run *after* the mechanical settlement and
+            # inside its own replay_as_of block. The order matters and is the
+            # contract: a position that gapped through its stop was closed
+            # above, so the agent cannot argue a hard line away — it only ever
+            # sees survivors.
+            try:
+                with replay_as_of(f"{day} 09:35"):
+                    agent_exits = _agent_exits(ctx, day) if ctx.agent_exits else []
+                if agent_exits:
+                    logger.info("%s: agent exits %s", day,
+                                dict(Counter(f["side"] for f in agent_exits)))
+            except Exception as exc:                  # noqa: BLE001
+                # Holds rather than sells, like every other failure path on
+                # this side. A model outage must not liquidate the book.
+                logger.warning("%s: agent exit step failed (%s: %s) — holding",
+                               day, type(exc).__name__, exc)
+                agent_exits = []
+                errors.append({"date": day, "stage": "agent_exit",
+                               "error": f"{type(exc).__name__}: {exc}"})
             with replay_as_of(day):
                 equity = _value(ctx, day)
                 # Inside the day's as-of, and after the book is marked: the
@@ -1672,6 +1808,15 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"买入 {len(buys)} 笔 {sum(b['amount'] or 0 for b in buys):,.0f} 元 / "
         f"卖出 {len(sells)} 笔 {sum(s['amount'] or 0 for s in sells):,.0f} 元",
         f"成交量超 ADV20 参与上限的笔数：{len(oversize)}（**已计数、尚未强制**）",
+    ]
+    # Who sold, and why. Without this split a reader cannot tell a book that
+    # the rules disposed of from one the agent actively managed — and in the
+    # first 20-day replay the answer was "all 11 were stops", which is the
+    # fact that made the missing target price visible.
+    exit_lines = _exit_attribution(result)
+    if exit_lines:
+        lines.append(f"出场归因：{'；'.join(exit_lines)}")
+    lines += [
         "",
         "— 结算判定（每个挂单-日一次）—",
     ]
@@ -1795,6 +1940,43 @@ def _corpus_changes_line(changes: list[dict]) -> str:
             "——生产侧的定时入库也在写这些文件，这一行不是对回放的判定")
 
 
+def _exit_attribution(result: dict) -> list[str]:
+    """Sells split by who decided, and by what the rule was.
+
+    ``walk_forward``-prefixed reasons are the mechanical settlement; anything
+    else came from an agent. The reasons themselves are counted rather than
+    only totalled, because "12 stops" and "12 take-profits" are the same
+    number and opposite outcomes.
+    """
+    sells = [f for f in result["fills"] if f.get("side") == "sell"]
+    if not sells:
+        return []
+    agent = [f for f in sells if str(f.get("reason", "")).startswith("agent")]
+    mechanical = [f for f in sells if f not in agent]
+    out = [f"机械 {len(mechanical)} 笔", f"agent {len(agent)} 笔"]
+
+    def _kind(reason: str) -> str:
+        r = str(reason or "")
+        low = r.lower()
+        # Agent first: its reason is free text written by a model and may
+        # mention a stop without the stop having caused the exit. Checking
+        # the mechanical rules first would attribute an agent's discretionary
+        # sell to the rule it happened to mention.
+        if r.startswith("agent"):
+            return "agent 判断"
+        if "止损" in r or "stop" in low:
+            return "止损"
+        if "止盈" in r or "target" in low:
+            return "止盈"
+        if "到期" in r or "expire" in low:
+            return "到期"
+        return "其他"
+
+    kinds = Counter(_kind(f.get("reason")) for f in sells)
+    out.append("（" + "、".join(f"{k} {v}" for k, v in kinds.most_common()) + "）")
+    return out
+
+
 def _max_drawdown(values: list[float]) -> float:
     peak, worst = float("-inf"), 0.0
     for value in values:
@@ -1854,6 +2036,9 @@ def build_parser() -> argparse.ArgumentParser:
                         default="placeholder",
                         help="placeholder: rank T-1 change, no model (default). "
                              "llm: the model chooses from an as-of panel.")
+    parser.add_argument(
+        "--agent-exits", action="store_true",
+        help="让 agent 决定卖出（每天多一次模型调用；机械硬止损始终先跑）")
     parser.add_argument("--panel-size", type=int, default=40,
                         help="securities the model may choose from (llm only).")
     parser.add_argument("--news-limit", type=int, default=60,

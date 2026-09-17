@@ -90,8 +90,17 @@ def _news_for_theme(theme_name: str) -> list[str]:
 
 
 def build_context(positions: list[dict], price_map: dict[str, float],
-                  signals: list[dict]) -> str:
-    """Everything the agent needs to decide, as one block of text."""
+                  signals: list[dict],
+                  news_by_theme: dict[str, list[str]] | None = None) -> str:
+    """Everything the agent needs to decide, as one block of text.
+
+    ``news_by_theme`` overrides the live lookup. That override is not a
+    convenience: ``_news_for_theme`` reads the vector store by wall-clock
+    offset and does not respect ``replay_mode``, so a replay that let it
+    through would decide with flashes from after its own day. A replay passes
+    its own already-windowed news; a live caller passes nothing and gets the
+    live lookup.
+    """
     by_code: dict[str, list[str]] = {}
     for s in signals:
         if s.get("type") == "signal":
@@ -116,12 +125,22 @@ def build_context(positions: list[dict], price_map: dict[str, float],
         )
         lines.append(f"  买入理由: {pos.get('reason') or '未记录'}")
         lines.append(f"  主线: {_theme_line(pos.get('theme', ''))}")
-        news = _news_for_theme(pos.get("theme", ""))
+        if news_by_theme is not None:
+            news = news_by_theme.get(pos.get("theme", "")) or []
+            source = "本日窗口内快讯"
+        else:
+            news = _news_for_theme(pos.get("theme", ""))
+            source = "近期快讯"
         if news:
             for n in news:
-                lines.append(f"  近期快讯: {n}")
+                lines.append(f"  {source}: {n}")
+        elif news_by_theme is not None:
+            # Distinguished from "the live lookup found nothing": a replay
+            # was not shown any news, and saying "无" would read as a market
+            # fact rather than as a missing input.
+            lines.append(f"  {source}: 未提供（回放未接入新闻窗口，不等于没有消息）")
         else:
-            lines.append("  近期快讯: 无（主线无新消息，不等于逻辑破坏）")
+            lines.append(f"  {source}: 无（主线无新消息，不等于逻辑破坏）")
         fired = by_code.get(code)
         if fired:
             lines.append(f"  规则信号: {'; '.join(fired)}")
@@ -175,7 +194,8 @@ reason 必须具体：说出是哪条逻辑成立或破坏，带上数据。写"
 confidence 是 high / medium / low。"""
 
 
-async def decide(context: str, trader=None) -> list[dict]:
+async def decide(context: str, trader=None, *, model=None,
+                 tools: list | None = None) -> list[dict]:
     """Ask the agent what to do with each position.
 
     Returns the parsed decision list; an empty list means "no decision",
@@ -186,21 +206,37 @@ async def decide(context: str, trader=None) -> list[dict]:
     stops and a pullback trader that gives a position room are two
     different books, and giving them one exit prompt would erase the
     difference the traders exist to measure.
+
+    ``model`` and ``tools`` exist for the replay, and the defaults are the
+    live ones. A replay must pass both:
+
+    * the live path builds its own ``AsyncOpenAI`` here, which bypasses the
+      LLM journal entirely — so exit calls were not recorded and a replay
+      could not reproduce them;
+    * the live tools (``search_news``, ``get_stock_fund_flow``,
+      ``get_sector_data``) answer from *now*. A replay that let them through
+      would decide a 2026-08 day using 2026-09 data. The buy side never had
+      this problem because it passes no tools at all.
     """
     from agents import Agent, Runner
-    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-    from openai import AsyncOpenAI
 
-    from alpha_agents import llm_roles
-    from alpha_agents.tools.registry import (
-        get_stock_fund_flow, get_sector_data, search_news,
-    )
+    if model is None:
+        from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+        from openai import AsyncOpenAI
 
-    # Agent client — counted by the tracing hook, not wrapped here.
-    api_key, base_url, agent_model = llm_roles.resolve(llm_roles.AGENT)
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    model = OpenAIChatCompletionsModel(
-        model=agent_model or "qwen-plus", openai_client=client)
+        from alpha_agents import llm_roles
+
+        # Agent client — counted by the tracing hook, not wrapped here.
+        api_key, base_url, agent_model = llm_roles.resolve(llm_roles.AGENT)
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        model = OpenAIChatCompletionsModel(
+            model=agent_model or "qwen-plus", openai_client=client)
+    if tools is None:
+        from alpha_agents.tools.registry import (
+            get_stock_fund_flow, get_sector_data, search_news,
+        )
+        tools = [search_news, get_stock_fund_flow, get_sector_data]
+
     instructions = _INSTRUCTIONS.format(hard=HARD_STOP_PCT)
     if trader is not None and getattr(trader, "extra_prompt", ""):
         instructions += f"\n\n## 你是谁\n\n{trader.extra_prompt.strip()}\n"
@@ -208,7 +244,7 @@ async def decide(context: str, trader=None) -> list[dict]:
         name=f"exit_trader:{getattr(trader, 'id', 'default')}",
         instructions=instructions,
         model=model,
-        tools=[search_news, get_stock_fund_flow, get_sector_data],
+        tools=list(tools),
     )
 
     result = await asyncio.wait_for(
@@ -398,6 +434,58 @@ async def run(price_map: dict[str, float], signals: list[dict],
     logger.info("Exit decisions: %s",
                 ", ".join(f"{d['code']}={d['action']}" for d in decisions))
     return apply(decisions, positions, price_map)
+
+
+async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
+                            *, day: str, news_by_theme: dict[str, list[str]]
+                            | None = None, trader=None,
+                            model=None) -> list[dict]:
+    """The sell side, for a historical replay.
+
+    A separate entry point rather than a flag on :func:`run`, because the two
+    differ in what they may read, and that difference is the whole risk:
+
+    * ``run`` decides *which* positions are worth a model call, using theses
+      and rule signals. A replay has no theses, and its rule signals are the
+      mechanical settlement — so it asks about every open position, every
+      day.
+    * ``run`` builds its context with ``_news_for_theme``, which calls
+      ``news_index.search_news(hours=...)``. That function searches the whole
+      vector store by wall-clock offset and does **not** consult
+      ``replay_mode`` (verified: zero references). Using it in a replay would
+      read flashes published after the replay day — the future leak this
+      runner exists to prevent.
+
+    So the caller supplies the news, already windowed to its own day, as
+    ``news_by_theme``. Passing ``None`` means "no news", which is honest and
+    not the same as "searched and found nothing" — the block says so.
+
+    The mechanical hard stop is **not** bypassed: ``_settle_exits`` runs
+    first in the runner, so a position that gapped through its stop is
+    already closed by the time this is asked. This function cannot reopen
+    one, and it must not be called before that settlement.
+    """
+    if not positions:
+        return []
+
+    context = build_context(positions, price_map, signals=[],
+                           news_by_theme=news_by_theme)
+    try:
+        decisions = await decide(context, trader, model=model, tools=[])
+    except asyncio.TimeoutError:
+        logger.warning("Replay exit decision timed out after %ds — holding all",
+                       _DECISION_TIMEOUT)
+        return []
+    except Exception as e:
+        # Every failure path holds. Selling on an unreadable reply is how a
+        # model outage becomes a liquidation.
+        logger.warning("Replay exit decision failed (%s) — holding all", e)
+        return []
+    if not decisions:
+        return []
+    logger.info("%s: exit decisions %s", day,
+                ", ".join(f"{d['code']}={d['action']}" for d in decisions))
+    return decisions
 
 
 def morning_calls_key(trader_id: str | None = None) -> str:

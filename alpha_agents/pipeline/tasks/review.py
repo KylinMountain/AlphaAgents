@@ -534,6 +534,45 @@ def _score_due_predictions() -> str:
     return "\n".join(x for x in lines if x)
 
 
+def _loop_report_lines(today: str, observation: dict | None) -> list[str]:
+    """What the learning half did today, and how far a decision can be traced.
+
+    Both halves are reported whether or not they produced anything. "No
+    observation today" and "the step crashed" print differently on purpose:
+    the first is the book being quiet, the second is a defect, and a report
+    that showed nothing for both would hide the second behind the first.
+    """
+    from alpha_agents.evolution import causal_trace as CT
+
+    if observation is None:
+        lines = [f"• 学习观察：{today} 没有可下的结论"
+                 "（可引用的平仓样本不足，或没有对比可言）—— 这是账本安静，不是步骤失败"]
+    else:
+        lines = [
+            f"• 学习观察：candidate #{observation['candidate_id']}"
+            f"（n={observation['n']}，{observation['supporting']} 支持 /"
+            f" {observation['opposing']} 反对，"
+            f"高 T-1 中位 {observation['high_median']:+.2f}% vs"
+            f" 低 T-1 中位 {observation['low_median']:+.2f}%）",
+        ]
+    lines.extend(CT.summary_lines())
+    return lines
+
+
+def _observe_evidence(today: str) -> dict | None:
+    """One production observation from the live book, or ``None``.
+
+    Reads the trades the labelling pass just wrote and hands them to the
+    Evidence Analyzer. The analyzer refuses to state anything when the sample
+    is too thin or has no contrast, and ``None`` here means exactly that —
+    "nothing to state yet", not "the step failed". A caller that conflated
+    the two would report a quiet book as a broken pipeline.
+    """
+    from alpha_agents.evolution import evidence_source as ES
+
+    return ES.observe(as_of=today)
+
+
 def _label_outcomes(today: str) -> dict:
     """Produce the three §9 labels that are not per-prediction.
 
@@ -681,6 +720,23 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Outcome labelling failed: %s", e)
 
+    # The LEARN half, in production. It runs *after* the labelling pass
+    # because it reads the realised results that pass writes: an observation
+    # derived before the labels exist would be measuring last night's book.
+    #
+    # Until 2026-09-17 the only caller of the analyser was the replay runner,
+    # so production never produced a candidate that could pass D25 — every
+    # production proposer writes empty citation buckets, and the one thing
+    # that can fill them lived in a script.
+    try:
+        observation = await asyncio.to_thread(_observe_evidence, today)
+    except Exception as e:
+        # Degrades to a warning like every other step here: a broken learning
+        # step must not take the review with it. The reason is logged rather
+        # than swallowed.
+        logger.warning("Evidence observation failed: %s", e)
+        observation = None
+
     # 1. Verify today's predictions in Python (batch, no LLM needed)
     pending = get_pending_predictions(today)
     themes = get_active_themes()
@@ -788,6 +844,18 @@ async def run_review() -> str | None:
     # are the part of the report that cannot be talked into looking good.
     if score_block:
         report = score_block + "\n\n" + report
+
+    # The loop's own two facts, stated where a person reads the day: did the
+    # learning step produce anything, and can a decision be traced back to
+    # it. Reported even when both answers are "nothing yet" — a silent zero
+    # is indistinguishable from a broken step.
+    try:
+        loop_lines = _loop_report_lines(today, observation)
+    except Exception as e:
+        logger.warning("Loop report lines unavailable: %s", e)
+        loop_lines = []
+    if loop_lines:
+        report = report + "\n\n" + "\n".join(loop_lines)
 
     # 5. Retire stale themes
     retired = retire_stale_themes()

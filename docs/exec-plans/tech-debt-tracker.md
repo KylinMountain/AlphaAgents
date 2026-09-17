@@ -467,13 +467,93 @@ fails at the transport layer, before a status exists); the retry always succeeds
 only one host is contacted, which rules out the obvious alternative — a trace-export or
 credential probe against OpenAI's own API.
 
-**Not yet fixed.** It costs ~0.4 s and one wasted request per simulated day, and every
-day still succeeds, so it is wasteful rather than wrong. The fix is one loop for the
-whole window (`loop.run_until_complete` per day) rather than `asyncio.run` per day.
-It was left alone deliberately: it is a change to the model-call path, and bundling it
-with the D38 fix would leave one verification run unable to say which change did what.
-Its acceptance criterion is checkable and cheap — **the same 120-day window should
-report 0 retries instead of 120.**
+**Fixed.** One loop for the whole window: `Context.loop`, passed to
+`propose_sync(loop=...)`, closed by `run()`'s `finally`. `propose_sync` keeps
+`asyncio.run` when no loop is given, because a one-shot caller is the case where
+it is correct — it is only wrong when the *client* outlives the call.
+
+Measured on the same 3-day window, one line apart, same provider, both runs
+completing all three days:
+
+```
+the loop ignored (the defect)   3 days   "Retrying request" 2
+one loop for the window         3 days   "Retrying request" 0
+```
+
+**The count alone was not enough to state this well, and the reason is worth
+keeping.** `--model-timeout 120` exists because a throttled free tier sometimes
+*queues* a request instead of answering `429`; when it does, the client times
+out and the SDK retries. So "retries" is two causes, and a criterion of "0
+retries" would be permanently unmeetable on a free tier. They separate cleanly
+by the gap between the retry line and the line before it, because the two
+failures take different amounts of time to happen:
+
+```
+                              retries   gap < 30s   gap >= 30s
+walk-120   (before)             120        119           1     (89.9s)
+walk-120b  (before)             121        119           2     (87.7s, 89.1s)
+walk-120c  (after)                3          0           3     (115.2s, 117.0s, 118.9s)
+```
+
+The criterion is **0 retries with a gap under 30 s**, and `walk-120c` meets it:
+all three retries it still shows are provider stalls, and not one stale
+connection remains. A stale connection fails **instantly** — the pool hands back
+a dead connection and it is rejected without any network wait, so the retry lands
+in the same millisecond as the line before it. A provider stall takes the
+client's whole timeout. Across all three windows the two classes are:
+
+```
+stale connections   238 retries    max 3.098 s   (237 of them <= 0.03 s)
+provider stalls       6 retries    min 87.739 s
+                                  ^^^ an 85-second empty band ^^^
+```
+
+**The first version of this criterion said "sub-second", and that was wrong in
+the way this repository keeps being wrong.** It contradicted the sentence three
+lines above it ("max 3.1 s"), and applying it would have counted walk-120's 119
+stale retries as **118** — one retry left unexplained in a window where every
+retry has a known cause, which is exactly the shape that sends the next person
+looking for a second defect that does not exist. The threshold has to sit in the
+measured empty band (**3.098 s → 87.739 s**), not be chosen for how it sounds.
+`walk-120b` happens to have all 119 stale retries under a second, so the wrong
+criterion would have **passed on that window and failed on the other** — the
+worst possible shape for a threshold, since one passing run is enough to keep it.
+
+The pre-fix count decomposes to **119 + 1** and **119 + 2** — and 119 is exactly
+`120 days - 1`. That is the mechanism predicting its own arithmetic: day 1 has
+nothing pooled to trip over, so the defect costs one retry per day *after* the
+first. Both 120-day windows agree on 119, independently.
+
+Two things the fix made visible that were not obvious from the symptom:
+
+1. **The journal cannot count these retries.** `_JournalCompletions.create`
+   wraps `self._inner.create(...)` in `except BaseException` and records a
+   failure, so it looks like a retried day would leave an `llm_error` record
+   beside its `llm_call`. It does not: the openai SDK retries *inside*
+   `self._inner.create`, so the exception never reaches that handler. The
+   pre-fix 120-day journal holds 120 `llm_call` and **0** `llm_error` — a
+   recording that is one call per day, exactly as if nothing had gone wrong.
+   The retry count therefore has to come from `openai._base_client`'s log, which
+   is how it was measured on both sides of the fix.
+2. **The transport half of the claim is not covered by a test, and cannot be.**
+   `tests/conftest.py` installs an audit hook refusing `socket.bind` and
+   `socket.connect` on `AF_INET` outright, so no loopback endpoint can exist
+   inside the suite. The *contract* is tested
+   (`tests/test_t1_decider.py::TestTheCallingLoopOutlivesTheClient`); the
+   transport measurement is `scripts/probe_loop_binding.py`, which runs one
+   client both ways against a loopback endpoint:
+
+   ```
+   a loop per call:  call 1: 200   call 2: RuntimeError: Event loop is closed
+                     call 3: 200   call 4: RuntimeError: Event loop is closed
+   one loop:         call 1: 200   call 2: 200   call 3: 200   call 4: 200
+   ```
+
+   Note the shape: not every call fails, but every *other* one — a failure
+   evicts the stale connection, so the next call finds an empty pool and opens a
+   fresh one. That is why the real run needed the SDK's retry to fail once per
+   day rather than once per client: each day ended holding a connection bound to
+   its own, soon-to-be-closed loop, and the next day tripped over it.
 
 ### D41 — The provider is ambient, so the same command is not the same run
 

@@ -243,7 +243,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     return parsed
 
 
-def propose_sync(**kwargs) -> dict:
+def propose_sync(*, loop: asyncio.AbstractEventLoop | None = None,
+                 **kwargs) -> dict:
     """``propose`` for the runner, which is synchronous.
 
     ``scripts/walk_forward.py`` walks a calendar in a plain loop and its day
@@ -251,5 +252,21 @@ def propose_sync(**kwargs) -> dict:
     the smallest change that keeps the runner's shape; the alternative — an
     async runner — would put ``await`` inside the ``replay_as_of`` blocks that
     currently read as three instants of one day.
+
+    ``loop`` is how a **run** says "one loop outlives every call in me", and
+    passing it is not an optimisation. The runner builds its model once for the
+    whole window, so one ``AsyncOpenAI`` — and the httpx connection pool inside
+    it — is shared by every simulated day. httpx pools connections bound to the
+    loop that opened them, so a fresh loop per day makes that day's first
+    request pick a connection from a loop that is closed: it fails at the
+    transport layer, before a status exists, and the SDK's own retry answers it
+    on the second attempt. Measured across two 120-day windows: 120 and 121
+    ``Retrying request`` lines, **119 of each** being this defect — exactly
+    ``days - 1``, because the first day has nothing pooled to trip over.
+
+    ``loop=None`` keeps ``asyncio.run``, which is right for a one-shot caller
+    and for a test: it is only wrong when the *client* outlives the call.
     """
-    return asyncio.run(propose(**kwargs))
+    if loop is None:
+        return asyncio.run(propose(**kwargs))
+    return loop.run_until_complete(propose(**kwargs))

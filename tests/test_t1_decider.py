@@ -13,6 +13,8 @@ Both are the same failure shape this repository keeps paying for: a wrong
 answer that looks like a normal one.
 """
 
+import asyncio
+
 import pytest
 
 from alpha_agents.agents import t1_decider as D
@@ -158,3 +160,98 @@ class TestThePromptCannotShipAHole:
                             template="{a_field_nobody_supplies}")
         assert "a_field_nobody_supplies" in str(caught.value)
         assert "news" in str(caught.value), "and says what it did supply"
+
+
+class TestTheCallingLoopOutlivesTheClient:
+    """A client built once must be driven by one loop, and the runner broke
+    that by calling ``asyncio.run`` per simulated day.
+
+    ``Context.model`` is built once for a whole window, so a single
+    ``AsyncOpenAI`` — and the httpx connection pool inside it — is shared by
+    every day. httpx pools connections bound to the loop that opened them, so
+    a fresh loop per day handed that day's first request a connection whose
+    loop was already closed: a transport failure with no status at all, which
+    the SDK's own retry then answered on the second attempt.
+
+    Measured on two 120-day windows before the fix: 120 and 121 ``Retrying
+    request`` lines, of which **119 in each** were this defect and the rest were
+    provider stalls after the client timeout. 119 is ``120 days - 1`` — day one
+    has nothing pooled to trip over — and the two windows agree on it
+    independently. ``Context.loop`` is now one loop for the window.
+
+    **The criterion is not "0 retries"**, and that was the first thing written
+    down and the first thing to be wrong: ``--model-timeout 120`` exists because
+    a throttled free tier sometimes queues a request instead of answering
+    ``429``, so a stall-then-retry is a different cause that the fix does not and
+    should not remove. The two separate by the gap to the preceding log line —
+    a stale connection fails *instantly*, a stall takes the whole timeout. Across
+    the three measured windows the stale class tops out at **3.098 s** (237 of
+    its 238 members are <= 0.03 s) and the stall class bottoms out at
+    **87.739 s**, so the criterion is **0 retries with a gap under 30 s** — a
+    threshold placed in that measured 85-second empty band rather than picked for
+    how it sounds. The first version said "sub-second", which would have counted
+    one window's 119 stale retries as 118 and passed on the other: a threshold
+    that fails on the evidence it was written for.
+
+    What is pinned here is the contract: the loop handed in is the loop every
+    call runs on, and it is still open at the end. The transport half of the
+    claim — that a loop-bound connection really does break when the loop
+    changes — is **not** covered by a test, because ``tests/conftest.py``
+    installs an audit hook that refuses ``socket.bind`` and ``socket.connect``
+    on ``AF_INET`` outright. It is measured instead by
+    ``scripts/probe_loop_binding.py``, which runs the same client both ways
+    against a loopback endpoint and prints both outcomes.
+    """
+
+    def test_every_call_runs_on_the_loop_it_was_given(self, monkeypatch):
+        seen = []
+
+        async def _fake(**_kwargs):
+            seen.append(asyncio.get_running_loop())
+            return {"orders": [], "refused": [], "parse_error": None}
+
+        monkeypatch.setattr(D, "propose", _fake)
+        loop = asyncio.new_event_loop()
+        try:
+            for _ in range(3):
+                D.propose_sync(loop=loop)
+            # Still open after three calls. A loop that were closed between
+            # them would give the same ``id`` and still be the defect.
+            assert not loop.is_closed()
+        finally:
+            loop.close()
+        assert [id(one) for one in seen] == [id(loop)] * 3
+
+    def test_without_a_loop_each_call_gets_its_own(self, monkeypatch):
+        """The contrast, and the whole reason the parameter exists: this is
+        the behaviour that was wrong — one client, three loops."""
+        seen = []
+
+        async def _fake(**_kwargs):
+            seen.append(asyncio.get_running_loop())
+            return {"orders": [], "refused": [], "parse_error": None}
+
+        monkeypatch.setattr(D, "propose", _fake)
+        for _ in range(3):
+            D.propose_sync()
+        assert len({id(one) for one in seen}) == 3
+
+    def test_a_supplied_loop_is_not_the_default(self, monkeypatch):
+        """Passing a loop changes the answer, so the two paths are not
+        accidentally the same code. Without this, ``loop`` could be accepted
+        and ignored and both tests above would still pass."""
+        seen = []
+
+        async def _fake(**_kwargs):
+            seen.append(asyncio.get_running_loop())
+            return {"orders": [], "refused": [], "parse_error": None}
+
+        monkeypatch.setattr(D, "propose", _fake)
+        loop = asyncio.new_event_loop()
+        try:
+            D.propose_sync(loop=loop)
+            D.propose_sync()
+        finally:
+            loop.close()
+        assert seen[0] is loop
+        assert seen[1] is not loop

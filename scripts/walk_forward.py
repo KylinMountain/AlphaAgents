@@ -62,6 +62,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import hashlib
 import json
@@ -893,7 +894,7 @@ def _decide_llm(ctx, day: str, prev_day: str) -> list[dict]:
         news=_news_window(day, prev_day, ctx.news_limit),
         book=book, knowledge=knowledge,
         trader_note=ctx.trader_note, picks=ctx.picks,
-        template=ctx.prompt, model=ctx.model)
+        template=ctx.prompt, model=ctx.model, loop=ctx.loop)
     if verdict["parse_error"]:
         # A reply we could not read is not the same as "it chose nothing",
         # and the two must not share a counter.
@@ -1232,6 +1233,21 @@ class Context:
         #: object the timeout lives on.
         self.model = (_build_model(args.model_timeout)
                       if args.decider == "llm" else None)
+        #: One event loop for the whole window, and it exists **because** the
+        #: model above is built once. httpx pools connections bound to the loop
+        #: that opened them, so ``asyncio.run`` per day made each day's first
+        #: request reuse a connection from a loop that was already closed —
+        #: a transport failure with no status, answered by the SDK's retry.
+        #: Measured at exactly one wasted request per day over 120 days, every
+        #: day, which is the shape of a cause that is per-loop rather than
+        #: per-call.
+        #:
+        #: ``None`` for the placeholder decider, which calls no model and so
+        #: has nothing to bind. ``run()`` closes it; a ``Context`` built and
+        #: dropped by a test would leave it open, which is why nothing but
+        #: ``run()`` builds one with a model in it.
+        self.loop = (asyncio.new_event_loop()
+                     if args.decider == "llm" else None)
         self.capacity: dict[str, int] = {}
         self.counters: Counter = Counter()
 
@@ -1300,6 +1316,32 @@ def run(args) -> dict:
     _assert_model_mode(args.decider)
 
     ctx = Context(args)
+    # The window is a function of its own for one reason: the loop the model's
+    # connection pool is bound to has to be closed on the way out, including
+    # when a day raises. ``run`` is the only thing that knows when the window
+    # begins and ends, so it is the only thing that can own that.
+    try:
+        return _run_window(ctx, args)
+    finally:
+        _close_decider_loop(ctx)
+
+
+def _close_decider_loop(ctx) -> None:
+    """Close the window's event loop, if this run built one.
+
+    Closed rather than left to the interpreter. "One loop per window" is the
+    property that keeps the shared client's connections valid, and a property
+    nothing ever checks is how this one got broken in the first place — the
+    loop is closed here so that a second loop cannot quietly appear later and
+    still leave every test green.
+    """
+    if ctx.loop is None:
+        return
+    ctx.loop.close()
+    ctx.loop = None
+
+
+def _run_window(ctx, args) -> dict:
     _seed_theme(ctx)
 
     window = ctx.corpus.window(args.start, args.days)

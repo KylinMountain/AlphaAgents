@@ -311,3 +311,57 @@ class TestTheDeclaredSearchCanBeReplayed:
         verdict = EV.replay_bundle(bundle, self._trades())
         assert verdict["ok"] is False
         assert any("does not know" in p for p in verdict["problems"])
+
+
+class TestADeltaCannotContradictItsOwnEvidence:
+    """The defect the first production observation exposed.
+
+    `evidence.PROPOSED_DELTA` was a constant `direction: "down"`, assuming the
+    proposition held. The real book came back with contrast **+7.68%** — high
+    T-1 names doing *better* — so candidate #3 proposed ranking lower while
+    citing evidence that ranking higher worked. A variant built from it would
+    have moved `w_rel` the wrong way, with a citation that made it look
+    justified.
+
+    `proposed_delta` derives the direction from the measurement now. This
+    guard covers the rows already written by the old code and any hand-written
+    candidate, because the check is on the pair rather than on the writer.
+    """
+
+    def _candidate_with_contrast(self, contrast, direction):
+        return _candidate(
+            payload={"n": 5, "contrast_pct": contrast,
+                     "evidence_bundle": {
+                         "search_scope": "s", "matching_rule": "r",
+                         "eligible": 5, "excluded": 0, "excluded_reasons": {},
+                         "cutoff": "2026-01-05"}},
+            proposed_behavior_delta={"field": "t1_change_rank",
+                                     "direction": direction})
+
+    def test_the_old_constant_is_now_refused(self, store, parent):
+        """Exactly candidate #3's shape: positive contrast, direction down."""
+        cid = self._candidate_with_contrast(7.68, "down")
+        with pytest.raises(V.VariantError, match="opposite to the evidence"):
+            V.build_variant(cid, parent_version_id=parent, built_by="k")
+
+    def test_the_matching_direction_is_accepted(self, store, parent):
+        cid = self._candidate_with_contrast(7.68, "up")
+        assert V.build_variant(cid, parent_version_id=parent,
+                               built_by="k").version_id > 0
+
+    def test_a_supported_proposition_still_ranks_lower(self, store, parent):
+        cid = self._candidate_with_contrast(-3.0, "down")
+        assert V.build_variant(cid, parent_version_id=parent,
+                               built_by="k").version_id > 0
+
+    def test_zero_contrast_supports_no_direction(self, store, parent):
+        cid = self._candidate_with_contrast(0.0, "down")
+        with pytest.raises(V.VariantError, match="zero contrast"):
+            V.build_variant(cid, parent_version_id=parent, built_by="k")
+
+    def test_a_candidate_without_a_contrast_is_not_refused(self, store, parent):
+        """Nothing to contradict. The bundle check covers the search; this
+        guard is about the direction and says nothing when there is none."""
+        cid = _candidate()          # payload has no contrast_pct
+        assert V.build_variant(cid, parent_version_id=parent,
+                               built_by="k").version_id > 0

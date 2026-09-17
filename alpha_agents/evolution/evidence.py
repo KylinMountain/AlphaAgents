@@ -68,14 +68,53 @@ MIN_TRADES = 4
 #: ranking would be unfalsifiable by the ranking's own results.
 PROPOSITION = "T-1 涨得更多的候选，实际收益更差"
 
-#: The behaviour change the proposition implies, if it holds on a larger
-#: sample. Stated as a delta rather than an instruction: this is a proposal,
-#: and nothing here applies it.
+#: The behaviour change a **supported** proposition implies: rank lower.
+#:
+#: This is only correct when the evidence actually supports the proposition.
+#: It used to be written unconditionally, which was a defect: on the first
+#: real production observation the contrast came out **+7.68%** — high-T-1
+#: names did *better* — and the candidate still proposed `direction: "down"`,
+#: because the delta was a constant that assumed its own claim. A variant
+#: built from that would have moved the parameter the opposite way to the
+#: evidence it cited, and the citation would have made it look justified.
+#:
+#: The direction is now derived from the measured contrast. See
+#: :func:`proposed_delta`.
 PROPOSED_DELTA = {
     "field": "t1_change_rank",
     "direction": "down",
     "note": "若该观察在更大样本上成立，选股应向 T-1 涨幅更低的一端移动",
 }
+
+#: The mirror: the evidence says ranking *higher* did better.
+PROPOSED_DELTA_AGAINST = {
+    "field": "t1_change_rank",
+    "direction": "up",
+    "note": "该观察的对比方向与命题相反（高 T-1 反而更好），"
+            "若在更大样本上成立，选股应向 T-1 涨幅更高的一端移动",
+}
+
+
+def proposed_delta(evidence: "Evidence") -> dict:
+    """The change the evidence supports — read off the evidence, not assumed.
+
+    ``contrast`` is high-T-1 median minus low-T-1 median. Negative means the
+    proposition holds (rank lower), positive means it is contradicted (rank
+    higher). The direction follows the measurement, so a candidate can never
+    cite evidence that argues against the change it proposes.
+
+    Returning a direction rather than ``None`` on contradiction is deliberate:
+    an observation that contradicts its own proposition is still a finding
+    worth acting on, and it is the *opposite* action. What must not happen is
+    the constant behaviour the first production run exposed.
+    """
+    if evidence.contrast < 0:
+        return dict(PROPOSED_DELTA)
+    if evidence.contrast > 0:
+        return dict(PROPOSED_DELTA_AGAINST)
+    # Exactly equal medians: no direction is implied, and inventing one would
+    # be the same defect one step smaller. The caller sees the field absent.
+    return {}
 
 
 @dataclass(frozen=True)
@@ -380,6 +419,14 @@ def save_observation(evidence: Evidence, *, source: str, source_date: str,
     """
     from alpha_agents.data import learning_candidates as LC
 
+    delta = proposed_delta(evidence)
+    if not delta:
+        raise ValueError(
+            "the evidence implies no direction (the two medians are equal), "
+            "so there is no behaviour change to propose. Recording a "
+            "candidate with a guessed direction is the defect "
+            "proposed_delta() exists to prevent.")
+
     return LC.save_candidate(
         entity_type="principle",
         operation=operation,
@@ -389,7 +436,7 @@ def save_observation(evidence: Evidence, *, source: str, source_date: str,
         payload={"as_of": source_date, **evidence.payload()},
         claim=evidence.claim,
         applicable_context=applicable_context,
-        proposed_behavior_delta=dict(PROPOSED_DELTA),
+        proposed_behavior_delta=delta,
         # Both keys, always. An empty list is the statement "searched, found
         # none" and is the reason save_candidate refuses a missing key.
         evidence_episode_ids={

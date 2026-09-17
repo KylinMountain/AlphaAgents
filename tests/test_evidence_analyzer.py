@@ -198,3 +198,71 @@ class TestTheContextIsStatedFromTheRunsOwnFacts:
         assert "pullback" in ctx
         assert "0.970" in ctx and "1.005" in ctx
         assert "2025-07-01" in ctx
+
+
+class TestTheProposedDirectionFollowsTheEvidence:
+    """The first production observation exposed this as a defect.
+
+    The delta was a constant `direction: "down"`, written on the assumption
+    that the proposition holds. The real book said otherwise — contrast
+    **+7.68%**, high-T-1 names doing *better* — and the candidate still
+    proposed ranking lower. A variant built from it would have moved the
+    parameter opposite to the evidence it cited, and the citation would have
+    made it look justified.
+    """
+
+    def _evidence(self, contrast: float) -> EV.Evidence:
+        return EV.Evidence(claim="c", n=5, cut=0.0, median_return=0.0,
+                           high_median=contrast, low_median=0.0)
+
+    def test_a_supported_proposition_ranks_lower(self):
+        assert EV.proposed_delta(self._evidence(-3.0))["direction"] == "down"
+
+    def test_a_contradicted_proposition_ranks_higher(self):
+        """Not `None`: an observation that contradicts its own proposition is
+        still a finding, and the action it supports is the opposite one."""
+        delta = EV.proposed_delta(self._evidence(7.68))
+        assert delta["direction"] == "up"
+        assert "相反" in delta["note"]
+
+    def test_equal_medians_propose_nothing(self):
+        """No direction is implied, and inventing one would be the same
+        defect one step smaller."""
+        assert EV.proposed_delta(self._evidence(0.0)) == {}
+
+    def test_the_saved_candidate_carries_the_derived_direction(
+            self, monkeypatch):
+        """End to end through `save_observation`, not just the helper."""
+        rows = [
+            _trade(1, 5.0, 10.0), _trade(2, 4.0, 9.0),
+            _trade(3, 1.0, -8.0), _trade(4, 0.5, -9.0),
+        ]
+        ev = EV.analyse(rows)
+        assert ev.contrast > 0, "this window contradicts the proposition"
+
+        captured = {}
+
+        def _fake_save(**kwargs):
+            captured.update(kwargs)
+            return 1
+
+        import alpha_agents.data.learning_candidates as LC
+        monkeypatch.setattr(LC, "save_candidate", _fake_save)
+        EV.save_observation(ev, source="t", source_date="2026-01-05",
+                            applicable_context="ctx")
+        assert captured["proposed_behavior_delta"]["direction"] == "up"
+
+    def test_saving_a_zero_contrast_evidence_refuses(self):
+        """Reachable, not hypothetical: four trades whose high and low groups
+        have equal medians. Recording a candidate would need a direction, and
+        there is none to derive."""
+        import pytest as _pytest
+        rows = [
+            _trade(1, 5.0, -10.0), _trade(2, 4.0, 10.0),
+            _trade(3, 1.0, 10.0), _trade(4, 0.5, -10.0),
+        ]
+        ev = EV.analyse(rows)
+        assert ev is not None and ev.contrast == 0.0
+        with _pytest.raises(ValueError, match="implies no direction"):
+            EV.save_observation(ev, source="t", source_date="2026-01-05",
+                                applicable_context="ctx")

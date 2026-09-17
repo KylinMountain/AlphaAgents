@@ -294,3 +294,46 @@ class TestItCannotFailTheDay:
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
         report = asyncio.run(run_shadow_run())
         assert "【影子实验】" in report
+
+
+class TestAClosedRunDoesNotReadAsPending:
+    """A retired experiment must not look like one that is still gathering.
+
+    `coverage` returns every run, so after an experiment is closed this report
+    was still printing 「还差 N 个样本」 for it — a line that reads as pending
+    work on something that will never accumulate another sample, in the one
+    report an operator scans to see what is still running. Observed on the
+    live book immediately after run #1 was closed for being un-pairable.
+    """
+
+    def test_a_closed_run_says_closed_and_does_not_count_down(
+            self, store, experiment):
+        """Two runs: one closed, one open.
+
+        The open one is required, not incidental. With nothing open the task
+        returns ``None`` on purpose — "a report saying 'nothing happened' every
+        trading day is noise in a feed a person reads" — so closing the only
+        experiment would exercise the wrong branch and prove nothing about
+        this line.
+        """
+        shadow.close_run(experiment["run"], reason="the book cannot be paired")
+        shadow.open_run(
+            policy_version_id=experiment["incumbent"],
+            reason="a live one, so the task has something to report",
+            report_type="morning", producer=shadow.BASELINE_NAME,
+            opened_at=_day(-30))
+        report = asyncio.run(run_shadow_run())
+        assert report is not None
+        assert "已结束" in report
+        assert "不再累积" in report
+        # The *closed* run's own line must not count down. The open run's may,
+        # so this is asserted per line rather than over the whole report.
+        closed_line = next(l for l in report.splitlines() if "已结束" in l)
+        assert "还差" not in closed_line, (
+            "a closed experiment was reported as short of its bar")
+
+    def test_an_open_run_still_counts_down(self, store, experiment):
+        """The other direction: the fix must not silence a live experiment."""
+        report = asyncio.run(run_shadow_run())
+        assert "配对进度" in report and "还差" in report
+        assert "已结束" not in report

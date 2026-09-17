@@ -83,7 +83,17 @@ def _position_line(row: dict, verdict: dict | None) -> str:
     this compared ``validation_days`` instead, so a verdict resting on twenty
     pairs from one morning looked short of a twenty-*day* bar and the experiment
     kept asking (D16).
+
+    A **closed** run is reported as closed rather than as short of its bar.
+    ``coverage`` returns every run, so after an experiment is retired this
+    function was still printing 「还差 N 个样本」 for it — a line that reads as
+    pending work on something that will never accumulate another sample, in the
+    one report an operator scans to see what is still running.
     """
+    if row.get("status") and row["status"] != "open":
+        return (f"• run #{row['run_id']} 已{_CLOSED_LABEL.get(row['status'], row['status'])}"
+                f"（{row['report_type']}）：停在 {row['paired']}/{row['needed']}"
+                " 个配对样本，不再累积 —— 它的预测与评分仍然可读")
     if verdict is not None and (verdict.get("n") or 0) >= row["needed"]:
         return (f"• run #{row['run_id']} 已裁决：{verdict['outcome']}"
                 f"（n={verdict['n']} 个配对样本 / "
@@ -95,6 +105,10 @@ def _position_line(row: dict, verdict: dict | None) -> str:
                 f"还差 {row['remaining']} 个样本")
     return (f"• run #{row['run_id']} 配对 {row['paired']}/{row['needed']}，"
             "样本够了")
+
+
+#: How a non-open run's status reads in the report line.
+_CLOSED_LABEL = {"closed": "结束", "abandoned": "放弃"}
 
 
 async def _ask_the_gate(row: dict, verdict: dict | None, today: str) -> str:

@@ -103,3 +103,66 @@ def concepts_by_code() -> dict[str, list[str]]:
 def concepts_for(code: str) -> list[str]:
     """One name's concepts. Convenience over :func:`concepts_by_code`."""
     return concepts_by_code().get(code, [])
+
+
+#: Snapshot tables are timestamped (`captured_at`), not dated, so a replay
+#: must bound them by an instant rather than by a day. The decision is made at
+#: 09:00, and no snapshot exists before 10:56 on any session in the corpus
+#: (verified) — so "the latest snapshot on the decision day" would be one
+#: taken *after* the decision. Only the previous session's **close** is
+#: knowable, which is why the reader takes an explicit cutoff.
+_CLOSE_HOUR = "15:00:00"
+
+
+def limit_pool_as_of(cutoff: str) -> dict[str, dict]:
+    """``code → {consecutive_limits, sector, ...}`` as of an instant.
+
+    ``cutoff`` is a full timestamp (``"2026-08-31 15:00:00"``) and nothing
+    captured after it is read. That is the whole point of the parameter: the
+    table is timestamped, so "the latest row" is a lookahead unless the
+    caller pins the instant.
+
+    Only ``pool_type='up'`` is returned. A name on the 涨停 list is a fact
+    about the previous session that a 09:00 decision may use; the 'down' and
+    'broken' lists are read by callers that want them.
+    """
+    from alpha_agents.data import snapshot_store
+
+    try:
+        rows = snapshot_store._get_conn().execute(
+            "SELECT code, name, consecutive_limits, sector, turnover_rate, "
+            "       seal_amount_yi, break_count, captured_at "
+            "  FROM limit_pool_snapshots "
+            " WHERE pool_type = 'up' AND captured_at <= ? "
+            " ORDER BY captured_at",
+            (cutoff,)).fetchall()
+    except sqlite3.DatabaseError as exc:
+        logger.warning("Limit pool unavailable: %s", exc)
+        return {}
+
+    # Last write wins: the latest capture at or before the cutoff is the one
+    # a 09:00 decision would have seen.
+    out: dict[str, dict] = {}
+    for row in rows:
+        out[row["code"]] = {
+            "consecutive_limits": row["consecutive_limits"],
+            "sector": row["sector"],
+            "seal_amount_yi": row["seal_amount_yi"],
+            "break_count": row["break_count"],
+        }
+    return out
+
+
+def _capture_date(cutoff: str) -> str:
+    """The session a cutoff instant belongs to.
+
+    The cutoff is ``day 09:00``, and the capture that a decision may read is
+    the **previous** session's close — so bounding the read to the cutoff's
+    own calendar day would return nothing, which is what the first version
+    did (measured: 0 names for a 09:00 cutoff when 73 were sitting in the
+    table from the prior evening).
+
+    Kept as a named helper because this off-by-one-session is the kind of
+    thing that gets "fixed" back.
+    """
+    return str(cutoff)[:10]

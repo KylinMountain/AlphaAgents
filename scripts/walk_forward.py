@@ -624,6 +624,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     """
     bars_prev = ctx.corpus.bars(prev_day)
     concepts = _concepts_map(ctx)
+    limit_pool = _limit_pool_map(ctx, day)
     ranked = []
     for code in ctx.corpus.instruments:
         reason = _eligibility(ctx, code, day, prev_day)
@@ -682,6 +683,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             # established is not offered at all.
             continue
         seen.add(code)
+        board = limit_pool.get(code) or {}
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
@@ -690,6 +692,11 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             "adv20": adv,
             "turnover_rate": round(float(row.get("turnover_rate") or 0.0), 2),
             "concepts": concepts.get(code, []),
+            # Only present for names that were on the previous session's
+            # 涨停 list. The column is blank for everything else, which is
+            # the fact — not every name has a limit history.
+            "consecutive_limits": board.get("consecutive_limits"),
+            "limit_sector": board.get("sector"),
         })
         if len(panel) >= limit:
             break
@@ -701,6 +708,29 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     ctx.counters["panel_offered_beyond_top_change"] += sum(
         1 for p in panel if p["code"] not in top_by_change)
     return panel
+
+
+def _limit_pool_map(ctx, day: str) -> dict[str, dict]:
+    """The previous session's 涨停 list, as knowable at 09:00 on ``day``.
+
+    Read from `limit_pool_snapshots`, which is **timestamped** rather than
+    dated, so the cutoff is an instant and not a day. A decision at 09:00 may
+    only use captures at or before it — and in this corpus no capture exists
+    before 10:56 on any session, so "the latest snapshot today" would always
+    be one taken after the decision. The previous session's evening captures
+    are the ones a 09:00 decision could actually have seen.
+
+    Empty for sessions the snapshot tables do not cover (they begin
+    2026-09-08), which the panel renders as a blank column rather than as
+    "not on the limit list" — the two are different claims.
+    """
+    try:
+        from alpha_agents.data import stock_meta
+        return stock_meta.limit_pool_as_of(f"{day} 09:00:00")
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["limit_pool_unavailable"] += 1
+        logger.debug("%s: limit pool unavailable: %s", day, exc)
+        return {}
 
 
 def _concepts_map(ctx) -> dict[str, list[str]]:

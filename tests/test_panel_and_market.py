@@ -250,3 +250,70 @@ class TestThePanelIsActuallyMixed:
         monkeypatch.setattr(wf, "_eligibility", lambda *a, **kw: None)
         panel = wf._build_panel(ctx, "2026-01-06", "2026-01-05", 4)
         assert all("turnover_rate" in p for p in panel)
+
+
+class TestTheLimitStreakReachesThePanel:
+    """The previous session's 涨停 list, which is A-share sentiment in a
+    number: 首板 is a start, 二三板 is acceleration, a high board is
+    relay risk. A 9% move means opposite things at 1 board and at 5.
+
+    `limit_pool_snapshots` is **timestamped**, not dated, so the read is
+    bounded by an instant. No capture exists before 10:56 on any session in
+    this corpus (verified), so "the latest snapshot on the decision day"
+    would always be one taken after the decision — the reader takes the
+    previous session's evening captures instead.
+    """
+
+    def test_a_streak_is_rendered(self):
+        row = dict(PANEL[0], consecutive_limits=3)
+        assert "3板" in D.format_panel([row])
+
+    def test_a_name_with_no_streak_shows_a_dash(self):
+        row = dict(PANEL[0], consecutive_limits=None)
+        line = [ln for ln in D.format_panel([row]).splitlines()
+                if "600001" in ln][0]
+        assert "| - |" in line
+
+    def _seed(self, rows):
+        """Plant limit-pool captures in the sandbox snapshot store."""
+        from alpha_agents.data import snapshot_store as SS
+        conn = SS._get_conn()
+        SS._SCHEMA and conn.executescript(SS._SCHEMA)
+        for captured_at, code, streak in rows:
+            conn.execute(
+                "INSERT INTO limit_pool_snapshots (captured_at, code, "
+                "pool_type, name, consecutive_limits) VALUES (?,?,?,?,?)",
+                (captured_at, code, "up", "甲", streak))
+        conn.commit()
+
+    def test_the_reader_takes_the_previous_sessions_close(self):
+        """A 09:00 cutoff must find the capture from the evening before, not
+        nothing. The first version bounded the read to the cutoff's own
+        calendar day and returned 0 names while 73 sat in the table."""
+        from alpha_agents.data import stock_meta
+        self._seed([("2026-09-08 20:44:00", "600001", 3)])
+        got = stock_meta.limit_pool_as_of("2026-09-09 09:00:00")
+        assert got.get("600001", {}).get("consecutive_limits") == 3
+
+    def test_a_capture_after_the_cutoff_is_not_read(self):
+        """The lookahead guard: the decision is at 09:00 and this capture is
+        from that afternoon."""
+        from alpha_agents.data import stock_meta
+        self._seed([("2026-09-09 15:30:00", "600002", 5)])
+        assert stock_meta.limit_pool_as_of("2026-09-09 09:00:00") == {}
+
+    def test_the_latest_capture_at_or_before_the_cutoff_wins(self):
+        from alpha_agents.data import stock_meta
+        self._seed([("2026-09-08 15:02:00", "600003", 1),
+                    ("2026-09-08 20:44:00", "600003", 2)])
+        got = stock_meta.limit_pool_as_of("2026-09-09 09:00:00")
+        assert got["600003"]["consecutive_limits"] == 2
+
+    def test_an_empty_store_returns_a_mapping_not_an_error(self):
+        from alpha_agents.data import stock_meta
+        assert stock_meta.limit_pool_as_of("2026-09-09 09:00:00") == {}
+
+    def test_the_prompt_explains_board_counting(self):
+        text = D.load_prompt()
+        assert "连板" in text
+        assert "首板" in text

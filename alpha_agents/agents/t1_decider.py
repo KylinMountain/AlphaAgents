@@ -90,17 +90,19 @@ def format_panel(panel: list[dict]) -> str:
     """
     if not panel:
         return "（今天没有可交易的候选）"
-    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 概念（当前成分） |",
-             "|---|---|---|---|---|---|---|"]
+    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 概念（当前成分） |",
+             "|---|---|---|---|---|---|---|---|"]
     for row in panel:
         adv = row.get("adv20")
         turn = row.get("turnover_rate")
         concepts = row.get("concepts") or []
+        streak = row.get("consecutive_limits")
         lines.append(
             f"| {row['code']} | {row.get('name', '')} | {row.get('close')} | "
             f"{row.get('change_pct')}% | "
             f"{'-' if turn is None else turn} | "
             f"{'-' if adv is None else int(adv)} | "
+            f"{'-' if not streak else str(int(streak)) + '板'} | "
             f"{'、'.join(concepts) if concepts else '-'} |")
     return "\n".join(lines)
 

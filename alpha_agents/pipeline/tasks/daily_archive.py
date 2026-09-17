@@ -32,7 +32,14 @@ def _tushare_archive(today: str) -> int:
 
     td = today.replace("-", "")
     jobs = [
-        ("fund_flow",   "moneyflow_dc",     save_stock_fund_flow_daily),
+        # `moneyflow`, not `moneyflow_dc`: the latter is the richer endpoint
+        # and the current token cannot read it (measured 2026-09-17,
+        # "您没有接口(moneyflow_dc)访问权限"). Plain `moneyflow` answers the
+        # whole market — 5550 rows for one session — and the writer now
+        # accepts its column naming. Falling back rather than switching
+        # outright would mean the two endpoints' rows disagree about what a
+        # column means; one source per table is the safer rule.
+        ("fund_flow",   "moneyflow",        save_stock_fund_flow_daily),
         ("lhb",         "top_list",         save_lhb_daily),
         ("lhb_inst",    "top_inst",         save_lhb_inst_daily),
         ("hm",          "hm_detail",        save_hm_daily),

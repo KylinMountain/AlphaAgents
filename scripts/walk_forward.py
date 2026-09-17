@@ -625,6 +625,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     bars_prev = ctx.corpus.bars(prev_day)
     concepts = _concepts_map(ctx)
     limit_pool = _limit_pool_map(ctx, day)
+    fund_flow = _fund_flow_map(ctx, prev_day)
     ranked = []
     for code in ctx.corpus.instruments:
         reason = _eligibility(ctx, code, day, prev_day)
@@ -697,6 +698,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             # the fact — not every name has a limit history.
             "consecutive_limits": board.get("consecutive_limits"),
             "limit_sector": board.get("sector"),
+            "net_amount": (fund_flow.get(code) or {}).get("net_amount"),
         })
         if len(panel) >= limit:
             break
@@ -708,6 +710,26 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     ctx.counters["panel_offered_beyond_top_change"] += sum(
         1 for p in panel if p["code"] not in top_by_change)
     return panel
+
+
+def _fund_flow_map(ctx, prev_day: str) -> dict[str, dict]:
+    """The previous session's whole-market fund flow, by code.
+
+    Read from ``stock_fund_flow_daily``, which is **dated** — so the bound is
+    the previous session and nothing later can be reached, unlike the
+    timestamped snapshot tables. One query for the whole market rather than
+    one per panel name.
+
+    Empty for sessions the archive does not hold, which the panel renders as
+    a blank column: "not archived" and "no fund flow" are different claims.
+    """
+    try:
+        from alpha_agents.data import stock_meta
+        return stock_meta.fund_flow_as_of(prev_day)
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["fund_flow_unavailable"] += 1
+        logger.debug("%s: fund flow unavailable: %s", prev_day, exc)
+        return {}
 
 
 def _limit_pool_map(ctx, day: str) -> dict[str, dict]:

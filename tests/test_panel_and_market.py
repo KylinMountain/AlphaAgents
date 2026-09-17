@@ -317,3 +317,53 @@ class TestTheLimitStreakReachesThePanel:
         text = D.load_prompt()
         assert "连板" in text
         assert "首板" in text
+
+
+class TestFundFlowReachesThePanel:
+    """主力净额: price is the result, money is the reason.
+
+    A name that rose on real institutional buying and one that rose while
+    institutions sold into retail demand are the same green candle and
+    different bets. The column comes from `stock_fund_flow_daily`, which is
+    **dated** (`trade_date`), so the bound is the previous session and
+    nothing later is reachable — unlike the timestamped snapshot tables,
+    which need an explicit instant.
+    """
+
+    def test_net_amount_is_rendered_with_its_sign(self):
+        row = dict(PANEL[0], net_amount=-35196.0)
+        assert "-35,196" in D.format_panel([row])
+
+    def test_inflow_is_signed_positive(self):
+        row = dict(PANEL[0], net_amount=19441.0)
+        assert "+19,441" in D.format_panel([row])
+
+    def test_a_session_without_an_archive_shows_a_dash(self):
+        """Blank means "not archived", which is not "no fund flow"."""
+        row = dict(PANEL[0], net_amount=None)
+        line = [ln for ln in D.format_panel([row]).splitlines()
+                if "600001" in ln][0]
+        assert line.count("| - |") >= 1
+
+    def test_the_reader_is_bounded_by_the_session(self):
+        """A day with no archive returns nothing rather than the newest
+        rows, which is the lookahead guard."""
+        from alpha_agents.data import stock_meta
+        assert stock_meta.fund_flow_as_of("2020-01-01") == {}
+
+    def test_the_reader_accepts_both_date_forms(self):
+        """One query per panel rather than one per name."""
+        from alpha_agents.data import stock_meta
+        a = stock_meta.fund_flow_as_of("2026-09-16")
+        b = stock_meta.fund_flow_as_of("20260916")
+        assert a == b
+
+    def test_it_can_be_limited_to_the_panel_codes(self):
+        from alpha_agents.data import stock_meta
+        got = stock_meta.fund_flow_as_of("2026-09-16", {"600584"})
+        assert set(got) <= {"600584"}
+
+    def test_the_prompt_explains_the_column(self):
+        text = D.load_prompt()
+        assert "主力净额" in text
+        assert "资金是原因" in text

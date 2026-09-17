@@ -166,3 +166,46 @@ def _capture_date(cutoff: str) -> str:
     thing that gets "fixed" back.
     """
     return str(cutoff)[:10]
+
+
+def fund_flow_as_of(as_of: str,
+                    codes: set[str] | None = None) -> dict[str, dict]:
+    """``code → {net_amount, trend-ish fields}`` for one session.
+
+    Read from ``stock_fund_flow_daily``, which is **dated** (``trade_date``
+    as ``YYYYMMDD``) rather than timestamped, so the bound is a day and there
+    is no intraday ambiguity. ``as_of`` may be either form.
+
+    One query for the whole panel rather than one per name: the panel shows a
+    few dozen codes and this table holds the whole market per session (5550
+    rows for 2026-09-16), so a per-code loop would be dozens of queries for
+    data that is already a single scan.
+
+    Returns ``{}`` when the session is not archived, which the caller renders
+    as a blank column. Older sessions are not archived — the table began
+    2026-09-16 — and a blank cell means "not archived", not "no fund flow".
+    """
+    day = str(as_of)[:10].replace("-", "")
+    sql = ("SELECT code, name, net_amount, net_amount_rate, buy_lg_amount, "
+           "       buy_elg_amount FROM stock_fund_flow_daily "
+           " WHERE trade_date = ?")
+    params: list = [day]
+    if codes:
+        placeholders = ",".join("?" for _ in codes)
+        sql += f" AND code IN ({placeholders})"
+        params.extend(sorted(codes))
+    try:
+        from alpha_agents.data import snapshot_store
+        rows = snapshot_store._get_conn().execute(sql, params).fetchall()
+    except sqlite3.DatabaseError as exc:
+        logger.warning("Fund flow unavailable: %s", exc)
+        return {}
+    return {
+        row["code"]: {
+            "net_amount": row["net_amount"],
+            "net_amount_rate": row["net_amount_rate"],
+            "buy_lg_amount": row["buy_lg_amount"],
+            "buy_elg_amount": row["buy_elg_amount"],
+        }
+        for row in rows
+    }

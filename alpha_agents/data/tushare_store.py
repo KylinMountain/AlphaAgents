@@ -46,9 +46,57 @@ def _s(row, key):
 
 # ── moneyflow_dc ──
 
+#: The two fund-flow endpoints this repository can reach, and how each names
+#: the same quantities. `moneyflow_dc` is the richer one and is **not
+#: available on the current token** (measured 2026-09-17: "您没有接口
+#: (moneyflow_dc)访问权限"), which is why the archive produced nothing for it
+#: while `moneyflow` answers the whole market — 5550 rows for one session.
+#:
+#: The two differ in more than names: `_dc` reports net amounts and their
+#: rates directly, while plain `moneyflow` reports gross buy/sell legs per
+#: size band and a single `net_mf_amount`. The net is computed from the legs
+#: for the bands, and the rates are left None rather than invented — a rate
+#: needs a denominator this endpoint does not supply.
+_FUND_FLOW_COLUMNS = {
+    "moneyflow_dc": {
+        "net_amount": "net_amount", "net_amount_rate": "net_amount_rate",
+        "buy_elg_amount": "buy_elg_amount",
+        "buy_elg_amount_rate": "buy_elg_amount_rate",
+        "buy_lg_amount": "buy_lg_amount",
+        "buy_lg_amount_rate": "buy_lg_amount_rate",
+        "buy_md_amount": "buy_md_amount",
+        "buy_md_amount_rate": "buy_md_amount_rate",
+        "buy_sm_amount": "buy_sm_amount",
+        "buy_sm_amount_rate": "buy_sm_amount_rate",
+    },
+    "moneyflow": {
+        "net_amount": "net_mf_amount", "net_amount_rate": None,
+        "buy_elg_amount": "buy_elg_amount", "buy_elg_amount_rate": None,
+        "buy_lg_amount": "buy_lg_amount", "buy_lg_amount_rate": None,
+        "buy_md_amount": "buy_md_amount", "buy_md_amount_rate": None,
+        "buy_sm_amount": "buy_sm_amount", "buy_sm_amount_rate": None,
+    },
+}
+
+
+def _fund_flow_columns(df: pd.DataFrame) -> dict:
+    """Which naming this frame uses, decided by its own columns."""
+    cols = set(df.columns)
+    return (_FUND_FLOW_COLUMNS["moneyflow_dc"] if "net_amount" in cols
+            else _FUND_FLOW_COLUMNS["moneyflow"])
+
+
 def save_stock_fund_flow_daily(df: pd.DataFrame) -> int:
+    """Persist one session's whole-market fund flow.
+
+    Accepts either endpoint's column naming. Before this it read
+    `net_amount`/`..._rate` unconditionally, so a `moneyflow` frame (the only
+    one the current token can reach) wrote zero rows — silently, since an
+    all-missing frame looks the same as an empty one.
+    """
     if df is None or df.empty:
         return 0
+    mapping = _fund_flow_columns(df)
     rows = []
     for _, r in df.iterrows():
         ts_code = _s(r, "ts_code").strip()
@@ -57,11 +105,21 @@ def save_stock_fund_flow_daily(df: pd.DataFrame) -> int:
         rows.append((
             _s(r, "trade_date"), ts_code, _bare_code(ts_code),
             _s(r, "name"), _f(r, "pct_change"), _f(r, "close"),
-            _f(r, "net_amount"), _f(r, "net_amount_rate"),
-            _f(r, "buy_elg_amount"), _f(r, "buy_elg_amount_rate"),
-            _f(r, "buy_lg_amount"), _f(r, "buy_lg_amount_rate"),
-            _f(r, "buy_md_amount"), _f(r, "buy_md_amount_rate"),
-            _f(r, "buy_sm_amount"), _f(r, "buy_sm_amount_rate"),
+            _f(r, mapping["net_amount"]),
+            None if mapping["net_amount_rate"] is None
+            else _f(r, mapping["net_amount_rate"]),
+            _f(r, mapping["buy_elg_amount"]),
+            None if mapping["buy_elg_amount_rate"] is None
+            else _f(r, mapping["buy_elg_amount_rate"]),
+            _f(r, mapping["buy_lg_amount"]),
+            None if mapping["buy_lg_amount_rate"] is None
+            else _f(r, mapping["buy_lg_amount_rate"]),
+            _f(r, mapping["buy_md_amount"]),
+            None if mapping["buy_md_amount_rate"] is None
+            else _f(r, mapping["buy_md_amount_rate"]),
+            _f(r, mapping["buy_sm_amount"]),
+            None if mapping["buy_sm_amount_rate"] is None
+            else _f(r, mapping["buy_sm_amount_rate"]),
         ))
     if not rows:
         return 0

@@ -135,3 +135,137 @@ class TestParseDecisionsRefusesWhatItCannotGrade:
 
     def test_a_malformed_block_returns_nothing(self):
         assert ED.parse_decisions("no block here") == []
+
+
+class TestTheAgentCanActuallyBeUnderstood:
+    """The parser only accepted a form neither model emits.
+
+    `parse_decisions` required `<!-- DECISIONS: [...] -->`. Asked for that
+    marker, both mimo and Qwen answer with a ```json fenced array instead —
+    measured: 17 exit calls in a 20-day replay, 17 unreadable, 0 decisions.
+    Production has had `AGENT_EXIT_DECISIONS=1` set with not one
+    `Exit decisions:` line in its logs, so the agent has never once acted on
+    a position. It held everything and said nothing.
+
+    That is the failure shape this repository keeps paying for: an answer
+    that looks like a normal one. These tests pin every shape the fallbacks
+    are for, and the ambiguity they must not fall into.
+    """
+
+    def _one(self, text):
+        got = ED.parse_decisions(text)
+        return got[0] if got else None
+
+    def test_the_documented_marker_still_works(self):
+        d = self._one('<!-- DECISIONS: [{"code":"600186","action":"hold",'
+                      '"reason":"x"}] -->')
+        assert d and d["code"] == "600186"
+
+    def test_a_json_fenced_array_is_read(self):
+        """The shape both models actually produce."""
+        d = self._one('判断如下：\n```json\n[{"code":"600186",'
+                      '"action":"sell","reason":"主线转弱"}]\n```')
+        assert d and d["action"] == "sell"
+
+    def test_an_unfenced_array_is_read(self):
+        d = self._one('整体判断：\n[{"code":"600186","action":"hold",'
+                      '"reason":"x"}]')
+        assert d and d["code"] == "600186"
+
+    def test_a_plain_fence_without_the_json_tag_is_read(self):
+        d = self._one('```\n[{"code":"600186","action":"hold","reason":"x"}]\n```')
+        assert d and d["code"] == "600186"
+
+    def test_an_example_in_the_prose_does_not_win_over_the_answer(self):
+        """A model that thinks out loud shows an example early and its real
+        answer at the end; taking the first array would act on the example."""
+        d = self._one(
+            '例如 [{"code":"600000","action":"hold","reason":"示例"}]。\n'
+            '我的判断：\n[{"code":"600186","action":"sell","reason":"真的"}]')
+        assert d and d["code"] == "600186" and d["action"] == "sell"
+
+    def test_the_real_shape_from_the_replay_parses(self):
+        """Verbatim from the 20-day run that exposed this."""
+        text = (
+            "整体判断来看，莲花控股今日依然有资金流入，主线也继续保持强度，"
+            "并没有出现主线归档或走弱的情况。\n\n"
+            "```json\n[\n    {\n"
+            '        "code": "600186",\n'
+            '        "action": "hold",\n'
+            '        "reason": "主线今日+1仍在流入",\n'
+            '        "confidence": "high"\n    }\n]\n```')
+        d = self._one(text)
+        assert d and d["code"] == "600186" and d["action"] == "hold"
+        assert d["confidence"] == "high"
+
+    def test_prose_with_no_json_still_holds(self):
+        assert ED.parse_decisions("我觉得该卖，但我不写 JSON") == []
+
+
+class TestTheExitClassifierKnowsTheSettlementsWording:
+    """`t1_execution` fills at the `lower` level (the stop) or the `upper`
+    one (the target) and says so as "only the lower level X was touched".
+
+    The first classifier looked for "stop"/"止损" only, so seven real exits
+    in the 20-day replay landed in 其他 — it reported 止损 1 when the truth
+    was 止损 6 / 止盈 2.
+    """
+
+    def _kinds(self, reasons):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+        fills = [{"side": "sell", "reason": r} for r in reasons]
+        return wf._exit_attribution({"fills": fills})[-1]
+
+    def test_a_lower_level_touch_is_a_stop(self):
+        assert "止损 1" in self._kinds(["only the lower level 11.0 was touched"])
+
+    def test_an_upper_level_touch_is_a_target(self):
+        assert "止盈 1" in self._kinds(["only the upper level 23.0 was touched"])
+
+    def test_a_gap_through_the_stop_is_a_stop(self):
+        assert "止损 1" in self._kinds(
+            ["the open 12.47 gapped through the stop 12.49"])
+
+    def test_an_agent_sell_is_not_attributed_to_a_rule_it_mentions(self):
+        """An agent's reason is free text and may mention a stop without the
+        stop having caused the exit."""
+        assert "agent 判断 1" in self._kinds(
+            ["agent卖出: 还没来得及止损，但主线已经转弱"])
+
+
+class TestTheAgentIsNotAskedAboutUnsellablePositions:
+    """T+1: shares bought today cannot be sold today.
+
+    Measured on a real run — two of four agent decisions were trims of a
+    position bought the previous session, and both were refused by the exit
+    path with "position #11 has only 0 settled shares today". The refusal is
+    the correct backstop; the defect is that the question was asked at all.
+    A model call whose only possible answer is "no" is a wasted call and a
+    decision that can only be discarded.
+    """
+
+    def test_a_position_bought_today_is_not_offered(self):
+        from alpha_agents.data import t1_settlement as S
+        assert S.may_sell("2026-08-26", "2026-08-27") is True
+        assert S.may_sell("2026-08-27", "2026-08-27") is False
+
+    def test_the_filter_is_in_place_where_the_step_asks(self):
+        """A grep rather than a run: driving the real step needs a corpus,
+        a book and a model, and the property is that the guard is on the
+        path at all."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._agent_exits)
+        assert "may_sell" in src, (
+            "the exit step does not filter by T+1, so it will ask about "
+            "positions whose settled shares are zero")
+        assert "agent_exit_t_plus_one" in src, (
+            "the filter is silent; a run must report how many positions it "
+            "held back")
+

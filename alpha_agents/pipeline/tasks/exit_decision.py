@@ -48,6 +48,10 @@ _DECISION_TIMEOUT = int(os.environ.get("EXIT_DECISION_TIMEOUT", "120"))
 
 _JSON_BLOCK = re.compile(r"<!--\s*DECISIONS:\s*(\[.*?\])\s*-->", re.DOTALL)
 
+#: A ```json (or plain ```) fenced body. Both models this repository runs
+#: answer in this shape, so it is the common case rather than the fallback.
+_FENCED = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
 # The five things a trader can do with a live position. Previously three,
 # and one of those was a lie: "trim" had no partial-close path so it was
 # booked as a full exit. A system that can only hold or close cannot learn
@@ -256,20 +260,65 @@ async def decide(context: str, trader=None, *, model=None,
 
 
 def parse_decisions(output: str) -> list[dict]:
-    """Pull the DECISIONS block out of the agent's report.
+    """Pull the decisions out of the agent's report.
 
-    A missing or malformed block returns nothing, and nothing means hold.
-    An exit that fires because the model wrote unparseable JSON is worse
-    than an exit that never fires: the hard stop is still underneath.
+    Three shapes are accepted, and the reason is a measured defect rather
+    than defensive coding:
+
+    1. the documented ``<!-- DECISIONS: [...] -->`` marker;
+    2. a ```json fenced array;
+    3. a bare JSON array.
+
+    Only shape 1 used to parse, and **neither model this repository runs
+    emits it** — asked for the marker, both answer with a fenced array. So
+    every exit decision was dropped and the agent held everything, silently:
+    production has had ``AGENT_EXIT_DECISIONS=1`` set with not one
+    ``Exit decisions:`` line in its logs, and the first replay that enabled
+    the path produced 17 unreadable replies out of 17.
+
+    That is the failure this repository keeps paying for — an answer that
+    looks like a normal one. The prompt still asks for the marker, because
+    the marker is the unambiguous form; the fallbacks exist because a parser
+    that only reads the form the model does not produce is a parser for
+    nothing.
+
+    A reply that matches nothing still returns ``[]``, which means hold. The
+    hard stop is underneath, so holding on an unreadable reply cannot run the
+    account down.
     """
-    m = _JSON_BLOCK.search(output)
-    if not m:
-        logger.warning("Exit agent returned no DECISIONS block — holding all")
+    text = output or ""
+    payload = None
+
+    m = _JSON_BLOCK.search(text)
+    if m:
+        payload = m.group(1)
+    else:
+        # The last fenced block wins: a model that thinks out loud often
+        # shows an example early and its real answer at the end.
+        fences = _FENCED.findall(text)
+        for body in reversed(fences):
+            if body.lstrip().startswith("["):
+                payload = body
+                break
+        if payload is None:
+            # An array with no fence around it. Anchored on the last `[` that
+            # closes at the end of the text, so an example array quoted in the
+            # prose is not mistaken for the answer.
+            start = text.rfind("[")
+            while start != -1:
+                candidate = text[start:]
+                if candidate.rstrip().endswith("]"):
+                    payload = candidate[: candidate.rfind("]") + 1]
+                    break
+                start = text.rfind("[", 0, start)
+    if payload is None:
+        logger.warning("Exit agent returned no readable decision list — "
+                       "holding all")
         return []
     try:
-        items = json.loads(m.group(1))
+        items = json.loads(payload)
     except json.JSONDecodeError as e:
-        logger.warning("Exit DECISIONS JSON malformed (%s) — holding all", e)
+        logger.warning("Exit decisions malformed/unparseable (%s) — holding all", e)
         return []
     if not isinstance(items, list):
         return []

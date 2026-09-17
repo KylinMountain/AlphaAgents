@@ -1281,6 +1281,27 @@ def _agent_exits(ctx, day: str) -> list[dict]:
         logger.info("%s: no priced positions for the agent exit step", day)
         return []
 
+    # T+1: shares bought today cannot be sold today. Asking the agent about
+    # them wastes a model call and produces a decision that can only be
+    # refused — measured on a real run, agent trims of a position bought the
+    # previous session were refused by the exit path with "position has only
+    # 0 settled shares today".
+    #
+    # Filtered here rather than left to the refusal: the refusal is the
+    # correct backstop, but a question whose only possible answer is "no"
+    # should not be asked. `_settle_exits` applies the same rule through
+    # `may_sell`, so the two agree about who is sellable.
+    from alpha_agents.data import t1_settlement as S
+    sellable = [p for p in priced if S.may_sell(p.get("open_date"), day)]
+    held_back = len(priced) - len(sellable)
+    if held_back:
+        ctx.counters["agent_exit_t_plus_one"] += held_back
+        logger.info("%s: %d position(s) held by T+1, not offered to the agent",
+                    day, held_back)
+    if not sellable:
+        return []
+    priced = sellable
+
     news_by_theme = _news_by_theme(ctx, day, prev, {p.get("theme") for p in priced})
     trader = None
     try:
@@ -2144,9 +2165,15 @@ def _exit_attribution(result: dict) -> list[str]:
         # sell to the rule it happened to mention.
         if r.startswith("agent"):
             return "agent 判断"
-        if "止损" in r or "stop" in low:
+        # The settlement's own wording, which is not the word "stop".
+        # `t1_execution` fills at the ``lower`` level (the stop) or the
+        # ``upper`` one (the target), and says so as "only the lower level
+        # X was touched". The first version of this classifier looked for
+        # "stop"/"止损" only, so seven real exits landed in 其他 — the split
+        # was reporting 止损 1 when the truth was 止损 5 / 止盈 2.
+        if "lower level" in low or "止损" in r or "stop" in low:
             return "止损"
-        if "止盈" in r or "target" in low:
+        if "upper level" in low or "止盈" in r or "target" in low:
             return "止盈"
         if "到期" in r or "expire" in low:
             return "到期"

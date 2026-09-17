@@ -137,7 +137,8 @@ class TestASellFillsAtItsOwnMomentsPrice:
             counters = {}
             trader = "pullback"
             decider = "llm"
-            mechanical_exits = True
+            mechanical_stop = True
+            mechanical_target = True
 
             class _C(dict):
                 def __getitem__(self, k):

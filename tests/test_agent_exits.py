@@ -418,7 +418,8 @@ class TestAWindowWithNoExitIsRefused:
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
         import walk_forward as wf
-        base = {"mechanical_exits": False, "agent_exits": False}
+        base = {"mechanical_stop": False, "mechanical_target": False,
+                "agent_exits": False}
         base.update(over)
         return wf, type("A", (), base)()
 
@@ -428,11 +429,13 @@ class TestAWindowWithNoExitIsRefused:
             wf._assert_an_exit_exists(args)
 
     def test_it_allows_the_experiment_arm(self):
-        wf, args = self._args(agent_exits=True)
+        wf, args = self._args(mechanical_stop=False,
+                              mechanical_target=False, agent_exits=True)
         wf._assert_an_exit_exists(args)
 
     def test_the_default_is_unaffected(self):
-        wf, args = self._args(mechanical_exits=True, agent_exits=False)
+        wf, args = self._args(mechanical_stop=True, mechanical_target=True,
+                              agent_exits=False)
         wf._assert_an_exit_exists(args)
 
     def test_hiding_the_levels_is_what_removes_the_exit(self):

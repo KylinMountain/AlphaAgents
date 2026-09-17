@@ -805,7 +805,8 @@ def _news_window(day: str, prev_day: str, limit: int,
         return []
 
 
-def _book_and_knowledge(ctx, day: str) -> tuple[str, str]:
+def _book_and_knowledge(ctx, day: str,
+                        phase: str = "open") -> tuple[str, str]:
     """What the agent holds, and what it has learned, as of the replay day.
 
     Read through the same functions the live morning scan uses, so a replay
@@ -824,13 +825,24 @@ def _book_and_knowledge(ctx, day: str) -> tuple[str, str]:
     # leak this runner exists to avoid, and reading no price at all is what
     # it did before: the agent was asked "should you sell" while unable to
     # see whether the position was up or down.
-    prev = ctx.corpus.previous(day)
+    # The mark follows the moment, exactly as the fill price does. At 09:00
+    # the last price that exists is T-1's close. At 14:55 today's close
+    # exists, and showing the agent yesterday's mark while telling it the
+    # session is over would give it a stale P&L to reason from — a position
+    # down 8% today would read as down 8% yesterday.
     price_map: dict[str, float] = {}
-    if prev:
-        for code, row in ctx.corpus.bars(prev).items():
+    if phase == "close":
+        for code, row in ctx.corpus.bars(day).items():
             close = row.get("close")
             if close:
                 price_map[code] = float(close)
+    else:
+        prev = ctx.corpus.previous(day)
+        if prev:
+            for code, row in ctx.corpus.bars(prev).items():
+                close = row.get("close")
+                if close:
+                    price_map[code] = float(close)
     try:
         book = feedback.inject_portfolio(trader_id=ctx.trader,
                                          price_map=price_map)
@@ -1098,6 +1110,14 @@ def _decide_llm(ctx, day: str, prev_day: str,
     # reason.
     ranking_day = day if phase == "close" else prev_day
     panel = _build_panel(ctx, day, ranking_day, ctx.panel_size)
+    if phase == "close":
+        # A close decision can only *add* exposure, and one name carries one
+        # position. Offering a held name invites an order that can only be
+        # refused — every close-buy refusal measured was this.
+        unavailable = _unavailable_codes(ctx)
+        before = len(panel)
+        panel = [row for row in panel if row["code"] not in unavailable]
+        ctx.counters["close_panel_held_removed"] += before - len(panel)
     ctx.counters["panel_size"] += len(panel)
     if not panel:
         logger.info("%s: empty panel, nothing to decide", day)
@@ -1106,7 +1126,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
     # and the knowledge changes as the learning step writes. A context
     # computed at the start of the window would be the 2026 leak in
     # miniature — the agent deciding on day 40 with day 1's empty book.
-    book, knowledge = _book_and_knowledge(ctx, day)
+    book, knowledge = _book_and_knowledge(ctx, day, phase)
     # The previous session's breadth, from the corpus: what kind of day this
     # is. Read at ``prev_day`` so it is knowable at 09:00 and cannot leak.
     market = _market_state(ctx, prev_day)
@@ -1359,11 +1379,28 @@ def _close_buys(ctx, day: str, prev_day: str, orders: list[dict]) -> list[dict]:
     # ranking day, and they do (`day` for a close decision) — a mismatch was
     # the first bug here, where the buy panel ranked on T-1 and the orders
     # were then validated against a panel ranked on T.
+    #
+    # Names already held or pending are dropped here **and** from the panel
+    # the agent is shown, so the two agree. They used to be offered and then
+    # refused: measured with an instrumented run, **every** close-buy refusal
+    # was a duplicate — the agent ordered at the close the same name it had
+    # ordered that morning, and `portfolio` correctly refused a second
+    # position on one name. The rule is real; asking a question whose only
+    # answer is "no" was the defect, exactly as with the T+1 filter above.
+    held = _unavailable_codes(ctx)
     by_code = {row["code"]: row for row in
-               _build_panel(ctx, day, day, ctx.panel_size)}
+               _build_panel(ctx, day, day, ctx.panel_size)
+               if row["code"] not in held}
     fills = []
     for order in orders:
         code = order["code"]
+        if code in held:
+            # The panel the agent was shown already excluded these, so this
+            # is a model naming something it was not offered. Counted apart
+            # from "not offerable" so the two cannot be read as one number:
+            # one is a held name, the other a name with no bar today.
+            ctx.counters["close_buy_already_held"] += 1
+            continue
         row = bars.get(code)
         panel_row = by_code.get(code)
         if row is None or panel_row is None:
@@ -1535,7 +1572,8 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             mechanical_stops=ctx.mechanical_exits,
+                             mechanical_stops=(ctx.mechanical_stop
+                                               and ctx.mechanical_target),
                              phase=phase))
     if not decisions:
         return []
@@ -1642,6 +1680,25 @@ def _limit_blocks(ctx, day: str, code: str, price: float, side: str):
     return None if fill.status == "filled" else fill.reason
 
 
+def _unavailable_codes(ctx) -> set[str]:
+    """Names this book cannot open another position on today.
+
+    One name, one position (``portfolio._open_position_impl``). Anything
+    pending or open is unavailable, and offering it to the model produces a
+    decision that can only be refused.
+
+    Read from the book rather than tracked in memory so the filter cannot
+    disagree with the guard that actually refuses.
+    """
+    try:
+        from alpha_agents.data import portfolio as P
+        return {p["code"] for p in P.get_open_positions(ctx.trader)} | {
+            p["code"] for p in P.get_pending_orders(ctx.trader)}
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("Could not read the book for the close panel: %s", exc)
+        return set()
+
+
 def _shares_for_exit(code: str, day: str) -> int | None:
     """What the executor actually sold, read back from the exit leg.
 
@@ -1722,9 +1779,9 @@ def _settle_exits(ctx, day: str) -> dict:
         verdict = S.exit_verdict(
             bar=S.bar_from_row(bars_today.get(code)), prev_close=prev_close,
             rule=rule,
-            stop_loss=(pos.get("stop_loss") if ctx.mechanical_exits else None),
+            stop_loss=(pos.get("stop_loss") if ctx.mechanical_stop else None),
             target_price=(pos.get("target_price")
-                          if ctx.mechanical_exits else None))
+                          if ctx.mechanical_target else None))
         counts[verdict.status] += 1
         if verdict.status == S.INTRADAY_AMBIGUOUS:
             events.append({"date": day, "position_id": pos["id"], "code": code,
@@ -1802,16 +1859,22 @@ class Context:
         #: it doubles the run's model calls, and that should be a choice
         #: the operator made rather than a surprise on the bill.
         self.agent_exits = getattr(args, "agent_exits", False)
-        #: Whether the mechanical stop/target is enforced. Off means the
-        #: agent is the only thing that can close a position — an experiment
-        #: to see whether it sells at all when nothing else will.
+        #: Whether the mechanical **stop** is enforced. Off means nothing
+        #: closes a position for being down: the agent has to decide.
         #:
         #: **Replay-only, and deliberately so.** The stop is the line that
         #: keeps a wrong call from becoming a blown account; removing it from
         #: production would be removing the only backstop under a model.
         #: Here the book is simulated, so the question "does it sell?" can be
         #: asked without paying for the answer.
-        self.mechanical_exits = getattr(args, "mechanical_exits", True)
+        self.mechanical_stop = getattr(args, "mechanical_stop", True)
+        #: Whether the mechanical **target** is enforced. Separate from the
+        #: stop on purpose: they are different claims about behaviour, and
+        #: "the agent never takes a profit" and "the agent never cuts a
+        #: loss" are two findings that a single switch would merge into one
+        #: number. The user asked to disable the take-profit as its own
+        #: experiment.
+        self.mechanical_target = getattr(args, "mechanical_target", True)
         self.panel_size = args.panel_size
         self.news_limit = args.news_limit
         #: The window's first session, carried so an observation can name the
@@ -2168,27 +2231,29 @@ def _model_usage(ctx, model: dict) -> tuple[bool, str]:
 def _assert_an_exit_exists(args) -> None:
     """Refuse a window in which nothing can close a position.
 
-    ``--no-mechanical-exits`` removes the stop and the target. With no agent
-    on the sell side there is then **no exit at all**: every fill stays open
-    until the window ends, and the equity curve measures the window's drift
-    rather than any decision. That is not an experiment, it is a missing
-    feature, so it is refused rather than run and explained afterwards.
+    Disabling both the stop and the target leaves the agent as the only
+    closer. With no agent on the sell side there is then **no exit at all**:
+    every fill stays open until the window ends, and the equity curve
+    measures the window's drift rather than any decision. That is not an
+    experiment, it is a missing feature, so it is refused rather than run and
+    explained afterwards.
 
-    Contrast with the arm that *is* allowed: no mechanical exits **and**
-    ``--agent-exits`` leaves exactly one thing able to sell, which is the
-    question worth asking.
+    Disabling one alone is allowed without an agent, because the other still
+    exits.
     """
-    if getattr(args, "mechanical_exits", True):
+    if getattr(args, "mechanical_stop", True):
+        return
+    if getattr(args, "mechanical_target", True):
         return
     if getattr(args, "agent_exits", False):
         return
     raise SystemExit(
-        "--no-mechanical-exits removes the stop and the target, and without "
-        "--agent-exits nothing can close a position: every fill would stay "
-        "open to the end of the window and the curve would measure drift, "
-        "not decisions.\n"
+        "--no-stop-loss and --no-take-profit together remove every mechanical "
+        "exit, and without --agent-exits nothing can close a position: every "
+        "fill would stay open to the end of the window and the curve would "
+        "measure drift, not decisions.\n"
         "  Add --agent-exits to make the agent the only seller, which is the "
-        "experiment this flag exists for.")
+        "experiment these flags exist for.")
 
 
 def _assert_model_mode(decider: str) -> None:
@@ -2633,10 +2698,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="placeholder: rank T-1 change, no model (default). "
                              "llm: the model chooses from an as-of panel.")
     parser.add_argument(
-        "--no-mechanical-exits", dest="mechanical_exits",
+        "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,
-        help="关闭机械止损/止盈，只让 agent 决定卖出（实验用；"
-             "机械路径之外的所有规则仍然生效）")
+        help="关闭机械止损（实验用）")
+    parser.add_argument(
+        "--no-take-profit", dest="mechanical_target",
+        action="store_false", default=True,
+        help="关闭机械止盈（实验用）")
     parser.add_argument(
         "--agent-exits", action="store_true",
         help="让 agent 决定卖出（每天多一次模型调用；机械硬止损始终先跑）")

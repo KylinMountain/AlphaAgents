@@ -620,3 +620,57 @@ class TestAReportTypeThatCannotBePairedIsRefused:
             horizon_days=None)
         assert SH.prob_coverage("intraday")["pairable"] is True
         assert SH.prob_coverage("intraday_signal")["pairable"] is False
+
+
+# ── 10. The challenger answers the same question the champion asked ─────
+#
+# `review.py` grades each champion row over the horizon *that row declared*,
+# and states the reason: "Grading a 3-day call over 5 days measured neither,
+# and doing it silently made the two books comparable on a window only one of
+# them chose." A challenger emitting a fixed horizon is compared against the
+# champion on two different windows whenever they disagree, which is the same
+# defect one level down.
+#
+# Measured on the live book the day this was fixed: the champion's `intraday`
+# rows for 2026-09-16 declare 3, and the first challenger emitted at 5 — so
+# every pair from that day was two different questions. 2026-09-15 carried
+# both 5 and 3 in a single day.
+
+
+class TestTheChallengerInheritsTheChampionsHorizon:
+    def _champion_with(self, store, date, code, horizon):
+        memory_store.save_prediction(
+            date, "intraday", code, "X", "看多", "high", "t", 1.0, "reason",
+            prob=0.6, trader_id="default", horizon_days=horizon)
+
+    def test_the_declared_horizon_is_read_per_code(self, store, version):
+        self._champion_with(store, _today(), "600000", 3)
+        self._champion_with(store, _today(), "600001", 5)
+        got = SH.champion_horizons(_today(), "intraday")
+        assert got == {"600000": 3, "600001": 5}
+
+    def test_a_row_with_no_declaration_falls_back_to_the_default(self, store):
+        memory_store.save_prediction(
+            _today(), "intraday", "600000", "X", "看多", "high", "t", 1.0,
+            "reason", prob=0.6, trader_id="default", horizon_days=None)
+        assert SH.champion_horizons(_today(), "intraday") == {
+            "600000": SH.DEFAULT_HORIZON_DAYS}
+
+    def test_the_emitted_forecast_carries_the_champions_horizon(
+            self, store, version):
+        self._champion_with(store, _today(), "600000", 3)
+        self._champion_with(store, _today(), "600001", 5)
+        run = _open(version, report_type="intraday")
+        SH.emit_for_date(run, _today())
+        got = {r["code"]: r["horizon_days"]
+               for r in SH.predictions_for(run)}
+        assert got == {"600000": 3, "600001": 5}, (
+            "the challenger answered a different question than the champion")
+
+    def test_an_explicit_override_still_wins(self, store, version):
+        """The escape hatch stays, so a deliberate divergence is possible —
+        and the CLI says out loud that it re-introduces the mismatch."""
+        self._champion_with(store, _today(), "600000", 3)
+        run = _open(version, report_type="intraday")
+        SH.emit_for_date(run, _today(), horizon_days=7)
+        assert SH.predictions_for(run)[0]["horizon_days"] == 7

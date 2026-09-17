@@ -565,9 +565,43 @@ def panel_for(date: str, report_type: str) -> list[str]:
     return [row["code"] for row in rows]
 
 
+def champion_horizons(date: str, report_type: str) -> dict[str, int]:
+    """The horizon each champion forecast declared, per code.
+
+    **The challenger must answer the same question.** ``review.py`` grades
+    each champion row over the horizon *that row declared*, falling back to
+    the global default only for rows written before the declaration existed.
+    A challenger that emitted a fixed horizon would be compared against the
+    champion on two different windows whenever they disagree — and the repo
+    has already named this defect in ``review.py``: *"Grading a 3-day call
+    over 5 days measured neither, and doing it silently made the two books
+    comparable on a window only one of them chose."*
+
+    Measured on the live book the day this was written: the champion's
+    ``intraday`` rows for 2026-09-16 declare ``horizon_days = 3``, while the
+    first challenger emitted at 5. Every pair from that day would have been
+    two different questions.
+
+    A code with two rows — two traders on the same day — takes the earliest
+    by ``id``, matching ``_champion_signals``, which makes the same choice for
+    the same reason and states it there.
+    """
+    conn = memory_store._get_conn()
+    rows = conn.execute(
+        "SELECT code, horizon_days FROM predictions WHERE date = ? "
+        "AND report_type = ? AND code IS NOT NULL ORDER BY id",
+        (date, report_type)).fetchall()
+    out: dict[str, int] = {}
+    for row in rows:
+        if row["code"] in out:
+            continue
+        out[row["code"]] = int(row["horizon_days"] or DEFAULT_HORIZON_DAYS)
+    return out
+
+
 def emit_for_date(run_id: int, date: str, *,
                   panel: list[str] | None = None,
-                  horizon_days: int = DEFAULT_HORIZON_DAYS) -> list[int]:
+                  horizon_days: int | None = None) -> list[int]:
     """Write the challenger's forecasts for one date. Returns their ids.
 
     The forecast comes from the run's registered producer, looked up by the
@@ -577,6 +611,13 @@ def emit_for_date(run_id: int, date: str, *,
     The producer is handed the *version it is bound to*: the parameters come
     from ``policy_version_id``, not from the configuration in force, which is
     what lets a challenger differ from the champion it is compared against.
+
+    ``horizon_days`` defaults to **the horizon the champion declared for that
+    code**, not to the global default. The pairing is the whole experiment: a
+    challenger graded over a different window than the champion is a
+    comparison of two questions, which is the failure ``review.py`` already
+    documents. Pass an explicit value only to override deliberately, and note
+    that doing so re-introduces the mismatch it exists to prevent.
 
     Idempotent per (run, date, code): re-emitting a day updates the forecast
     rather than adding a second row for the same stock, because two rows would
@@ -602,11 +643,13 @@ def emit_for_date(run_id: int, date: str, *,
             "own, and its verdict would describe evidence it never produced.")
     if panel is None:
         panel = panel_for(date, run["report_type"])
-    deadline = _deadline_for(date, horizon_days)
-    if deadline is None:
-        raise ShadowError(
-            f"A {horizon_days}-day horizon does not produce a deadline; the "
-            "forecast could never mature.")
+    declared = champion_horizons(date, run["report_type"]) if horizon_days is None \
+        else {}
+
+    def _horizon(code: str) -> int:
+        if horizon_days is not None:
+            return int(horizon_days)
+        return int(declared.get(code, DEFAULT_HORIZON_DAYS))
     # Resolved before the lock: the parameters of the version being measured,
     # and the champion's labels for the panel it will be paired against.
     ctx = DecisionContext(
@@ -622,6 +665,15 @@ def emit_for_date(run_id: int, date: str, *,
         with conn:
             for code in panel:
                 code = _text(code, "code")
+                # Per code, because the champion declares per row. A single
+                # deadline for the whole panel would answer a different
+                # question for every code whose champion chose otherwise.
+                code_horizon = _horizon(code)
+                deadline = _deadline_for(date, code_horizon)
+                if deadline is None:
+                    raise ShadowError(
+                        f"A {code_horizon}-day horizon does not produce a "
+                        f"deadline for {code}; the forecast could never mature.")
                 conn.execute(
                     "INSERT INTO shadow_predictions (run_id, policy_version_id, "
                     "date, code, prob, horizon_days, deadline) "
@@ -631,7 +683,7 @@ def emit_for_date(run_id: int, date: str, *,
                     "deadline = excluded.deadline",
                     (run_id, run["policy_version_id"], date, code,
                      float(producer.forecast(date, code, ctx)),
-                     int(horizon_days), deadline))
+                     code_horizon, deadline))
                 row = conn.execute(
                     "SELECT id FROM shadow_predictions WHERE run_id = ? "
                     "AND date = ? AND code = ?", (run_id, date, code)).fetchone()

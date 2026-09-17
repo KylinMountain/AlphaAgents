@@ -355,8 +355,19 @@ def _cmd_shadow_emit(args) -> int:
         return 0
 
     ids = shadow.emit_for_date(args.run, args.date, horizon_days=args.horizon)
-    print(f"  run #{args.run} wrote {len(ids)} forecast(s) for {args.date} at "
-          f"a {args.horizon}-day horizon")
+    if args.horizon is None:
+        # Say what was actually used, per code, rather than a number this
+        # command no longer chooses.
+        horizons = sorted({r["horizon_days"] for r in
+                           shadow.predictions_for(args.run)
+                           if r["date"] == args.date})
+        described = ", ".join(f"{h} 天" for h in horizons) or "无"
+        print(f"  run #{args.run} wrote {len(ids)} forecast(s) for {args.date}，"
+              f"horizon 继承冠军声明：{described}")
+    else:
+        print(f"  run #{args.run} wrote {len(ids)} forecast(s) for {args.date} "
+              f"at an overridden {args.horizon}-day horizon — this differs "
+              "from the champion's declaration wherever they disagree")
     if not ids:
         print("  the panel was empty: the champion has no forecast for that "
               "date and report type. This is not a failure — it is the "
@@ -411,6 +422,79 @@ def _cmd_gate(args) -> int:
     else:
         print("  the pointer did not move, and this verdict cannot move it.")
     return 0
+
+
+def _cmd_variant_build(args) -> int:
+    """Build a policy variant from a candidate. Moves nothing.
+
+    The operator half of ``evolution.variant.build_variant``. Without a verb
+    here the module would be the "declared but unreachable" shape D31 records:
+    a capability with tests and no caller, which reads as finished work until
+    someone tries to use it.
+
+    It writes a *frozen version* and archives the proposed configuration. It
+    does not install, approve or promote anything — the pointer moves only by
+    ``promote``, and only after a person approves, which is a separate act.
+    """
+    from alpha_agents.evolution import variant as V
+
+    if args.dry_run:
+        try:
+            candidate = _preview_variant(args)
+        except V.VariantError as e:
+            print(f"  refused: {e}")
+            print("dry run: nothing written.")
+            return 1
+        print(f"  would build a variant of version #{args.parent} from "
+              f"candidate #{args.candidate}")
+        for change in candidate["changes"]:
+            print(f"    {change['block']}.{change['param']} "
+                  f"{change['step']:+.3f} ({change['field']}/{change['direction']})")
+        print(f"    evidence: {candidate['supporting']} supporting, "
+              f"{candidate['opposing']} opposing")
+        print("dry run: nothing written.")
+        return 0
+
+    try:
+        built = V.build_variant(
+            args.candidate, parent_version_id=args.parent,
+            built_by=args.by, reason=args.reason)
+    except V.VariantError as e:
+        # A refusal is an answer about the candidate, not a crash: the operator
+        # needs to read why, and it exits non-zero so a script notices.
+        print(f"  refused: {e}")
+        return 1
+    print(f"  variant built: policy version #{built.version_id} "
+          f"(parent #{built.parent_version_id}) from candidate "
+          f"#{built.candidate_id}")
+    for change in built.changes:
+        print(f"    {change['block']}.{change['param']} "
+              f"{change['step']:+.3f} ({change['field']}/{change['direction']})")
+    if built.path:
+        print(f"    archived: {built.path}")
+    print("  it is frozen, not in force. The pointer did not move: it moves "
+          "only by promote, after a person approves.")
+    return 0
+
+
+def _preview_variant(args) -> dict:
+    """What ``variant-build`` would do, without writing the version.
+
+    Checks the same guards in the same order by asking the module, rather than
+    re-implementing them here: two implementations of one rule is how they come
+    to disagree.
+    """
+    from alpha_agents.data import learning_candidates as LC
+    from alpha_agents.evolution import variant as V
+
+    candidate = LC.get_candidate(args.candidate)
+    if candidate is None:
+        raise V.VariantError(f"No learning candidate #{args.candidate}")
+    supporting, opposing = V.assert_evidence_is_not_empty(candidate)
+    delta = json.loads(candidate["proposed_behavior_delta"])
+    change = V._delta_to_change(delta)
+    return {"changes": [change], "supporting": len(supporting),
+            "opposing": len(opposing)}
 
 
 def _declared_floor(version_id: int) -> int | None:
@@ -653,10 +737,13 @@ def main(argv: list[str] | None = None) -> int:
         "shadow-emit", help="write the challenger's forecasts for one date.")
     shadow_emit.add_argument("--run", type=int, required=True)
     shadow_emit.add_argument("--date", required=True, metavar="YYYY-MM-DD")
-    shadow_emit.add_argument("--horizon", type=int,
-                             default=shadow.DEFAULT_HORIZON_DAYS,
-                             help="trading days the forecast gives itself "
-                                  f"(default: {shadow.DEFAULT_HORIZON_DAYS}).")
+    shadow_emit.add_argument("--horizon", type=int, default=None,
+                             help="override the horizon, in trading days. "
+                                  "Default: inherit what the champion declared "
+                                  "for each code, because a challenger graded "
+                                  "over a different window than the champion "
+                                  "is a comparison of two questions. Setting "
+                                  "this re-introduces that mismatch.")
     shadow_emit.add_argument("--dry-run", action="store_true",
                              help="print the panel it would use, then stop.")
     shadow_emit.set_defaults(func=_cmd_shadow_emit)
@@ -681,6 +768,26 @@ def main(argv: list[str] | None = None) -> int:
                            "clock). It cannot shorten the window — that comes "
                            "from the version's own frozen_at.")
     gate.set_defaults(func=_cmd_gate)
+
+    variant_build = sub.add_parser(
+        "variant-build",
+        help="build a policy variant from a candidate; moves no pointer.")
+    variant_build.add_argument("--candidate", type=int, required=True,
+                               help="the learning candidate to build from.")
+    variant_build.add_argument("--parent", type=int, required=True,
+                               help="the frozen version the candidate was "
+                                    "distilled against; the variant inherits "
+                                    "it and changes only what the delta names.")
+    variant_build.add_argument("--by", required=True,
+                               help="who is building it. A person: this writes "
+                                    "a frozen version.")
+    variant_build.add_argument("--reason", default=None,
+                               help="why, in one sentence (default: derived "
+                                    "from the candidate and the change).")
+    variant_build.add_argument("--dry-run", action="store_true",
+                               help="check the guards and print the change, "
+                                    "then stop.")
+    variant_build.set_defaults(func=_cmd_variant_build)
 
     approve = sub.add_parser("approve", help="authorise a version.")
     approve.add_argument("--version", type=int, required=True)

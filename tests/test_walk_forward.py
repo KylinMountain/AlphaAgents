@@ -1271,3 +1271,17 @@ class TestTheAgentsOwnExitsReachTheReport:
         assert "agent 0 笔" not in line, (
             "the attribution says the agent sold nothing while its fills are "
             "present")
+
+    def test_an_agent_sell_carries_its_quantity_and_amount(
+            self, tmp_path, monkeypatch):
+        """The row printed "卖出 3 笔 0 元" while three real exits sat in
+        `position_exits`: shares and amount were hardcoded None, so the one
+        bucket with no other source of numbers reported zero."""
+        result = self._run_with_fake_agent_sell(tmp_path, monkeypatch)
+        agent_sells = [f for f in result["fills"]
+                       if str(f.get("reason", "")).startswith("agent")]
+        assert agent_sells
+        for f in agent_sells:
+            assert f["shares"], f"no quantity on {f}"
+            assert f["amount"], f"no amount on {f}"
+            assert f["amount"] == f["shares"] * f["price"]

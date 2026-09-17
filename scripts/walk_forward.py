@@ -1403,17 +1403,43 @@ def _agent_exits(ctx, day: str) -> list[dict]:
             kind = str(a.get("type") or "agent_other")
             ctx.counters[kind if kind.startswith("agent_") else f"agent_{kind}"] += 1
             continue
+        # Shares and amount are read back from the exit leg the executor
+        # just wrote. They were hardcoded None, so the report printed
+        # "卖出 3 笔 0 元" while three real exits sat in `position_exits` —
+        # the row that answers "how much did it sell" was empty for the one
+        # bucket that had no other source of numbers.
+        shares = _shares_for_exit(a.get("code"), day)
+        price = a.get("close_price")
         fills.append({
             "date": day, "side": "sell", "code": a["code"],
             "name": a.get("name", ""),
-            "shares": None, "price": a.get("close_price"),
-            "amount": None, "capacity_shares": None,
+            "shares": shares, "price": price,
+            "amount": (shares or 0) * price if price else None,
+            "capacity_shares": None,
             "capacity_oversize": False,
             "reason": f"agent卖出: {a.get('reason', '')}"[:200],
         })
     ctx.counters["agent_exit_calls"] += 1
     ctx.counters["agent_exits"] += len(fills)
     return fills
+
+
+def _shares_for_exit(code: str, day: str) -> int | None:
+    """What the executor actually sold, read back from the exit leg.
+
+    The alert carries a price and a reason but not a quantity, and inventing
+    one from the position would be a guess the moment a trim is involved.
+    ``position_exits`` is the record the executor wrote, so it is the answer.
+    """
+    try:
+        from alpha_agents.data.memory_store import _get_conn
+        row = _get_conn().execute(
+            "SELECT shares FROM position_exits WHERE code = ? AND exit_date = ? "
+            "ORDER BY id DESC LIMIT 1", (code, day)).fetchone()
+        return int(row["shares"]) if row and row["shares"] else None
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("Exit shares for %s on %s unavailable: %s", code, day, exc)
+        return None
 
 
 def _news_by_theme(ctx, day: str, prev_day: str,

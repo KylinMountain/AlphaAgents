@@ -10,7 +10,7 @@ import logging
 
 from openai import AsyncOpenAI
 
-from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
+from alpha_agents import llm_roles
 from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,8 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
     if len(events) < 2:
         return []
 
-    if not DIGEST_API_KEY:
+    api_key, base_url, model = llm_roles.resolve(llm_roles.DIGEST)
+    if not api_key:
         logger.debug("DIGEST_API_KEY not set, skipping event linking")
         return []
 
@@ -102,11 +103,10 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
     user_msg = "请分析以下事件之间的关系：\n\n" + "\n\n".join(lines)
 
     try:
-        client = instrument(AsyncOpenAI(api_key=DIGEST_API_KEY,
-                                        base_url=DIGEST_BASE_URL),
+        client = instrument(AsyncOpenAI(api_key=api_key, base_url=base_url),
                             module="event_linker")
         response = await client.chat.completions.create(
-            model=DIGEST_MODEL,
+            model=model,
             max_tokens=1024,
             timeout=60,
             messages=[

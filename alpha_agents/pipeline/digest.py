@@ -19,10 +19,23 @@ import re
 import tiktoken
 from openai import AsyncOpenAI
 
+from alpha_agents import llm_roles
 from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
+
+
+def _digest_credentials() -> tuple[str, str, str]:
+    """The ``digest`` role's endpoint, with this module's names as fallback.
+
+    Read at call time and from this module's globals, so a test that patches
+    ``digest.DIGEST_API_KEY`` is still observed while ``SUMMARY_*``-style
+    role config in ``.env`` layers on top.
+    """
+    return llm_roles.resolve(
+        llm_roles.DIGEST,
+        legacy=(DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL))
 
 # Raised from 4096 after every batch of a real morning scan came back at
 # exactly that number — the ceiling, not the answer. One news item costs
@@ -232,8 +245,9 @@ def _parse_response(text: str) -> list[dict]:
 
 def _get_client() -> AsyncOpenAI:
     """Create an OpenAI-compatible async client."""
+    api_key, base_url, _ = _digest_credentials()
     return instrument(
-        AsyncOpenAI(api_key=DIGEST_API_KEY, base_url=DIGEST_BASE_URL),
+        AsyncOpenAI(api_key=api_key, base_url=base_url),
         module="digest")
 
 
@@ -250,7 +264,7 @@ async def _digest_once(client: AsyncOpenAI,
     """
     user_message = _build_user_message(batch)
     response = await client.chat.completions.create(
-        model=DIGEST_MODEL,
+        model=_digest_credentials()[2],
         max_tokens=MAX_OUTPUT_TOKENS,
         timeout=DIGEST_TIMEOUT,
         messages=[
@@ -330,7 +344,7 @@ async def digest_news(news_items: list[dict]) -> list[dict]:
     except Exception as e:
         logger.debug("news capture failed: %s", e)
 
-    if not DIGEST_API_KEY:
+    if not _digest_credentials()[0]:
         logger.error(
             "DIGEST_API_KEY not set. Set it to use any OpenAI-compatible provider. "
             "Default: SiliconFlow free tier (https://siliconflow.cn)"

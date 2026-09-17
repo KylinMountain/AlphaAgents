@@ -18,7 +18,7 @@ import logging
 from agents import ModelSettings, OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from alpha_agents import llm_journal
+from alpha_agents import llm_journal, llm_roles
 from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,21 @@ def _fallback_models() -> list[str]:
     return [m for m in _OPENROUTER_FALLBACKS if m != primary]
 
 
+def _credentials(role: str) -> tuple[str, str, str]:
+    """The resolved triple for ``role``, honouring this module's globals.
+
+    Only the agent role has globals here, and they are passed as the legacy
+    triple rather than read from ``config`` inside ``llm_roles``: tests patch
+    ``model_factory.AGENT_MODEL`` and friends, and only a reader of this
+    module's own global sees that. Other roles have no globals to honour, so
+    they resolve from their own ``<ROLE>_*`` config.
+    """
+    if role == llm_roles.AGENT:
+        return llm_roles.resolve(
+            role, legacy=(AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL))
+    return llm_roles.resolve(role)
+
+
 def model_identity() -> dict:
     """The declared model identity, as a fingerprintable dict.
 
@@ -67,16 +82,23 @@ def model_identity() -> dict:
     primary is bypassed and a different model answers, which is a different
     trader.
     """
+    _, base_url, model = _credentials(llm_roles.AGENT)
     return {
-        "agent_model": AGENT_MODEL or DEFAULT_MODEL,
-        "agent_base_url": AGENT_BASE_URL,
+        "agent_model": model or DEFAULT_MODEL,
+        "agent_base_url": base_url,
         "default_model": DEFAULT_MODEL,
         "fallbacks": _fallback_models(),
     }
 
 
-def create_model(timeout: float | None = None) -> OpenAIChatCompletionsModel:
-    """The chat model every agent runs on.
+def create_model(timeout: float | None = None, *,
+                 role: str = llm_roles.AGENT) -> OpenAIChatCompletionsModel:
+    """The chat model a role runs on.
+
+    ``role`` names the purpose, not the provider: ``agent`` for the deciders,
+    ``summary`` for the report summarisers, ``digest`` for news filtering.
+    See ``llm_roles`` for the table and ``.env.example`` for the names. The
+    default keeps every existing caller on exactly the credentials it had.
 
     ``timeout`` is opt-in and defaults to the SDK's own, so the production
     path is byte-for-byte what it was. It exists because a walk-forward
@@ -97,15 +119,16 @@ def create_model(timeout: float | None = None) -> OpenAIChatCompletionsModel:
     # window otherwise disagree for reasons that have nothing to do with 2020.
     # In the default ``live`` mode this hands back the very object below —
     # same identity, no proxy, no file — so the production path is unchanged.
+    api_key, base_url, model = _credentials(role)
     extra = {"timeout": timeout} if timeout else {}
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL, **extra)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url, **extra)
     return OpenAIChatCompletionsModel(
-        model=AGENT_MODEL or DEFAULT_MODEL,
+        model=model or DEFAULT_MODEL,
         openai_client=llm_journal.journaled(client),
     )
 
 
-def create_model_settings() -> ModelSettings:
+def create_model_settings(role: str = llm_roles.AGENT) -> ModelSettings:
     """Run settings carrying the provider fallback chain.
 
     OpenRouter reads a ``models`` array from the request body and moves
@@ -117,7 +140,13 @@ def create_model_settings() -> ModelSettings:
     valid primary, and providers that do not know the field ignore it —
     so DashScope, DeepSeek and the rest take the same path with an empty
     extra_body.
+
+    The chain is the *agent* role's: it was measured for the tool loop that
+    reaches ``max_turns=100``. A summariser has no such loop, so handing it
+    the agent's fallbacks would be a claim about latency nobody measured.
     """
+    if role != llm_roles.AGENT:
+        return ModelSettings()
     fallbacks = _fallback_models()
     if not fallbacks:
         return ModelSettings()

@@ -12,9 +12,8 @@ from agents import Agent, Runner
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from alpha_agents.config import (
-    PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
-)
+from alpha_agents import llm_roles
+from alpha_agents.config import PROMPTS_DIR
 from alpha_agents.data.memory_store import (
     get_active_themes, get_prediction_stats, get_all_cognition_latest,
 )
@@ -70,8 +69,8 @@ async def run_weekly_report() -> str | None:
     agent = Agent(
         name="weekly_analyst",
         instructions=prompt_text,
-        model=_create_model(),
-        model_settings=create_model_settings(),
+        model=_create_model(role=llm_roles.SUMMARY),
+        model_settings=create_model_settings(role=llm_roles.SUMMARY),
         tools=[],  # No tools needed — purely summarization
     )
 

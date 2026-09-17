@@ -15,6 +15,7 @@ from functools import lru_cache
 
 from openai import OpenAI
 
+from alpha_agents import llm_roles
 from alpha_agents.data.vector_store import VectorStore
 from alpha_agents.config import (
     CHROMA_PATH,
@@ -30,6 +31,19 @@ COLLECTION_NAME = "concepts"
 BATCH_SIZE = 64
 
 
+def _embedding_credentials() -> tuple[str, str, str]:
+    """The ``embedding`` role's endpoint.
+
+    Vectors are a separate role rather than a corner of the agent config
+    because a chat model cannot serve an ``/embeddings`` call at all — the
+    two must be independently pointable, which is what the role table makes
+    explicit instead of implicit in two env prefixes.
+    """
+    return llm_roles.resolve(
+        llm_roles.EMBEDDING,
+        legacy=(EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL))
+
+
 @lru_cache(maxsize=1)
 def _get_store() -> VectorStore:
     """The concept vector store. Cached — it holds a SQLite connection."""
@@ -38,8 +52,8 @@ def _get_store() -> VectorStore:
 
 def _get_openai_client() -> OpenAI:
     """Create OpenAI-compatible client for embeddings."""
-    return instrument(OpenAI(api_key=EMBEDDING_API_KEY,
-                             base_url=EMBEDDING_BASE_URL),
+    api_key, base_url, _ = _embedding_credentials()
+    return instrument(OpenAI(api_key=api_key, base_url=base_url),
                       module="embedding")
 
 
@@ -52,14 +66,15 @@ def _call_embedding_api(texts: list[str]) -> list[list[float]]:
     Returns:
         List of embedding vectors.
     """
-    if not EMBEDDING_API_KEY:
+    api_key, _, model = _embedding_credentials()
+    if not api_key:
         raise RuntimeError(
             "EMBEDDING_API_KEY not set. Set it or SILICONFLOW_API_KEY for free BGE embeddings."
         )
 
     client = _get_openai_client()
     response = client.embeddings.create(
-        model=EMBEDDING_MODEL,
+        model=model,
         input=texts,
     )
 
@@ -108,7 +123,8 @@ def build_concept_embeddings(conn: sqlite3.Connection) -> int:
         logger.info("全部 %d 个概念已有向量", len(ids))
         return 0
 
-    logger.info("Embedding %d concepts via %s (%s)...", len(new_ids), EMBEDDING_MODEL, EMBEDDING_BASE_URL)
+    _, embed_base_url, embed_model = _embedding_credentials()
+    logger.info("Embedding %d concepts via %s (%s)...", len(new_ids), embed_model, embed_base_url)
     embeddings = embed_texts(new_names)
 
     for i in range(0, len(new_ids), BATCH_SIZE):

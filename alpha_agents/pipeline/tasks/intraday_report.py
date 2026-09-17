@@ -144,15 +144,16 @@ async def _get_cause_analysis(context: str) -> str:
     from agents import Agent, Runner
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
     from openai import AsyncOpenAI
-    from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+    from alpha_agents import llm_roles
     from alpha_agents.tools.registry import (
         web_search, get_lhb_detail, get_stock_fund_flow, get_sector_data,
         get_cls_telegraph, get_news,
     )
 
     # Agent client — counted by the tracing hook, not wrapped here.
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
-    model = OpenAIChatCompletionsModel(model=AGENT_MODEL or "qwen-plus", openai_client=client)
+    api_key, base_url, agent_model = llm_roles.resolve(llm_roles.AGENT)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    model = OpenAIChatCompletionsModel(model=agent_model or "qwen-plus", openai_client=client)
     agent = Agent(
         name="cause_analyst",
         instructions=(

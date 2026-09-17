@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 
-from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
+from alpha_agents import llm_roles
 from alpha_agents.data.report_store import (
     get_predictions_by_date,
     save_review,
@@ -204,10 +204,10 @@ async def run_daily_review(target_date: str | None = None) -> dict:
 
     # 4. Use LLM to analyze discrepancies
     review_text = ""
-    if DIGEST_API_KEY:
+    api_key, base_url, model = llm_roles.resolve(llm_roles.DIGEST)
+    if api_key:
         try:
-            client = instrument(AsyncOpenAI(api_key=DIGEST_API_KEY,
-                                            base_url=DIGEST_BASE_URL),
+            client = instrument(AsyncOpenAI(api_key=api_key, base_url=base_url),
                                 module="daily_review")
             user_msg = (
                 f"日期: {target_date}\n\n"
@@ -215,7 +215,7 @@ async def run_daily_review(target_date: str | None = None) -> dict:
                 f"整体准确率: {accuracy * 100:.0f}% ({correct_count}/{total_matched} 匹配的预测正确)"
             )
             response = await client.chat.completions.create(
-                model=DIGEST_MODEL,
+                model=model,
                 max_tokens=2048,
                 timeout=90,
                 messages=[

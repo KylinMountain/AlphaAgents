@@ -191,15 +191,16 @@ async def decide(context: str, trader=None) -> list[dict]:
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
     from openai import AsyncOpenAI
 
-    from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+    from alpha_agents import llm_roles
     from alpha_agents.tools.registry import (
         get_stock_fund_flow, get_sector_data, search_news,
     )
 
     # Agent client — counted by the tracing hook, not wrapped here.
-    client = AsyncOpenAI(api_key=AGENT_API_KEY, base_url=AGENT_BASE_URL)
+    api_key, base_url, agent_model = llm_roles.resolve(llm_roles.AGENT)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     model = OpenAIChatCompletionsModel(
-        model=AGENT_MODEL or "qwen-plus", openai_client=client)
+        model=agent_model or "qwen-plus", openai_client=client)
     instructions = _INSTRUCTIONS.format(hard=HARD_STOP_PCT)
     if trader is not None and getattr(trader, "extra_prompt", ""):
         instructions += f"\n\n## 你是谁\n\n{trader.extra_prompt.strip()}\n"

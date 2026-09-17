@@ -11,10 +11,7 @@ from agents import Agent, Runner
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from alpha_agents.config import (
-    PROMPTS_DIR,
-    AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
-)
+from alpha_agents.config import PROMPTS_DIR
 from alpha_agents.tools.registry import FUTURES_TOOLS
 from alpha_agents.agents.geopolitical import create_geopolitical_agent
 from alpha_agents.agents.reflection import run_reflection

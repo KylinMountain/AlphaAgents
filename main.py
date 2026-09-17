@@ -581,6 +581,28 @@ def cmd_init_history(args: argparse.Namespace) -> None:
     logging.info("Init complete: %d rows", total)
 
 
+def cmd_llm_roles(args: argparse.Namespace) -> None:
+    """Print which model answers for each purpose.
+
+    The audit surface for the role table. Five env schemes used to decide
+    this, two of them read by nothing; "which model filters the news" was
+    answerable only by reading the call site. This answers it from the
+    resolver the call sites actually use.
+    """
+    from alpha_agents import llm_roles
+    rows = llm_roles.table()
+    width = max(len(r["role"]) for r in rows)
+    for r in rows:
+        mark = " " if r["configured"] else "!"
+        print(f"{mark} {r['role']:<{width}}  {r['tier']:<9}  "
+              f"{r['model'] or '(未配置)':<32} {r['base_url'] or '-'}")
+        print(f"  {'':<{width}}  {r['purpose']}")
+    missing = [r["role"] for r in rows if not r["configured"]]
+    if missing:
+        print(f"\n未配置凭证的角色：{', '.join(missing)}")
+        logging.warning("LLM role(s) without credentials: %s", ", ".join(missing))
+
+
 def cmd_build_embeddings(args: argparse.Namespace) -> None:
     """Force rebuild concept embeddings."""
     from alpha_agents.data.embeddings import build_concept_embeddings
@@ -649,6 +671,11 @@ def main() -> None:
     # build-embeddings — force rebuild
     p_embed = subparsers.add_parser("build-embeddings", help="强制重建概念语义搜索向量")
     p_embed.set_defaults(func=cmd_build_embeddings)
+
+    # llm-roles — which model answers for each purpose
+    p_roles = subparsers.add_parser(
+        "llm-roles", help="打印每个用途（agent/digest/summary/…）解析到的模型与端点")
+    p_roles.set_defaults(func=cmd_llm_roles)
 
     args = parser.parse_args()
     setup_logging(getattr(args, "verbose", False))

@@ -14,7 +14,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from alpha_agents.config import AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL
+from alpha_agents import llm_roles
 from alpha_agents.data.token_usage import instrument
 
 logger = logging.getLogger(__name__)
@@ -252,11 +252,16 @@ class ContextCompressor:
             prompt = SUMMARY_TEMPLATE_FIRST.format(content=content)
 
         try:
-            client = instrument(OpenAI(api_key=AGENT_API_KEY,
-                                       base_url=AGENT_BASE_URL),
+            # The ``summary`` role, not ``agent``: this module only shortens
+            # prose the pipeline already produced, so it is the one call site
+            # whose whole job is summarisation. Left on the agent role it
+            # would keep the deciders' model for a task that cannot decide
+            # anything.
+            api_key, base_url, summary_model = llm_roles.resolve(llm_roles.SUMMARY)
+            client = instrument(OpenAI(api_key=api_key, base_url=base_url),
                                 module="context_compressor")
             response = client.chat.completions.create(
-                model=AGENT_MODEL or "qwen-plus",
+                model=summary_model or "qwen-plus",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=2000,
                 temperature=0.3,

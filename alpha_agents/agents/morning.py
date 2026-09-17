@@ -11,9 +11,7 @@ from agents import Agent, Runner
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from alpha_agents.config import (
-    PROMPTS_DIR, AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL,
-)
+from alpha_agents.config import PROMPTS_DIR
 from alpha_agents.tools.registry import (
     filter_stocks, get_anomaly_stocks, get_block_trade, get_bond_yields,
     get_concept_ranking, get_earnings_calendar, get_financial_data,

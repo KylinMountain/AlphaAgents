@@ -205,113 +205,6 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
 
 ---
 
-## Current status
-
-进度锚定在 [`docs/TRADER_CORE_DESIGN.md`](docs/TRADER_CORE_DESIGN.md) §14 的五个阶段上 ——
-那是唯一定义「阶段」的地方。
-
-| 阶段 | 状态 | 交付了什么 |
-| --- | :-: | --- |
-| 1 可信的最小切片 | ✅ 2026-09-11 | 现金含已实现损益、逐笔退出记录、显式的交易员/来源绑定、交易结果与预测标签分离、候选知识边界 |
-| 2 完整交易内核 | ✅ 2026-09-11 | 订单状态机、资金预留、T+1 批次结算、统一意图路径、内核时钟、对账、重放 |
-| 3 可归因的学习 | ✅ 2026-09-12 | 决策 episode、三类结果的生命周期、候选知识的提案与五态生命周期、已批准知识快照 |
-| **4 受控演化** | ✅ 2026-09-13 | 冻结策略注册表、前向影子账户、公平评估、授权晋升与回滚、检索闸门；2026-09-13 补第 0 步（`freeze` / `install`）与出厂候选生产者，2026-09-14 在生产库建立指针（V1 在效、行为中性）并把实验接上每日调度。**但一次真实晋升都没发生过**——它要 20 个配对样本的前向证据，而实验今天才刚开始跑 |
-| **5 产品整合** | ✅ 2026-09-13 | 交易 / 学习 / 实验三个读模型贯通 API 与前端。**但「页面能打开」不是「页面有事实」：Learn 与 Evolve 两个页面今天显示的主要是「当前状态说明」，不是数据** |
-
-逐项明细、每条边界、以及每一轮跑了什么命令得到什么结果，在
-[`docs/TRADER_CORE_IMPLEMENTATION.md`](docs/TRADER_CORE_IMPLEMENTATION.md)。
-
-### 机制已交付 ≠ 已经在跑
-
-Phase 1–5 的代码都有测试钉住（全量 **1930 passed, 18 skipped**），
-但**生产库还是空的**：`position_exits` / `intents` / `decision_snapshots` /
-`episodes` / `outcomes` / `learning_candidates` 全是 0 行 —— 这些表落地之后还没跑过生产。
-`predictions` 202 行里 `brier` 全为 NULL，所以校准曲线仍然是空的。
-
-**卡点是样本，不是代码** —— 这是这个项目当前最诚实的一句话，而且它有确切日期。
-G1 的评分链路（`_score_due_predictions` → `scoring.score_prediction`，做因子残差回归
-取残差再算 Brier）**已经在每日 15:30 的 review 里跑**，`prob` 也已经在 47 行上填了
-（最早 2026-09-08）；`brier` 为空的原因不是没接，是**还没有一笔预测的窗口走完**。
-所以「还没有评估货币」是一句关于日历的话，不是关于代码的话 —— 而**日历要按交易日算**：
-到期判定原本用 `date + 5 天`（日历天），而 `_forward_return` 要 6 个**交易日**的收盘，
-于是每一笔预测在它「到期」那天都必然拿不到数据。这个错 2026-09-13 修掉了（D10）：
-`scoring.evidence_window_closed` 成为唯一的判据，窗口未收口的预报**保持 `pending`
-而不是被写成 `censored`**（「我们还没等到」与「我们等了、没等到」是两件事）。
-最早那批（09-08）要等 **2026-09-15** 的收盘进库才可评，09-11 那批等 **09-18**。
-
-Phase 4 的另一半也在 2026-09-13 补上了：`scripts/policy.py` 此前四个动词
-**没有一个能创建第一行记录**（approve / promote 都要引用一个必须已存在的版本），
-现在有了 `freeze` / `install`；`shadow.PRODUCERS` 也第一次有了 `kind="candidate"`
-的生产者（`remap_confidence`，用**它绑定版本**的参数重映射冠军记录的信心标签）。
-于是「提升真的会改变行为」不再是靠约定：`confidence_to_prob` 读的是**在效版本**里的参数，
-所以指针移动的那一刻行为才改变。
-
-2026-09-14 那两步也做了，都是操作决定：**生产库的指针建立了**（V1 在效，
-参数与代码默认逐值相同，所以行为中性），实验的两个日常动作
-（`shadow-emit` / `shadow-score`）**接上了每日 15:45 的调度**；
-`scripts/policy.py` 另有四个手动动词（`shadow-open` / `gate` 等）。
-但**一次真实晋升仍然没有发生过，而且今天也跑不了**：晋升要二十个**配对样本**
-（`holdout_gate.MIN_VALIDATION_SAMPLES`；单位是 `(日期, 代码)` 对，不是天数）的
-前向证据，而那要等实验先跑起来。
-**可运行 ≠ 跑过**，而**「可达」不被读成「在跑」**正是这几轮刻意保留的一句话。
-
-**这条门槛原先与 `n<50 不上线` 不一致，2026-09-15 收口了。** 收口的方向是
-**把规则降到 20 去就代码**，不是把代码抬到 50：`MIN_VALIDATION_SAMPLES` 是行为来源，
-抬它会让**所有已冻结版本立刻变 drifted**；降 `GOVERNANCE_MIN_SAMPLES` 不动任何交易行为。
-所以「大样本量」的自我要求**是真的降低了**——20 个配对样本是个弱依据，这一句不该被含糊掉。
-换掉的是「仓库自己写的规则没人执法」这个状态。`scripts/policy.py status`
-仍然每次打印版本声明的门槛、闸门的弃权线与仓库规则三者
-（`holdout_gate.promotion_floor_gap`），所以它们若再次分叉会被看见。
-
-**还有一条单向的后果要记住**：`install` 之后概率映射的所有权从磁盘转到指针，
-再改 `scoring.DEFAULT_DECISION_PARAMS` 对行为**没有影响**。要改映射就得走完整条证据路径。
-`scripts/policy.py status` 会把在效的那组参数按**值**打出来，就是为了让「改了没用」
-与「改好了」不是一个样子。
-
-同一形状的第四件：`predictions.horizon_days` / `deadline`（「这笔预测自己声明多久到期」）
-机制完整、有测试，但 `morning_scan` 与 `intraday_monitor` 两处生产调用**都没传
-`horizon_days`**，所以 202 行全靠全局 5 天兜底并被标成 `legacy_horizon`。
-这是**有能力、无生产用户**，不是 bug —— 也**不要顺手在调用点补 `horizon_days=5`**：
-那正是 `_deadline_for` 明确拒绝做的事（把「调用方没说」写成「调用方说了五天」）。
-
-
-### 三个工作台：`unavailable` / `empty` / `present`
-
-Phase 5 的读模型（`alpha_agents/server/readmodels/`）把上面这句话做成了可读的状态，
-而不是留给人去比对文档。每个 section 声明它读的**表与列**，读之前先做一次只读探针：
-
-| 状态 | 含义 | 今天的例子（2026-09-14） |
-|---|---|---|
-| `unavailable` / `schema=absent` | 表在本库不存在，模块从未跑过 | `candidate_transitions` |
-| `unavailable` / `schema=partial` | 表在，但缺列 —— **本库 schema 落后于代码** | `gate_decisions` 缺 `evidence_scope` 等四列（第一次写裁决时会自动 `ALTER`）；`learning_candidates` 缺 `evidence_episode_ids` |
-| `empty` | 表在、0 行，**这是合法状态** | `episodes`、`outcomes`、`position_exits`、`shadow_runs` |
-| `present` | 有行 | `virtual_portfolio`（52 行）、`predictions`（202 行）、`policy_versions`（1 个版本在效） |
-
-**这一列会随运维动作变，所以它带日期。** 09-13 实测 evolve 的 `pointer` / `shadow` 是
-`absent`；09-14 执行第 0 步（`freeze` + `install`）之后分别变成 `present` 与 `empty`。
-「进化实验台」这个页面因此从 09-14 起有真实内容，而「学习日志」仍然主要是状态说明。
-
-这条设计的要点是**读模型不建表**：每个数据模块的读函数进入时都会 `init_schema`，
-所以一个顺手调用的页面会把「打开一次网页」变成一次 schema 变更。
-探针不通过就不调用，并把缺的东西**点名报出来** —— 「表没建」和「暂时没数据」
-从此不是同一句话。三个端点是 `/api/trade-workspace`、`/api/learn-journal`、
-`/api/evolve-lab`；`/api/portfolio` 改为委托同一个投影，不再自己拼一份。
-
-前端三个工作台把上面四种状态渲染成**四种不同的东西**：`absent` 与 `partial` 各有自己的
-说明文案（「这些表在这个库里不存在」vs「表在，但这个库的 schema 落后于代码」），
-因为两者指向完全不同的修复动作；payload 整个没到是第四态，**不得**打印
-`0 有数据 · 0 空 · 0 读不到` —— 那正是健康空页的样子。这条性质由
-`cd web && npm run check:render` 机械检查（3 状态 × 3 视图，每个用例都声明
-「不得出现什么」）。它不进 CI：`harness.yml` 里没有 node，仓库的前端逻辑测试
-（`tests/test_report_markdown.mjs`）同样是本地命令。
-
-**它抓到过什么**（`npm run lint` 与 `npm run build` 对这三件事全是绿灯）：
-两个新视图在 payload 为空时崩溃（`sec.value` 少一个 `?`）；`trade.book` 把
-「表读不到」渲染成「你没有持仓」；「整个读模型没到」原本与「四节都读不到」同一句话。
-
-
----
-
 ## Architecture
 
 依赖只朝一个方向走，反向 import 会被 `scripts/lint_harness.py` 在 CI 里拦下来：
@@ -384,15 +277,30 @@ cp .env.example .env
 
 ### 2. 配置模型
 
-```env
-SILICONFLOW_API_KEY=sk-xxx
+一个用途一套凭证，命名只有一种形状 `<ROLE>_API_KEY / _BASE_URL / _MODEL`：
 
+```env
+SILICONFLOW_API_KEY=sk-xxx          # 兜底 embedding 与 digest
+
+# 决策与分析 Agent —— 要聪明
 AGENT_API_KEY=sk-xxx
 AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 AGENT_MODEL=qwen-plus
+
+# 新闻过滤与事件链接 —— 可以便宜
+DIGEST_API_KEY=sk-xxx
+DIGEST_BASE_URL=https://api.siliconflow.cn/v1
+DIGEST_MODEL=Qwen/Qwen2.5-7B-Instruct
 ```
 
-兼容 OpenAI API 风格的模型服务。
+`SUMMARY`（周报 / 复盘 / 上下文压缩）不写就继承 `DIGEST`，所以只想让摘要变便宜，
+单独写 `SUMMARY_*` 即可，不动任何决策路径。查看每个用途实际解析到哪个模型：
+
+```bash
+uv run python main.py llm-roles
+```
+
+兼容 OpenAI API 风格的模型服务。完整角色表与示例见 [`.env.example`](.env.example)。
 
 ### 3. 构建新闻索引
 

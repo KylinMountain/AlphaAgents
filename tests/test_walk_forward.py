@@ -216,6 +216,10 @@ def _run(replay: Path, **over) -> dict:
 # ── reading a result ────────────────────────────────────────────────────────
 
 
+def wf_exit_attribution(result: dict) -> list[str]:
+    return walk_forward._exit_attribution(result)
+
+
 def _fills(result: dict, code: str) -> list[dict]:
     return [f for f in result["fills"] if f["code"] == code]
 
@@ -1189,3 +1193,81 @@ class TestTheHardStopIsOutsideTheAgentsReach:
         """It doubles the run's model calls, so it is a choice the operator
         made rather than a surprise on the bill."""
         assert _args().agent_exits is False
+
+
+class TestTheAgentsOwnExitsReachTheReport:
+    """They were dropped, and the one number a reader checks was the one
+    wrong.
+
+    `_agent_exits` built its fill rows correctly and the book was updated, so
+    the trades really happened — the database carried
+    `close_reason: agent卖出: ...` and the realised P&L included them. But
+    the day loop only merged the `entries` and `exits` buckets into
+    `fill_rows`, so the agent's own sells never reached the report. A run
+    whose agent sold twice printed **卖出 0 笔**.
+
+    A reader answering "does it sell when nothing else will" looks at exactly
+    that line, so this is the worst place for a silent omission.
+    """
+
+    def _run_with_fake_agent_sell(self, tmp_path, monkeypatch):
+        """One window where the agent sells everything it is shown.
+
+        The decider is stubbed rather than sampled, so the test measures the
+        plumbing — does an agent sell reach the report — and not the model.
+        """
+        import alpha_agents.pipeline.tasks.exit_decision as ED
+
+        async def _fake_decide(positions, price_map, **kw):
+            return [{"code": p["code"], "action": "sell", "reason": "实验"}
+                    for p in positions]
+
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(ED, "decide_for_replay", _fake_decide)
+        monkeypatch.setattr(ED, "decide", _fake_decide)
+        # `--decider llm` builds a real client from the environment, which a
+        # test has no credentials for. The buy side is stubbed out too, so
+        # the only thing under test is whether an agent sell reaches the
+        # report.
+        series, instruments = _normal()
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        # The buy side is stubbed to nothing, so the position the agent will
+        # sell is planted directly. It is opened on the session *before* the
+        # window so T+1 does not hide it.
+        original = walk_forward._run_decider
+
+        def _plant_then_decide(ctx, day, prev_day):
+            from alpha_agents.data import portfolio as P
+            if not P.get_open_positions(ctx.trader):
+                P.create_pending_order(
+                    code="600001", name="甲", theme=ctx.theme,
+                    order_date=prev_day, entry_low=9.0, entry_high=11.0,
+                    stop_loss=8.0, source="test", reason="planted",
+                    trader_id=ctx.trader)
+                settled = walk_forward._settle_entries(
+                    ctx, prev_day, P.get_pending_orders(ctx.trader))
+                assert settled["fills"], "the planted order did not fill"
+            return []
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _plant_then_decide)
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None: object())
+        return _run(replay, days=3, agent_exits=True, decider="llm",
+                    panel_size=5)
+
+    def test_an_agent_sell_appears_in_fills(self, tmp_path, monkeypatch):
+        result = self._run_with_fake_agent_sell(tmp_path, monkeypatch)
+        agent_sells = [f for f in result["fills"]
+                       if str(f.get("reason", "")).startswith("agent")]
+        assert agent_sells, (
+            "the agent sold but no fill carries an agent reason: the third "
+            "bucket was dropped before the report")
+
+    def test_the_report_attributes_it_to_the_agent(self, tmp_path, monkeypatch):
+        result = self._run_with_fake_agent_sell(tmp_path, monkeypatch)
+        line = " ".join(wf_exit_attribution(result))
+        assert "agent" in line
+        assert "agent 0 笔" not in line, (
+            "the attribution says the agent sold nothing while its fills are "
+            "present")

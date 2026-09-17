@@ -359,3 +359,96 @@ class TestTheAlertTypeIsCountedOnce:
             "the counter prefixes a type that already has the prefix, so "
             "`agent_trim` is recorded as `agent_agent_trim`")
         assert "startswith(\"agent_\")" in src
+
+
+class TestTheNoSafetyNetExperiment:
+    """Disabling the mechanical exits asks one question: does the agent sell?
+
+    The stop is the line that keeps a wrong call from becoming a blown
+    account. Removing it is only safe in a replay, and the arm is only
+    meaningful if two things hold:
+
+    * the agent is told the truth — if it believes a stop sits underneath it
+      will answer as though something else will save it, and the answer stops
+      being a judgement about selling;
+    * something can still exit — with no stop, no target and no agent, every
+      fill stays open and the curve measures drift rather than decisions.
+    """
+
+    def test_the_context_says_there_is_no_safety_net(self):
+        ctx = ED.build_context(POSITIONS, PRICES, signals=[],
+                               news_by_theme={}, mechanical_stops=False)
+        assert "没有安全网" in ctx
+        assert "卖不卖完全由你决定" in ctx
+
+    def test_it_does_not_claim_a_hard_line_it_will_not_enforce(self):
+        ctx = ED.build_context(POSITIONS, PRICES, signals=[],
+                               news_by_theme={}, mechanical_stops=False)
+        assert "系统强制平仓" not in ctx
+
+    def test_the_default_context_still_promises_the_hard_line(self):
+        """The complement, so the test above cannot pass by the wording
+        having simply been deleted."""
+        ctx = ED.build_context(POSITIONS, PRICES, signals=[],
+                               news_by_theme={})
+        assert "风控硬线" in ctx and "系统强制平仓" in ctx
+
+    def test_the_flag_reaches_the_context(self, monkeypatch):
+        seen = {}
+
+        async def _fake_decide(context, trader=None, **kw):
+            seen["context"] = context
+            return []
+
+        monkeypatch.setattr(ED, "decide", _fake_decide)
+        asyncio.run(ED.decide_for_replay(
+            POSITIONS, PRICES, day="2026-01-05", news_by_theme={},
+            model=object(), mechanical_stops=False))
+        assert "没有安全网" in seen["context"]
+
+
+class TestAWindowWithNoExitIsRefused:
+    """`--no-mechanical-exits` without `--agent-exits` leaves nothing able to
+    close a position: every fill stays open and the equity curve measures the
+    window's drift rather than any decision. That is a missing feature, not
+    an experiment, so it is refused rather than run and explained after."""
+
+    def _args(self, **over):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+        base = {"mechanical_exits": False, "agent_exits": False}
+        base.update(over)
+        return wf, type("A", (), base)()
+
+    def test_it_refuses_without_an_agent(self):
+        wf, args = self._args()
+        with pytest.raises(SystemExit, match="nothing can close a position"):
+            wf._assert_an_exit_exists(args)
+
+    def test_it_allows_the_experiment_arm(self):
+        wf, args = self._args(agent_exits=True)
+        wf._assert_an_exit_exists(args)
+
+    def test_the_default_is_unaffected(self):
+        wf, args = self._args(mechanical_exits=True, agent_exits=False)
+        wf._assert_an_exit_exists(args)
+
+    def test_hiding_the_levels_is_what_removes_the_exit(self):
+        """`exit_verdict` reads the *position's* stop, so passing None is
+        exactly the mechanical exit and leaves T+1, price limits, suspension
+        and gap handling intact — a constant would not."""
+        from alpha_agents.data import market_rules, t1_settlement as S
+        rule = market_rules.market_rules("600001", "2026-01-05", name="甲")
+        # A quiet session: -2% open, so no price limit is involved and the
+        # only thing that can close the position is its own stop level.
+        bar = S.DayBar(date="2026-01-05", open=9.8, high=10.2, low=9.4,
+                       close=9.9)
+        with_levels = S.exit_verdict(bar=bar, prev_close=10.0, rule=rule,
+                                     stop_loss=9.5, target_price=None)
+        without = S.exit_verdict(bar=bar, prev_close=10.0, rule=rule,
+                                 stop_loss=None, target_price=None)
+        assert with_levels.status == S.FILLED_AT_OPEN
+        assert without.status == S.NO_FILL
+        assert "no stop and no target" in without.reason

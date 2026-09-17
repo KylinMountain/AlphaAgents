@@ -1381,7 +1381,8 @@ def _agent_exits(ctx, day: str) -> list[dict]:
     decisions = ctx.loop.run_until_complete(
         ED.decide_for_replay(priced, price_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
-                             model=ctx.model))
+                             model=ctx.model,
+                             mechanical_stops=ctx.mechanical_exits))
     if not decisions:
         return []
 
@@ -1466,10 +1467,20 @@ def _settle_exits(ctx, day: str) -> dict:
             rule = market_rules.market_rules(code, day, name=name)
         except ValueError:
             rule = None
+        # The experiment switch. Hiding the levels — rather than changing a
+        # constant — is what makes this honest: `exit_verdict` reads the
+        # *position's* stop, so passing None removes exactly the two
+        # mechanical exits and leaves every other rule (T+1, price limits,
+        # suspension, gap handling) intact.
+        #
+        # Note what this does NOT touch: `portfolio.position_monitor`'s hard
+        # exit, which is a production path the replay does not call.
         verdict = S.exit_verdict(
             bar=S.bar_from_row(bars_today.get(code)), prev_close=prev_close,
-            rule=rule, stop_loss=pos.get("stop_loss"),
-            target_price=pos.get("target_price"))
+            rule=rule,
+            stop_loss=(pos.get("stop_loss") if ctx.mechanical_exits else None),
+            target_price=(pos.get("target_price")
+                          if ctx.mechanical_exits else None))
         counts[verdict.status] += 1
         if verdict.status == S.INTRADAY_AMBIGUOUS:
             events.append({"date": day, "position_id": pos["id"], "code": code,
@@ -1547,6 +1558,16 @@ class Context:
         #: it doubles the run's model calls, and that should be a choice
         #: the operator made rather than a surprise on the bill.
         self.agent_exits = getattr(args, "agent_exits", False)
+        #: Whether the mechanical stop/target is enforced. Off means the
+        #: agent is the only thing that can close a position — an experiment
+        #: to see whether it sells at all when nothing else will.
+        #:
+        #: **Replay-only, and deliberately so.** The stop is the line that
+        #: keeps a wrong call from becoming a blown account; removing it from
+        #: production would be removing the only backstop under a model.
+        #: Here the book is simulated, so the question "does it sell?" can be
+        #: asked without paying for the answer.
+        self.mechanical_exits = getattr(args, "mechanical_exits", True)
         self.panel_size = args.panel_size
         self.news_limit = args.news_limit
         #: The window's first session, carried so an observation can name the
@@ -1658,6 +1679,7 @@ def run(args) -> dict:
             "scripts/walk_forward.py --start 2025-07-01 --days 30")
     _assert_actually_bound(_REPLAY_DIR)
     _assert_model_mode(args.decider)
+    _assert_an_exit_exists(args)
 
     ctx = Context(args)
     # The window is a function of its own for one reason: the loop the model's
@@ -1776,6 +1798,14 @@ def _run_window(ctx, args) -> dict:
                 event["kind"] = kind
                 event_rows.append(event)
             fill_rows.extend(bucket["fills"])
+        # The agent's own exits, which are a **third** bucket and were
+        # dropped here. `_agent_exits` built the rows correctly and the book
+        # was updated, so the trades really happened — but they never
+        # reached the report, which printed "卖出 0 笔" while the positions
+        # carried `close_reason: agent卖出: ...` in the database. The one
+        # number a reader checks to answer "did it sell" was the one number
+        # wrong.
+        fill_rows.extend(agent_exits)
         settle_rows.append({
             "date": day,
             "ordered": len(placed),
@@ -1858,6 +1888,32 @@ def _model_usage(ctx, model: dict) -> tuple[bool, str]:
                     f"日志原有 {model['journal_before']} 条（应 > 0）")
     return False, (f"live 模式下的模型回放无法核对（新增 {calls} 条）："
                    "live 不记录，两次同窗口运行会因采样而不同")
+
+
+def _assert_an_exit_exists(args) -> None:
+    """Refuse a window in which nothing can close a position.
+
+    ``--no-mechanical-exits`` removes the stop and the target. With no agent
+    on the sell side there is then **no exit at all**: every fill stays open
+    until the window ends, and the equity curve measures the window's drift
+    rather than any decision. That is not an experiment, it is a missing
+    feature, so it is refused rather than run and explained afterwards.
+
+    Contrast with the arm that *is* allowed: no mechanical exits **and**
+    ``--agent-exits`` leaves exactly one thing able to sell, which is the
+    question worth asking.
+    """
+    if getattr(args, "mechanical_exits", True):
+        return
+    if getattr(args, "agent_exits", False):
+        return
+    raise SystemExit(
+        "--no-mechanical-exits removes the stop and the target, and without "
+        "--agent-exits nothing can close a position: every fill would stay "
+        "open to the end of the window and the curve would measure drift, "
+        "not decisions.\n"
+        "  Add --agent-exits to make the agent the only seller, which is the "
+        "experiment this flag exists for.")
 
 
 def _assert_model_mode(decider: str) -> None:
@@ -2301,6 +2357,11 @@ def build_parser() -> argparse.ArgumentParser:
                         default="placeholder",
                         help="placeholder: rank T-1 change, no model (default). "
                              "llm: the model chooses from an as-of panel.")
+    parser.add_argument(
+        "--no-mechanical-exits", dest="mechanical_exits",
+        action="store_false", default=True,
+        help="关闭机械止损/止盈，只让 agent 决定卖出（实验用；"
+             "机械路径之外的所有规则仍然生效）")
     parser.add_argument(
         "--agent-exits", action="store_true",
         help="让 agent 决定卖出（每天多一次模型调用；机械硬止损始终先跑）")

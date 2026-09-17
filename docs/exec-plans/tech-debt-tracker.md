@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D25, D30, D31, D32** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D30, D31** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -36,12 +36,16 @@ walk would have improvised an intraday path and a capacity cap from the fill day
 volume; and D24 was that nothing recorded a model exchange, so re-running the same window
 re-sampled the model instead of reproducing it. Their entries below carry the payment
 records; none of the six ever reached this list as debt. **D25 was opened the same day, out of the M3
-design (§8 of that plan), and is *not* paid** — a candidate can reach `validated` on an empty evidence
-list, and its fix belongs on the lifecycle transition, not on the five call sites that would be tempted
-to fill the bucket with any id at hand. **D26 was found in the UI the same day and paid the same day**:
+design (§8 of that plan), and is *paid on 2026-09-17*** — the fix landed where the entry said it
+belonged, on the transition rather than on the five call sites: `evolution.evidence` supplies the
+producer that can name the decision an episode records, and `evolution.variant` refuses to build a
+policy variant from a candidate whose evidence is empty or whose search is undeclared. See D25 below.
+**D26 was found in the UI the same day and paid the same day**:
 the command columns had entered the `position_exits` DDL without a migration, so every close intent on
 an older database failed and the SQL error was recorded as the intent's rejection reason — a broken
-exit path showing up in the UI as policy.)_
+exit path showing up in the UI as policy. **D32 was opened from that same measurement and is *paid on
+2026-09-17***: the fault is now marked by the writer and counted apart by the reader, so an outage can
+no longer read as a policy verdict. See D32 below.)_
 
 _Later the same evening, the round that removed a unit lie and a threshold that
 was never compared: **D8 is half paid** — `predictions.horizon_days` has writers
@@ -712,7 +716,7 @@ not a syntactic property, and the four instances share no shape — two are data
 is a code path, one is a private helper. A lint rule is not obviously available. The recognition
 rule above is what this entry can offer: a question to ask during review, not a check to run.
 
-### D32 — A system fault is stored as a rejection reason, so an outage reads as policy
+### D32 — A system fault is stored as a rejection reason, so an outage reads as policy (paid 2026-09-17)
 
 **Added 2026-09-16, measuring D26's aftermath.** `intent.submit_intent` records two very different
 things in the same column, `intents.reject_reason`:
@@ -738,7 +742,22 @@ is correct today and quietly wrong the first time a policy reason contains a col
 fact above is what this entry can offer — that the two populations are distinguishable *in the
 data*, by construction, at the writer.
 
-### D25 — A candidate can walk the whole lifecycle on an empty evidence list
+**Paid 2026-09-17, and the shape is the second and third candidates together.** The writer now
+prefixes the reason with `intent.FAULT_PREFIX` (`!fault: `) — the "stable marker at the writer"
+option, which is the only place that knows which of the two populations the row belongs to. The
+reader is `intent.is_fault()`, which also classifies rows that predate the marker by the
+`ExceptionClass: ` shape the writer used then; that legacy rule is scoped to real exception-class
+names rather than "anything with a colon", which is the objection the third candidate raised.
+`_read_intents` counts them as `faults` and the 改账审计 panel shows them as 系统故障 with the row
+labelled 故障, keeping genuine refusals as refusals.
+
+Measured on the live book: of 81 rejected intents, **68 are faults** (`OperationalError: no such
+column: command_id`, D26's outage) and **13 are genuine refusals** — so the classification
+reproduces the historical split exactly, without either side being relabelled. `tests/test_intent_faults.py`
+pins both directions, because a fix that called every rejection a fault would satisfy the fault case
+alone.
+
+### D25 — A candidate can walk the whole lifecycle on an empty evidence list (paid 2026-09-17)
 
 **Added 2026-09-16, while designing M3** (§8 of the T+1 plan). `learning_candidates.save_candidate`
 requires the four proposal fields, and `_episode_citations` insists both buckets be *stated* rather
@@ -774,6 +793,21 @@ the plan), so an empty opposing bucket means *searched the declared set and foun
 evaluator replays the declared search to check the counts. Still a negative case with a mutation
 probe, because a static assertion here would be satisfied by the very constants that make the bucket
 empty.
+
+**Paid 2026-09-17, at the place this entry said the fix belonged.** The blocker it named was "a
+transition needs a reason to fire: something has to be able to name the decision an episode records.
+Nothing can today." That something is now `evolution.evidence` — the Evidence Analyzer, which reads
+closed trades with their `episode_id`, states the T-1 proposition, and writes both citation buckets.
+`evolution.variant` is the transition, and it refuses to build a policy variant from a candidate
+whose evidence is empty, whose citations are all opposing, or whose payload declares no
+`evidence_bundle`. The five production call sites were **not** filled in: they still write empty
+buckets, and the guard fires on them exactly as intended.
+
+The bundle carries `search_scope`, `matching_rule`, `eligible`, `excluded`, `excluded_reasons` and
+`cutoff`; `evidence.replay_bundle` re-applies the declared rule and checks the counts, so an inflated
+`eligible` or an unknown `matching_rule` is caught rather than trusted. `tests/test_policy_variant.py`
+holds the negative cases in both directions — empty buckets refused, empty *opposing* bucket allowed,
+ids-without-a-bundle refused, and a faithful bundle replaying clean.
 
 ### D24 — Nothing recorded the model exchanges, so a re-run of the same window was a re-sample (paid 2026-09-16)
 

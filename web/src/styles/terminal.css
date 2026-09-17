@@ -41,7 +41,7 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .up{color:var(--rise)!important}.down{color:var(--fall)!important}.soft{color:var(--muted)}
 .topbar{height:60px;background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:15}.crumb{display:flex;align-items:center;gap:9px}.crumb b{font-size:14px}.session-pill{display:flex;align-items:center;gap:7px;padding:5px 9px;background:var(--green-soft);color:var(--green);border-radius:999px;font-size:12.5px;font-weight:650}.actions{display:flex;gap:8px;align-items:center}.search{height:34px;width:260px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);display:flex;align-items:center;padding:0 10px;color:var(--muted)}.search input{border:0;outline:0;background:transparent;color:var(--text);width:100%;padding-left:7px}.icon-btn,.btn{height:34px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);border-radius:10px;cursor:pointer;padding:0 10px}.icon-btn{width:34px;padding:0}.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:650}.btn:hover,.icon-btn:hover{border-color:var(--border-strong);background:var(--surface-2)}
 .content{padding:22px;max-width:1680px;margin:0 auto}.view{display:none}.view.active{display:block}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:16px}.page-head h1{font-size:23px;letter-spacing:-.4px;margin:0 0 5px}.page-head p{margin:0;color:var(--muted);font-size:14px}.date-note{text-align:right;color:var(--muted);font-size:13.5px}.date-note b{display:block;color:var(--text-2);font-size:14px;margin-bottom:3px}
-.grid{display:grid;gap:14px}.g12{grid-template-columns:repeat(12,minmax(0,1fr))}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);min-width:0}.card.pad{padding:16px}.card-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}.card-title h3{margin:0;font-size:14px}.card-title span{font-size:12.5px;color:var(--muted)}.card-sub{margin:6px 14px 0;font-size:12px;color:var(--muted);line-height:1.6}
+.grid{display:grid;gap:14px}.g12{grid-template-columns:repeat(12,minmax(0,1fr))}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);min-width:0}.card.pad{padding:16px}.card-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}.card-title h3{margin:0;font-size:14px}.card-title span{font-size:12.5px;color:var(--muted)}.card-title-right{display:flex;align-items:center;gap:8px}.card-sub{margin:6px 14px 0;font-size:12px;color:var(--muted);line-height:1.6}
 /* One left edge per card. A card's own `.table` puts its first cell at 12px
  * (the cell's own padding), but the prose under it sat in a 14px wrapper and
  * any table nested inside that wrapper landed at 26px — three edges in one
@@ -184,8 +184,14 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 /* The fact that comes from the code rather than the database: can this
  * build promote anything at all. The database cannot express it — zero
  * verdicts reads the same whether the gate is quiet or unreachable. */
-.ws-reach{border-left:3px solid var(--amber)}
-.ws-reach.ws-reach-open{border-left-color:var(--green)}
+/* The accent is an inset shadow, not a wider border. `border-left:3px` made
+ * this the one card whose content edge differed from every other card's —
+ * 2px further right, on top of the 16px padding it had from `.card.pad`
+ * instead of the 14px/12px the shared wrapper uses. A reader notices the
+ * misalignment without being able to name it, which is what "风格不一致"
+ * was. A shadow paints the same stripe and changes no geometry. */
+.ws-reach{box-shadow:inset 3px 0 0 var(--amber),var(--shadow)}
+.ws-reach.ws-reach-open{box-shadow:inset 3px 0 0 var(--green),var(--shadow)}
 /* The verdict in the card's own header, in the colour of the border under
  * it. It used to carry `.up` — the A-share *rise* token, which is red — so
  * a positive verdict rendered red inside a green-bordered card. `.up` and

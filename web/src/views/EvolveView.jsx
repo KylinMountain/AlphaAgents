@@ -37,44 +37,57 @@ function ts(v) {
   return v ? String(v).replace('T', ' ').slice(0, 19) : DASH
 }
 
-/* The fact the database cannot express: can this build promote anything? */
+/* The fact the database cannot express: can this build promote anything?
+ *
+ * A `WorkspaceCard` like every sibling, not a hand-built `card pad`. It was
+ * the one card on the page with its own wrapper, and the difference is
+ * visible: `.card.pad` insets its title at 16px plus the 3px accent border
+ * (19px), while every other card insets its title at 14px and its body at
+ * 12px. So this card's heading sat 5px right of the heading below it and its
+ * body 7px right — the "风格不一致" a reader notices without being able to
+ * name. The accent border is kept; it is the card's own marker, not a
+ * different layout.
+ */
 function Reachability({ code }) {
   if (!code) return null
   const open = code.reachable
   return (
-    <article className={`card pad ws-reach ${open ? 'ws-reach-open' : ''}`}
-             style={{ marginBottom: 14 }}>
-      <div className="card-title">
-        <h3>晋升路径是否可达</h3>
+    <WorkspaceCard
+      title="晋升路径是否可达"
+      sec={{ state: 'present', schema: 'complete' }}
+      tone={`ws-reach ${open ? 'ws-reach-open' : ''}`}
+      badge={(
         <span className={`ws-reach-verdict${open ? '' : ' is-closed'}`}>
           {open ? '可达' : '本构建不可达'}
         </span>
+      )}>
+      <div className="card-body">
+        <p className={open ? 'soft' : 'thesis-warn'}>
+          {open
+            ? '至少有一个候选生产者已登记，闸门可以产出候选级证据。'
+            : '这不来自数据库，来自代码：闸门只接受 candidate_policy 证据，'
+              + '而当前登记的生产者全是基线 —— 所以这个构建能产出的每一份裁决'
+              + '都是 baseline_only，并会在晋升时被拒绝。补它要先回答「候选策略是什么」，'
+              + '那是设计决定，不是缺函数。'}
+        </p>
+        <div className="ws-codefacts">
+          <CodeFact label="已登记生产者">
+            {(code.producers || []).map((p) => (
+              <code key={p} style={{ marginRight: 6 }}>{p}</code>
+            ))}
+          </CodeFact>
+          <CodeFact label="其中候选生产者">
+            {code.candidate_producers?.length
+              ? code.candidate_producers.map((p) => <code key={p}>{p}</code>)
+              : <span className="soft">无</span>}
+          </CodeFact>
+          <CodeFact label="晋升接受的证据等级">
+            <code>{code.promotion_accepts}</code>
+          </CodeFact>
+          <CodeFact label="基线名称"><code>{code.baseline}</code></CodeFact>
+        </div>
       </div>
-      <p className={open ? 'soft' : 'thesis-warn'}>
-        {open
-          ? '至少有一个候选生产者已登记，闸门可以产出候选级证据。'
-          : '这不来自数据库，来自代码：闸门只接受 candidate_policy 证据，'
-            + '而当前登记的生产者全是基线 —— 所以这个构建能产出的每一份裁决'
-            + '都是 baseline_only，并会在晋升时被拒绝。补它要先回答「候选策略是什么」，'
-            + '那是设计决定，不是缺函数。'}
-      </p>
-      <div className="ws-codefacts">
-        <CodeFact label="已登记生产者">
-          {(code.producers || []).map((p) => (
-            <code key={p} style={{ marginRight: 6 }}>{p}</code>
-          ))}
-        </CodeFact>
-        <CodeFact label="其中候选生产者">
-          {code.candidate_producers?.length
-            ? code.candidate_producers.map((p) => <code key={p}>{p}</code>)
-            : <span className="soft">无</span>}
-        </CodeFact>
-        <CodeFact label="晋升接受的证据等级">
-          <code>{code.promotion_accepts}</code>
-        </CodeFact>
-        <CodeFact label="基线名称"><code>{code.baseline}</code></CodeFact>
-      </div>
-    </article>
+    </WorkspaceCard>
   )
 }
 

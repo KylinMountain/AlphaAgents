@@ -69,13 +69,17 @@ export function Blocked({ sec }) {
   )
 }
 
-export function WorkspaceCard({ title, subtitle, sec, children }) {
+export function WorkspaceCard({ title, subtitle, sec, badge, tone, children }) {
   if (!sec) return null
   return (
-    <article className="card table-wrap" style={{ marginBottom: 14 }}>
+    <article className={`card table-wrap${tone ? ` ${tone}` : ''}`}
+             style={{ marginBottom: 14 }}>
       <div className="card-title" style={{ padding: '14px 14px 0' }}>
         <h3>{title}</h3>
-        <SectionMeta sec={sec} />
+        <span className="card-title-right">
+          {badge}
+          <SectionMeta sec={sec} />
+        </span>
       </div>
       {/* The subtitle belongs to the card, so it renders whenever the card
        * does. It used to render *only* in the empty branch, which is why an

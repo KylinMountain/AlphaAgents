@@ -338,24 +338,30 @@ export default function PortfolioView({ workspace }) {
       </article>
 
       {stats?.total_closed > 0 && Object.keys(stats.by_theme || {}).length > 0 && (
-        /* marginBottom, like every sibling card, not marginTop. The two
-         * spacing models met here: this card carried its own top margin and
-         * the card below carried a bottom margin on *its* predecessor, so
-         * when 已结束 lost its bottom margin this one fused into 归因链 and
-         * the two read as a single card. One model, applied to every card. */
-        <article className="card pad" style={{ marginBottom: 14 }}>
-          <div className="card-title"><h3>按主线</h3><span>近 30 日已平仓</span></div>
-          <div className="health-group">
-            {Object.entries(stats.by_theme).map(([theme, v]) => (
-              <div className="health-source" key={theme}>
-                <span className="name">{theme}</span>
-                <span className={trendClass(v.avg_return)}>
-                  {v.count} 笔 · {fmtPct(v.avg_return)}
-                </span>
-              </div>
-            ))}
+        /* A `WorkspaceCard` like every sibling, not a hand-built `card pad`.
+         *
+         * Two spacing models had met here — this card carried `marginTop`
+         * while the rest carried `marginBottom` — and one padding model was
+         * missing: `.card.pad` insets its title at 16px where the shared
+         * wrapper insets at 14px and its body at 12px. So this card's heading
+         * sat 2px right of the heading below it, which is the same
+         * "风格不一致" the reach card had. The page has one card now. */
+        <WorkspaceCard title="按主线"
+                       sec={{ state: 'present', schema: 'complete' }}
+                       badge={<span>近 30 日已平仓</span>}>
+          <div className="card-body">
+            <div className="health-group" style={{ marginTop: 0 }}>
+              {Object.entries(stats.by_theme).map(([theme, v]) => (
+                <div className="health-source" key={theme}>
+                  <span className="name">{theme}</span>
+                  <span className={trendClass(v.avg_return)}>
+                    {v.count} 笔 · {fmtPct(v.avg_return)}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-        </article>
+        </WorkspaceCard>
       )}
 
         </>

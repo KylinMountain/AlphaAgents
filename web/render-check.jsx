@@ -297,6 +297,14 @@ const CASES = [
                   states: {}, sections: attributionPresent } },
    { want: ['退出腿', '旧仓平仓', '#7', '已实现合计'],
      reject: ['还没有一笔平仓能指回论点'] }],
+  /* The same structural rule on the trade page. 按主线 was a hand-built
+   * `card pad` — 16px inset, where its six siblings use the shared wrapper's
+   * 14px title and 12px body — so its heading sat 2px right of theirs. */
+  ['trade · every card shares one wrapper', PortfolioView,
+   { workspace: { workspace: 'trade', generated_at: '2026-09-17T04:30:00+00:00',
+                  states: {}, sections: tradeSections } },
+   { want: ['按主线', '近 30 日已平仓', 'card table-wrap'],
+     reject: ['card pad'] }],
   /* The 改账审计 panel with an outage in its history. D32: a raised
    * exception was stored in the same column as a policy refusal, so D26's
    * 68 failed closes printed as 68 ordinary 已拒绝 rows, with the raw
@@ -365,6 +373,29 @@ const CASES = [
               states: {}, sections: learnOutcomesBrokenChain } },
    { want: ['标签链断裂 1 条', '两个答案'],
      reject: ['窗口已收口却没收尾', '是成熟度、不是缺口'] }],
+  /* Every card on a page is the same card.
+   *
+   * 晋升路径是否可达 was hand-built as `card pad ws-reach` while its four
+   * siblings were `WorkspaceCard`s, so its heading sat 5px right of theirs
+   * and its body 7px — a misalignment a reader notices without being able to
+   * name. Asserting the *class list* is what catches that; asserting the copy
+   * cannot, because the copy was never wrong.
+   *
+   * The check is deliberately "one wrapper class for every card on the page"
+   * rather than a pixel rule: `check:render` runs in Node with no layout
+   * engine, so the class list is the strongest thing it can honestly assert.
+   * The tone modifier (`ws-reach`) is allowed to sit on top; a second wrapper
+   * is not. */
+  ['evolve · every card shares one wrapper', EvolveView,
+   { evolve: { workspace: 'evolve', generated_at: '2026-09-17T04:30:00+00:00',
+               states: {}, sections: evolveSections,
+               code: { producers: ['constant_0.5', 'remap_confidence'],
+                       baseline: 'constant_0.5',
+                       candidate_producers: ['remap_confidence'],
+                       promotion_accepts: 'candidate_policy',
+                       reachable: true } } },
+   { want: ['card table-wrap ws-reach ws-reach-open', '晋升路径是否可达'],
+     reject: ['card pad ws-reach'] }],
   ['evolve · absent + partial', EvolveView,
    { evolve: { workspace: 'evolve', generated_at: '2026-09-13T04:30:00+00:00',
                states: {},

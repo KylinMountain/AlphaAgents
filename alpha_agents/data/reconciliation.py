@@ -394,6 +394,15 @@ def _summary(conn: sqlite3.Connection) -> dict:
         tid = r["trader_id"] or ""
         out.setdefault(tid, {})
         out[tid]["reservation_held"] = r["held"]
+        # Historical note, kept so an old run's summary stays readable:
+        # consumed rows used to keep their original ``amount`` and this
+        # field tracked the un-absorbed over-reserve, on the promise that
+        # reconciliation would release it later — which never happened,
+        # because reconciliation is read-only here. A fill now shrinks the
+        # row to its actual cost (see ``reservations.consume_reservation``),
+        # so consumed == amount and "remaining" is always zero on a fresh
+        # book; on a database written before that change the two numbers
+        # still differ and this field is the only witness.
         out[tid]["reservation_consumed_remaining"] = (
             r["consumed_total"] - r["consumed_used"])
         out[tid]["reservation_released"] = r["released"]

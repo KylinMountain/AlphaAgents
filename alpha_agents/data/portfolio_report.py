@@ -73,6 +73,12 @@ def get_open_positions_summary(trader_id: str | None = None,
         capital = P.account_capital()
         available = capital - sum((p["open_price"] or 0) * (p["shares"] or 0)
                                  for p in positions)
+    # "已投" is the binding on cash, not the sum of position costs: it
+    # includes what pending orders have earmarked. Deriving it as
+    # ``capital − available`` keeps the three numbers on one identity
+    # (总资金 = 已投 + 可用); the first version printed the open book's
+    # cost here, so a run with several pending backstops showed 已投
+    # above 总资金 and 可用 negative while the equity curve had the cash.
     invested = capital - available
 
     lines = [f"总资金 {capital:,.0f}元 | 已投 {invested:,.0f}元 | 可用 {available:,.0f}元"]

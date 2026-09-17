@@ -1453,6 +1453,59 @@ def _close_buys(ctx, day: str, prev_day: str, orders: list[dict]) -> list[dict]:
     return fills
 
 
+def _fill_replay_peak_fields(ctx, positions: list[dict], day: str,
+                             phase: str) -> None:
+    """Compute what production's monitor would have written, as of ``day``.
+
+    ``build_context`` renders 峰值 / 回撤 / 持仓天数 from
+    ``peak_return_pct`` / ``holding_days``. In a live run
+    ``position_monitor.check_positions`` maintains them; a replay does not
+    run that module, so both columns were 0 every day — the agent was asked
+    "should I sell" while shown a peak of zero, and every drawdown figure in
+    its reasons was its own arithmetic on the current price rather than a
+    fact the system had handed it.
+
+    The peak is taken over **closes**, the same series a replay can see:
+    from the fill day's own close (by the time the agent is asked, the fill
+    day has already closed — T+1 is exactly why the position cannot have
+    been sold first) up to T-1 in the open phase, or up to today in the
+    close phase. Intraday highs are deliberately not used — the live
+    monitor marks from realtime prices it polls, and a daily replay's
+    honest equivalent is the close series.
+
+    ``holding_days`` has no price in it, so its anchor is simply the
+    decision day, the same arithmetic ``position_monitor`` runs.
+    """
+    for pos in positions:
+        code = pos["code"]
+        open_price = pos.get("open_price") or 0.0
+        open_date = pos.get("open_date")
+        if not open_price or not open_date:
+            continue
+        upto = day if phase == "close" else (ctx.corpus.previous(day) or "")
+        # The fill day's close counts: the fill is at that day's open, so
+        # its close is already in the agent's as-of past. Starting the
+        # range *after* it made a position bought the previous session
+        # show a peak of zero on the day the agent first could sell it.
+        i_start = ctx.corpus.index.get(open_date, -1)
+        i_end = ctx.corpus.index.get(upto, -1)
+        peak = 0.0
+        for i in range(i_start, i_end + 1):
+            row = ctx.corpus.bars(ctx.corpus.days[i]).get(code)
+            close = row.get("close") if row else None
+            if close:
+                peak = max(peak, (float(close) - open_price) / open_price * 100)
+        try:
+            from datetime import date as _date
+            d0 = _date.fromisoformat(open_date)
+            d1 = _date.fromisoformat(day)
+            holding = max(0, (d1 - d0).days)
+        except ValueError:
+            holding = pos.get("holding_days", 0)
+        pos["peak_return_pct"] = round(peak, 2)
+        pos["holding_days"] = holding
+
+
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
     """Ask the agent what to do with the positions the rules left open.
 
@@ -1565,6 +1618,13 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
             "client", day, ctx.decider)
         return []
 
+    # 峰值、回撤与持仓天数。生产由 `position_monitor.check_positions` 每个周期
+    # 写回 `peak_return_pct` / `holding_days`，而回放不跑那个模块——三个字段
+    # 恒为 0，agent 拿着"峰值 0%"回答"该不该卖"，它理由里写的回撤全是它自己
+    # 用浮亏推的，不是系统喂的。这里按 as-of 收盘序列补算：open → 只走到 T-1
+    # （今天还没发生），close → 走到今天。每日收盘价是当日事实，不属于未来。
+    _fill_replay_peak_fields(ctx, priced, day, phase)
+
     # The journaled model, so the call is recorded and reproducible, and
     # **no tools**: every live tool answers from now, which inside a replay is
     # the future. The buy side passes none for the same reason.
@@ -1605,25 +1665,30 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         return []
     alerts = ED.apply(decisions, tradable, fill_map)
     fills = []
+    claimed_legs: set[int] = set()
     for a in alerts:
-        if a.get("type") != "agent_exit":
-            # trim/add are recorded by the executor and are not full exits;
-            # counting them as sells would overstate the agent's activity.
-            #
-            # The alert type already carries the `agent_` prefix
-            # (`agent_trim`, `agent_add`), and the first version prefixed it
-            # again — the counter read `agent_agent_trim`, which no reader
-            # would look for and the report never printed.
-            kind = str(a.get("type") or "agent_other")
-            ctx.counters[kind if kind.startswith("agent_") else f"agent_{kind}"] += 1
+        kind = str(a.get("type") or "agent_other")
+        kind = kind if kind.startswith("agent_") else f"agent_{kind}"
+        if a.get("type") == "agent_add":
+            # An add buys; it is not a sell and has no leg in
+            # `position_exits`. Counted so the run's activity is visible,
+            # but it must not inflate the sell rows.
+            ctx.counters[kind] += 1
             continue
-        # Shares and amount are read back from the exit leg the executor
-        # just wrote. They were hardcoded None, so the report printed
-        # "卖出 3 笔 0 元" while three real exits sat in `position_exits` —
-        # the row that answers "how much did it sell" was empty for the one
-        # bucket that had no other source of numbers.
-        shares = _shares_for_exit(a.get("code"), day)
+        # Both a full exit and a trim wrote a real leg into `position_exits`,
+        # and both are the agent selling. The first version passed only
+        # `agent_exit` through and dropped `agent_trim` here — the executor
+        # had done the trade, the book was updated, and the report printed
+        # "卖出 5 笔" for a window in which the agent had sold on **18**
+        # separate legs (6 full exits, 12 trims). The one number a reader
+        # checks to answer "did it manage the book" was a third of the truth.
+        #
+        # Shares and amount are read back from the leg the executor just
+        # wrote. They were hardcoded None once, so the report printed
+        # "卖出 3 笔 0 元" while three real exits sat in `position_exits`.
+        shares = _shares_for_exit(a.get("code"), day, claimed_legs)
         price = a.get("close_price")
+        reason = a.get("reason", "")
         fills.append({
             "date": day, "side": "sell", "code": a["code"],
             "name": a.get("name", ""),
@@ -1631,8 +1696,10 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
             "amount": (shares or 0) * price if price else None,
             "capacity_shares": None,
             "capacity_oversize": False,
-            "reason": f"agent卖出: {a.get('reason', '')}"[:200],
+            "reason": (reason if reason.startswith("agent")
+                       else f"{kind}: {reason}")[:200],
         })
+        ctx.counters[kind] += 1
     ctx.counters["agent_exit_calls"] += 1
     ctx.counters["agent_exits"] += len(fills)
     return fills
@@ -1699,19 +1766,30 @@ def _unavailable_codes(ctx) -> set[str]:
         return set()
 
 
-def _shares_for_exit(code: str, day: str) -> int | None:
+def _shares_for_exit(code: str, day: str, used: set[int]) -> int | None:
     """What the executor actually sold, read back from the exit leg.
 
     The alert carries a price and a reason but not a quantity, and inventing
     one from the position would be a guess the moment a trim is involved.
     ``position_exits`` is the record the executor wrote, so it is the answer.
+
+    ``used`` holds leg ids already claimed by an earlier alert this call.
+    Without it, two trims of one position on the same day — which the window
+    measured three times — would both read the newest leg and the report
+    would double-count one and drop the other. Legs are booked in the order
+    the alerts were applied, so the oldest unclaimed leg is the match.
     """
     try:
         from alpha_agents.data.memory_store import _get_conn
-        row = _get_conn().execute(
-            "SELECT shares FROM position_exits WHERE code = ? AND exit_date = ? "
-            "ORDER BY id DESC LIMIT 1", (code, day)).fetchone()
-        return int(row["shares"]) if row and row["shares"] else None
+        rows = _get_conn().execute(
+            "SELECT id, shares FROM position_exits WHERE code = ? AND exit_date = ? "
+            "ORDER BY id ASC", (code, day)).fetchall()
+        for row in rows:
+            if row["id"] in used or not row["shares"]:
+                continue
+            used.add(row["id"])
+            return int(row["shares"])
+        return None
     except Exception as exc:                          # noqa: BLE001
         logger.debug("Exit shares for %s on %s unavailable: %s", code, day, exc)
         return None
@@ -2617,6 +2695,15 @@ def _exit_attribution(result: dict) -> list[str]:
         # mention a stop without the stop having caused the exit. Checking
         # the mechanical rules first would attribute an agent's discretionary
         # sell to the rule it happened to mention.
+        if r.startswith("agent卖出"):
+            return "agent 清仓"
+        if r.startswith("agent减仓"):
+            # Trims were invisible until the second agent-exits window: 13
+            # real sells never reached the report because only the
+            # `agent_exit` alert type became a fill row. Named apart from a
+            # full exit because "sold 5 times" and "trimmed 12 times" are
+            # also the same number and different management.
+            return "agent 减仓"
         if r.startswith("agent"):
             return "agent 判断"
         # The settlement's own wording, which is not the word "stop".

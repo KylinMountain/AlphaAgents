@@ -91,7 +91,15 @@ class TestConsumeTransitionsOnce:
         row = R.reservation_for_order(conn, 1)
         assert row["state"] == R.CONSUMED
         assert row["consumed_amount"] == 800.0
-        assert row["amount"] == 1000.0, "the original estimate is preserved"
+        # The over-reserve is given back by shrinking the row to the actual
+        # cost. The first version kept ``amount`` intact and let
+        # ``unconsumed_total`` keep counting it, on the promise that
+        # reconciliation would release it later — but reconciliation is
+        # read-only here and never did: eight fills locked 647k of a 1M pot
+        # and the agent was shown 可用 −41,624 while the equity curve had
+        # the cash.
+        assert row["amount"] == 800.0, \
+            "the row shrinks to the actual cost; the over-reserve is back"
 
     def test_a_second_consume_is_loud(self, conn):
         """A double-consume would mean two fills shared one reservation."""
@@ -156,13 +164,14 @@ class TestUnconsumedTotal:
                             code="000001", amount=400.0)
         assert R.unconsumed_total(conn, "t") == 1400.0
 
-    def test_consumed_counts_only_the_unabsorbed_part(self, conn):
+    def test_a_consumed_row_binds_nothing(self, conn):
         _seed_order(conn, order_id=1)
         R.reserve_for_order(conn, order_id=1, trader_id="t",
                             code="600000", amount=1000.0)
         R.consume_reservation(conn, 1, actual_cost=700.0)
-        assert R.unconsumed_total(conn, "t") == 300.0, \
-            "the over-reserve is still binding until reconciliation runs"
+        assert R.unconsumed_total(conn, "t") == 0.0, \
+            "the fill's cost lives in invested; counting the row here too " \
+            "would charge the position twice"
 
     def test_released_counts_nothing(self, conn):
         _seed_order(conn, order_id=1)
@@ -208,6 +217,7 @@ from alpha_agents.data import reservations as R  # noqa: E402
 from alpha_agents.data import trader as TR  # noqa: E402
 from alpha_agents.data import trade_ledger  # noqa: E402
 from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE  # noqa: E402
+from alpha_agents.data.portfolio import trader_capital  # noqa: E402
 
 
 @pytest.fixture()
@@ -282,14 +292,19 @@ class TestReservationsFollowTheOrderLifecycle:
 
     def test_filling_converts_the_hold_to_actual_cost(
             self, store, traders_dir, theme):
-        """The reservation transitions held → consumed at the actual cost;
-        the consumed row stays so reconciliation can match it against the
-        position's open cost later."""
+        """The reservation transitions held → consumed at the actual cost,
+        and the over-reserve goes straight back to available: the row
+        shrinks to the actual cost, the consumed row stays as
+        reconciliation evidence, and nothing of it binds cash."""
         _write_trader(traders_dir, "slow", SLOW)
         oid = P.create_pending_order(
             code="600000", name="A", theme="t", order_date="2026-01-05",
             entry_low=9.0, entry_high=11.0, stop_loss=8.5,
             source="morning", reason="主线在流入", trader_id="slow")
+        backstop = trader_capital("slow") * 0.10 * (1 + SLIPPAGE_RATE)
+        after_reserve = P.get_available_capital("slow")
+        assert after_reserve == pytest.approx(
+            trader_capital("slow") - backstop)
         P._fill_order(
             P.get_pending_orders("slow")[0],
             fill_price=10.0, fill_date="2026-01-05")
@@ -303,13 +318,18 @@ class TestReservationsFollowTheOrderLifecycle:
         expected_actual = (position["shares"] * position["open_price"]
                            * (1 + SLIPPAGE_RATE))
         assert row["consumed_amount"] == pytest.approx(expected_actual)
-        # The over-reserve is the part of the held amount that the actual
-        # fill did not absorb. It is still in unconsumed_total (counted
-        # via the consumed row's amount − consumed_amount) and is
-        # released by reconciliation, not by the fill itself — that
-        # bookkeeping is what lets the two storages be compared.
-        assert row["amount"] - row["consumed_amount"] > 0, \
-            "entry_high should have over-estimated the fill"
+        assert row["amount"] == pytest.approx(expected_actual), \
+            "the over-reserve was released at the fill, not parked for a " \
+            "reconciliation that never ran"
+        # What remains bound is the position's own cost, no more: the
+        # available figure answers "cash minus the filled position minus
+        # still-pending backstops", not "cash minus a phantom 100k per
+        # order that already filled". ``invested`` reads
+        # ``open_price * shares`` without the slippage leg, so the
+        # expected remainder uses that basis.
+        invested = position["shares"] * position["open_price"]
+        assert P.get_available_capital("slow") == pytest.approx(
+            trader_capital("slow") - invested)
 
     def test_cancelling_a_pending_order_returns_the_full_backstop(
             self, store, traders_dir, theme):

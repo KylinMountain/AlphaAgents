@@ -882,7 +882,11 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
              order["id"]),
         )
         # The held reservation is now the actual cost. Entry_high
-        # over-estimated; the over-reserve is returned to available.
+        # over-estimated; the over-reserve is returned to available —
+        # for real, not by promise: the consume call shrinks the row to
+        # the actual cost, and the first version left the full backstop
+        # bound until a reconciliation that never ran (eight fills locked
+        # 647k of a 1M pot in one replay window).
         actual_cost = shares * fill_price * (1 + SLIPPAGE_RATE)
         reservations.consume_reservation(
             conn, order_id=order["id"], actual_cost=actual_cost)

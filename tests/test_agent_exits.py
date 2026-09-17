@@ -232,8 +232,123 @@ class TestTheExitClassifierKnowsTheSettlementsWording:
     def test_an_agent_sell_is_not_attributed_to_a_rule_it_mentions(self):
         """An agent's reason is free text and may mention a stop without the
         stop having caused the exit."""
-        assert "agent 判断 1" in self._kinds(
+        assert "agent 清仓 1" in self._kinds(
             ["agent卖出: 还没来得及止损，但主线已经转弱"])
+
+    def test_an_agent_trim_is_named_apart_from_a_full_exit(self):
+        """Trims were invisible until the second agent-exits window: only
+        the `agent_exit` alert became a fill row, so the report printed
+        "卖出 5 笔" for a window with 18 real sell legs. A trim is the
+        agent selling too, and "sold" vs "trimmed" is the difference
+        between two kinds of management."""
+        assert "agent 减仓 1" in self._kinds(
+            ["agent减仓: 回撤达到2.9%，适当减仓降低风险"])
+        kinds = self._kinds(["agent卖出: 逻辑证伪", "agent减仓: 回撤过大"])
+        assert "agent 清仓 1" in kinds
+        assert "agent 减仓 1" in kinds
+
+
+class TestTheReplayFeedsTheAgentItsPeak:
+    """峰值 / 回撤 / 持仓天数 were dead data in a replay.
+
+    `position_monitor.check_positions` maintains `peak_return_pct` and
+    `holding_days` in production, but a replay never runs that module —
+    `build_context` rendered 峰值0% for every position on every day, and
+    every drawdown figure in the agent's reasons was its own arithmetic on
+    the current price rather than a fact the system had handed it. The
+    helper `_fill_replay_peak_fields` computes them as-of the decision,
+    from closes only.
+    """
+
+    @staticmethod
+    def _fill_helper():
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+        return wf
+
+    def test_the_fill_days_own_close_counts(self):
+        """A position filled at Tuesday's open has Tuesday's close behind
+        it by any later 09:00 — T+1 is exactly why it could not have been
+        sold first. Starting the series after the fill day made a position
+        bought the previous session show a peak of zero on the first day
+        the agent could act on it."""
+        # open phase on 07-03: T-1's close is 07-02's 11.0 → peak +10%
+        pos = {"code": "600001", "open_price": 10.0,
+               "open_date": "2025-07-02"}
+        wf = self._fill_helper()
+        wf._fill_replay_peak_fields(
+            _CtxStub(closes={"2025-07-01": 10.0, "2025-07-02": 11.0,
+                             "2025-07-03": 9.5}),
+            [pos], "2025-07-03", "open")
+        assert pos["peak_return_pct"] == 10.0
+
+    @staticmethod
+    def _fill_helper():
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+        return wf
+
+    def test_the_open_phase_never_sees_todays_close(self):
+        wf = self._fill_helper()
+        pos = {"code": "600001", "open_price": 10.0,
+               "open_date": "2025-07-01"}
+        # close phase would see 11.0 (peak 10%), open phase must not
+        wf._fill_replay_peak_fields(_CtxStub(closes={"2025-07-01": 10.0,
+                                                     "2025-07-02": 11.0}),
+                                    [pos], "2025-07-02", "open")
+        assert pos["peak_return_pct"] == 0.0
+        # ...but the close phase does
+        pos2 = {"code": "600001", "open_price": 10.0,
+                "open_date": "2025-07-01"}
+        wf._fill_replay_peak_fields(_CtxStub(closes={"2025-07-01": 10.0,
+                                                     "2025-07-02": 11.0}),
+                                    [pos2], "2025-07-02", "close")
+        assert pos2["peak_return_pct"] == 10.0
+
+    def test_holding_days_is_calendar_days_to_the_decision(self):
+        wf = self._fill_helper()
+        pos = {"code": "600001", "open_price": 10.0,
+               "open_date": "2025-07-01"}
+        wf._fill_replay_peak_fields(_CtxStub(closes={"2025-07-01": 10.0,
+                                                     "2025-07-04": 10.5}),
+                                    [pos], "2025-07-04", "open")
+        assert pos["holding_days"] == 3
+
+
+def _CtxStub(closes: dict[str, float] | None = None):
+    """A two-method stand-in for the runner's context.
+
+    ``_fill_replay_peak_fields`` reads ``corpus.previous`` and
+    ``corpus.bars``; a stub keeps the peak tests about the arithmetic
+    rather than about the corpus loader.
+    """
+    closes = closes or {}
+
+    class _Corpus:
+        def __init__(self):
+            self.days = sorted(closes)
+            self.index = {d: i for i, d in enumerate(self.days)}
+            self._bars = {d: {"600001": {"open": c, "high": c, "low": c,
+                                         "close": c}}
+                          for d, c in closes.items()}
+
+        def bars(self, day):
+            return self._bars.get(day, {})
+
+        def previous(self, day):
+            i = self.index.get(day)
+            if i is None or i == 0:
+                return None
+            return self.days[i - 1]
+
+    class _Ctx:
+        corpus = _Corpus()
+
+    return _Ctx()
 
 
 class TestTheAgentIsNotAskedAboutUnsellablePositions:

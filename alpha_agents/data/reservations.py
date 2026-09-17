@@ -9,16 +9,16 @@ had been a polite suggestion rather than a constraint.
 Reservations close the gap. ``reserve_for_order`` is called when an
 order is created and inserts a ``held`` row for the order's worst-case
 cost. A successful fill calls ``consume_reservation``, which transitions
-the row to ``consumed`` with the actual cost and releases the
-over-reserve (entry_high routinely over-estimates the fill). A cancel,
-expiry or rejection calls ``release_reservation`` to drop the hold
-entirely.
+the row to ``consumed`` and shrinks it to the actual cost — the
+over-reserve (entry_high routinely over-estimates the fill) goes straight
+back to available, and the consumed row stays only as reconciliation
+evidence. A cancel, expiry or rejection calls ``release_reservation`` to
+drop the hold entirely.
 
 ``unconsumed_total`` is what ``get_available_capital`` subtracts: the
-sum of (amount − consumed_amount) over rows still in ``held`` or
-``consumed`` state. ``consumed`` rows are kept (not deleted) because
-reconciliation needs the pair — the position's open cost on
-``virtual_portfolio`` and the reservation that funded it should agree.
+sum of amounts over rows still in ``held`` state. Consumed rows bind
+nothing — their cost lives in ``invested`` — and released rows are
+gone.
 
 The held amount is a backstop, not a precise forecast. Reserving
 ``trader_capital * MAX_POSITION_PCT * (1 + slippage)`` per pending
@@ -81,7 +81,8 @@ def reserve_for_order(conn: sqlite3.Connection, *, order_id: int,
 def consume_reservation(conn: sqlite3.Connection, order_id: int,
                         actual_cost: float,
                         kind: str = CASH_RESERVE) -> tuple[int, float]:
-    """Mark a held reservation as ``consumed`` at the actual cost.
+    """Convert a held reservation into its actual cost, and **give the
+    over-reserve back**.
 
     Returns ``(reservation_id, released_amount)``. ``released_amount``
     is what the over-reserve was — ``amount - actual_cost`` if positive,
@@ -89,6 +90,18 @@ def consume_reservation(conn: sqlite3.Connection, order_id: int,
     backstop; that should not happen because the fill was sized to fit
     under the backstop, and clamping to 0 is safer than a silent
     negative cash flow.
+
+    The over-reserve is returned by shrinking ``amount`` to the actual
+    cost, so a consumed row binds nothing: ``unconsumed_total`` reads a
+    consumed row as 0. The first version kept ``amount`` intact and let
+    ``unconsumed_total`` keep counting ``amount − consumed_amount`` on
+    every filled order, on the promise that reconciliation would release
+    it later — but reconciliation is read-only against this table and
+    never did. Measured on a 20-day replay: eight consumed rows held
+    647k of a 1M pot, and the agent was shown 可用 −41,624 while the
+    equity curve reported nearly a million in cash. A position's own
+    cost is already in ``invested``; keeping the over-reserve bound as
+    well charged it twice.
     """
     if not (isinstance(actual_cost, (int, float)) and actual_cost > 0
             and actual_cost != float("inf") and actual_cost == actual_cost):
@@ -109,9 +122,12 @@ def consume_reservation(conn: sqlite3.Connection, order_id: int,
     released = max(0.0, float(row["amount"]) - float(actual_cost))
     conn.execute(
         "UPDATE reservations SET state = 'consumed', "
-        "consumed_amount = ?, reason = COALESCE(reason, '') || 'consumed', "
+        "consumed_amount = ?, amount = ?, "
+        "reason = COALESCE(reason, '') || 'consumed', "
         "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-        "WHERE id = ?", (float(actual_cost), row["id"]),
+        "WHERE id = ?", (float(actual_cost),
+                         float(min(actual_cost, row["amount"])),
+                         row["id"]),
     )
     return int(row["id"]), released
 
@@ -162,16 +178,15 @@ def reservation_for_order(conn: sqlite3.Connection, order_id: int,
 def unconsumed_total(conn: sqlite3.Connection, trader_id: str) -> float:
     """Sum of still-binding reservation amounts for one trader.
 
-    ``held`` rows count their full amount; ``consumed`` rows count only
-    the part not yet absorbed (amount − consumed_amount); ``released``
-    rows count 0. The result is the cash this trader's pending orders
-    and the over-reserve on its filled orders are still holding back
-    from being spent again.
+    ``held`` rows count their full amount — that is live cash a pending
+    order may still spend; ``consumed`` rows count **0**, because a fill
+    shrank the row to the actual cost (see :func:`consume_reservation`)
+    and that cost is already inside ``invested`` — counting it here too
+    would charge the position twice; ``released`` rows count 0.
     """
     row = conn.execute(
         "SELECT "
         "  COALESCE(SUM(CASE WHEN state = 'held' THEN amount "
-        "                   WHEN state = 'consumed' THEN amount - consumed_amount "
         "                   ELSE 0 END), 0) AS held_total "
         "FROM reservations WHERE trader_id = ?", (trader_id,),
     ).fetchone()

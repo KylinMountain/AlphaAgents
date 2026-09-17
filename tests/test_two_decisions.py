@@ -284,3 +284,47 @@ class TestTheCloseBuyQuadrant:
         src = inspect.getsource(wf._close_buys)
         assert "open_position" in src
         assert "create_pending_order" not in src
+
+
+class TestANameCarriesOnePositionAtATime:
+    """`portfolio` refuses a second position on a name that already has one
+    (or a pending order for one). The agent re-ordered names it was holding
+    and the intent door refused them with a message that names four possible
+    causes, so the refusal was indistinguishable from a theme or capital
+    problem.
+
+    Measured on a real window: the close decision re-bought `603407` and
+    `300035`, both of which the open decision had ordered the same morning.
+
+    The rule is real — one name, one position — so the fix is to state it,
+    not to relax it. The prompt says it now, and the book is already in the
+    context for the agent to check against.
+    """
+
+    def test_the_rule_exists_in_the_book(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        from alpha_agents.data import portfolio
+        src = inspect.getsource(portfolio)
+        assert "already exists for" in src
+
+    def test_the_buy_prompt_states_it(self):
+        """A constraint the model is not told about is one it will violate
+        and then be silently refused for."""
+        from alpha_agents.agents import t1_decider as D
+        text = D.load_prompt()
+        assert "一只票同时只能有一笔" in text
+        assert "先看上面的【我的账本】" in text
+
+    def test_the_book_is_actually_in_the_context(self):
+        """The rule is only actionable if the agent can see what it holds."""
+        from alpha_agents.agents import t1_decider as D
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._decide_llm)
+        assert "_book_and_knowledge" in src

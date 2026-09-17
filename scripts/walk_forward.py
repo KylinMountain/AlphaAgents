@@ -777,8 +777,15 @@ def _concepts_map(ctx) -> dict[str, list[str]]:
     return cached
 
 
-def _news_window(day: str, prev_day: str, limit: int) -> list[dict]:
-    """Flash news published between the previous close and 09:00 on ``day``.
+def _news_window(day: str, prev_day: str, limit: int,
+                 phase: str = "open") -> list[dict]:
+    """Flash news knowable at ``phase`` on ``day``.
+
+    ``"open"`` reads the overnight window ending 09:00; ``"close"`` reads the
+    session's own window ending 14:55. The cutoff has to move with the phase
+    or the prompt lies: the close context tells the agent it is 14:55 and
+    that it can see the day, and then handing it news from 09:00 would
+    contradict the sentence directly above the list.
 
     The window is the whole as-of statement: news is continuous, so "the
     latest N items" would silently drop whatever arrived beyond N and re-read
@@ -787,9 +794,12 @@ def _news_window(day: str, prev_day: str, limit: int) -> list[dict]:
     widening them to the day.
     """
     from alpha_agents.data.snapshot_store import read_news
+    if phase == "close":
+        as_of, since = f"{day} 14:55:00", f"{day} 09:00:00"
+    else:
+        as_of, since = f"{day} 09:00:00", f"{prev_day} 15:00:00"
     try:
-        return read_news(None, as_of=f"{day} 09:00:00",
-                         since=f"{prev_day} 15:00:00", limit=limit)
+        return read_news(None, as_of=as_of, since=since, limit=limit)
     except Exception as exc:                          # noqa: BLE001
         logger.warning("%s: news window unavailable: %s", day, exc)
         return []
@@ -1077,7 +1087,17 @@ def _decide_llm(ctx, day: str, prev_day: str,
     """
     from alpha_agents.agents import t1_decider
 
-    panel = _build_panel(ctx, day, prev_day, ctx.panel_size)
+    # The ranking day follows the moment. At 09:00 the only bar that exists
+    # is T-1's, so the panel ranks on it. At 14:55 today's bar exists and is
+    # what a close decision should be looking at — ranking the close panel on
+    # yesterday would hand the agent yesterday's movers while telling it the
+    # session is over.
+    #
+    # `_close_buys` rebuilds this panel to validate the answer, so both must
+    # agree on which day; they are built from this one function for that
+    # reason.
+    ranking_day = day if phase == "close" else prev_day
+    panel = _build_panel(ctx, day, ranking_day, ctx.panel_size)
     ctx.counters["panel_size"] += len(panel)
     if not panel:
         logger.info("%s: empty panel, nothing to decide", day)
@@ -1094,7 +1114,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
         ctx.counters["market_state_days"] += 1
     verdict = t1_decider.propose_sync(
         day=day, prev_day=prev_day, panel=panel,
-        news=_news_window(day, prev_day, ctx.news_limit),
+        news=_news_window(day, prev_day, ctx.news_limit, phase),
         book=book, knowledge=knowledge, market=market,
         trader_note=ctx.trader_note, picks=ctx.picks,
         template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase)
@@ -1333,6 +1353,12 @@ def _close_buys(ctx, day: str, prev_day: str, orders: list[dict]) -> list[dict]:
 
     bars = ctx.corpus.bars(day)
     prow = ctx.corpus.bars(prev_day) if prev_day else {}
+    # The **same** panel the close decision was shown. It is rebuilt rather
+    # than threaded through because `_decide_llm` is also called by the
+    # placeholder path and by tests; the two calls have to agree on the
+    # ranking day, and they do (`day` for a close decision) — a mismatch was
+    # the first bug here, where the buy panel ranked on T-1 and the orders
+    # were then validated against a panel ranked on T.
     by_code = {row["code"]: row for row in
                _build_panel(ctx, day, day, ctx.panel_size)}
     fills = []
@@ -1480,7 +1506,8 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         return []
     priced = sellable
 
-    news_by_theme = _news_by_theme(ctx, day, prev, {p.get("theme") for p in priced})
+    news_by_theme = _news_by_theme(ctx, day, prev,
+                                   {p.get("theme") for p in priced}, phase)
     trader = None
     try:
         from alpha_agents.data.trader import get_trader
@@ -1633,8 +1660,8 @@ def _shares_for_exit(code: str, day: str) -> int | None:
         return None
 
 
-def _news_by_theme(ctx, day: str, prev_day: str,
-                   themes: set) -> dict[str, list[str]]:
+def _news_by_theme(ctx, day: str, prev_day: str, themes: set,
+                   phase: str = "open") -> dict[str, list[str]]:
     """This day's news, grouped by the theme each flash mentions.
 
     Read through the replay's own windowed reader — the same one the buy side
@@ -1647,7 +1674,7 @@ def _news_by_theme(ctx, day: str, prev_day: str,
     names = {t for t in themes if t}
     if not names:
         return out
-    items = _news_window(day, prev_day, limit=200)
+    items = _news_window(day, prev_day, 200, phase)
     for item in items:
         text = f"{item.get('title') or ''} {item.get('content') or ''}"
         for theme in names:

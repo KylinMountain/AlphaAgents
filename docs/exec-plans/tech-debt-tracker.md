@@ -25,7 +25,7 @@ every one now names the exception and logs it. D5 (the clustering dimension) —
 measured, half the entry turned out false, and the dead dimension is live again.
 D4 (four files over 1200 lines) — split into nine modules, none over the limit.
 D12 was added the same day: `scripts/research/` holds 11 byte-identical copies of
-`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D30, D31** (D15, D16 and D17 were all opened and
+`scripts/*.py`. **Open: D6, D8, D12, D13, D14, D18, D30, D31, D42** (D15, D16 and D17 were all opened and
 paid on 2026-09-15, in one round. **D19–D24 were opened *and* paid on 2026-09-16**, all six
 from an external review of the T+1 plan and all six fixed the same day: D19 was a
 wrong market rule already in the kernel (the cash-side T+1 rule was the *withdrawal* rule
@@ -756,6 +756,57 @@ column: command_id`, D26's outage) and **13 are genuine refusals** — so the cl
 reproduces the historical split exactly, without either side being relabelled. `tests/test_intent_faults.py`
 pins both directions, because a fix that called every rejection a fault would satisfy the fault case
 alone.
+
+### D42 — A corrected proposal over unchanged evidence cannot be recorded
+
+**Added 2026-09-17, from the first real production observation.**
+`save_candidate` dedupes on a fingerprint of
+`[entity_type, operation, target_id, source, source_date, payload]`. The four
+*proposal* fields — `claim`, `applicable_context`, `proposed_behavior_delta`,
+`evidence_episode_ids` — are deliberately excluded, and the reason is good: an
+exact retry should return the original row rather than writing a second one.
+
+The gap that leaves: the proposal is not part of the identity, so a candidate
+whose proposal is **corrected** over the same evidence matches the old row and
+`ON CONFLICT DO NOTHING` swallows the correction. Measured on the live book —
+candidate #3 was written by code that hardcoded `direction: "down"`; the
+direction was then fixed to follow the measured contrast, and re-observing
+produced the *same* candidate #3 with the *old* direction still on file. The
+caller got an id back and had no way to tell.
+
+Worse when the matched row is `retired`: the corrected proposal is not written
+at all, and the returned id names a candidate the lifecycle says is finished.
+
+**Cost.** A defect in the proposal path cannot be repaired by re-running it.
+The only routes are to mutate the row (which the lifecycle forbids — a
+proposal must not edit its own history) or to change the evidence so the
+fingerprint differs (which changes what the candidate is *about*). So the
+correction is unrecoverable through the normal path, and the failure is
+silent in the direction that matters: it returns success.
+
+**Not paid.** The fix is a decision, not a patch, and the candidates are not
+equivalent:
+
+* include the proposal fields in the fingerprint — but then an exact retry
+  writes a second row, which is the duplication the exclusion exists to
+  prevent, and `_distil`'s daily-rewrite defect (D35) would return;
+* keep the fingerprint and refuse when the matched row is not `observation` —
+  honest, but makes a retired candidate block its own correction forever;
+* keep the fingerprint and *report* the match, which is what
+  `evidence_source.observe` now does: it returns `deduped_into_existing: true`
+  and logs a warning naming D42. That converts a silent success into a loud
+  one without deciding the policy.
+
+The third option is what shipped, and it is a mitigation rather than a fix.
+The decision this entry is waiting on is what a *corrected* proposal is: a new
+candidate (new identity), or the same candidate with an amended proposal (a
+mutation the lifecycle currently forbids). That is a design question about the
+candidate's identity, and it should be answered deliberately rather than by
+whichever of the three is easiest to code.
+
+**How it is recognised.** A caller that re-runs an observation after fixing a
+proposal bug and gets an id back whose `status` is not `observation`, or whose
+`proposed_behavior_delta` is the old one.
 
 ### D25 — A candidate can walk the whole lifecycle on an empty evidence list (paid 2026-09-17)
 

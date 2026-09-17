@@ -660,33 +660,13 @@ def _trader_note(ctx) -> str:
 # ── the learning step ───────────────────────────────────────────────────────
 
 
-#: Closed trades a T-1-change observation needs before it is written at all.
-#: Deliberately far below the n ≥ 50 a claim would need to *ship*: this is the
-#: floor for recording an observation, and the write lands in the
-#: ``observation`` state whose whole purpose is to quarantine evidence this
-#: thin. Raising it to 50 would mean the loop records nothing in a window this
-#: size — which is how "we learned nothing" gets mistaken for "nothing
-#: happened", and the two are different facts.
-_MIN_TRADES_FOR_AN_OBSERVATION = 4
-
 #: How many observations the knowledge block shows. The newest few: the prompt
 #: is a budget, and an observation that has not been promoted is not more
 #: informative for being old.
+#:
+#: The trade-count floor and the median live in
+#: ``alpha_agents.evolution.evidence`` now, beside the analysis that uses them.
 _KNOWLEDGE_LIMIT = 3
-
-
-def _median(values: list[float]) -> float:
-    """The middle value; the mean of the two middles when the count is even.
-
-    A median and not a mean, for the reason ``AGENTS.md`` gives: A-share
-    cross-sections are right-skewed, and a mean over a handful of trades is
-    one limit-up away from any number at all.
-    """
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2
 
 
 def _closed_trades(ctx, day: str, conn) -> list[dict]:
@@ -734,104 +714,43 @@ def _closed_trades(ctx, day: str, conn) -> list[dict]:
 def _distil(ctx, day: str, trades: list[dict]) -> dict | None:
     """One dated, checkable statement about T-1 change, or ``None`` if too thin.
 
-    The proposition is falsifiable and it is the decider's own: **a candidate
-    that was up more on the previous session did worse** — the opposite of
-    what ranking by T-1 change assumes. Per trade it holds in two ways: a
-    name up more than typical on T-1 that returned less than the window's
-    typical result, or a name up less that returned more. Either is
-    *support*; the two mirror images are the opposition.
+    The analysis itself lives in ``alpha_agents.evolution.evidence`` — the
+    LEARN half of the loop, and a component rather than a private function of
+    this runner. It used to be sixty lines here, which meant the Evidence
+    Analyzer the design calls for existed only inside one script: outside the
+    package, outside the layer rules, and unreachable from anything else.
 
-    The return is compared against the **window's median realised return**,
-    not against zero. That is a correction, not a preference. The first
-    version tested ``(t1 > cut) != (return_pct > 0)``, and on the
-    2025-07-01 window every one of the four closed trades lost money — so
-    ``return_pct > 0`` was ``False`` for all of them and the test collapsed
-    to ``t1 > cut``. The support count then *is* the group size, an
-    arithmetic identity dressed as evidence; it can never disagree with the
-    medians printed beside it. It also inverted two of the four citations,
-    including the window's best trade (low T-1, smallest loss, -4.96%),
-    which it called *opposing* the proposition that trade actually supports.
+    What stays here is the part that is genuinely about a *replay*: reading
+    the T-1 feature out of the corpus at the order's own date. The analyzer
+    takes :class:`~alpha_agents.evolution.evidence.Trade` values and knows
+    nothing about where they came from.
 
-    No model is asked what it thinks of itself. The claim is a median of
-    realised returns and the feature comes from the corpus, so the repo's
-    "utility comes from market data only" rule is enforced by construction
-    rather than promised. Both citation lists are stated even when empty:
-    ``save_candidate`` refuses a missing one, and for a good reason —
-    "we found no opposing evidence" has to be tellable from "nobody looked".
+    The proposition, the median-to-median comparison, the empty-list rule and
+    the reason the per-trade test is against the window's median rather than
+    zero are all documented on that module.
     """
-    scored = [t for t in trades
-              if t["t1_change"] is not None and t["episode_id"] is not None]
-    if len(scored) < _MIN_TRADES_FOR_AN_OBSERVATION:
-        return None
+    from alpha_agents.evolution import evidence as EV
 
-    cut = _median([t["t1_change"] for t in scored])
-    high = [t for t in scored if t["t1_change"] > cut]
-    low = [t for t in scored if t["t1_change"] <= cut]
-    if not high or not low:
-        # Every trade on one side of the cut: there is no contrast to state,
-        # and a claim with no contrast cannot be wrong, which is not a virtue.
-        return None
-
-    ret_med = _median([t["return_pct"] for t in scored])
-
-    def _supported(t: dict) -> bool:
-        return (t["t1_change"] > cut) != (t["return_pct"] > ret_med)
-
-    supporting = sorted(t["episode_id"] for t in scored if _supported(t))
-    opposing = sorted(t["episode_id"] for t in scored if not _supported(t))
-
-    hi_med = _median([t["return_pct"] for t in high])
-    lo_med = _median([t["return_pct"] for t in low])
-    n = len(scored)
-    claim = (
-        f"本窗口已平仓 {n} 笔中，T-1 涨幅高于中位数（{cut:+.2f}%）的 {len(high)} 笔"
-        f"中位收益 {hi_med:+.2f}%，低于或等于的 {len(low)} 笔中位收益 {lo_med:+.2f}%"
-        f"（全窗口中位收益 {ret_med:+.2f}%）"
-        f"——「T-1 涨得越多、实际收益越差」逐笔看有 {len(supporting)} 笔支持、"
-        f"{len(opposing)} 笔反对（n={n}，远低于 n≥50，仅为观察）")
-
-    from alpha_agents.data import learning_candidates as LC
-
-    candidate_id = LC.save_candidate(
-        entity_type="principle",
-        operation="create",
+    observations = [
+        EV.Trade(
+            position_id=t["position_id"],
+            code=t["code"],
+            return_pct=t["return_pct"],
+            close_date=t["close_date"],
+            t1_change=t["t1_change"],
+            episode_id=t["episode_id"],
+            close_reason=t["close_reason"],
+        )
+        for t in trades
+    ]
+    return EV.analyse_and_save(
+        observations,
         source="walk_forward_replay",
         source_date=day,
-        payload={
-            "as_of": day,
-            "n": n,
-            "cut_pct": round(cut, 4),
-            "median_return_pct": round(ret_med, 4),
-            "high_median_return_pct": round(hi_med, 4),
-            "low_median_return_pct": round(lo_med, 4),
-            # Each trade carries its own verdict, so the two counts in the
-            # claim can be re-derived from this record alone instead of
-            # being taken on trust. A reader who doubts "3 支持 / 1 反对"
-            # can check it here without knowing the rule.
-            "trades": [
-                {"episode_id": t["episode_id"], "code": t["code"],
-                 "t1_change_pct": round(t["t1_change"], 4),
-                 "return_pct": round(t["return_pct"], 4),
-                 "supports": _supported(t),
-                 "close_reason": t["close_reason"]}
-                for t in scored
-            ],
-        },
-        claim=claim,
-        applicable_context=(
-            f"{ctx.trader} 交易员，入口区间 {ctx.entry_zone[0]:.3f}–"
-            f"{ctx.entry_zone[1]:.3f} × T-1 收盘，按 T-1 涨幅排序选股，"
-            f"窗口自 {ctx.window_start} 起"),
-        proposed_behavior_delta={
-            "field": "t1_change_rank",
-            "direction": "down",
-            "note": "若该观察在更大样本上成立，选股应向 T-1 涨幅更低的一端移动",
-        },
-        evidence_episode_ids={"supporting": supporting, "opposing": opposing},
+        trader=ctx.trader,
+        entry_zone=ctx.entry_zone,
+        window_start=ctx.window_start,
     )
-    return {"candidate_id": candidate_id, "n": n,
-            "supporting": len(supporting), "opposing": len(opposing),
-            "high_median": round(hi_med, 4), "low_median": round(lo_med, 4)}
 
 
 def _learn(ctx, day: str) -> dict:

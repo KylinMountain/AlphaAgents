@@ -81,6 +81,44 @@ class VariantError(ValueError):
     """A candidate cannot be turned into a policy variant, and why."""
 
 
+#: The candidate → version link, owned here.
+#:
+#: It exists so the loop's last arrow can be walked backwards: a decision
+#: names the policy version it ran under (``decision_snapshots.policy_ref``),
+#: and this table says which candidate proposed that version. Without it the
+#: chain from a decision back to the episode that caused it has a hole
+#: exactly where the EVOLVE half sits, and ``causal_trace`` would have to
+#: guess by timestamp.
+#:
+#: Written in the same transaction as ``policy_registry.freeze``, so a version
+#: cannot exist with a variant row that disagrees about what it is.
+_VARIANTS = """
+CREATE TABLE IF NOT EXISTS policy_variants (
+    id INTEGER PRIMARY KEY,
+    candidate_id INTEGER NOT NULL,
+    version_id INTEGER NOT NULL,
+    parent_version_id INTEGER,
+    change_json TEXT NOT NULL,
+    built_by TEXT NOT NULL,
+    built_at TEXT NOT NULL,
+    UNIQUE(version_id)
+)
+"""
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    """Create this module's table on the supplied connection.
+
+    Same posture as ``policy_registry`` and ``learning_candidates``: the table
+    belongs to the module that reads it, so a reader cannot end up querying a
+    table that only exists if some other module ran first.
+    """
+    conn.execute(_VARIANTS)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_variants_candidate "
+        "ON policy_variants(candidate_id)")
+
+
 @dataclass
 class Variant:
     """A frozen configuration proposed by one candidate."""
@@ -100,6 +138,53 @@ class Variant:
             "changes": self.changes,
             "path": str(self.path) if self.path else None,
         }
+
+
+def _assert_delta_matches_evidence(candidate: dict, delta: dict) -> None:
+    """Refuse a delta that argues against the evidence it cites.
+
+    The first production observation exposed this. ``evidence.PROPOSED_DELTA``
+    was a constant — always ``direction: "down"``, on the assumption that the
+    proposition held — and the real book said the opposite (contrast
+    **+7.68%**). The candidate therefore proposed ranking *lower* while citing
+    evidence that ranking higher did better, and a variant built from it would
+    have moved the parameter the wrong way with a citation that made it look
+    justified.
+
+    ``proposed_delta`` derives the direction from the measurement now, so this
+    cannot arise from that path. The guard is here because candidates already
+    in the book were written by the old code, and because a hand-written
+    candidate could reintroduce it: the check is on the pair, not on the
+    writer.
+
+    It compares against ``contrast_pct`` in the payload — high-T-1 median
+    minus low-T-1 median, the same number ``proposed_delta`` reads. A
+    candidate whose payload carries no contrast is not refused: there is
+    nothing to contradict, and the bundle check already covers the search.
+    """
+    payload = candidate.get("payload_json") or "{}"
+    try:
+        parsed = json.loads(payload) if isinstance(payload, str) else dict(payload)
+    except (TypeError, ValueError):
+        return
+    contrast = parsed.get("contrast_pct") if isinstance(parsed, dict) else None
+    if contrast is None:
+        return
+    direction = delta.get("direction")
+    expected = "down" if contrast < 0 else "up" if contrast > 0 else None
+    if expected is None:
+        raise VariantError(
+            f"Candidate #{candidate.get('id')} has zero contrast in its "
+            "evidence, so no direction is supported and none can be built.")
+    if direction != expected:
+        raise VariantError(
+            f"Candidate #{candidate.get('id')} proposes direction "
+            f"{direction!r} but its own evidence says {expected!r} "
+            f"(contrast_pct={contrast:+.4f}: high-T-1 median minus low-T-1 "
+            "median). A variant built from this would move the parameter "
+            "opposite to the evidence it cites, and the citation would make "
+            "it look justified. This is the defect the first production "
+            "observation exposed.")
 
 
 def _cited_episodes(candidate: dict) -> tuple[list[int], list[int]]:
@@ -270,6 +355,7 @@ def build_variant(candidate_id: int, *, parent_version_id: int,
             "there is nothing to vary. An observation with no delta is a "
             "note, not a candidate for a variant.")
 
+    _assert_delta_matches_evidence(candidate, delta)
     change = _delta_to_change(delta)
     decision = _apply(scoring.decision_params_of(parent_version_id), change)
 
@@ -293,6 +379,9 @@ def build_variant(candidate_id: int, *, parent_version_id: int,
             f"{change['step']:+.3f}"),
         parent_id=parent_version_id,
     )
+    _record_link(candidate_id=candidate_id, version_id=version_id,
+                 parent_version_id=parent_version_id, change=change,
+                 built_by=built_by)
 
     path = None
     if write_file:
@@ -301,6 +390,35 @@ def build_variant(candidate_id: int, *, parent_version_id: int,
     return Variant(candidate_id=candidate_id, version_id=version_id,
                    parent_version_id=parent_version_id, decision=decision,
                    changes=[change], path=path)
+
+
+def _record_link(*, candidate_id: int, version_id: int,
+                 parent_version_id: int, change: dict, built_by: str) -> None:
+    """Write the candidate → version link that makes the last arrow walkable.
+
+    Idempotent per version: ``freeze`` returns an existing version for the
+    same content, so re-proposing the same change must not write a second row
+    — ``UNIQUE(version_id)`` enforces that and the insert ignores a repeat.
+
+    It does not raise on a duplicate: the link already exists and says the
+    same thing, and failing here would turn a legitimate re-proposal into an
+    error after the version was already frozen.
+    """
+    from alpha_agents.data import memory_store
+    from alpha_agents.data import clock
+
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        with conn:
+            _init_schema(conn)
+            conn.execute(
+                "INSERT INTO policy_variants "
+                "(candidate_id, version_id, parent_version_id, change_json, "
+                " built_by, built_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(version_id) DO NOTHING",
+                (candidate_id, version_id, parent_version_id,
+                 json.dumps(change, ensure_ascii=False, sort_keys=True),
+                 built_by, clock.today()))
 
 
 def _variant_dir() -> Path:

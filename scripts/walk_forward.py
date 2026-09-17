@@ -630,8 +630,21 @@ def _book_and_knowledge(ctx, day: str) -> tuple[str, str]:
     miniature — day 40 deciding with day 1's empty journal.
     """
     from alpha_agents.evolution import feedback
+    # Marks come from the previous session's close — the last price that
+    # exists at 09:00 on ``day``. Reading today's bar would be the future
+    # leak this runner exists to avoid, and reading no price at all is what
+    # it did before: the agent was asked "should you sell" while unable to
+    # see whether the position was up or down.
+    prev = ctx.corpus.previous(day)
+    price_map: dict[str, float] = {}
+    if prev:
+        for code, row in ctx.corpus.bars(prev).items():
+            close = row.get("close")
+            if close:
+                price_map[code] = float(close)
     try:
-        book = feedback.inject_portfolio(trader_id=ctx.trader)
+        book = feedback.inject_portfolio(trader_id=ctx.trader,
+                                         price_map=price_map)
     except Exception as exc:                          # noqa: BLE001
         logger.warning("portfolio context unavailable: %s", exc)
         book = ""
@@ -921,6 +934,11 @@ def _decide_llm(ctx, day: str, prev_day: str) -> list[dict]:
             entry_low=order["entry_low"],
             entry_high=order["entry_high"],
             stop_loss=order["stop_loss"],
+            # Carried through now. It was accepted-and-dropped before, so
+            # every position had exactly one exit — the stop. That is the
+            # structural reason all 11 trades in the first 20-day replay
+            # ended in a stop loss.
+            target_price=order.get("target_price"),
             source="walk_forward",
             reason=f"{t1_decider.DECIDER_NAME}: {order['reason']}",
             trader_id=ctx.trader)

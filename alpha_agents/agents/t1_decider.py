@@ -161,9 +161,32 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             refused.append({"code": code, "why": "non_positive_price",
                             "detail": str(low)})
             continue
+        # ``target_price`` is optional, and its absence is meaningful rather
+        # than an error: a position with no target has exactly one exit, the
+        # stop. That is what every order in the first 20-day replay looked
+        # like, and it is why all 11 exits were stops.
+        target = raw.get("target_price")
+        if target is not None and target != "":
+            try:
+                target = float(target)
+            except (TypeError, ValueError):
+                refused.append({"code": code, "why": "bad_target",
+                                "detail": str(target)[:40]})
+                continue
+            if not target > high:
+                # A target at or below the entry ceiling is not a target: the
+                # order would exit at a price it could have been filled at,
+                # which is a stop with a different name.
+                refused.append({"code": code, "why": "target_not_above_entry",
+                                "detail": f"{target} !> {high}"})
+                continue
+            target = round(target, 2)
+        else:
+            target = None
         orders.append({
             "code": code, "entry_low": round(low, 2),
             "entry_high": round(high, 2), "stop_loss": round(stop, 2),
+            "target_price": target,
             "reason": str(raw.get("reason") or "").strip()[:200],
         })
     return {"orders": orders, "refused": refused, "parse_error": None}

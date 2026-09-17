@@ -15,28 +15,62 @@ import logging
 import re
 
 from alpha_agents.data.memory_store import _get_conn
-from alpha_agents.data.portfolio import (
-    account_capital, get_available_capital, get_open_positions,
-    get_pending_orders, trader_capital,
-)
 
 logger = logging.getLogger(__name__)
 
 
-def get_open_positions_summary(trader_id: str | None = None) -> str:
+def _portfolio():
+    """The lifecycle half, imported lazily.
+
+    ``portfolio`` re-exports this module's formatters at the bottom of its own
+    file (the split was about size, not about the API), so a top-level import
+    here makes the pair circular: importing ``portfolio_report`` first leaves
+    ``portfolio`` partially initialised and its re-export fails with
+    ``cannot import name 'format_portfolio_stats'``.
+
+    That was latent until a test imported this module directly. It is not a
+    new defect — it reproduces on the unmodified tree — but it means this
+    module could only ever be reached *through* ``portfolio``, which is not a
+    property it should depend on.
+
+    Lazy rather than restructured: moving the re-export out of ``portfolio``
+    would break every existing ``from portfolio import get_portfolio_stats``
+    caller, and the cost here is one module lookup per call.
+    """
+    from alpha_agents.data import portfolio as P
+    return P
+
+
+def get_open_positions_summary(trader_id: str | None = None,
+                               price_map: dict[str, float] | None = None) -> str:
     """Format open positions + pending orders for agent context.
 
     ``trader_id=None`` shows the whole account, for the dashboard. An agent
     always passes its own id: the capital line is what it sizes against,
-    and quoting the pooled number would have it bet money it has not got.
+    quoting the pooled number would have it bet money it has not got.
+
+    ``price_map`` (``code → latest price``) is optional and its absence is
+    visible rather than silent. Two things were wrong before it existed:
+
+    * The line read ``(市值25,650元)`` while computing ``open_price * shares``
+      — that is **cost**, not market value. A field named 市值 that reports
+      cost is worse than no field: it reads as a fact about the market.
+    * With no current price, an agent could not see whether it was up or down
+      on a position, which makes "should I sell" unanswerable. The replay's
+      agent asked to hold positions it had no P&L for.
+
+    When ``price_map`` is omitted the line says ``现价未提供`` rather than
+    printing the cost under a market-value label — a caller that has no
+    prices should be told it has no prices.
     """
-    positions = get_open_positions(trader_id)
-    pending = get_pending_orders(trader_id)
+    P = _portfolio()
+    positions = P.get_open_positions(trader_id)
+    pending = P.get_pending_orders(trader_id)
     if trader_id:
-        capital = trader_capital(trader_id)
-        available = get_available_capital(trader_id)
+        capital = P.trader_capital(trader_id)
+        available = P.get_available_capital(trader_id)
     else:
-        capital = account_capital()
+        capital = P.account_capital()
         available = capital - sum((p["open_price"] or 0) * (p["shares"] or 0)
                                  for p in positions)
     invested = capital - available
@@ -53,26 +87,50 @@ def get_open_positions_summary(trader_id: str | None = None) -> str:
                 zone = f"≤{p['entry_high']:.2f}"
             elif p.get("entry_low"):
                 zone = f"≥{p['entry_low']:.2f}"
+            target = p.get("target_price")
             lines.append(
                 f"  {p['code']} {p.get('name','')} | 介入区间{zone} | "
-                f"止损{p.get('stop_loss') or '无'} | 挂单日{p['order_date']}"
+                f"止损{p.get('stop_loss') or '无'} | "
+                f"目标{target if target else '无'} | 挂单日{p['order_date']}"
             )
 
     if positions:
         lines.append(f"持仓中 {len(positions)} 笔:")
         for p in positions:
-            shares = p.get('shares', 0)
-            cost = (p['open_price'] or 0) * shares
-            lines.append(
-                f"  {p['code']} {p.get('name','')} {shares}股 @ {p['open_price']:.2f} "
-                f"(市值{cost:,.0f}元) | 止损{p.get('stop_loss') or '无'} | "
-                f"持仓{p.get('holding_days', 0)}天"
-            )
+            lines.append(_position_line(p, price_map))
 
     if not pending and not positions:
         lines.append("无挂单/持仓")
 
     return "\n".join(lines)
+
+
+def _position_line(pos: dict, price_map: dict[str, float] | None) -> str:
+    """One holding, with its mark if a price was supplied.
+
+    Split out so the cost-vs-value distinction has one home: the cost is
+    always shown, and the mark is shown only when it is actually known.
+    """
+    shares = pos.get("shares", 0)
+    open_price = pos.get("open_price") or 0
+    cost = open_price * shares
+    head = (f"  {pos['code']} {pos.get('name','')} {shares}股 @ "
+            f"{open_price:.2f} (成本{cost:,.0f}元)")
+    price = (price_map or {}).get(pos["code"])
+    if price:
+        value = price * shares
+        pnl = (price - open_price) * shares
+        pct = (price - open_price) / open_price * 100 if open_price else 0.0
+        head += (f" | 现价{price:.2f} 市值{value:,.0f}元 "
+                 f"浮动{pnl:+,.0f}元({pct:+.2f}%)")
+    else:
+        # Not silently omitted: an agent told nothing about its P&L cannot
+        # answer the question it is being asked.
+        head += " | 现价未提供"
+    target = pos.get("target_price")
+    return (head + f" | 止损{pos.get('stop_loss') or '无'}"
+            f" | 目标{target if target else '无'}"
+            f" | 持仓{pos.get('holding_days', 0)}天")
 
 
 def get_today_changes_summary(today: str) -> str:

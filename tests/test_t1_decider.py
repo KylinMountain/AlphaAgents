@@ -255,3 +255,116 @@ class TestTheCallingLoopOutlivesTheClient:
             loop.close()
         assert seen[0] is loop
         assert seen[1] is not loop
+
+
+class TestATargetIsOptionalButChecked:
+    """`target_price` is the difference between one exit and two.
+
+    Every order in the first 20-day replay had a stop and no target, so the
+    only way out of a position was the stop — and all 11 trades took it. The
+    field was accepted by the order layer and dropped by the runner, so this
+    is about the parser's half of that seam.
+    """
+
+    def test_a_target_above_the_entry_is_kept(self):
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"target_price":12.0,"reason":"主线"}]}', CODES)
+        assert v["orders"][0]["target_price"] == 12.0
+
+    def test_omitting_it_is_allowed_and_recorded_as_none(self):
+        """Optional, and its absence is a fact worth carrying rather than an
+        error: it says the position has exactly one exit."""
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"reason":"主线"}]}', CODES)
+        assert v["orders"][0]["target_price"] is None
+
+    def test_a_target_below_the_entry_ceiling_is_refused(self):
+        """A target at or under the fill ceiling is not a target: the order
+        would exit at a price it could have been filled at."""
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"target_price":10.2,"reason":"x"}]}', CODES)
+        assert v["orders"] == []
+        assert v["refused"][0]["why"] == "target_not_above_entry"
+
+    def test_a_target_equal_to_the_ceiling_is_refused(self):
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"target_price":10.5,"reason":"x"}]}', CODES)
+        assert v["refused"][0]["why"] == "target_not_above_entry"
+
+    def test_an_unparseable_target_is_refused_by_name(self):
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"target_price":"涨一倍","reason":"x"}]}', CODES)
+        assert v["refused"][0]["why"] == "bad_target"
+
+    def test_an_empty_string_means_no_target(self):
+        """Some models emit `""` for an absent optional field rather than
+        omitting it; that is an omission, not a bad number."""
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.0,"target_price":"","reason":"x"}]}', CODES)
+        assert v["orders"][0]["target_price"] is None
+
+    def test_the_prompt_asks_for_a_target(self):
+        """The template is part of the contract: a field the runner reads but
+        the prompt never mentions is one the model will not emit."""
+        text = D.load_prompt()
+        assert "target_price" in text
+        assert "日均波动" in text
+
+
+class TestTheBookShowsWhetherAPositionIsUp:
+    """`inject_portfolio` renders `现价未提供` unless a price map is passed.
+
+    The replay's agent was asked to decide holds and sells while unable to see
+    its own P&L. This pins the seam, not the formatting."""
+
+    def test_the_summary_says_so_when_no_price_is_supplied(self):
+        from alpha_agents.data import portfolio_report as PR
+        line = PR._position_line(
+            {"code": "600001", "name": "甲", "shares": 100,
+             "open_price": 10.0, "stop_loss": 9.0, "holding_days": 1},
+            None)
+        assert "现价未提供" in line
+        assert "成本1,000元" in line
+        assert "市值" not in line.split("现价未提供")[0]
+
+    def test_the_cost_label_is_not_called_market_value(self):
+        """The defect: the line read `(市值1,000元)` while computing
+        `open_price * shares`. A field named 市值 that reports cost is worse
+        than no field, because it reads as a fact about the market."""
+        from alpha_agents.data import portfolio_report as PR
+        line = PR._position_line(
+            {"code": "600001", "name": "甲", "shares": 100,
+             "open_price": 10.0, "stop_loss": 9.0, "holding_days": 1},
+            None)
+        assert "成本1,000元" in line
+
+    def test_a_price_shows_the_mark_and_the_pnl(self):
+        from alpha_agents.data import portfolio_report as PR
+        line = PR._position_line(
+            {"code": "600001", "name": "甲", "shares": 100,
+             "open_price": 10.0, "stop_loss": 9.0, "holding_days": 1},
+            {"600001": 11.0})
+        assert "现价11.00" in line and "市值1,100元" in line
+        assert "+100元(+10.00%)" in line
+
+    def test_a_loss_is_signed(self):
+        from alpha_agents.data import portfolio_report as PR
+        line = PR._position_line(
+            {"code": "600001", "name": "甲", "shares": 100,
+             "open_price": 10.0, "stop_loss": 9.0, "holding_days": 1},
+            {"600001": 9.5})
+        assert "-50元(-5.00%)" in line
+
+    def test_the_target_is_rendered_when_present(self):
+        from alpha_agents.data import portfolio_report as PR
+        line = PR._position_line(
+            {"code": "600001", "name": "甲", "shares": 100,
+             "open_price": 10.0, "stop_loss": 9.0, "target_price": 12.0,
+             "holding_days": 1}, None)
+        assert "目标12.0" in line

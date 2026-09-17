@@ -259,7 +259,8 @@ def inject_recent_lessons(days: int = 7, *, purpose: str = "decision") -> str:
     return "\n".join(lines)
 
 
-def inject_portfolio(trader_id: str | None = None, days: int = 5) -> str:
+def inject_portfolio(trader_id: str | None = None, days: int = 5,
+                     price_map: dict[str, float] | None = None) -> str:
     """What the agent is currently holding, and how its last exits went.
 
     The morning and intraday agents recommended stocks without ever being
@@ -274,12 +275,22 @@ def inject_portfolio(trader_id: str | None = None, days: int = 5) -> str:
     portfolio would be worse than showing it nothing: it would size
     against money it does not have and reason about positions it never
     took.
+
+    ``price_map`` carries the mark. Without it the holdings render as cost
+    plus a stop, and an agent cannot tell a position that is up 6% from one
+    that is down 6% — which is most of what "should I sell this" depends on.
+    The caller supplies it because this layer must not reach for a quote:
+    a replay has to read the price of *its* day, and a live run reads the
+    latest. Passing ``None`` is honest and renders ``现价未提供``.
     """
     from alpha_agents.data.portfolio import (
         get_closed_positions, get_open_positions_summary,
     )
 
-    sections = [f"【我的持仓】\n{get_open_positions_summary(trader_id)}"]
+    sections = [
+        f"【我的持仓】\n"
+        f"{get_open_positions_summary(trader_id, price_map=price_map)}"
+    ]
 
     try:
         closed = get_closed_positions(limit=8, trader_id=trader_id)

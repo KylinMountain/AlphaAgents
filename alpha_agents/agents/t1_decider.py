@@ -74,18 +74,52 @@ def load_prompt(path: Path | None = None) -> str:
 
 
 def format_panel(panel: list[dict]) -> str:
-    """Render the allowed securities, one per line, with what is knowable."""
+    """Render the allowed securities, one per line, with what is knowable.
+
+    The columns are what a person would look at before deciding, minus the
+    ones this system does not have. 换手率 and 概念 were added after a 20-day
+    replay in which every order was a bare `code / close / change / adv20`
+    row — five numbers and no way to tell a small-cap theme stock from a
+    large-cap blue chip, which are two different bets.
+
+    概念 is labelled **当前成分** because the membership table has no as-of
+    date: it is what the name is tagged with now, not what it was tagged with
+    on the replayed session. Saying so in the header is the honest minimum;
+    dropping the column would cost the sector context that A-share judgement
+    mostly runs on.
+    """
     if not panel:
         return "（今天没有可交易的候选）"
-    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | ADV20(手) |",
-             "|---|---|---|---|---|"]
+    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 概念（当前成分） |",
+             "|---|---|---|---|---|---|---|"]
     for row in panel:
         adv = row.get("adv20")
+        turn = row.get("turnover_rate")
+        concepts = row.get("concepts") or []
         lines.append(
             f"| {row['code']} | {row.get('name', '')} | {row.get('close')} | "
             f"{row.get('change_pct')}% | "
-            f"{'-' if adv is None else int(adv)} |")
+            f"{'-' if turn is None else turn} | "
+            f"{'-' if adv is None else int(adv)} | "
+            f"{'、'.join(concepts) if concepts else '-'} |")
     return "\n".join(lines)
+
+
+def format_market(state: dict) -> str:
+    """The previous session's breadth, or an explicit absence.
+
+    Answers "what kind of day am I deciding into". The advancer share in the
+    first replay window ran from 8.1% to 78.3%, and the model was never told
+    which — every day looked the same from inside its prompt.
+    """
+    if not state:
+        return "（未提供：本次运行没有可用的市场宽度数据）"
+    return (
+        f"上一交易日 {state.get('prev_day')}："
+        f"上涨家数 {state.get('advancers_pct')}%，"
+        f"全市场中位涨幅 {state.get('median_change_pct')}%，"
+        f"涨停 {state.get('limit_up')} 家 / 跌停 {state.get('limit_down')} 家"
+        f"（样本 {state.get('n')} 只）")
 
 
 def format_news(items: list[dict]) -> str:
@@ -194,7 +228,8 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
 
 def build_message(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str, knowledge: str,
-                  trader_note: str, picks: int, template: str) -> str:
+                  trader_note: str, picks: int, template: str,
+                  market: dict | None = None) -> str:
     """Fill the prompt. Every placeholder must be consumed.
 
     The ``{VOCAB}`` lesson from ``agents/morning.py`` applies: a template
@@ -211,7 +246,7 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
     every day after it died with ``KeyError: 'news'``.
     """
     fields = {"day": day, "prev_day": prev_day, "panel": format_panel(panel),
-              "news": format_news(news),
+              "news": format_news(news), "market": format_market(market or {}),
               "book": book or "（空仓）",
               "knowledge": knowledge or "（还没有任何经验在生效）",
               "trader_note": trader_note or "", "picks": picks}
@@ -238,7 +273,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str = "", knowledge: str = "",
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
-                  max_turns: int = 1) -> dict:
+                  max_turns: int = 1, market: dict | None = None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -252,7 +287,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     message = build_message(
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,
-        template=template if template is not None else load_prompt())
+        template=template if template is not None else load_prompt(),
+        market=market)
 
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model)

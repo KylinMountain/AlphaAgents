@@ -537,6 +537,68 @@ def _eligibility(ctx, code: str, day: str, prev_day: str) -> str | None:
 # ── the model-backed decider ────────────────────────────────────────────────
 
 
+def _market_state(ctx, prev_day: str) -> dict:
+    """The breadth of the previous session, from the corpus alone.
+
+    Computed from ``daily_kline`` rather than read from
+    ``market_breadth_snapshots``, and that is deliberate: the snapshot tables
+    only begin 2026-09-08, so a window starting 2026-08-18 would have no
+    breadth for its first fifteen sessions. Recomputing covers every session
+    the corpus holds, and it cannot leak — the bar is dated, not timestamped.
+
+    What this answers, and why a position decision needs it: "should I be
+    buying today at all" is a different question on a session where 78% of
+    names rose than on one where 8% did. Measured over the first replay
+    window, the advancer share moved between 8.1% and 78.3% — the model was
+    never told which kind of day it was in.
+    """
+    bars = ctx.corpus.bars(prev_day)
+    changes = [float(r["change_pct"]) for r in bars.values()
+               if r.get("change_pct") is not None]
+    if not changes:
+        return {}
+    changes.sort()
+    n = len(changes)
+    advancers = sum(1 for c in changes if c > 0)
+    median = (changes[n // 2] if n % 2 else
+              (changes[n // 2 - 1] + changes[n // 2]) / 2)
+    return {
+        "prev_day": prev_day,
+        "n": n,
+        "advancers_pct": round(100 * advancers / n, 1),
+        "median_change_pct": round(median, 2),
+        "limit_up": sum(1 for c in changes if c >= 9.8),
+        "limit_down": sum(1 for c in changes if c <= -9.8),
+    }
+
+
+def _resolve_concepts(ctx, prev_day: str, code: str) -> list[str]:
+    """The concepts a name belongs to, or ``[]`` with the reason recorded.
+
+    **Current membership, used knowingly.** ``stocks.db``'s
+    ``concept_stocks`` has no as-of column (verified: two columns,
+    ``concept_id`` and ``stock_code``), so a name's concept list is what it is
+    *now*, not what it was on the replayed session. A concept assigned after
+    the window therefore appears in it — a real lookahead, of a weaker kind
+    than a price leak because it is a label rather than an outcome.
+
+    It is included because sector membership is close to essential for A-share
+    judgement — a name trading outside its 主线 is a different bet — and
+    because the alternative available today is not "point-in-time concepts"
+    but "no sector information at all". The honest middle is to include it
+    *and* say so, which the panel does: the column is labelled 概念（当前成分）
+    and the report carries the caveat. When a dated membership source exists,
+    this function is the one place that changes.
+    """
+    try:
+        from alpha_agents.data.stock_meta import concepts_for
+        return list(concepts_for(code) or [])
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["concepts_unavailable"] += 1
+        logger.debug("%s: concepts unavailable for %s: %s", prev_day, code, exc)
+        return []
+
+
 def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     """The securities the decision may order, and the only ones.
 
@@ -561,6 +623,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     costs a history read per code and most of the pool is never shown.
     """
     bars_prev = ctx.corpus.bars(prev_day)
+    concepts = _concepts_map(ctx)
     ranked = []
     for code in ctx.corpus.instruments:
         reason = _eligibility(ctx, code, day, prev_day)
@@ -576,26 +639,90 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
         if float(chg) >= LIMIT_UP_SKIP_PCT:
             continue
         ranked.append((float(chg), code, row))
-    ranked.sort(key=lambda t: t[0], reverse=True)
+
+    if not ranked:
+        return []
+
+    # Ranked by change, as before — but the *pool* is widened before the cut
+    # so the cut is no longer the only decision. Selection used to be
+    # `top-N by T-1 change`, which meant the model could only ever pick
+    # yesterday's biggest movers and the ranking, not the model, chose the
+    # strategy. The pool is now the union of that ranking with the session's
+    # most-traded names, so a quiet name with real turnover is offerable.
+    by_change = sorted(ranked, key=lambda t: t[0], reverse=True)
+    by_turnover = sorted(
+        ranked, key=lambda t: (t[2].get("turnover_rate") or 0.0), reverse=True)
+
+    # **Interleaved, not concatenated.** The first version appended the
+    # turnover ranking after the change ranking and then took the first
+    # `limit` — so every slot was still filled from the change ranking and
+    # the widening did nothing. It was caught by a counter: the run reported
+    # `panel_offered_liquid: 0`. Alternating is what actually mixes them.
+    pool: list[tuple] = []
+    ci = ti = 0
+    while (len(pool) < limit * 4
+           and (ci < len(by_change) or ti < len(by_turnover))):
+        if ci < len(by_change):
+            pool.append(by_change[ci])
+            ci += 1
+        if ti < len(by_turnover):
+            pool.append(by_turnover[ti])
+            ti += 1
+    ctx.counters["panel_pool"] += len(pool)
 
     panel: list[dict] = []
-    for chg, code, row in ranked[:limit * 3]:
+    seen = set()
+    for chg, code, row in pool:
+        if code in seen:
+            continue
         adv = ctx.corpus.adv20(code, prev_day)
         if adv is None or adv <= 0:
             # No measurable liquidity is not the same as illiquid, and the
             # plan's rule is that a security whose numbers cannot be
             # established is not offered at all.
             continue
+        seen.add(code)
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
             "close": float(row["close"]),
             "change_pct": round(chg, 2),
             "adv20": adv,
+            "turnover_rate": round(float(row.get("turnover_rate") or 0.0), 2),
+            "concepts": concepts.get(code, []),
         })
         if len(panel) >= limit:
             break
+    ctx.counters["panel_ranked"] += len(by_change)
+    # Names offered from *outside* the top `limit` by change. This is the
+    # number that says the mix is real; it read 0 when the pool was
+    # concatenated, which is how the defect above was found.
+    top_by_change = {c for _, c, _ in by_change[:limit]}
+    ctx.counters["panel_offered_beyond_top_change"] += sum(
+        1 for p in panel if p["code"] not in top_by_change)
     return panel
+
+
+def _concepts_map(ctx) -> dict[str, list[str]]:
+    """Concept membership for the panel, read once per run.
+
+    Cached on the context because the file does not change inside a window and
+    a read per day would be a query per simulated session for data that is
+    ~3.7k rows. Read through the corpus (read-only when shared) like every
+    other corpus file.
+    """
+    cached = getattr(ctx, "_concepts", None)
+    if cached is None:
+        from alpha_agents.data import stock_meta
+        cached = stock_meta.concepts_by_code()
+        ctx._concepts = cached
+        if cached:
+            logger.info("Concept membership: %d code(s) tagged", len(cached))
+        else:
+            logger.warning(
+                "Concept membership is empty — the panel's 概念 column will "
+                "be blank. stocks.db may not be shared into this replay.")
+    return cached
 
 
 def _news_window(day: str, prev_day: str, limit: int) -> list[dict]:
@@ -900,10 +1027,15 @@ def _decide_llm(ctx, day: str, prev_day: str) -> list[dict]:
     # computed at the start of the window would be the 2026 leak in
     # miniature — the agent deciding on day 40 with day 1's empty book.
     book, knowledge = _book_and_knowledge(ctx, day)
+    # The previous session's breadth, from the corpus: what kind of day this
+    # is. Read at ``prev_day`` so it is knowable at 09:00 and cannot leak.
+    market = _market_state(ctx, prev_day)
+    if market:
+        ctx.counters["market_state_days"] += 1
     verdict = t1_decider.propose_sync(
         day=day, prev_day=prev_day, panel=panel,
         news=_news_window(day, prev_day, ctx.news_limit),
-        book=book, knowledge=knowledge,
+        book=book, knowledge=knowledge, market=market,
         trader_note=ctx.trader_note, picks=ctx.picks,
         template=ctx.prompt, model=ctx.model, loop=ctx.loop)
     if verdict["parse_error"]:
@@ -1803,6 +1935,7 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"已实现 / 浮盈 {first['realized']:,.0f} → {last['realized']:,.0f} real / "
         f"{last['unrealized']:,.0f} unreal",
         f"期末持仓/挂单 {last['open_positions']} / {last['pending_orders']}",
+        *_benchmark_lines(ctx, result, start_capital),
         "",
         "— 成交 —",
         f"买入 {len(buys)} 笔 {sum(b['amount'] or 0 for b in buys):,.0f} 元 / "
@@ -1938,6 +2071,53 @@ def _corpus_changes_line(changes: list[dict]) -> str:
     parts = [f"{c['file']} {c['size_delta']:+d}B" for c in changes]
     return (f"{len(changes)} 个文件有变化：{'、'.join(parts)}"
             "——生产侧的定时入库也在写这些文件，这一行不是对回放的判定")
+
+
+def _benchmark_lines(ctx, result: dict, start_capital: float) -> list[str]:
+    """The window's return against an equal-weight market.
+
+    Without this line "the strategy lost 1.7%" cannot be interpreted: the
+    first 20-day replay returned -1.71% on a window where the equal-weight
+    market returned -2.81%, so the honest reading was "it lost less than the
+    market", not "the strategy is losing". Both numbers are computed the same
+    way — the account's own equity against every listed name that traded on
+    both sessions, equal-weighted — so they are comparable rather than merely
+    adjacent.
+
+    A window with too little history returns a line saying so rather than a
+    silently absent one.
+    """
+    equity = result.get("equity") or []
+    if len(equity) < 2:
+        return []
+    days = [r["date"] for r in equity]
+    index, covered = 1.0, 0
+    for prev_day, day in zip(days, days[1:]):
+        try:
+            bars_prev = ctx.corpus.bars(prev_day)
+            bars_now = ctx.corpus.bars(day)
+        except Exception as exc:                      # noqa: BLE001
+            logger.debug("benchmark bars unavailable for %s: %s", day, exc)
+            continue
+        rets = []
+        for code, now in bars_now.items():
+            before = bars_prev.get(code)
+            if not before or not before.get("close") or now.get("change_pct") is None:
+                continue
+            rets.append(float(now["change_pct"]) / 100)
+        if rets:
+            index *= 1 + sum(rets) / len(rets)
+            covered += 1
+    if not covered:
+        return ["等权大盘      （本窗口没有可比的行情，无法计算）"]
+    agent = equity[-1]["equity"] / start_capital - 1
+    market = index - 1
+    return [
+        f"等权大盘      {market * 100:+.3f}%（{covered} 个交易日）",
+        f"超额（agent − 大盘） {(agent - market) * 100:+.3f}%",
+        "  （大盘 = 当日全市场有行情的标的等权平均；没有这一行，"
+        "「亏了」无法解释）",
+    ]
 
 
 def _exit_attribution(result: dict) -> list[str]:

@@ -7,16 +7,17 @@ from pathlib import Path
 
 
 def load_env() -> None:
-    """Load .env file from project root if it exists."""
-    env_path = Path(__file__).parent / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+    """Load .env from the project root, before ``config`` is imported.
+
+    Delegates to ``alpha_agents.env_file``, which owns the parsing now — the
+    scripts under ``scripts/`` need the same behaviour and two copies of it
+    would drift. This module keeps the call because it has to run *before* the
+    ``alpha_agents.config`` import below: ``config`` reads ``os.environ`` at
+    import time.
+    """
+    from alpha_agents.env_file import load_env as _load
+
+    _load()
 
 
 # Load .env BEFORE importing config (config reads os.environ at import time)

@@ -77,6 +77,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Load .env before anything imports ``config``, which reads os.environ at
+# import time. Without this the runner cannot reach a provider and dies on
+# ``Missing credentials`` — D41, where the same command is not the same run
+# because the key arrives only when something injects it. ``main.py`` always
+# did this; the scripts did not. The import is from ``env_file`` rather than
+# ``config`` precisely so that importing the loader does not freeze the
+# constants it is meant to precede.
+from alpha_agents.env_file import load_env  # noqa: E402
+
+load_env()
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PRODUCTION_DIR = _PROJECT_ROOT / "data"
 

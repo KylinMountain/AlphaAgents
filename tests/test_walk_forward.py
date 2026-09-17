@@ -35,9 +35,11 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 import threading
+import time
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -280,12 +282,86 @@ class TestTheProductionBookIsUntouched:
         assert result["production"]["unchanged"] is True
         assert result["production"]["hash_before"] == result["production"]["hash_after"]
 
-        fingerprint = result["corpus"]["before"]
-        assert fingerprint["market_history.db"] is not None, (
-            "the corpus fingerprint saw no history file, so 'untouched' below "
-            "would be comparing two absences")
-        assert result["corpus"]["untouched"] is True
+        # The verdict is about the replay's own handles, not about a file
+        # another process owns (D39). The guard that the check saw a real file
+        # stays: an access report over an empty set would pass vacuously.
+        access = result["corpus"]["access"]
+        assert access["files"]["market_history.db"]["present"] is True, (
+            "the access check saw no history file, so 'read_only' below would "
+            "be a statement about nothing")
+        assert access["files"]["market_history.db"]["shared"] is True
+        assert access["read_only"] is True
+
+        # Kept, and it means less than it looks like: this fixture's corpus has
+        # no second writer, so on a live box the same comparison is red because
+        # production moved the file. That is why it is no longer the verdict.
         assert result["corpus"]["before"] == result["corpus"]["after"]
+        assert result["corpus"]["changes"] == []
+
+    def test_a_corpus_file_that_was_not_shared_is_reported_writable(self, tmp_path):
+        """The negative half — without it ``read_only`` could be a constant.
+
+        A check that can only come out true is not a check. The state it exists
+        to catch is a corpus file the bootstrap did not link: ``corpus_access``
+        then opens it read-write and the replay can append to history. That
+        state is planted here by replacing one link with a real copy, which is
+        also the only way to reach it — the bootstrap always links.
+        """
+        replay, corpus = _prepare(tmp_path, *_normal())
+        link = replay / "stocks.db"
+        assert link.is_symlink(), "fixture did not share stocks.db to begin with"
+        link.unlink()
+        link.write_bytes((corpus / "stocks.db").read_bytes())
+
+        result = _run(replay, days=2)
+
+        assert result["corpus"]["access"]["read_only"] is False
+        assert result["corpus"]["access"]["files"]["stocks.db"] == {
+            "present": True, "shared": False}
+        # And the summary names the file, rather than printing a bare 否.
+        assert "stocks.db" in walk_forward._corpus_access_line(
+            result["corpus"]["access"])
+
+    def test_a_file_production_moves_does_not_fail_the_run(self, tmp_path):
+        """D39's harm, pinned: the exit status must not depend on a file another
+        process owns.
+
+        Production touches ``market_snapshots.db`` while a window runs. That is
+        how the old check came out 否 on a live box on **every** long run, and
+        because it gated the exit status, every long run returned 1. The move is
+        simulated here by re-stamping a shared file's mtime from a thread while
+        the window runs — production's write reduced to the effect the
+        fingerprint reads, and one that cannot corrupt the corpus it is about.
+        """
+        replay, corpus = _prepare(tmp_path, *_normal())
+        target = corpus / "market_history.db"
+        assert (replay / "market_history.db").is_symlink(), (
+            "the fixture shared no history, so nothing is being simulated")
+
+        stop = threading.Event()
+
+        def _production_writes():
+            while not stop.is_set():
+                os.utime(target, None)
+                time.sleep(0.01)
+
+        walk_forward._REPLAY_DIR = replay
+        writer = threading.Thread(target=_production_writes, daemon=True)
+        writer.start()
+        try:
+            rc = walk_forward.main(["--start", _START, "--days", "2",
+                                    "--trader", "pullback", "--run-id", "d39"])
+        finally:
+            stop.set()
+            writer.join(timeout=5)
+
+        meta = json.loads((replay / "walk-reports" / "d39" / "run.json")
+                          .read_text(encoding="utf-8"))
+        assert meta["corpus_changes"], (
+            "the diagnostic saw nothing move, so this test proved nothing about "
+            "the case it exists for")
+        assert meta["corpus_read_only"] is True
+        assert rc == 0, "a file another process owns moved, and the run failed"
 
     def test_the_runner_refuses_the_production_directory(self):
         """The guard behind #1, stated where it can fail loudly."""
@@ -428,7 +504,7 @@ class TestTheAmbiguousCountIsEmitted:
 
         assert report["meta"]["placeholder_decider_called_no_model"] is True
         assert report["meta"]["production_db_unchanged"] is True
-        assert report["meta"]["corpus_untouched"] is True
+        assert report["meta"]["corpus_read_only"] is True
 
 
 # ── 5. the decision cannot see the day it trades ────────────────────────────

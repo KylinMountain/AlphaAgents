@@ -597,9 +597,12 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
 的 —— D27（成交路径自死锁）与 D28（负预算掐断整个挂单循环）就是这么被找到的。
 - [x] 生产库内容 hash 跑前跑后不变（与 M0 第一条合跑一次即可）
       —— `test_a_run_leaves_the_live_book_and_the_corpus_alone`：在 runner 之外**独立**量一次
-      生产库 sha256（runner 自己也报这个数，两处都断言，报错了也拦得住），并同时断言
-      共享语料的 size/mtime 指纹前后相同 —— 这两条是一件事：跑一次只写自己的账本。
-      两处都先断言「指纹真的看到了文件」，否则「前后相同」是在比两个空。
+      生产库 sha256（runner 自己也报这个数，两处都断言，报错了也拦得住），并同时断言回放
+      拿到的是**只读句柄**（`result["corpus"]["access"]["read_only"]`）—— 这两条是一件事：
+      跑一次只写自己的账本。两处都先断言「真的看到了文件」，否则「未变」「只读」是在比两个空。
+      **2026-09-17 改口径**：原先这里断言共享语料的 size/mtime 前后相同，问的是「文件变了没有」，
+      而在生产还活着的机器上这个问题的答案永远是「变了」（D39）。现在问的是「这次回放有没有写」，
+      并且 `main` 的退出码也改挂在这一条上（改之前每次长窗口都返回 1）。
       **M0 那半（「往生产库塞一条、回放检索不到」）不在本文件里，但它并不是没做** ——
       它在 `tests/test_walk_bootstrap.py::test_state_seeded_in_the_corpus_cannot_reach_the_replay`：
       往语料的 `memory.db` 里塞一条 candidate + 一条持仓，断言回放账本为空、
@@ -612,6 +615,8 @@ policy version。而 §11 写明 *"automatic evaluation success is not permissio
       结论：**这条用例钉住的是「runner 自己不写语料」，而报告里那行问的是「语料变了没有」，
       是两个不同的问题。** 前者已经有答案；后者要改成问前者（D39 的修法），
       否则报告里那行红是一个永远亮着、于是被读者学会忽略的灯。
+      **2026-09-17：D39 已修**（见 `TRADER_CORE_IMPLEMENTATION.md` §9 第二十四轮）——
+      判据改成问回放自己，指纹降级为诊断并逐文件命名，那个布尔值不再决定退出码。
 - [x] 同一窗口在 `replay-recorded` 下重跑两次，成交明细逐行相同
       —— `test_two_runs_agree_row_for_row`。**口径**：M1 的占位决策器**不调模型**，
       所以这条钉住的是时钟、结算与账本（并断言 journal 记录数为 0）；模型那一半是 D24

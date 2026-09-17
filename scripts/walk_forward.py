@@ -191,10 +191,10 @@ if _REPLAY_DIR is not None:
 
 logger = logging.getLogger("walk_forward")
 
-#: The corpus files the replay shares by reference. Hashed by size+mtime before
-#: and after: a write to a shared corpus file is already impossible at the
-#: SQLite layer (``corpus_access`` opens it ``mode=ro``), and this is the second
-#: claim — that nothing tried.
+#: The corpus files the replay shares by reference. The **pass/fail** question
+#: is whether the replay opened each one read-only (D39); the size+mtime
+#: fingerprint is kept as a diagnostic only, because production writes one of
+#: these files continuously while a window runs.
 CORPUS_FILES = ("market_history.db", "market_snapshots.db", "stocks.db")
 
 #: The placeholder decider's name, carried into every report so a reader cannot
@@ -272,7 +272,12 @@ def _limitations(ctx) -> tuple[str, ...]:
 
 
 def _corpus_fingerprint(data_dir: Path) -> dict:
-    """Size and mtime of every shared corpus file, for the before/after check."""
+    """Size and mtime of every shared corpus file — **diagnostic** (D39).
+
+    Kept because a reader wants to know what moved, and because a bare boolean
+    cannot be diagnosed after the fact. Not a verdict: one of these files
+    belongs to production (see :func:`_corpus_access_check`).
+    """
     out = {}
     for name in CORPUS_FILES:
         path = data_dir / name
@@ -283,6 +288,69 @@ def _corpus_fingerprint(data_dir: Path) -> dict:
         out[name] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
                      "symlink": path.is_symlink()}
     return out
+
+
+def _corpus_access_check(data_dir: Path) -> dict:
+    """Did *the replay* open every corpus file read-only? (D39)
+
+    This replaces a bare ``size+mtime`` comparison, and the replacement is the
+    whole point of the debt entry. The old check asked "is this file unchanged"
+    and reported one boolean; on a machine where the scheduled pipeline ingests
+    news continuously the honest answer is always no — ``market_snapshots.db``
+    grew by 53 KB during a 120-day window — so **the check could not pass on a
+    live box, and its red was never a fact about the replay**. It also gated the
+    exit status, so every long run returned 1.
+
+    "Did the replay write" is answerable from the replay's own directory.
+    ``corpus_access`` opens a file read-only exactly when it is a symlink, so a
+    file the bootstrap linked is one the store cannot write; the refusal itself
+    is pinned by ``tests/test_corpus_access.py``, on throwaway files.
+
+    **This deliberately does not probe.** Every detector of "is this handle
+    read-only" is a real write attempt — measured: ``PRAGMA user_version = 0``
+    and ``CREATE TABLE`` both raise ``attempt to write a readonly database``,
+    while ``BEGIN IMMEDIATE`` does *not* raise and so detects nothing. A probe
+    would therefore mutate the corpus in exactly the case this check exists to
+    catch, which is a bad trade for a check whose job is to protect it.
+    """
+    files = {}
+    for name in CORPUS_FILES:
+        path = data_dir / name
+        if not path.exists():
+            files[name] = {"present": False}
+            continue
+        files[name] = {"present": True,
+                       "shared": corpus_access.is_shared(path)}
+    present = [f for f in files.values() if f["present"]]
+    return {
+        "files": files,
+        # No corpus file at all is a failure, not a vacuous pass: a run that
+        # read no history demonstrated nothing about reading it.
+        "read_only": bool(present) and all(f["shared"] for f in present),
+    }
+
+
+def _corpus_changes(before: dict, after: dict) -> list[dict]:
+    """Which shared files moved while the window ran, and by how much.
+
+    **Diagnostic, not a verdict** (D39). Production writes
+    ``market_snapshots.db`` continuously, so a non-empty list here is the normal
+    case and says nothing about the replay. It exists because the first two
+    write-ups of this defect named the wrong file twice — a bare boolean cannot
+    be diagnosed after the fact, and finding the real writer took a manual
+    ``stat`` on a guess about which directory was watched.
+    """
+    changes = []
+    for name in sorted(set(before) | set(after)):
+        old, new = before.get(name), after.get(name)
+        if old == new:
+            continue
+        changes.append({
+            "file": name, "before": old, "after": new,
+            "size_delta": ((new or {}).get("size") or 0)
+                          - ((old or {}).get("size") or 0),
+        })
+    return changes
 
 
 def _corpus_root() -> str:
@@ -1347,6 +1415,9 @@ def _run_window(ctx, args) -> dict:
     window = ctx.corpus.window(args.start, args.days)
     journal_before = _journal_records(_REPLAY_DIR)
     prod_hash_before = _sha256(_PRODUCTION_DIR / "memory.db")
+    #: The verdict (did the replay get read-only handles) and the diagnostic
+    #: (what moved) are separate readings, because only the first is about us.
+    corpus_access_before = _corpus_access_check(_REPLAY_DIR)
     corpus_before = _corpus_fingerprint(_REPLAY_DIR)
 
     equity_rows, fill_rows, settle_rows, event_rows = [], [], [], []
@@ -1443,8 +1514,9 @@ def _run_window(ctx, args) -> dict:
         "production": {"hash_before": prod_hash_before,
                        "hash_after": prod_hash_after,
                        "unchanged": prod_hash_before == prod_hash_after},
-        "corpus": {"before": corpus_before, "after": corpus_after,
-                   "untouched": corpus_before == corpus_after},
+        "corpus": {"access": corpus_access_before,
+                   "before": corpus_before, "after": corpus_after,
+                   "changes": _corpus_changes(corpus_before, corpus_after)},
     }
 
 
@@ -1586,7 +1658,12 @@ def write_report(result: dict, out_dir: Path) -> dict:
             (model["journal_after"] - model["journal_before"]) == 0
             if ctx.decider != "llm" else None),
         "production_db_unchanged": result["production"]["unchanged"],
-        "corpus_untouched": result["corpus"]["untouched"],
+        "corpus_read_only": result["corpus"]["access"]["read_only"],
+        "corpus_files": result["corpus"]["access"]["files"],
+        #: Diagnostic, and named file-by-file on purpose: D39's first two
+        #: write-ups guessed the wrong writer twice, which a bare boolean
+        #: makes unavoidable.
+        "corpus_changes": result["corpus"]["changes"],
         "errors": result["errors"],
         "limitations": list(_limitations(ctx)),
     }
@@ -1662,7 +1739,9 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         "",
         "— 口径检查 —",
         f"生产库内容 hash 未变        {'是' if result['production']['unchanged'] else '**否**'}",
-        f"共享语料 size+mtime 未变    {'是' if result['corpus']['untouched'] else '**否**'}",
+        f"回放对语料只读              {'是' if result['corpus']['access']['read_only'] else '**否**'}"
+        f"（{_corpus_access_line(result['corpus']['access'])}）",
+        f"共享语料 size+mtime（诊断） {_corpus_changes_line(result['corpus']['changes'])}",
         f"模型调用与声明一致          {'是' if model_usage_ok else '**否**'}"
         f"（{model_usage_detail}）",
         f"抛错的日-阶段               {len(result['errors'])}"
@@ -1733,6 +1812,39 @@ def _error_kinds(errors: list[dict]) -> str:
         f"{e.get('stage', '?')}:{(e.get('error') or '?').split(':')[0].strip()}"
         for e in errors)
     return "（" + "；".join(f"{k}×{n}" for k, n in kinds.most_common()) + "）"
+
+
+def _corpus_access_line(access: dict) -> str:
+    """Which corpus files were shared, and which were not — the failure, named.
+
+    A bare 否 would leave the reader to guess which file the replay could have
+    written, which is the same defect one level down.
+    """
+    present = [n for n, f in access["files"].items() if f["present"]]
+    writable = [n for n, f in access["files"].items()
+                if f["present"] and not f["shared"]]
+    if not present:
+        return "语料目录里没有共享文件，这次运行没有读到历史"
+    if writable:
+        return (f"{len(present)} 个共享文件中 {len(writable)} 个可写："
+                + "、".join(writable))
+    return f"{len(present)} 个文件全部以只读打开"
+
+
+def _corpus_changes_line(changes: list[dict]) -> str:
+    """What moved, file by file, with the reason this is not a verdict (D39).
+
+    On this machine the answer is normally "something moved", production moved
+    it, and the line has to say so rather than let a reader score the replay by
+    it. It names the file and the delta because the first two write-ups of this
+    defect blamed the wrong writer twice, and a bare boolean cannot be
+    diagnosed after the fact.
+    """
+    if not changes:
+        return "无（没有任何共享文件变化）"
+    parts = [f"{c['file']} {c['size_delta']:+d}B" for c in changes]
+    return (f"{len(changes)} 个文件有变化：{'、'.join(parts)}"
+            "——生产侧的定时入库也在写这些文件，这一行不是对回放的判定")
 
 
 def _max_drawdown(values: list[float]) -> float:
@@ -1832,8 +1944,12 @@ def main(argv: list[str] | None = None) -> int:
     result = run(args)
     report = write_report(result, args.out)
     print(report["summary"])
+    # The exit status is about what this run did, so it is built from the
+    # readings that are about this run. ``corpus_read_only`` (did we get
+    # read-only handles) is ours; "did a file another process owns move" is not,
+    # and gating on it made every long run on a live box return 1 (D39).
     ok = (report["meta"]["production_db_unchanged"]
-          and report["meta"]["corpus_untouched"]
+          and report["meta"]["corpus_read_only"]
           and report["meta"]["model_usage_ok"])
     return 0 if ok else 1
 

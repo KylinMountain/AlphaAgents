@@ -881,12 +881,18 @@ pattern**。两个变异探针被捕获（维度改回常量；matcher 把缺失
 | C | `_range_overlaps_zone` 恒为假 | `test_a_touch_the_open_missed_is_counted_and_written_out` |
 | D | 去掉重跑前的 store 句柄重置 | `test_two_runs_agree_row_for_row` |
 | E | `_refuse_production` 不再拒绝生产目录 | `test_the_runner_refuses_the_production_directory` |
-| F | `_corpus_fingerprint` 全返回 `None` | `test_a_run_leaves_the_live_book_and_the_corpus_alone`（防空转守卫） |
-| G | 让 `corpus_after` 与 `corpus_before` 不同 | 同上 + `test_a_touch_the_open_missed_is_counted_and_written_out` |
+| F | `_corpus_fingerprint` 全返回 `None` | **2026-09-17 起换成** `test_a_file_production_moves_does_not_fail_the_run`（见下） |
+| G | 让 `corpus_after` 与 `corpus_before` 不同 | `test_a_run_leaves_the_live_book_and_the_corpus_alone` + `test_a_touch_the_open_missed_is_counted_and_written_out` |
 
 F / G 是**回补探针**：初版交付里有个自己留的洞 —— runner 会算 `corpus_untouched`，
 而我只断言了 `production_db_unchanged`，从没检查前者。补上后配这两条探针，
 F 证明「指纹真的看到了文件」那句不是装饰，G 证明「前后相同」这句真的会响。
+
+**2026-09-17（第二十四轮）F 的落点变了，得说清楚。** 这一轮把「真的看到了文件」这条守卫
+从指纹移到了 `_corpus_access_check`（`access["files"][…]["present"]`），所以 F **不再**让
+`test_a_run_leaves_the_live_book_and_the_corpus_alone` 变红 —— 它现在让**新加的那条线程测试**
+变红，因为一个什么都看不见的指纹**永远报不出变动**，而那条测试要求诊断真的报出一次变动。
+**这是换了落点，不是失效**：实测 F 仍然恰好让 1 条变红。
 
 **探针 D 是实质性的**：去掉那句重置，第二次运行读到的是第一次留下的持仓
 （成交从 600001 变成 600002 / 600003）。「同一窗口重跑两次」这件事**依赖测试自己丢掉
@@ -1745,7 +1751,8 @@ walk-120c   120 天   重试 3 次   间隔 115.2s / 117.0s / 118.9s   全是提
 
 `corpus_untouched` 报**「否」**，与上一轮一致，原因见 §6（D39：写者是生产侧的实时新闻入库，
 不是回放）。**它不是本轮的回归** —— 这一条在修前修后都报「否」，而这正是 D39 要说的：
-那行检查问的问题和它有答案的问题不是同一个。
+那行检查问的问题和它有答案的问题不是同一个。**（2026-09-17：该检查已按 D39 改掉，
+`corpus_untouched` 这个名字不再存在，见第二十四轮。）**
 
 #### 本轮验证
 
@@ -1768,6 +1775,94 @@ walk-120c   120 天   重试 3 次   间隔 115.2s / 117.0s / 118.9s   全是提
 带 shim 的那个「4 failed」既不是回归、也不该被写进任何验证记录。**
 （`dangerouslyDisableSandbox` 不解决这件事 —— shim 走的是 `PYTHONPATH` 注入，不是操作系统沙箱，
 关掉后者仍会等满 120 秒再抛。）
+
+### 第二十四轮（D39 付清：把「文件变了没有」换成「这次回放写了没有」，2026-09-17）
+
+第二十三轮刻意把 D39 留到下一轮（原话：「和本轮的循环修复混在一起，会让这一次验证说不清是
+哪个改动起了作用」）。本轮付清。
+
+#### 1. 真正的伤害是退出码，不只是那行红
+
+先把代价量清楚。`main()` 的判据原文是：
+
+```python
+ok = (report["meta"]["production_db_unchanged"]
+      and report["meta"]["corpus_untouched"]
+      and report["meta"]["model_usage_ok"])
+```
+
+而那个 120 天窗口的记录是 `corpus_untouched: false`、`production_db_unchanged: true`、
+`model_usage_ok: true` —— 也就是说**一次干净的运行被判成失败、返回 1**。
+在还活着的机器上窗口越长越必然如此（生产侧的定时入库一直在写 `market_snapshots.db`，
+实测大约每半小时一次）。所以这不是「报告里有一行不好看」，是**这个 runner 在长窗口上
+不可能成功**。
+
+#### 2. 换掉问题本身
+
+新增 `_corpus_access_check`：对每个共享语料文件，读它**是不是 symlink** —— 这正是
+`corpus_access` 用来决定 `mode=ro` 的那个谓词。判据 `read_only` =「这次运行读到的每个语料
+文件，都是 store 写不了的那个」。指纹保留但**降级为诊断**：`_corpus_changes` 逐文件命名并
+给出 delta，汇总行明说生产侧也在写这些文件、这一行不是对回放的判定。`main()` 的退出码
+改挂 `corpus_read_only`。
+
+#### 3. 两个决定是量出来的，不是挑出来的
+
+**（a）检查不做探针。** 「这个句柄是不是只读」的每一种检测法都是**一次真的写尝试**。实测：
+
+```
+BEGIN IMMEDIATE          没有报错          <-- 什么都检测不出来
+PRAGMA user_version = 0  OperationalError: attempt to write a readonly database
+CREATE TABLE probe (x)   OperationalError: attempt to write a readonly database
+```
+
+所以探针会**在检查本该抓住的那个情形里把语料写坏** —— 对一个以保护语料为职责的检查，
+这是坏交易。改成读那个决定模式的谓词；「写被拒绝」本身早就由
+`tests/test_corpus_access.py` 在**一次性文件**上钉住了（那里做探针是安全的）。
+
+**（b）判据必须能变红，否则它不是检查。** 负向情形是「bootstrap 没有链接的语料文件」——
+那时 store 会以读写打开它，回放就能往历史里追加。
+`test_a_corpus_file_that_was_not_shared_is_reported_writable` 用「把一条链接换成真副本」
+把这个状态种出来。
+
+#### 4. 验收（现跑）
+
+新鲜 120 天窗口（占位决策器）：
+
+```
+回放对语料只读              是（3 个文件全部以只读打开）
+共享语料 size+mtime（诊断） 无（没有任何共享文件变化）
+```
+
+exit **0** —— 同一形状的窗口在改之前返回 1。生产侧写入那一半由
+`test_a_file_production_moves_does_not_fail_the_run` 钉住：窗口运行期间由一个线程反复重打
+共享文件的 mtime，断言**诊断看见了、判据没受影响、`main` 仍然返回 0**。
+
+#### 5. 两个探针，各只让一条变红
+
+源文件按字节还原（`scripts/walk_forward.py` sha256
+`5b24ce1798dddb255bfc3605152ef6a4e1d89cf25943e36b21256ef6bcff913b`）：
+
+| 探针 | 改动 | 结果 |
+|---|---|---|
+| P1 | 退出条件退回 `not corpus_changes` | 1 条红 —— `test_a_file_production_moves_does_not_fail_the_run` |
+| P2 | `read_only` 忽略 `shared` 谓词 | 1 条红 —— `test_a_corpus_file_that_was_not_shared_is_reported_writable` |
+| F（旧探针） | `_corpus_fingerprint` 全返回 `None` | 1 条红，但**落点换了** —— 见 §9 第十五轮那段补记：守卫从指纹移到访问检查，F 现在钉的是「一个什么都看不见的指纹永远报不出变动」 |
+
+#### 6. 仍未覆盖，如实写
+
+验收那次运行**没有**碰上生产侧写入（`corpus_changes` 为空），所以「诊断行会把变动的文件名
+印出来」在**真实生产写入**上的证明，靠的是那个线程测试，而不是一次真实窗口。要补的话是跑
+一次 `--decider llm` 的长窗口（约 25 分钟，生产大约每半小时写一次）；本轮没有跑。
+
+#### 本轮验证
+
+- `.venv/bin/python -m pytest tests/ -q` → **2275 passed / 18 skipped**
+  （上一轮 2273 + 本轮 2 条 = 2275，逐数相符；`test_walk_forward.py` 35 → **37 条**）。
+- `.venv/bin/python scripts/lint_harness.py` → exit 0，**173 个文件**，存量 **13 条**（未扩基线）。
+- `.venv/bin/python scripts/lint_docs.py` → exit 0。
+- 120 天窗口（新代码，`/tmp/d39long`）→ exit **0**，`corpus_read_only: true`，
+  三个语料文件均 `present && shared`。
+- 三个探针共用同一个还原点，每次都核对 sha256（见 §5）。
 
 ## 10. Phase 2 逐项交付（S1–S6）
 

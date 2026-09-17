@@ -393,7 +393,7 @@ being a consistency check on the record rather than on the direction. Each trade
 `payload["trades"]` now carries its own `supports` flag, so the counts can be re-derived
 from the record instead of taken on trust.
 
-### D39 — The corpus check asks whether a file changed, on a machine where production changes it
+### D39 — The corpus check asks whether a file changed, on a machine where production changes it (paid 2026-09-17)
 
 The 120-day run's summary reported `共享语料 size+mtime 未变 **否**`. The check is right to
 exist — a replay that mutates the shared corpus makes every run irreproducible — but
@@ -439,12 +439,72 @@ the replay. Three readings of one boolean, in order — the replay mutates the c
 the concurrent test suite did it; then a scheduled snapshot writer did it. The first two
 were wrong, each cost a run or a `stat`, and the first made it into a committed document.
 
-**Remedy, revised.** The question worth asking is not "is this file unchanged" — on a
-machine where production is ingesting, the honest answer is always no. It is "did *the
-replay* write". That is directly checkable: assert that the replay's handle on a shared
-file is read-only, or that no write was attempted, instead of comparing `size` and `mtime`
-of a file another process owns. If the fingerprint is kept at all it should name the file
-and both values, and be scoped to files production does not write.
+**Paid 2026-09-17.** The check now asks the replay-side question.
+`_corpus_access_check` reads, for each corpus file the replay shares, whether it
+is a symlink — the exact predicate `corpus_access` uses to decide `mode=ro` — and
+the verdict is `read_only`: **every corpus file this run read was one the store
+cannot write**. The `size+mtime` fingerprint is kept and demoted to a diagnostic:
+`_corpus_changes` names each file that moved and its delta, and the summary line
+says out loud that production also writes those files and that the line is not a
+verdict on the replay.
+
+The exit status was the real harm, and it is what changed most. `main` gated on
+`corpus_untouched`, so on a live box **every long run returned 1**. Measured on
+the recorded 120-day run: `corpus_untouched false` while
+`production_db_unchanged` and `model_usage_ok` were both true — a clean run
+reported as a failure. It now gates on `corpus_read_only`, which is about this
+run.
+
+**Two choices were settled by measuring, not by taste.**
+
+1. **The check does not probe.** Every detector of "is this handle read-only" is
+   a real write attempt. Measured on a read-only handle:
+
+   ```
+   BEGIN IMMEDIATE          no error          <-- detects nothing
+   PRAGMA user_version = 0  OperationalError: attempt to write a readonly database
+   CREATE TABLE probe (x)   OperationalError: attempt to write a readonly database
+   ```
+
+   A probe would therefore mutate the corpus in exactly the case the check exists
+   to catch — a bad trade for the check whose job is to protect it. What is read
+   instead is the predicate that decides the mode, and the refusal itself is
+   already pinned by `tests/test_corpus_access.py`, on throwaway files, where
+   probing is safe.
+
+2. **The verdict has to be able to come out false, or it is not a check.** The
+   negative case is a corpus file the bootstrap did not link; the replay can then
+   append to history.
+   `test_a_corpus_file_that_was_not_shared_is_reported_writable` plants that
+   state by replacing one link with a real copy.
+
+**Acceptance, measured.** A fresh 120-day window (placeholder decider) reports
+
+```
+回放对语料只读              是（3 个文件全部以只读打开）
+共享语料 size+mtime（诊断） 无（没有任何共享文件变化）
+```
+
+and exits **0** — where the same shape of window returned 1 before. The
+production-write case is pinned by
+`test_a_file_production_moves_does_not_fail_the_run`, which re-stamps a shared
+file's mtime from a thread while the window runs, then asserts the diagnostic saw
+it, the verdict did not, and `main` still returned 0.
+
+Two probes, each reddening exactly one test, source restored byte-exact
+(`scripts/walk_forward.py` sha256
+`5b24ce1798dddb255bfc3605152ef6a4e1d89cf25943e36b21256ef6bcff913b`):
+
+| probe | change | result |
+|---|---|---|
+| P1 | exit condition back to `not corpus_changes` | 1 red — `test_a_file_production_moves_does_not_fail_the_run` |
+| P2 | `read_only` ignores the `shared` predicate | 1 red — `test_a_corpus_file_that_was_not_shared_is_reported_writable` |
+
+**What is still not covered.** The acceptance run's own window happened not to
+catch a production write (`corpus_changes` empty), so the *live* demonstration of
+the named-change line rests on the threaded test rather than on a real
+production move during a real window. A long `--decider llm` window would cover
+it; none was run for this fix.
 
 ### D40 — One event loop per day, one shared client, so every day's first request fails and is retried
 

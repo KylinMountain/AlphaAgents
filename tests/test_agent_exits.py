@@ -269,3 +269,93 @@ class TestTheAgentIsNotAskedAboutUnsellablePositions:
             "the filter is silent; a run must report how many positions it "
             "held back")
 
+
+
+class TestATrimIsALotOrItIsNotATrim:
+    """`int(held * frac)` is not lot-aligned, and the exit path refuses a
+    partial that is not a whole lot.
+
+    Measured on a real run: a 7000-share position trimmed to 3500 fine, then
+    the next trim asked for 1750 — refused, and the decision was silently
+    dropped. The agent had decided; the arithmetic threw it away.
+    """
+
+    def _trim(self, monkeypatch, held, fraction=None):
+        calls = {}
+
+        def _fake_close(position_id, *, close_price, close_reason, shares=None):
+            calls["shares"] = shares
+            return True
+        monkeypatch.setattr(ED, "close_position", _fake_close)
+        pos = {"id": 1, "code": "600001", "name": "甲", "shares": held,
+               "open_price": 10.0}
+        d = {"code": "600001", "action": "trim", "reason": "减仓"}
+        if fraction is not None:
+            d["fraction"] = fraction
+        out = ED._apply_trim(pos, 11.0, d)
+        return calls.get("shares"), out
+
+    def test_the_sale_is_lot_aligned_at_the_default_fraction(
+            self, monkeypatch):
+        """3500 * 0.5 = 1750, floored to the lot = 1700. The un-aligned
+        value was 1750, which the exit path refuses."""
+        shares, out = self._trim(monkeypatch, 3500)
+        assert shares == 1700, f"expected 1700 (a whole lot), got {shares}"
+        assert out is not None
+
+    def test_a_seven_thousand_share_position_trims_to_thirty_five_hundred(
+            self, monkeypatch):
+        shares, _ = self._trim(monkeypatch, 7000)
+        assert shares == 3500
+
+    def test_the_remainder_is_always_a_whole_lot_too(self, monkeypatch):
+        for held in (1000, 1500, 2900, 3500, 7000, 12300):
+            shares, _ = self._trim(monkeypatch, held)
+            assert shares % ED.LOT_SIZE == 0, (held, shares)
+            assert (held - shares) % ED.LOT_SIZE == 0, (held, shares)
+
+    def test_below_one_lot_it_holds_rather_than_selling_everything(
+            self, monkeypatch):
+        """A trim that cannot reach a lot is not a disguised full exit."""
+        shares, out = self._trim(monkeypatch, 100)
+        assert out is None
+
+    def test_a_fraction_that_would_leave_nothing_is_not_a_trim(
+            self, monkeypatch):
+        """0.9 of 100 is 90 — below a lot. Selling the 100 instead would
+        misreport what the agent decided."""
+        shares, out = self._trim(monkeypatch, 100, fraction=0.9)
+        assert out is None
+
+    def test_the_headline_fraction_is_honoured_where_it_can_be(
+            self, monkeypatch):
+        shares, _ = self._trim(monkeypatch, 10000, fraction=0.3)
+        assert shares == 3000
+
+
+class TestTheAlertTypeIsCountedOnce:
+    """The alert type already carries the `agent_` prefix.
+
+    The first version prefixed it again, so the counter read
+    `agent_agent_trim` — a key no reader would look for and the report never
+    printed. A trim that succeeded therefore looked like no activity at all.
+    """
+
+    def test_the_types_the_executor_returns(self):
+        import inspect
+        src = inspect.getsource(ED._apply_trim)
+        assert '"agent_trim"' in src
+        src = inspect.getsource(ED._apply_sell)
+        assert '"agent_exit"' in src
+
+    def test_the_counter_does_not_double_the_prefix(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import inspect
+        import walk_forward as wf
+        src = inspect.getsource(wf._agent_exits)
+        assert 'f"agent_{a.get' not in src, (
+            "the counter prefixes a type that already has the prefix, so "
+            "`agent_trim` is recorded as `agent_agent_trim`")
+        assert "startswith(\"agent_\")" in src

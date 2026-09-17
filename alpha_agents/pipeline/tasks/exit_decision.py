@@ -35,6 +35,9 @@ from alpha_agents.data.memory_store import get_theme_by_name
 from alpha_agents.data.portfolio import (
     HARD_STOP_PCT, close_position, get_open_positions,
 )
+# A-share board lot. Imported from the module that already owns the constant
+# rather than re-declared, so a market-rule change moves one place.
+from alpha_agents.data.portfolio_exit import LOT_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -390,14 +393,27 @@ def _apply_trim(pos: dict, price: float, d: dict) -> dict | None:
         frac = min(0.9, max(0.1, float(d.get("fraction"))))
     except (TypeError, ValueError):
         frac = DEFAULT_TRIM_FRACTION
-    sell = int(held * frac)
+    # Lot-aligned, because A-shares trade in board lots and the exit path
+    # refuses a partial that is not a whole lot. Without this, a trim of a
+    # 7000-share position succeeds (3500) and the next one is refused
+    # (1750) — measured on a real run, where the second trim was refused and
+    # the decision was silently dropped.
+    sell = int(held * frac) // LOT_SIZE * LOT_SIZE
     reason = f"agent减仓: {d['reason']}"[:200]
+    if sell <= 0 or sell >= held:
+        # Below one lot, or the whole position: neither is a trim. Holding is
+        # the honest outcome for the first, and a full exit dressed as a trim
+        # would misreport what the agent decided.
+        logger.info("Trim of %s not actionable (%d of %d股) — holding",
+                    d["code"], sell, held)
+        return None
     if not close_position(pos["id"], close_price=price,
                           close_reason=reason, shares=sell):
-        # Below one lot to sell — holding is the honest outcome, not a
-        # silent full exit, which is what the old code did.
-        logger.info("Trim of %s too small to execute (%d股) — holding",
-                    d["code"], held)
+        # The exit path refused for a reason it logged (T+1, a limit, a
+        # closed position). Holding is the honest outcome, not a silent full
+        # exit, which is what the old code did.
+        logger.info("Trim of %s refused by the exit path (%d of %d股) — holding",
+                    d["code"], sell, held)
         return None
     return {"type": "agent_trim", "code": d["code"], "name": pos.get("name", ""),
             "reason": reason, "close_price": price,

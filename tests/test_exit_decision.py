@@ -302,11 +302,33 @@ class TestSizingIsTheAgentsCall:
                 self.POS, {"600835": 18.56}) == []
 
     def test_a_trim_too_small_to_execute_holds(self):
-        """Below one lot the honest outcome is holding, not a silent exit."""
+        """Below one lot the honest outcome is holding, not a silent exit.
+
+        The sale is computed **before** the call now: a 100-share position
+        at the default half-fraction yields 50, which is not a board lot, so
+        there is nothing to submit. Asking the exit path to refuse it worked
+        but spent a round trip on a question with one possible answer — and
+        measured on a real run the refusal was silent, so the decision
+        vanished.
+        """
         with patch.object(exit_decision, "close_position",
                           return_value=False) as close:
             assert exit_decision.apply(
                 [{"code": "600835", "action": "trim", "reason": "x"}],
                 [{"id": 7, "code": "600835", "name": "X", "shares": 100,
                   "open_price": 18.4}], {"600835": 18.56}) == []
-        assert close.called
+        assert not close.called, (
+            "a sub-lot trim reached the exit path; it should be resolved "
+            "before the call")
+
+    def test_a_trim_that_can_reach_a_lot_is_submitted(self):
+        """The complement, so the guard above cannot pass by refusing
+        everything."""
+        with patch.object(exit_decision, "close_position",
+                          return_value=True) as close:
+            out = exit_decision.apply(
+                [{"code": "600835", "action": "trim", "reason": "x"}],
+                [{"id": 7, "code": "600835", "name": "X", "shares": 400,
+                  "open_price": 18.4}], {"600835": 18.56})
+        assert close.called and close.call_args.kwargs["shares"] == 200
+        assert out and out[0]["type"] == "agent_trim"

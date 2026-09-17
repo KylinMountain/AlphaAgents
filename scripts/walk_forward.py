@@ -1342,7 +1342,13 @@ def _agent_exits(ctx, day: str) -> list[dict]:
         if a.get("type") != "agent_exit":
             # trim/add are recorded by the executor and are not full exits;
             # counting them as sells would overstate the agent's activity.
-            ctx.counters[f"agent_{a.get('type', 'other')}"] += 1
+            #
+            # The alert type already carries the `agent_` prefix
+            # (`agent_trim`, `agent_add`), and the first version prefixed it
+            # again — the counter read `agent_agent_trim`, which no reader
+            # would look for and the report never printed.
+            kind = str(a.get("type") or "agent_other")
+            ctx.counters[kind if kind.startswith("agent_") else f"agent_{kind}"] += 1
             continue
         fills.append({
             "date": day, "side": "sell", "code": a["code"],

@@ -557,3 +557,66 @@ class TestIntegrity:
         summary = SH.summary(run)
         assert summary["counts"]["forecasts"] == 1
         assert summary["integrity"] == []
+
+
+# ── 9. A report type that can never be paired is refused up front ───────
+#
+# `paired_count` needs `brier IS NOT NULL` on the champion row, `brier` is
+# written only for a row that carried a `prob`, and `prob` is written only for
+# an `actionable` pick — a limit-up `signal` row is an observation and carries
+# none by design. So a report type whose rows are all signals is not a slow
+# experiment, it is an impossible one, and its progress line reads `0/20`
+# forever: a shape identical to "the experiment just started".
+
+
+class TestAReportTypeThatCannotBePairedIsRefused:
+    def test_a_signal_only_book_is_refused(self, store, version):
+        """`intraday_signal` is the real case: 282 rows in the live book, not
+        one of them carrying a prob."""
+        for code in ("600000", "600001"):
+            memory_store.save_prediction(
+                _today(), "intraday_signal", code, "X", "看多", "high",
+                "t", 1.0, "reason", prob=None, trader_id="default",
+                horizon_days=None)
+
+        with pytest.raises(SH.ShadowError, match="cannot be paired"):
+            _open(version, report_type="intraday_signal")
+
+    def test_the_refusal_names_why_and_what_to_use(self, store, version):
+        memory_store.save_prediction(
+            _today(), "intraday_signal", "600000", "X", "看多", "high",
+            "t", 1.0, "reason", prob=None, trader_id="default",
+            horizon_days=None)
+        with pytest.raises(SH.ShadowError) as exc:
+            _open(version, report_type="intraday_signal")
+        message = str(exc.value)
+        assert "none" in message and "prob" in message
+        assert "intraday" in message, (
+            "the refusal has to say which book does work, or the operator is "
+            "left guessing")
+
+    def test_an_actionable_book_is_accepted(self, store, version):
+        """The other direction. `intraday` rows all carry a prob, so the same
+        refusal must not fire on them."""
+        memory_store.save_prediction(
+            _today(), "intraday", "600000", "X", "看多", "high",
+            "t", 1.0, "reason", prob=0.6, trader_id="default", horizon_days=3)
+        assert _open(version, report_type="intraday") > 0
+
+    def test_an_empty_book_is_not_refused(self, store, version):
+        """A fresh deployment has no rows yet. Refusing that would make the
+        experiment impossible to start before the data exists — the refusal is
+        specifically "this type has a history and none of it is gradable"."""
+        assert SH.prob_coverage("intraday_signal")["rows"] == 0
+        assert _open(version, report_type="intraday_signal") > 0
+
+    def test_the_measurement_is_reported(self, store):
+        memory_store.save_prediction(
+            _today(), "intraday", "600000", "X", "看多", "high",
+            "t", 1.0, "reason", prob=0.6, trader_id="default", horizon_days=3)
+        memory_store.save_prediction(
+            _today(), "intraday_signal", "600001", "X", "看多", "high",
+            "t", 1.0, "reason", prob=None, trader_id="default",
+            horizon_days=None)
+        assert SH.prob_coverage("intraday")["pairable"] is True
+        assert SH.prob_coverage("intraday_signal")["pairable"] is False

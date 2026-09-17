@@ -298,6 +298,37 @@ def _cmd_shadow_open(args) -> int:
     return 0
 
 
+def _cmd_shadow_close(args) -> int:
+    """End a shadow run. Its forecasts and scores stay readable.
+
+    The operator half of ``shadow.close_run``, which until now had no caller
+    at all — the same "declared but unreachable" shape as D31. Without it an
+    experiment opened on the wrong book could not be retired, and
+    ``open_run`` refuses a second open run for the same
+    (version, report type, producer), so the version was blocked from being
+    measured correctly for as long as the mistake stood.
+    """
+    run = shadow.get_run(args.run)
+    if run is None:
+        raise ValueError(f"No shadow run #{args.run} to close")
+    if run["status"] != "open":
+        print(f"  run #{args.run} is already {run['status']}; nothing to do.")
+        return 0
+    if args.dry_run:
+        coverage = shadow.coverage(args.run)["runs"]
+        paired = coverage[0]["paired"] if coverage else 0
+        print(f"  would close run #{args.run} "
+              f"({run['report_type']!r} / {run['producer']!r}), "
+              f"which has {paired} paired sample(s)")
+        print("  its forecasts and scores stay readable; only the status moves.")
+        print("dry run: nothing written.")
+        return 0
+    shadow.close_run(args.run, reason=args.reason, closed_at=args.at)
+    print(f"  run #{args.run} closed. Its forecasts and scores remain "
+          "readable — closing ends the experiment, it does not erase it.")
+    return 0
+
+
 def _cmd_shadow_emit(args) -> int:
     """Write the challenger's forecasts for one date.
 
@@ -591,9 +622,14 @@ def main(argv: list[str] | None = None) -> int:
                                   "constant_0.5 for the no-skill baseline, or "
                                   "remap_confidence for the candidate. An "
                                   "unregistered name is refused, with the list.")
-    shadow_open.add_argument("--report-type", default="morning",
+    shadow_open.add_argument("--report-type", default="intraday",
                              help="which book the experiment pairs on "
-                                  "(default: morning).")
+                                  "(default: intraday — the actionable book). "
+                                  "'morning' has produced nothing since "
+                                  "2026-09-10 and 'intraday_signal' carries no "
+                                  "prob, so neither can ever produce a paired "
+                                  "sample; open_run measures the book and "
+                                  "refuses one that cannot.")
     shadow_open.add_argument("--reason", required=True,
                              help="why, in one sentence.")
     shadow_open.add_argument("--at", default=None, metavar="YYYY-MM-DD",
@@ -601,6 +637,17 @@ def main(argv: list[str] | None = None) -> int:
     shadow_open.add_argument("--dry-run", action="store_true",
                              help="print what would happen, then stop.")
     shadow_open.set_defaults(func=_cmd_shadow_open)
+
+    shadow_close = sub.add_parser(
+        "shadow-close", help="end a shadow run; its scores stay readable.")
+    shadow_close.add_argument("--run", type=int, required=True)
+    shadow_close.add_argument("--reason", required=True,
+                              help="why it is being ended, in one sentence.")
+    shadow_close.add_argument("--at", default=None, metavar="YYYY-MM-DD",
+                              help="the date to record (default: the kernel clock).")
+    shadow_close.add_argument("--dry-run", action="store_true",
+                              help="print what would happen, then stop.")
+    shadow_close.set_defaults(func=_cmd_shadow_close)
 
     shadow_emit = sub.add_parser(
         "shadow-emit", help="write the challenger's forecasts for one date.")

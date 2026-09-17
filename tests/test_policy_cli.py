@@ -323,8 +323,16 @@ class TestTheExperimentIsDrivable:
         return registry.versions_for()[-1]["id"]
 
     def _open(self, cli, version: int, *extra) -> int:
+        # The report type is stated rather than defaulted. The default moved
+        # from `morning` to `intraday` on 2026-09-17 because `morning` has
+        # produced nothing since 2026-09-10 and `intraday_signal` carries no
+        # prob, so neither can ever yield a paired sample. These tests
+        # exercise the CLI's mechanics on the `morning` book, so they say so
+        # rather than inherit a default that is a judgement about which book
+        # is worth measuring.
         return cli.main(["shadow-open", "--version", str(version),
                          "--producer", "remap_confidence",
+                         "--report-type", "morning",
                          "--reason", "measure the candidate", *extra])
 
     def test_opening_a_run_names_what_it_measures(self, cli, store, capsys):

@@ -225,6 +225,77 @@ def scope_for(producer_name: str) -> str:
         "either baseline or candidate.")
 
 
+def prob_coverage(report_type: str, *, days: int = 30,
+                  conn: sqlite3.Connection | None = None) -> dict:
+    """Whether a report type's book can be paired at all, measured.
+
+    A paired sample needs **both** sides scored, and ``paired_count`` requires
+    ``brier IS NOT NULL`` on the champion row. ``brier`` is written only for a
+    row that carried a ``prob``, and ``prob`` is written only for an
+    ``actionable`` pick — a limit-up ``signal`` row is an observation, not a
+    forecast, and carries none by design.
+
+    So a report type whose rows are all signals is not a slow experiment: it
+    is one that can never reach n=1, however long it runs. The operator would
+    see ``0/20`` every day and read it as "early" rather than "impossible".
+
+    This is measured from the book rather than declared, because the split
+    between the two populations is a property of the code path that wrote the
+    rows — ``intraday_signal`` and ``intraday`` come from the same function,
+    one branch apart — and a constant list here would drift from it silently.
+    """
+    conn = conn if conn is not None else memory_store._get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) rows, "
+        "  SUM(prob IS NOT NULL) with_prob, "
+        "  SUM(brier IS NOT NULL) with_brier, "
+        "  COUNT(DISTINCT date) days, "
+        "  MAX(date) newest "
+        "FROM predictions WHERE report_type = ? "
+        "  AND date >= date('now', ?)",
+        (report_type, f"-{int(days)} day")).fetchone()
+    rows = int(row["rows"] or 0)
+    with_prob = int(row["with_prob"] or 0)
+    return {
+        "report_type": report_type,
+        "rows": rows,
+        "with_prob": with_prob,
+        "with_brier": int(row["with_brier"] or 0),
+        "days": int(row["days"] or 0),
+        "newest": row["newest"],
+        "pairable": with_prob > 0,
+        "window_days": int(days),
+    }
+
+
+def assert_pairable(report_type: str, *, days: int = 30) -> dict:
+    """Refuse a report type that has never carried a probability.
+
+    Called by ``open_run``. Opening an experiment on such a book is not a
+    harmless no-op: it writes a run row, the daily task emits forecasts
+    against an empty panel, ``paired_count`` stays at zero forever, and the
+    progress line reads ``0/20`` — a shape identical to "the experiment just
+    started". The operator has no way to tell the two apart from the report,
+    which is the defect this refuses.
+
+    A book with **no rows at all** is not refused: that is a fresh deployment
+    or a report type nothing has run yet, and refusing it would make the
+    experiment impossible to start before the data exists. The refusal is
+    specifically "this type has a history and none of it can be graded".
+    """
+    cov = prob_coverage(report_type, days=days)
+    if cov["rows"] > 0 and not cov["pairable"]:
+        raise ShadowError(
+            f"Report type {report_type!r} cannot be paired: {cov['rows']} "
+            f"prediction(s) in the last {cov['window_days']} days and **none** "
+            "carries a prob, so none can be scored for Brier. A paired sample "
+            "needs both sides graded, so this experiment would report 0/needed "
+            "forever — indistinguishable from one that just started. Pick a "
+            "report type whose rows carry probabilities (the actionable book, "
+            "e.g. 'intraday'), or open the experiment once such rows exist.")
+    return cov
+
+
 # ── Schema, owned here ─────────────────────────────────────────────────
 
 _RUNS = """
@@ -316,7 +387,7 @@ def _positive_id(value, field: str) -> int:
 
 
 def open_run(*, policy_version_id: int, reason: str,
-             trader_id: str | None = None, report_type: str = "morning",
+             trader_id: str | None = None, report_type: str = "intraday",
              producer: str = BASELINE_NAME,
              opened_at: str | None = None) -> int:
     """Open a shadow run of one frozen policy version. Returns its id.
@@ -352,6 +423,10 @@ def open_run(*, policy_version_id: int, reason: str,
         raise ShadowError(
             f"No policy version #{policy_version_id} to shadow: a run that "
             "cannot name the policy it is measuring could never be promoted.")
+    # Refuse a book that can never be paired, before writing the run row.
+    # Checked here rather than in the CLI so both doors — the scheduled task
+    # and ``scripts/policy.py`` — get the same answer.
+    assert_pairable(report_type)
     trader = _text(trader_id, "trader_id") if trader_id else \
         f"{SHADOW_TRADER_PREFIX}{policy_version_id}"
 

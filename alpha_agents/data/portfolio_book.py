@@ -198,3 +198,48 @@ def get_closed_positions(limit: int = 50,
         _trader_args(trader_id) + (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 下单前的两个读账本助手 ──────────────────────────────────
+#
+# 从 ``portfolio`` 搬来：它们只读行、不碰钱、不定价，正是本模块的职责。
+# 搬动的原因是 ``portfolio`` 越过了 1200 行上限，而这两个函数与
+# ``_create_pending_order_impl`` 之间没有共享状态——它们各自被两处调用，
+# 所以放在这里不制造新的耦合。
+
+
+def _valid_prediction(conn, prediction_id, code: str, trader_id: str) -> bool:
+    """这份预测确实是这个交易员对这只票的判断吗？"""
+    if prediction_id is None:
+        return True
+    if type(prediction_id) is not int or prediction_id <= 0:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM predictions WHERE id=? AND code=? AND trader_id=?",
+        (prediction_id, code, trader_id),
+    ).fetchone() is not None
+
+
+def _expire_days_for(thesis_id, trader_id: str, *, thesis_mod, trader_pct,
+                     default: int) -> int:
+    """How many days this order is worth waiting for.
+
+    The idea declares its own horizon, so the order inherits it. A three-day
+    breakout setup whose price has not arrived by day three has not been
+    unlucky — it has not happened, and the agent said three days when it
+    wrote the thing down. ``_create_pending_order_impl`` used to write a
+    flat ``PENDING_EXPIRE_DAYS`` here, which meant every declaration was
+    overridden by a 2 that the monitor then never read anyway.
+
+    The trader's own default is the second choice, so a book whose agent
+    omitted the horizon still expires on the schedule that book believes
+    in. ``PENDING_EXPIRE_DAYS`` is the last resort and nothing more.
+
+    ``thesis_mod`` / ``trader_pct`` are injected rather than imported: both
+    live in ``portfolio``, which imports this module, so a module-scope
+    import here would be a cycle.
+    """
+    th = thesis_mod.get_by_id(thesis_id)
+    if th and th.horizon_days:
+        return int(th.horizon_days)
+    return int(trader_pct(trader_id, "default_horizon_days", default))

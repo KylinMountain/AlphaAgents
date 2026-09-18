@@ -60,6 +60,7 @@ from alpha_agents.data.portfolio_sizing import (
 # Imported at module scope because check_pending_orders and _fill_order
 # call into it directly, and re-exported to callers by being in this
 # namespace — chat.py still does `from portfolio import _cancel_order`.
+from alpha_agents.data import portfolio_book
 from alpha_agents.data.portfolio_book import (
     _cancel_order,
     _cancel_order_impl,
@@ -281,38 +282,6 @@ def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
 # ── Pending Orders (挂单) ───────────────────────────────────
 
 
-def _valid_prediction(conn, prediction_id: int | None, code: str, trader_id: str) -> bool:
-    if prediction_id is None:
-        return True
-    if type(prediction_id) is not int or prediction_id <= 0:
-        return False
-    return conn.execute(
-        "SELECT 1 FROM predictions WHERE id=? AND code=? AND trader_id=?",
-        (prediction_id, code, trader_id),
-    ).fetchone() is not None
-
-
-def _expire_days_for(thesis_id: int | None, trader_id: str) -> int:
-    """How many days this order is worth waiting for.
-
-    The idea declares its own horizon, so the order inherits it. A three-day
-    breakout setup whose price has not arrived by day three has not been
-    unlucky — it has not happened, and the agent said three days when it
-    wrote the thing down. ``_create_pending_order_impl`` used to write a
-    flat ``PENDING_EXPIRE_DAYS`` here, which meant every declaration was
-    overridden by a 2 that the monitor then never read anyway.
-
-    The trader's own default is the second choice, so a book whose agent
-    omitted the horizon still expires on the schedule that book believes
-    in. ``PENDING_EXPIRE_DAYS`` is the last resort and nothing more.
-    """
-    th = thesis.get_by_id(thesis_id)
-    if th and th.horizon_days:
-        return int(th.horizon_days)
-    return int(_trader_pct(trader_id, "default_horizon_days",
-                           PENDING_EXPIRE_DAYS))
-
-
 def _create_pending_order_impl(
     *,
     code: str,
@@ -350,7 +319,8 @@ def _create_pending_order_impl(
     """
     with _write_lock:
         conn = _get_conn()
-        if not _valid_prediction(conn, prediction_id, code, trader_id):
+        if not portfolio_book._valid_prediction(
+                conn, prediction_id, code, trader_id):
             logger.warning("Rejected prediction link %s for %s/%s", prediction_id, trader_id, code)
             return None
         if not attribution.valid_thesis(conn, thesis_id, code, trader_id):
@@ -384,13 +354,27 @@ def _create_pending_order_impl(
         # The same admission bar check_pending_orders applies, applied at
         # creation instead of one cycle later — see `data/theme_gate.py` for
         # what it is now and why the old one cost 106 of 117 orders.
+        #
+        # A refusal is recorded, not just logged: it is the decision a
+        # counterfactual has to see. Built from the same terms as the
+        # placement below, because "what it would have ordered" and "what it
+        # refused to order" are the same intent with a different action.
+        terms = {"entry_low": entry_low, "entry_high": entry_high,
+                 "stop_loss": stop_loss, "target_price": target_price,
+                 "source": source, "reason": reason}
         weak = theme_admits(theme)
         if weak:
+            attribution.record_refusal(
+                conn, trader_id=trader_id, code=code, order_date=order_date,
+                refused_by=weak, theme=theme, thesis_id=thesis_id,
+                prediction_id=prediction_id, **terms)
             logger.info("Rejected order %s %s: %s — 下一轮也会被撤，不如不建",
                         code, name, weak)
             return None
 
-        expire_days = _expire_days_for(thesis_id, trader_id)
+        expire_days = portfolio_book._expire_days_for(
+            thesis_id, trader_id, thesis_mod=thesis,
+            trader_pct=_trader_pct, default=PENDING_EXPIRE_DAYS)
         cursor = conn.execute(
             "INSERT INTO virtual_portfolio "
             "(code, name, theme, order_date, open_date, open_price, entry_low, entry_high, "
@@ -410,13 +394,8 @@ def _create_pending_order_impl(
             attribution.freeze(
                 conn, trader_id=trader_id, code=code,
                 information_cutoff=order_date, decided_at=order_date,
-                payload={
-                    "action": "open",
-                    "entry_low": entry_low, "entry_high": entry_high,
-                    "stop_loss": stop_loss, "target_price": target_price,
-                    "expire_days": expire_days,
-                    "source": source, "reason": reason,
-                },
+                payload={"action": "open", "expire_days": expire_days,
+                         **terms},
                 thesis_id=thesis_id, order_id=order_id,
                 prediction_id=prediction_id,
                 sources=[source] if source else [],
@@ -979,7 +958,8 @@ def _open_position_impl(
 
     with _write_lock:
         conn = _get_conn()
-        if not _valid_prediction(conn, prediction_id, code, trader_id):
+        if not portfolio_book._valid_prediction(
+                conn, prediction_id, code, trader_id):
             logger.warning("Rejected prediction link %s for %s/%s", prediction_id, trader_id, code)
             return None
         if not attribution.valid_thesis(conn, thesis_id, code, trader_id):

@@ -83,6 +83,52 @@ def _text(value, field: str) -> str:
     return value.strip()
 
 
+def record_refusal(conn: sqlite3.Connection, *, trader_id: str, code: str,
+                   order_date: str, refused_by: str, entry_low=None,
+                   entry_high=None, stop_loss=None, target_price=None,
+                   theme: str = "", source: str = "", reason: str = "",
+                   thesis_id: int | None = None,
+                   prediction_id: int | None = None) -> int | None:
+    """Record a decision the **system refused to act on**.
+
+    A refusal is a decision. It returned ``None`` and wrote nothing, which
+    made the one case a counterfactual exists to measure invisible: when the
+    OFF arm places an order and the ON arm is blocked by the theme gate, the
+    changed side had no row, so pairing reported ``pairs=0`` instead of "the
+    gate changed this decision". Measured on a 5-day replay with rebuilt
+    theme scores — two orders were refused by the gate and neither left a
+    decision behind.
+
+    ``payload["action"] == "refuse"`` is what makes it comparable: the intent
+    comparison then sees "placed an order" against "refused, because 主线偏弱"
+    as a difference, which it is. An abstention (the model choosing to do
+    nothing) still writes nothing — that is a different fact, and conflating
+    them would make "the gate blocked it" indistinguishable from "it found
+    nothing worth buying".
+
+    Best effort, like the other audit writes on the order path: a snapshot
+    that cannot be written must not turn a refusal into a placement.
+    """
+    try:
+        snapshot_id = freeze(
+            conn, trader_id=trader_id, code=code,
+            information_cutoff=order_date, decided_at=order_date,
+            payload={
+                "action": "refuse",
+                "refused_by": refused_by,
+                "entry_low": entry_low, "entry_high": entry_high,
+                "stop_loss": stop_loss, "target_price": target_price,
+                "theme": theme, "source": source, "reason": reason,
+            },
+            thesis_id=thesis_id, prediction_id=prediction_id,
+            sources=[source] if source else [],
+        )
+        conn.commit()
+        return snapshot_id
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("Could not freeze refusal for %s: %s", code, exc)
+        return None
+
 def valid_thesis(conn: sqlite3.Connection, thesis_id: int | None,
                  code: str, trader_id: str) -> bool:
     """Does this thesis belong to this order?

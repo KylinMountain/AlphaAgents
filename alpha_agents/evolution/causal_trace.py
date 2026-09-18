@@ -273,7 +273,9 @@ def _intent_differs(a: dict, b: dict) -> bool:
 
 
 def counterfactual_changes(*, limit: int = 200,
-                           conn: sqlite3.Connection | None = None) -> dict:
+                           conn: sqlite3.Connection | None = None,
+                           other_conn: sqlite3.Connection | None = None
+                           ) -> dict:
     """Pair decisions that differ **only** in which policy decided them.
 
     A pair is two ``decision_snapshots`` rows with the same ``trader_id``,
@@ -281,6 +283,14 @@ def counterfactual_changes(*, limit: int = 200,
     That is the closest a ledger can get to the ON/OFF experiment the design
     asks for (§8.6): the same trader, the same world state, two policies, and
     the intents they produced.
+
+    ``other_conn`` is the ON/OFF case, and it is why this takes two
+    connections. The design is explicit that the two arms have **independent
+    books** ("账本各自独立"), so the pair lives in two files and a single-`conn`
+    reading can never see one. Rows from both are read into one index and
+    paired by the same key; ``arm`` on each side records which book a
+    decision came from, so a difference can be attributed without assuming
+    which connection was "the experiment".
 
     It is deliberately strict about what it will pair, and it reports what it
     refused:
@@ -290,19 +300,27 @@ def counterfactual_changes(*, limit: int = 200,
     * rows whose cutoff differs are not paired — they decided on different
       information, so any difference could be the day rather than the policy.
 
-    The honest answer today is ``pairs == 0``: nothing runs the same decision
-    twice under two policies yet. That is why the rate is ``None`` rather than
-    ``0.0``, and it is a finding about the loop, not a failure of this function.
+    A **one-sided** opportunity — same trader, cutoff and code, but only one
+    arm has a row — is the case the design says must stay in the denominator
+    ("不得只比两边都买过的票的交集"). It is reported as
+    ``one_sided`` rather than silently dropped, because "the other arm chose
+    not to act" is exactly the change being measured.
     """
     if conn is None:
         from alpha_agents.data.memory_store import _get_conn
         conn = _get_conn()
 
-    rows = conn.execute(
-        "SELECT id, trader_id, code, information_cutoff, policy_ref, "
-        "       payload_json "
-        "FROM decision_snapshots "
-        "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    def _rows(source: sqlite3.Connection, arm: str) -> list[dict]:
+        got = source.execute(
+            "SELECT id, trader_id, code, information_cutoff, policy_ref, "
+            "       payload_json "
+            "FROM decision_snapshots "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{**dict(r), "arm": arm} for r in got]
+
+    rows = _rows(conn, "a")
+    if other_conn is not None:
+        rows += _rows(other_conn, "b")
 
     groups: dict[tuple, list] = {}
     for row in rows:
@@ -310,14 +328,26 @@ def counterfactual_changes(*, limit: int = 200,
         groups.setdefault(key, []).append(row)
 
     pairs: list[dict] = []
+    one_sided: list[dict] = []
     unpaired = 0
     for key, group in groups.items():
         by_policy: dict[str, list] = {}
         for row in group:
             by_policy.setdefault(row["policy_ref"] or "", []).append(row)
         if len(by_policy) < 2:
-            # One policy on this world state: no counterfactual is available.
-            unpaired += len(group)
+            # One policy on this world state. With two books that is not
+            # "no counterfactual" — it is the one-sided case, and it is
+            # counted separately so a reader can tell it from a same-book
+            # retry.
+            if other_conn is not None and len({r["arm"] for r in group}) == 1:
+                one_sided.append({
+                    "trader_id": key[0], "information_cutoff": key[1],
+                    "code": key[2], "arm": group[0]["arm"],
+                    "policy_ref": group[0]["policy_ref"],
+                    "intent": _intent_of(group[0]["payload_json"]),
+                })
+            else:
+                unpaired += len(group)
             continue
         refs = sorted(by_policy)
         # Every **distinct policy pair**, not "incumbent vs challenger": the
@@ -336,6 +366,8 @@ def counterfactual_changes(*, limit: int = 200,
                     "code": key[2],
                     "policy_a": a_row["policy_ref"],
                     "policy_b": b_row["policy_ref"],
+                    "arm_a": a_row["arm"],
+                    "arm_b": b_row["arm"],
                     "decision_a": a_row["id"],
                     "decision_b": b_row["id"],
                     "changed": _intent_differs(a, b),
@@ -352,13 +384,18 @@ def counterfactual_changes(*, limit: int = 200,
         "pairs": len(pairs),
         "changed": changed,
         "unpaired_decisions": unpaired,
+        "one_sided": one_sided[:20],
+        "one_sided_count": len(one_sided),
         "differences": [p for p in pairs if p["changed"]][:10],
         "note": (
             "Pairs share trader, information_cutoff and code and differ only "
             "in policy_ref. Zero pairs means no decision has yet been taken "
             "twice under two policies, so behaviour change is undefined — "
             "not zero. Neither ref is claimed to be the incumbent: the "
-            "snapshot records which policy decided, not which is the parent."),
+            "snapshot records which policy decided, not which is the parent. "
+            "one_sided lists opportunities only one arm acted on — the design "
+            "requires those in the denominator, and they are the cases a "
+            "lineage metric cannot see."),
     }
 
 

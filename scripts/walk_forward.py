@@ -275,6 +275,12 @@ LLM_LIMITATIONS = (
     "movers, so this measures selection inside a panel, not the panel itself",
     "one sampled model call per day: recorded and replayable, but a single "
     "sample is not a distribution over the model's judgement",
+    "the close-phase decision is a **synthetic close assumption**, not a "
+    "strict point-in-time 14:55 decision: it is shown the day's final "
+    "open/high/low/close/volume and its sells fill at that close, because the "
+    "business moment being modelled is 'just before the close' and a daily "
+    "bar is the finest data a replay holds. The last five minutes are not "
+    "modelled, so a run must not be read as a genuine 14:55 information set",
     "the {knowledge} block in a replay is this run's **own** observations, not "
     "the production retrieval path: production reaches a decision only through "
     "an approved knowledge snapshot (feedback.inject_principles), and a replay "

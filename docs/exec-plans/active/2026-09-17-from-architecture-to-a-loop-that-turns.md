@@ -329,6 +329,52 @@ size 差异算改变、弃权 vs 下单算改变、理由不同不算改变、0�
 `counterfactual_changes()` 产出 `pairs > 0`，从而得到
 `counterfactual_change_rate > 0`。机制全部就位，只差这一步执行。
 
+**2026-09-18：执行时发现两个必须补的结构缺口。**
+
+在带主题门的 5 天窗口上直接问反事实，得到：
+
+```
+decision_snapshots: 5   pairs: 0   unpaired: 5
+counterfactual_change_rate: None
+```
+
+两个原因，都已定位到行：
+
+**缺口 1：门的拒绝不落决策快照。**
+主题门在 `portfolio.create_pending_order` 里 `theme_admits()` 返回非空时
+**`return None`**（`data/portfolio.py:389-394`），发生在
+`attribution.freeze()` **之前**。所以"被门拦下的决定"在
+`decision_snapshots` 里**没有行**。
+
+而 ON/OFF 的差异**恰好落在这一侧**：OFF 组会下单、ON 组被拦。
+`counterfactual_changes()` 的配对要求两侧都有快照，于是把这种差异
+计成 `pairs=0` 而不是"一次被门改变的决定"。
+
+这正是评审 §8.6 说的「**不得只比两边都买过的票的交集**——那正好把两个
+交易员不同的选择丢掉，而不同的选择才是实验的内容」。**分母必须包含
+只被一边选中的机会。**
+
+修法（下一步）：门拒绝时也写一条决策记录，标记为
+`refused_by=theme_gate`，并带上 `policy_ref`。这样配对能看见
+"同一 (trader, cutoff, code) 下，一侧下单、另一侧被拦"，
+这正是 `changed=True`。
+**不能**只把 cancel 路径的 `close_reason` 当证据——那是订单被撤，
+与"建单被拒"是两件事（本窗口 2 笔是 `cancel_score` 撤单，
+不是 `admit_score` 拒单）。
+
+**缺口 2：回放的决策快照 `policy_ref` 全是 NULL。**
+5 条快照的 `policy_ref` 都是 NULL（回放没把在效版本记进去），
+所以 `counterfactual_changes()` 按 `policy_ref` 分组时只有一组，
+连"两个不同 policy"这个前提都不成立。
+
+修法（下一步）：回放在写决策快照时带上它在效的 policy 版本
+（`policy_registry.active_ref()`，或 OFF 臂显式的"无"标记），
+否则 ON/OFF 两臂在账本上无法区分。
+
+**这两处补完，④ 才真的能跑出 `pairs > 0`。** 在那之前
+`counterfactual_change_rate` 保持 `None`（未定义），而不是 0——
+"没测过"与"没有改变"必须继续分开。
+
 ### 🔴 这一轮又抓到两个真缺陷（都是我自己引入的）
 
 1. **`max_turns` 有两个主人，runner 的赢了**（见上）——已修。

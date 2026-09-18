@@ -1,0 +1,19 @@
+# Grandfathered policy statements — judgement that reached the
+# agent without passing the evidence door. New ones fail CI.
+# Remove a line only by moving the claim to versioned knowledge
+# or by deleting it. See docs/exec-plans/active/
+# 2026-09-17-from-architecture-to-a-loop-that-turns.md
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"""Synthesize all signals into a summary and actionable reco
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"recommendation": "可介入",
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"recommendation": "回避",
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"recommendation": "等回调",
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"recommendation": "观望",
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::"recommendation": "轻仓试探",
+alpha_agents/tools/institutional_position.py::hands the agent a conclusion instead of the inputs::return summary, {"recommendation": "数据不足，无法给出操作建议"}
+alpha_agents/tools/registry.py::attributes intent to an aggregate::主力净流入 = 大资金看好；主力净流出 = 大资金撤退。
+alpha_agents/tools/registry.py::equates a numeric threshold with a verdict::- "首亏"/"预减" = 高风险（earnings_risk: high），建议回避
+alpha_agents/tools/registry.py::equates a numeric threshold with a verdict::- ROE > 15% = 优质企业
+alpha_agents/tools/registry.py::equates a numeric threshold with a verdict::- 涨跌比 < 0.5 = 悲观（谨慎看多，关注超跌机会）
+alpha_agents/tools/registry.py::equates a numeric threshold with a verdict::- 涨跌比 > 2 = 乐观（适合看多）
+alpha_agents/tools/registry.py::hands the agent a conclusion instead of the inputs::综合4个维度给出操作建议：
+alpha_agents/tools/registry.py::hands the agent a conclusion instead of the inputs::输出包含: 综合评分(-10到+10)、多空信号列表、操作建议（介入区间+止损位）。

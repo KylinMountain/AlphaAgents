@@ -33,6 +33,15 @@ jobs:
       - name: Knowledge base
         run: uv run python scripts/lint_docs.py
 
+      - name: Policy contamination
+        # Judgement that reached the agent without passing the evidence door:
+        # a tool docstring saying "ROE > 15% = 优质企业", a prompt asserting
+        # "价格是结果，资金是原因". An unlabelled claim fails; a labelled
+        # prior (〔先验〕/〔approved〕) passes, because the problem is not
+        # having priors — it is having them without saying so.
+        # See tests/test_policy_contamination.py.
+        run: uv run python scripts/lint_policy.py
+
   tests:
     name: Tests
     runs-on: ubuntu-latest

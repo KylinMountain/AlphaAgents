@@ -1,0 +1,205 @@
+# 从「有自进化架构」到「自进化跑起来」：review 的四项 minimum fix
+
+状态：active
+创建：2026-09-17
+来源：外部评审（GPT-5.6 Sol）对 `v0.1.0` / 最近一轮真实 walk-forward /
+RSI-M3 实现的 REWORK 判定。**本文先把它的技术主张逐条对代码核实，再排任务。**
+
+## 核实结论（2026-09-17，对 main @ 77d4951）
+
+评审的技术主张**基本全部属实**，逐条给出代码证据：
+
+| # | 主张 | 核实 | 证据 |
+|---|---|---|---|
+| 1 | T1 Trader 没有工具、只有 1 turn | ✅ 属实 | `agents/t1_decider.py:320` `max_turns: int = 1`；`:338-340` `Agent(...)` **无 `tools=`** |
+| 2 | Morning Analyst 有 26 工具 / 40 turns | ✅ 属实 | `agents/morning.py:37` `MORNING_TOOLS`（26 个）、`:143` `max_turns=40` |
+| 3 | `decision_change_rate` 测的是血缘不是因果 | ✅ 属实 | `evolution/causal_trace.py:174` `changed = sum(... if c.candidate_id is not None)`——跑在候选派生版本上即计为 changed，**没有比较 ON/OFF 下的 intent** |
+| 4 | Variant 只支持一个基因位点 | ✅ 属实 | `evolution/variant.py:74-76` `_SUPPORTED_DELTAS` 只有 `("t1_change_rank","down"/"up") → theme_gate.w_rel ∓0.05` |
+| 5 | prompt 里有未经治理的"交易真理" | ✅ 属实 | `prompts/t1_decide.md:25-32`「这是 A 股**最重要的情绪指标**」「**价格是结果，资金是原因**」「**A 股是板块驱动的**」 |
+| 6 | tool docstring 里有策略判断 | ✅ 属实 | `tools/registry.py:319`「ROE > 15% = 优质企业」、`:332`「涨跌比 > 2 = 乐观（适合看多）」、`:402`「主力净流入 = 大资金看好」、`:462-468`「综合4个维度给出**操作建议**」 |
+| 7 | 6 个问题型工具只有 1 个落地 | ✅ 属实 | `docs/trader_toolkit.md:163-168` 列了 6 个；代码里只有 `get_limit_ladder`（`tools/limit_ladder.py:111`），`get_theme_leader` / `get_intraday_shape` / `get_stock_memory` / `get_my_state` / `replay_trade` **均无实现** |
+| 8 | 容量未强制、close replay 无滑点 | ✅ 属实 | `walk_forward.py:1157` 只把 `participation` 传给容量**计数**；全文件无 `SLIPPAGE` |
+| 9 | 14:55 用完整日线是显式近似 | ✅ 属实，且已在代码注释中声明 | `exit_decision.py:121-123` 明说"今天的开高低收量你**都已经看到**"；报告**未**把它标为 synthetic close |
+| 10 | `n < 50` 与闸门 `20` 的语义需统一 | ⚠️ **评审略滞后，但指出的是真问题** | `holdout_gate.py:58` `MIN_VALIDATION_SAMPLES = 20`；`GOLDEN_PRINCIPLES §7` 已于 2026-09-15 改为 `n < 20`——**规则与代码已是同一个数**。真问题在**表述层**：`docs/releases/v0.1.0.md` 当时仍写 `n < 50`（已修） |
+
+**核实中发现的额外问题（评审未提，属我们自己的账）**：
+
+- `docs/releases/v0.1.0.md` 有两处过时的 `n < 50`，与 §7/闸门不一致 → 已在本轮修正为 `n < 20`。
+- 这正是评审 P2 说的"不应该让读者猜"：**旧数字残留在对外文档里**，而文档是读者建立信任的入口。
+
+**评审结论中我们不接受的一处**：评审把"14:55 决策"称为应改名为
+`synthetic close decision assumption`。**工程口径我们保留**（用户已明确接受"收盘前基本等于收盘"），
+但**报告层要如实标注**——这正是本计划第 4 项的一部分。
+
+## 目标
+
+把评审的 4 项 minimum fix 落成**可机器验收**的交付。做到之后，
+评审承诺的评价变化是：从"具备 self-evolution architecture"到
+"governed self-evolving trader 已经跑起来"。
+
+**四件事，按依赖顺序：**
+
+### ① `decision_change_rate` 从血缘指标改为反事实指标（P1，最独立）
+
+**问题**：现在的实现把"跑在候选派生版本上"当作"决定变了"。一个
+`candidate_id != None` 但 intent 与 OFF 完全相同的决策，也被计为 changed。
+
+**收口**：新增反事实比较——同一 `WorldSnapshot`（同一日、同一面板、同一账本、
+同一模型交换），分别在 policy **OFF** 与 **ON** 下取 intent，逐字段比较
+`code / action / size / entry_low / entry_high / stop / target / abstain`，
+任一不同才算 changed。
+
+**验收（可机器检查）**：
+- 新指标 `counterfactual_change_rate`，与旧 `decision_change_rate` **并存且命名区分**；
+  旧指标改名为 `lineage_rate`（或保留但 docstring 明说它是血缘率），不再叫 change。
+- 测试：构造两个决策，OFF/ON 的 intent 完全相同 → `counterfactual_change_rate == 0`
+  且 `lineage_rate == 1`；OFF/ON 不同 → 前者 > 0。
+- 测试：`WorldSnapshot` 不同的两次决策**不得**进入同一配对（否则比的是两天的市场）。
+
+### ② 未经治理的策略断言：标注来源或移出（P1）
+
+**问题**：`prompts/t1_decide.md` 与 `tools/registry.py` 里有大量
+**hypothesis/policy** 被写成事实（"最重要的情绪指标"、"资金是原因"、"ROE>15% 是优质企业"、
+"综合评分给出操作建议"）。它们绕过了 candidate→validate→promote 这条唯一入口。
+
+**收口**（按可执行性分两级，先做 ① 级）：
+1. **区分事实与判断**：tool 输出只保留可核验事实（`broken_rate = 29.3%`），
+   把"建议降低仓位"这类结论移出 tool 层。
+2. **给策略性断言标来源**：prompt 中的策略句必须能回答"它凭什么获得真理身份"。
+   在 prompt 文件里对每一条加结构化来源标注（`invariant` / `approved knowledge` /
+   `candidate`），无来源者移入 knowledge 层。
+
+**验收**：
+- 新测试 `tests/test_policy_contamination.py`：扫描 `prompts/*.md` 与
+  `tools/registry.py` 的 docstring，命中**策略性断言模式**（"= 优质"、"适合看多"、
+  "操作建议"、"是原因"、"最重要的"）而**没有来源标注**的，测试失败并点名文件行号。
+- 白名单必须显式（每条注明来源），不允许"因为现在改不动所以豁免"的笼统豁免。
+
+### ③ 把 replay-safe 的问题型工具接进 T1 Trader（P1，工作量最大）
+
+**问题**：T1 Trader `tools=[]` / `max_turns=1`——它只能读平台预先做好的包，
+不能自己转头观察。`docs/trader_toolkit.md` 自己列的 6 个工具里，5 个没实现。
+
+**收口**：**不是把 30 个 registry tools 塞进去**，而是先接 5–6 个
+replay-safe、只输出事实的问题型工具（评审 §11 的清单）：
+
+| 工具 | 回答的问题 | 数据源 |
+|---|---|---|
+| `get_market_regime(as_of)` | 今天是什么市场 | breadth / ladder / 炸板率 / 昨日涨停溢价 / 最高连板 / 板块集中度 / 换手水位 |
+| `get_theme_state(theme, as_of)` | 这条线在生命周期哪一段 | 龙头 / 连板高度 / 梯队 / 昨日龙头今日表现 / 跟风数 / 炸板数 / 资金流 / 扩散或收缩 |
+| `get_stock_context(code, as_of)` | 这只票是什么状态 | 20/60 日结构 / ATR / 换手 / 成交额 / 资金流序列 / 相对板块强弱 / 涨停史 / 龙虎榜 / 融资 / 新闻时间线 |
+| `get_intraday_shape(code, as_of)` | 今天分时怎么走的 | open / VWAP / high-low / 上午下午量占比 / 冲高回落 / 尾盘加速 / relative volume |
+| `get_stock_memory(code)` | 我认识这只票吗 | 我过去看过它几次、买过几次、每次的理由与结果 |
+| `get_my_state()` | 我今天手顺不顺 | 当日/本周 P&L、回撤、连亏次数、今日决策数、敞口、主线集中度、最近 10 笔校准 |
+
+**硬约束（评审 §17 第 4 条，本计划的重点）**：
+每个开放给 Trader 的工具必须声明 **`supports_replay` / `as_of` / `source_time`**，
+**读未来直接失败**。这是回放诚实性的契约，不是文档要求。
+
+**验收**：
+- `tests/test_trader_tools_time_travel.py`：对每个接进 T1 的工具，
+  在 as-of 早于数据时点的调用上断言**抛错或返回空**，且错误信息点名时间边界；
+  在 as-of 覆盖数据时返回内容。用一个**未来数据**的 fixture 证明它不会泄漏。
+- T1 Trader 的 `tools=` 非空、`max_turns > 1`；一次真实回放里能看到至少一次
+  **模型主动发起**的工具调用（journal 里有 tool_calls）。
+- 分层不变量仍通过（工具在 `tools/`，不得反向 import）。
+
+### ④ RSI golden path 第一次真实跑通（P1，本计划的验收核心）
+
+**问题**：`variant.py` / `shadow.py` / `holdout_gate.py` / `policy_registry.py` /
+`causal_trace.py` 全都在，但生产 promotion = 0、真实 shadow = 0、
+ON/OFF 行为差异证据 = 0。**机制可达 ≠ 在跑。**
+
+**收口**：跑通**一次完整链条**（不要求自动 promote，人审批这道门保留）：
+
+```
+episode → candidate（带 EvidenceBundle）
+        → variant（冻结）
+        → 未见过的 future window
+        → ON / OFF 反事实比较
+        → decision 真的不同
+        → outcome
+        → evaluator
+        → survive / retire
+```
+
+**验收（本计划的最终判据，全部要真实数据、非桩）**：
+- 一次真实 walk-forward 里，存在一个 `candidate_id`，其 variant 在
+  **候选诞生之后**的窗口上产生了至少一次 `counterfactual_change_rate > 0` 的决策。
+- 该链条的 `causal_trace` 完整（`episode → candidate → variant → decision`），
+  且每一步都能在库里查到行。
+- evaluator 给出 survive 或 retire 的**明确裁决**（不是 abstain）。
+- **不 promote**——promotion 仍需人授权；本项只证明"链条能转一圈"。
+
+## 决策记录
+
+- 2026-09-17：**评审的技术主张逐条核实后基本全部接受**。P0 无新增（评审也确认
+  上一轮那些真 P0 已系统性修掉）。接受的核心是评审的框架判断：
+  **缺的是证明，不是更多功能**。
+- 2026-09-17：**评审第 10 条（`n < 50` vs 20）按"表述滞后"处理**，不是代码缺陷——
+  §7 与 `MIN_VALIDATION_SAMPLES` 已同为 20；残留的 `n < 50` 在 release notes 里，已修。
+- 2026-09-17：**14:55 口径保留工程近似，但报告必须标注**。评审建议改名
+  `synthetic close decision assumption`——我们在**报告层**采纳，在**实现层**不改：
+  用户已明确接受该近似，改实现等于放弃"收盘前决策"这个真实业务动作。
+- 2026-09-17：**工具接入不做 tool sprawl**。只接评审 §11 的 5–6 个问题型工具，
+  且必须先满足 time-travel 契约；registry 里那 30 个不整体接入。
+- 2026-09-17：**顺序**：① 最独立且能立刻修正一个错误命名 → 先做；
+  ② 是纯静态检查、风险低 → 紧随；③ 依赖新工具与 journal，工作量最大；
+  ④ 是总验收，依赖 ①②③ 全部到位。
+
+## 边界（本计划不做什么）
+
+- **不新增市场数据源。** 评审明确建议："我反而不建议现在继续堆市场数据源了。"
+- **不自动 promote。** 自动产生 → 自动验证 → 自动淘汰，**人审批** → 生产。
+  这仍然叫 Governed Self-Evolution。
+- **不重写 Trader Core。** 评审明确：不是 Trader Core REWORK。
+- **不为通过测试而放宽 time-travel 契约**（这是 ③ 里最容易被"先跑通"压力侵蚀的一条）。
+
+## 进度（2026-09-17）
+
+### ✅ ① `decision_change_rate` 改为反事实指标 —— 已完成
+
+`evolution/causal_trace.py`：
+
+- 旧指标保留在 `decision_change_rate` 键下，并新增**诚实的别名 `lineage_rate`**
+  与 `lineage_note`，明说它测的是"跑在候选提出的版本上"而不是"决定变了"。
+- 新增 `counterfactual_changes()`：配对条件是 **同 trader + 同
+  `information_cutoff` + 同 code + 不同 `policy_ref`**，逐字段比较
+  `action / code / shares / size_pct / entry_low / entry_high / stop_loss /
+  target_price`。`reason` 散文**不**参与比较（换句话说不算行为改变）；
+  `None` 与 `0` **不**相等（"没设止损"和"止损=0"是两条不同指令）。
+- 新增 `counterfactual_change_rate`，**无配对时为 `None` 而不是 0.0**——
+  没被测过 ≠ 没有改变。
+- 刻意**不**猜谁是 incumbent：`decision_snapshots` 只记录"哪个 policy 做了决定"，
+  不记录谁是父版本，按字符串排序猜血缘正是本模块存在的意义所反对的。
+- 报告行把「血缘」与「行为改变」分开打印。
+
+测试：`tests/test_causal_trace.py` 新增 `TestTheCounterfactualIsAPairNotALedger`
+（9 个用例：同 policy 不算配对、不同日不算配对、intent 相同不算改变、
+size 差异算改变、弃权 vs 下单算改变、理由不同不算改变、0≠None）。
+
+### ✅ ② 策略污染检查 —— 已完成（存量入册，T1 prompt 已清理）
+
+`scripts/lint_policy.py` + `scripts/lint_policy_baseline.txt`（14 条存量）
++ `tests/test_policy_contamination.py`（13 个用例）+ CI 新增一步。
+
+- **检查器**扫 `alpha_agents/prompts/` 与 `alpha_agents/tools/`，模式包括
+  「阈值=结论」「适合看多」「操作建议」「是原因」「最重要的指标」「…驱动的」
+  「大资金看好」。
+- **豁免机制是这套规则能落地的前提**：命中句子只要**声明来源**即放行
+  （`〔先验〕` / `〔approved〕` / `〔invariant〕`，可写在上一行）。问题从来不是
+  「有先验」，而是「有先验却不说」。
+- **已实质修复 `t1_decide.md`**：「价格是结果，资金是原因」「A 股是板块驱动的」
+  「这是 A 股最重要的情绪指标」三处断言改写为**带 `n=0` 标注的先验**，
+  并改掉了"通常/才"这类把未验证规律说成普遍事实的措辞。
+- 两处误伤已收窄（`futures.md` 的「情绪驱动」是分类标签；
+  `price_levels.py:153` 是计算说明且原文写着"不含任何建议"），
+  分别用收紧正则与**逐行豁免+理由**处理，不用整文件豁免。
+
+**未做**：`tools/registry.py` / `institutional_position.py` 的 14 条仍在存量里。
+它们需要的是**改输出**（把 `recommendation: 可介入` 换成可核验事实），
+属于 ③ 的工具改造范围，不与本步混做。
+
+### ⏳ ③ 问题型工具接进 T1 Trader —— 未开始
+
+### ⏳ ④ RSI golden path 真实跑通 —— 未开始（依赖 ①②③）

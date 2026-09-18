@@ -40,6 +40,22 @@ The two rates the plan asks for:
     Of the decisions made after a variant was frozen, what fraction ran under
     a version that variant produced. This is the number that separates "the
     system recorded a lesson" from "the lesson changed what the system did".
+
+    **The name overclaimed, and this module now says so twice.** Running under
+    a candidate's version is *lineage*: it proves the version was in force. It
+    does not prove the decision would have differed without it — a decision
+    that runs on variant 17 and orders the same code at the same size as the
+    incumbent changed nothing. The metric kept the name ``decision_change_rate``
+    and the paragraph above kept claiming it answered "did the lesson change
+    what the system did", which is a counterfactual and cannot be read off a
+    single ledger.
+
+    The counterfactual is now its own function (:func:`counterfactual_changes`),
+    over decisions that actually form a pair: same trader, same information
+    cutoff, same code, **different** ``policy_ref``. It compares the frozen
+    intents field by field and reports the rate over *pairs*, with the pair
+    count as its denominator. ``lineage_rate`` is what the old number is, named
+    honestly.
 """
 
 from __future__ import annotations
@@ -162,22 +178,35 @@ def trace_decisions(*, limit: int = 200,
 
 def rates(*, limit: int = 200,
           conn: sqlite3.Connection | None = None) -> dict:
-    """The two rates, over the most recent ``limit`` decisions.
+    """The rates, over the most recent ``limit`` decisions.
 
-    Both are reported with their denominator, because a rate over zero
-    decisions is not 0% — it is undefined, and printing 0% would read as
-    "the loop is failing" when the truth is "nothing has happened yet".
+    Every rate carries its denominator, because a rate over zero decisions is
+    not 0% — it is undefined, and printing 0% would read as "the loop is
+    failing" when the truth is "nothing has happened yet".
+
+    ``decision_change_rate`` is **lineage**, and is kept under its old key for
+    callers that already read it, with ``lineage_rate`` as the honest alias and
+    ``lineage_note`` stating what it does not mean. The counterfactual answer —
+    "would the decision have differed without the candidate's policy" — is
+    :func:`counterfactual_changes` and its rate is ``counterfactual_change_rate``;
+    it is ``None`` (undefined) until a real ON/OFF pair exists.
     """
     chains = trace_decisions(limit=limit, conn=conn)
     total = len(chains)
     traced = sum(1 for c in chains if c.complete)
     changed = sum(1 for c in chains if c.candidate_id is not None)
+    cf = counterfactual_changes(limit=limit, conn=conn)
     return {
         "decisions": total,
         "causal_trace_rate": (traced / total) if total else None,
         "traced": traced,
         "decision_change_rate": (changed / total) if total else None,
+        "lineage_rate": (changed / total) if total else None,
         "changed": changed,
+        "counterfactual_change_rate": (
+            (cf["changed"] / cf["pairs"]) if cf["pairs"] else None),
+        "counterfactual_changed": cf["changed"],
+        "counterfactual_pairs": cf["pairs"],
         "broken": [c.as_dict() for c in chains if not c.complete][:10],
         "note": (
             "A decision records which policy version it ran under, not which "
@@ -185,20 +214,185 @@ def rates(*, limit: int = 200,
             "per decision. So 'traced' means the chain "
             "episode → candidate → variant → decision is complete, and it "
             "does not mean the decision quoted the candidate."),
+        "lineage_note": (
+            "decision_change_rate / lineage_rate counts decisions that ran "
+            "under a version a candidate proposed. That is lineage, not "
+            "behaviour change: a decision on variant 17 that orders the same "
+            "code at the same size as the incumbent is counted here and "
+            "changed nothing. The counterfactual rate needs a real ON/OFF "
+            "pair over one world state (same trader, same information_cutoff, "
+            "same code, different policy_ref) and compares the frozen intents "
+            "field by field."),
+    }
+
+
+#: The intent fields a counterfactual comparison looks at. Named rather than
+#: compared as whole payloads: a payload also carries the reason prose and the
+#: source, and two decisions that order the same thing for differently-worded
+#: reasons have not changed behaviour. ``None`` on both sides counts as equal —
+#: "both declined to state a stop" is the same decision, not a difference.
+_INTENT_FIELDS = ("action", "code", "shares", "size_pct",
+                  "entry_low", "entry_high", "stop_loss", "target_price")
+
+
+def _intent_of(payload_json: str | None) -> dict:
+    """The comparable part of a frozen decision payload.
+
+    Absent fields normalise to ``None`` so a payload that omits a key and one
+    that writes ``null`` compare equal — otherwise the comparison would report
+    a difference that exists only in serialisation.
+    """
+    try:
+        payload = json.loads(payload_json) if payload_json else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {k: payload.get(k) for k in _INTENT_FIELDS}
+
+
+def _intent_differs(a: dict, b: dict) -> bool:
+    """Do these two intents describe different behaviour?
+
+    Numeric fields are compared at their stored precision. ``0`` and ``None``
+    are **not** the same: "no position" and "a zero-size position" are
+    different instructions, and the whole point of a counterfactual is to
+    catch that kind of difference rather than smooth it away.
+    """
+    for key in _INTENT_FIELDS:
+        av, bv = a.get(key), b.get(key)
+        if av is None and bv is None:
+            continue
+        if isinstance(av, (int, float)) and isinstance(bv, (int, float)):
+            if float(av) != float(bv):
+                return True
+            continue
+        if av != bv:
+            return True
+    return False
+
+
+def counterfactual_changes(*, limit: int = 200,
+                           conn: sqlite3.Connection | None = None) -> dict:
+    """Pair decisions that differ **only** in which policy decided them.
+
+    A pair is two ``decision_snapshots`` rows with the same ``trader_id``,
+    same ``information_cutoff``, same ``code`` and **different** ``policy_ref``.
+    That is the closest a ledger can get to the ON/OFF experiment the design
+    asks for (§8.6): the same trader, the same world state, two policies, and
+    the intents they produced.
+
+    It is deliberately strict about what it will pair, and it reports what it
+    refused:
+
+    * two rows under the **same** policy are not a pair — that is a retry or a
+      second order, and comparing it would report noise as change;
+    * rows whose cutoff differs are not paired — they decided on different
+      information, so any difference could be the day rather than the policy.
+
+    The honest answer today is ``pairs == 0``: nothing runs the same decision
+    twice under two policies yet. That is why the rate is ``None`` rather than
+    ``0.0``, and it is a finding about the loop, not a failure of this function.
+    """
+    if conn is None:
+        from alpha_agents.data.memory_store import _get_conn
+        conn = _get_conn()
+
+    rows = conn.execute(
+        "SELECT id, trader_id, code, information_cutoff, policy_ref, "
+        "       payload_json "
+        "FROM decision_snapshots "
+        "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    groups: dict[tuple, list] = {}
+    for row in rows:
+        key = (row["trader_id"], row["information_cutoff"], row["code"])
+        groups.setdefault(key, []).append(row)
+
+    pairs: list[dict] = []
+    unpaired = 0
+    for key, group in groups.items():
+        by_policy: dict[str, list] = {}
+        for row in group:
+            by_policy.setdefault(row["policy_ref"] or "", []).append(row)
+        if len(by_policy) < 2:
+            # One policy on this world state: no counterfactual is available.
+            unpaired += len(group)
+            continue
+        refs = sorted(by_policy)
+        # Every **distinct policy pair**, not "incumbent vs challenger": the
+        # snapshot records which policy decided, not which one is the parent,
+        # and picking one by string order would be inventing the ancestry this
+        # module exists to verify. Each pair is labelled by its own refs.
+        for i, ref_a in enumerate(refs):
+            for ref_b in refs[i + 1:]:
+                a_row = by_policy[ref_a][0]
+                b_row = by_policy[ref_b][0]
+                a = _intent_of(a_row["payload_json"])
+                b = _intent_of(b_row["payload_json"])
+                pairs.append({
+                    "trader_id": key[0],
+                    "information_cutoff": key[1],
+                    "code": key[2],
+                    "policy_a": a_row["policy_ref"],
+                    "policy_b": b_row["policy_ref"],
+                    "decision_a": a_row["id"],
+                    "decision_b": b_row["id"],
+                    "changed": _intent_differs(a, b),
+                    "intent_a": a,
+                    "intent_b": b,
+                })
+        # Extra decisions under a policy that already contributed one row to
+        # every comparison: counted, not silently dropped. Two orders under
+        # one policy are not a second counterfactual.
+        unpaired += len(group) - len(refs)
+
+    changed = sum(1 for p in pairs if p["changed"])
+    return {
+        "pairs": len(pairs),
+        "changed": changed,
+        "unpaired_decisions": unpaired,
+        "differences": [p for p in pairs if p["changed"]][:10],
+        "note": (
+            "Pairs share trader, information_cutoff and code and differ only "
+            "in policy_ref. Zero pairs means no decision has yet been taken "
+            "twice under two policies, so behaviour change is undefined — "
+            "not zero. Neither ref is claimed to be the incumbent: the "
+            "snapshot records which policy decided, not which is the parent."),
     }
 
 
 def summary_lines(*, limit: int = 200,
                   conn: sqlite3.Connection | None = None) -> list[str]:
-    """The rates as report lines, for the daily review."""
+    """The rates as report lines, for the daily review.
+
+    Lineage and behaviour change are printed as two different things, because
+    they are. The first line answers "did a decision run under a version a
+    candidate proposed"; the second answers "did the decision actually differ"
+    — and the second says "undefined" rather than "0%" while no ON/OFF pair
+    exists, so a reader cannot mistake "nothing was tested" for "nothing
+    changed".
+    """
     r = rates(limit=limit, conn=conn)
     if r["decisions"] == 0:
-        return ["• 因果链：还没有决策快照，两个比率都无从计算（不是 0%）"]
+        return ["• 因果链：还没有决策快照，比率无从计算（不是 0%）"]
+
     def _pct(v):
         return "—" if v is None else f"{v * 100:.1f}%"
-    return [
+
+    out = [
         f"• 因果链：{r['traced']}/{r['decisions']} 条决策可完整追溯到 episode"
         f"（causal_trace_rate {_pct(r['causal_trace_rate'])}）",
-        f"• 行为改变：{r['changed']}/{r['decisions']} 条决策跑在候选提出的版本上"
-        f"（decision_change_rate {_pct(r['decision_change_rate'])}）",
+        f"• 血缘：{r['changed']}/{r['decisions']} 条决策跑在候选提出的版本上"
+        f"（lineage_rate {_pct(r['lineage_rate'])}）——**这不等于行为改变**",
     ]
+    if r["counterfactual_pairs"]:
+        out.append(
+            f"• 行为改变：{r['counterfactual_changed']}/{r['counterfactual_pairs']} "
+            f"对同世界状态的 ON/OFF 决策产生了不同 intent"
+            f"（counterfactual_change_rate {_pct(r['counterfactual_change_rate'])}）")
+    else:
+        out.append(
+            "• 行为改变：**尚无 ON/OFF 配对**（同一个决策在不同 policy 下各跑一次），"
+            "所以行为改变率是未定义而不是 0% —— 没有任何决策被反事实验证过")
+    return out

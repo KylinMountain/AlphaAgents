@@ -73,9 +73,16 @@ class TestTheTemplateAsksForThem:
         assert "{market}" in text
 
     def test_the_prompt_explains_why_concepts_matter(self):
-        """A column the model is not told how to use is one it ignores."""
+        """A column the model is not told how to use is one it ignores.
+
+        The claim it used to state as fact ("A 股是板块驱动的") is now a
+        labelled prior: the model still reads how to use the column, and it
+        also reads that nothing in this repository has tested the claim. See
+        ``tests/test_policy_contamination.py``.
+        """
         text = D.load_prompt()
-        assert "板块驱动" in text
+        assert "脱离主线独自上涨的票" in text
+        assert "〔先验" in text
         assert "换手" in text
 
     def test_it_renders_with_every_placeholder_consumed(self):
@@ -364,6 +371,9 @@ class TestFundFlowReachesThePanel:
         assert set(got) <= {"600584"}
 
     def test_the_prompt_explains_the_column(self):
+        """The column is still explained; the causal claim is now labelled a
+        prior rather than stated as a fact about the market."""
         text = D.load_prompt()
         assert "主力净额" in text
-        assert "资金是原因" in text
+        assert "放量上涨且主力净流入" in text
+        assert "〔先验" in text

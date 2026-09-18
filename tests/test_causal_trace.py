@@ -194,11 +194,116 @@ class TestTheRatesCarryTheirDenominator:
         assert r["traced"] == 1
         assert r["causal_trace_rate"] == pytest.approx(0.5)
         assert r["decision_change_rate"] == pytest.approx(0.5)
+        # The old key is lineage, and the alias says so.
+        assert r["lineage_rate"] == pytest.approx(0.5)
 
     def test_it_names_what_traced_does_not_mean(self, store):
         """The boundary, in the payload. A reader must not read 'traced' as
         'the decision quoted the candidate'."""
         assert "not which rule text" in CT.rates()["note"]
+
+    def test_lineage_is_not_behaviour_change_and_says_so(self, store):
+        """The defect this fixes: a decision that ran on a candidate's version
+        but ordered exactly what the incumbent would have ordered was counted
+        as a changed decision. Lineage is a fact about which version was in
+        force; behaviour change is a counterfactual."""
+        assert "lineage, not" in CT.rates()["lineage_note"]
+        assert "field by field" in CT.rates()["lineage_note"]
+
+
+class TestTheCounterfactualIsAPairNotALedger:
+    """`decision_change_rate` measured lineage and called it change.
+
+    A counterfactual needs the same decision taken twice: same trader, same
+    information cutoff, same code, two policies. Anything else compares two
+    different worlds and would report the day as the policy.
+    """
+
+    def _snapshot(self, store, *, code="600000", cutoff="2026-01-05",
+                  policy_ref="v1", payload=None, trader="default"):
+        store.execute(
+            "INSERT INTO decision_snapshots (trader_id, code, information_cutoff, "
+            " decided_at, payload_json, policy_ref, content_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'h')",
+            (trader, code, cutoff, cutoff,
+             json.dumps(payload if payload is not None else {}), policy_ref))
+        store.commit()
+
+    def test_no_pair_is_undefined_not_zero(self, store):
+        """Nothing runs one decision under two policies yet. That is a finding
+        about the loop; printing 0% would claim a test that never ran."""
+        self._snapshot(store, policy_ref="v1")
+        r = CT.counterfactual_changes()
+        assert r["pairs"] == 0
+        assert CT.rates()["counterfactual_change_rate"] is None
+        assert CT.rates()["counterfactual_pairs"] == 0
+        assert "尚无 ON/OFF 配对" in "\n".join(CT.summary_lines())
+
+    def test_the_same_policy_twice_is_not_a_pair(self, store):
+        """Two orders under one policy are a retry or a second position, not a
+        counterfactual."""
+        self._snapshot(store, policy_ref="v1")
+        self._snapshot(store, policy_ref="v1")
+        assert CT.counterfactual_changes()["pairs"] == 0
+
+    def test_a_different_day_is_not_a_pair(self, store):
+        """Different cutoff means different information, so a difference could
+        be the day rather than the policy."""
+        self._snapshot(store, cutoff="2026-01-05", policy_ref="v1")
+        self._snapshot(store, cutoff="2026-01-06", policy_ref="v2")
+        assert CT.counterfactual_changes()["pairs"] == 0
+
+    def test_identical_intents_under_two_policies_are_not_change(self, store):
+        """The exact defect: variant 17 was in force and the order is the same
+        as the incumbent's. Lineage is 1, change is 0."""
+        payload = {"action": "open", "entry_low": 9.0, "entry_high": 9.5,
+                   "stop_loss": 8.5, "target_price": 11.0, "reason": "主线"}
+        self._snapshot(store, policy_ref="v1", payload=payload)
+        self._snapshot(store, policy_ref="v2", payload=payload)
+        r = CT.counterfactual_changes()
+        assert r["pairs"] == 1
+        assert r["changed"] == 0
+        assert r["differences"] == []
+        assert CT.rates()["counterfactual_change_rate"] == pytest.approx(0.0)
+
+    def test_a_size_difference_is_change(self, store):
+        self._snapshot(store, policy_ref="v1",
+                       payload={"action": "open", "shares": 1000})
+        self._snapshot(store, policy_ref="v2",
+                       payload={"action": "open", "shares": 500})
+        r = CT.counterfactual_changes()
+        assert r["pairs"] == 1
+        assert r["changed"] == 1
+        assert CT.rates()["counterfactual_change_rate"] == pytest.approx(1.0)
+
+    def test_abstaining_versus_ordering_is_change(self, store):
+        """`{}` is "no order" and an entry is an order. Comparing whole
+        payloads would call two differently-worded reasons a behaviour change;
+        comparing the intent fields catches the difference that matters."""
+        self._snapshot(store, policy_ref="v1", payload={})
+        self._snapshot(store, policy_ref="v2",
+                       payload={"action": "open", "entry_low": 9.0,
+                                "entry_high": 9.5})
+        assert CT.counterfactual_changes()["changed"] == 1
+
+    def test_a_differently_worded_reason_is_not_change(self, store):
+        """Reason prose is not behaviour. Two decisions that order the same
+        thing for different reasons did the same thing."""
+        self._snapshot(store, policy_ref="v1",
+                       payload={"action": "open", "shares": 1000,
+                                "reason": "主线启动，资金流入"})
+        self._snapshot(store, policy_ref="v2",
+                       payload={"action": "open", "shares": 1000,
+                                "reason": "梯队完整，龙头确认"})
+        assert CT.counterfactual_changes()["changed"] == 0
+
+    def test_zero_is_not_the_same_as_absent(self, store):
+        """"No stop" and "a stop at zero" are different instructions."""
+        self._snapshot(store, policy_ref="v1",
+                       payload={"action": "open", "stop_loss": None})
+        self._snapshot(store, policy_ref="v2",
+                       payload={"action": "open", "stop_loss": 0})
+        assert CT.counterfactual_changes()["changed"] == 1
 
 
 class TestTheLinkIsRecordedOnce:

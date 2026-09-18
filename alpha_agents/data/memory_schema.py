@@ -53,6 +53,43 @@ CREATE TABLE IF NOT EXISTS theme_lines (
     notes TEXT
 );
 
+-- One theme's score on one past day, so a replay can ask what the gate would
+-- have said **then**.
+--
+-- `theme_lines.trend_score` is a single present-day column: it is rewritten
+-- every cycle and holds only today's answer. Rebuilding history into it would
+-- therefore mean every replayed day reading the *last* rebuilt day's score —
+-- the future written into the past, which is the one thing a replay exists to
+-- prevent. Hence a dated table instead of overwriting a value.
+--
+-- Written only by `scripts/rebuild_theme_scores.py`, which derives it from
+-- `market_snapshots.sector_flow_snapshots` (the only per-day board history
+-- this repository holds, and it starts 2026-09-08). Read only through
+-- `theme_gate`, and only when a replay as-of is set — production keeps reading
+-- the live column, because in production the live column *is* today's truth.
+--
+-- `confirm` is recorded per row because the reconstruction cannot derive it
+-- (production's confirmation counts confirmed sessions, which is not in the
+-- snapshot), and a score whose missing term is invisible is a score nobody can
+-- audit.
+CREATE TABLE IF NOT EXISTS theme_score_history (
+    id INTEGER PRIMARY KEY,
+    theme TEXT NOT NULL,
+    as_of TEXT NOT NULL,          -- the day whose close this score describes
+    score REAL NOT NULL,
+    flow_pct REAL,
+    rel_pct REAL,
+    confirm REAL,
+    board TEXT,                   -- the board row the theme was matched to
+    board_scope TEXT,             -- 'concept' | 'industry'
+    board_rank INTEGER,
+    board_of INTEGER,
+    source TEXT,                  -- which table it was derived from
+    UNIQUE(theme, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_theme_score_history
+    ON theme_score_history(theme, as_of);
+
 -- A position is held because of a thesis, and the thesis — not the fill —
 -- is what gets graded. See alpha_agents/data/thesis.py and
 -- docs/thesis_design.md for why the invalidation conditions are a closed

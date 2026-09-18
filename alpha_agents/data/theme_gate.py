@@ -108,7 +108,7 @@ def theme_gate(theme: str, kind: str = "admit") -> str | None:
     status = row.get("status")
     if status in ("declining", "archived"):
         return f"主线已{status}({theme})"
-    score = row.get("trend_score")
+    score = _score_as_of(theme, row)
     if score is None:
         logger.debug("Theme gate: '%s' has no score this cycle — passing it", theme)
         return None
@@ -121,6 +121,46 @@ def theme_gate(theme: str, kind: str = "admit") -> str | None:
         label = "明显走弱" if kind == "cancel" else "偏弱"
         return f"主线{label}({theme}评分{float(score):.2f}<{bar})"
     return None
+
+
+def _score_as_of(theme: str, row: dict) -> float | None:
+    """This theme's score **at the moment being simulated**.
+
+    Live: ``theme_lines.trend_score``, which is today's answer and the right
+    one when today is now.
+
+    Replay: the newest ``theme_score_history`` row at or before the replay
+    as-of. That table exists because the live column cannot answer a
+    historical question — it holds one day, so reading it under replay would
+    let a 2026-09-14 decision use a score computed on 2026-09-18.
+
+    A replay with no history row returns ``None``, which is the gate's
+    documented "unmeasurable, therefore pass" branch. That is honest: the
+    reconstruction covers only the days its source covers, so a window before
+    2026-09-08 behaves exactly as it did before this function existed — the
+    gate passes everything — and the theme gate is only *testable* from that
+    date on.
+    """
+    from alpha_agents.evolution.replay_mode import get_replay_as_of
+
+    as_of = get_replay_as_of()
+    if not as_of:
+        return row.get("trend_score")
+
+    day = str(as_of)[:10]
+    try:
+        from alpha_agents.data.memory_store import _get_conn
+        hit = _get_conn().execute(
+            "SELECT score FROM theme_score_history "
+            "WHERE theme = ? AND as_of <= ? ORDER BY as_of DESC LIMIT 1",
+            (theme, day)).fetchone()
+    except Exception as e:
+        # No history table (a replay directory built before this existed) or a
+        # read failure: fall through to "unmeasurable", never to the live
+        # column — that column is the future under a replay.
+        logger.debug("Theme history unavailable for %r: %s", theme, e)
+        return None
+    return float(hit["score"]) if hit else None
 
 
 def theme_admits(theme: str) -> str | None:

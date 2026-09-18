@@ -105,6 +105,10 @@ PROMPT_FILE = "t1_decide.md"
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
+#: A fenced block anywhere in the reply, prose before and after allowed. Used
+#: to find the answer inside a model's narration — see `_strip_fence`.
+_FENCE_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
 SYSTEM_INSTRUCTIONS = (
     "你是一名 A 股日频交易员。你只根据用户消息里给出的信息做决定，"
     "不使用你记忆中的任何具体行情或个股事实。"
@@ -184,17 +188,63 @@ def format_news(items: list[dict]) -> str:
 
 
 def _strip_fence(text: str) -> str:
-    """Drop a ```json fence if the model wrapped its answer in one.
+    """Pull the JSON object out of a reply, fences and prose included.
 
-    Not a nicety: a fenced reply is otherwise a parse failure, and a parse
-    failure is indistinguishable in the report from a model that chose to
-    order nothing. Stripping is the difference between "it said no" and
-    "we could not read it".
+    Not a nicety: an unreadable reply is indistinguishable in the report from
+    a model that chose to order nothing, and stripping is the difference
+    between "it said no" and "we could not read it".
+
+    Three shapes, and the third is the one that cost 14 decisions:
+
+    1. a bare object — returned as is;
+    2. the whole reply wrapped in a ```json fence — the fence comes off;
+    3. **prose followed by a fenced object.** This is what a tool-using model
+       does: it narrates ("Let me finalize my decision… Rationale summary:")
+       and then emits the answer. The first version only handled case 2,
+       because it tested ``startswith("```")`` — so once tools made the model
+       explain itself, 14 of 20 buy decisions parsed as garbage while their
+       replies contained a perfectly valid order. The runner counted them as
+       ``decider_unreadable`` and placed nothing.
+
+    The last fenced block wins, because a model that thinks out loud may
+    quote a malformed example early and put its real answer at the end.
     """
-    stripped = text.strip()
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
     if stripped.startswith("```"):
-        stripped = _FENCE_RE.sub("", stripped).strip()
-    return stripped
+        return _FENCE_RE.sub("", stripped).strip()
+    fences = _FENCE_BLOCK.findall(stripped)
+    for block in reversed(fences):
+        body = block.strip()
+        if body.startswith("{") or body.startswith("["):
+            return body
+    # No fence: an object embedded in prose. Anchored on the last `{` that
+    # closes at the end of the text, so an example quoted mid-answer is not
+    # mistaken for the reply.
+    return _trailing_json_object(stripped)
+
+
+def _trailing_json_object(text: str) -> str:
+    """The last balanced ``{...}`` at the end of ``text``, or ``text``.
+
+    Returns ``text`` unchanged when it already looks like JSON or when no
+    balanced object is found — the caller's ``json.loads`` then produces the
+    real error, rather than this helper inventing one.
+    """
+    end = text.rfind("}")
+    if end == -1:
+        return text
+    start = text.rfind("{", 0, end + 1)
+    while start != -1:
+        candidate = text[start:end + 1]
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError:
+            start = text.rfind("{", 0, start)
+            continue
+        return candidate
+    return text
 
 
 def parse_orders(text: str, panel_codes: set[str]) -> dict:

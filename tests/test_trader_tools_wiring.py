@@ -384,3 +384,60 @@ class TestTheReportCarriesTheCostOfAsking:
         import walk_forward as wf
 
         assert wf._tool_call_lines({"model_calls": {}, "fills": []}) == []
+
+
+class TestProseBeforeTheAnswerStillParses:
+    """A tool-using model narrates, then answers — and that broke the parser.
+
+    Measured on the 10-day window with 24 turns: 14 of 20 buy decisions were
+    counted `decider_unreadable`. Their replies were not empty and not
+    malformed — every one contained a valid `{"orders": [...]}` block. It came
+    *after* the model's reasoning ("Let me finalize my decision… Rationale
+    summary:"), and `_strip_fence` only removed a fence when the whole reply
+    began with one.
+
+    The failure mode is the one this repository keeps paying for: an unreadable
+    reply and a deliberate abstention produced the same report line, so 14 real
+    decisions looked like 14 days of "it chose nothing".
+    """
+
+    ORDERS = ('{"orders": [{"code": "600001", "entry_low": 9.0, '
+              '"entry_high": 9.5, "stop_loss": 8.5, "target_price": 11.0, '
+              '"reason": "主线"}]}')
+
+    def test_prose_then_a_fenced_object(self):
+        reply = f"Let me finalize. Rationale:\n- catalyst is real\n\n```json\n{self.ORDERS}\n```"
+        out = t1_decider.parse_orders(reply, {"600001"})
+        assert out["parse_error"] is None
+        assert [o["code"] for o in out["orders"]] == ["600001"]
+
+    def test_prose_then_a_bare_object(self):
+        reply = f"理由如下：隔夜半导体大涨。\n\n{self.ORDERS}"
+        out = t1_decider.parse_orders(reply, {"600001"})
+        assert out["parse_error"] is None
+
+    def test_a_fence_without_the_json_tag(self):
+        reply = f"Narration.\n\n```\n{self.ORDERS}\n```"
+        assert t1_decider.parse_orders(reply, {"600001"})["parse_error"] is None
+
+    def test_the_last_fenced_block_wins(self):
+        """A model that thinks out loud may show an example first. The answer
+        is the one it ended with."""
+        reply = ("Example only:\n```json\n{\"orders\": []}\n```\n\n"
+                 f"Final answer:\n```json\n{self.ORDERS}\n```")
+        out = t1_decider.parse_orders(reply, {"600001"})
+        assert [o["code"] for o in out["orders"]] == ["600001"]
+
+    def test_a_bare_object_with_no_prose_still_works(self):
+        assert t1_decider.parse_orders(self.ORDERS,
+                                       {"600001"})["parse_error"] is None
+
+    def test_genuinely_unreadable_text_is_still_an_error(self):
+        """The fix must not turn every reply into an order. "I could not read
+        this" has to stay distinguishable from "it ordered nothing"."""
+        out = t1_decider.parse_orders("I have decided to do nothing today.",
+                                      {"600001"})
+        assert out["parse_error"], (
+            "prose with no JSON must still be reported as unreadable, or the "
+            "counter that caught this bug stops catching anything")
+        assert out["orders"] == []

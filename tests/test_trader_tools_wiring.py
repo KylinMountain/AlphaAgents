@@ -313,3 +313,74 @@ class TestTheTurnBudgetHasOneOwner:
     def test_the_budget_covers_three_tool_rounds_and_an_answer(self):
         """One turn per round-trip plus one to answer, from the recording."""
         assert t1_decider.DEFAULT_MAX_TURNS >= 4
+
+
+class TestTheReportCarriesTheCostOfAsking:
+    """A result reported without its cost is an advertisement, not a finding.
+
+    Attaching tools changed what a decision is: measured on a 3-day window,
+    ~23 tool calls per decision. Two windows compared without that number
+    look equal in cost when one spends several times the model traffic to
+    reach its answer.
+    """
+
+    def test_tool_calls_are_counted_from_the_journal(self, tmp_path):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        journal = tmp_path / "llm_journal"
+        journal.mkdir()
+        (journal / "default.jsonl").write_text(
+            json.dumps({"tool_calls": [{"name": "a"}, {"name": "b"}]}) + "\n"
+            + json.dumps({"tool_calls": []}) + "\n"
+            + json.dumps({"tool_calls": [{"name": "c"}]}) + "\n",
+            encoding="utf-8")
+        assert wf._journal_tool_calls(tmp_path) == 3
+
+    def test_a_half_written_line_does_not_lose_the_rest(self, tmp_path):
+        """A run killed mid-write leaves a truncated final line. The count of
+        everything before it is still true."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        journal = tmp_path / "llm_journal"
+        journal.mkdir()
+        (journal / "default.jsonl").write_text(
+            json.dumps({"tool_calls": [{"name": "a"}]}) + "\n"
+            + '{"tool_calls": [{"name": "b"',
+            encoding="utf-8")
+        assert wf._journal_tool_calls(tmp_path) == 1
+
+    def test_no_journal_is_zero_not_an_error(self, tmp_path):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        assert wf._journal_tool_calls(tmp_path) == 0
+
+    def test_the_summary_prints_the_cost_next_to_the_buys(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        lines = wf._tool_call_lines({
+            "model_calls": {"tool_calls": 46},
+            "fills": [{"side": "buy"}, {"side": "buy"}],
+        })
+        assert lines and "46" in lines[0] and "23.0" in lines[0]
+
+    def test_a_run_with_no_tools_prints_nothing(self):
+        """A placeholder run has no tool calls; printing '0' would be a
+        number about nothing."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        assert wf._tool_call_lines({"model_calls": {}, "fills": []}) == []

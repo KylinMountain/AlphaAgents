@@ -2141,6 +2141,11 @@ def _run_window(ctx, args) -> dict:
 
     window = ctx.corpus.window(args.start, args.days)
     journal_before = _journal_records(_REPLAY_DIR)
+    #: Tool calls are read from the journal's own records rather than counted
+    #: in memory, for the same reason the exit legs are read back from
+    #: `position_exits`: the recording is what actually happened, and a
+    #: counter kept beside it can disagree with it.
+    tools_before = _journal_tool_calls(_REPLAY_DIR)
     prod_hash_before = _sha256(_PRODUCTION_DIR / "memory.db")
     #: The verdict (did the replay get read-only handles) and the diagnostic
     #: (what moved) are separate readings, because only the first is about us.
@@ -2280,6 +2285,7 @@ def _run_window(ctx, args) -> dict:
             time.sleep(args.pace_seconds)
 
     journal_after = _journal_records(_REPLAY_DIR)
+    tools_after = _journal_tool_calls(_REPLAY_DIR)
     prod_hash_after = _sha256(_PRODUCTION_DIR / "memory.db")
     corpus_after = _corpus_fingerprint(_REPLAY_DIR)
 
@@ -2290,7 +2296,8 @@ def _run_window(ctx, args) -> dict:
         "learning": learning_rows,
         "model_calls": {
             "mode": os.environ.get("ALPHAAGENTS_LLM_MODE", "live"),
-            "journal_before": journal_before, "journal_after": journal_after},
+            "journal_before": journal_before, "journal_after": journal_after,
+            "tool_calls": max(0, tools_after - tools_before)},
         "production": {"hash_before": prod_hash_before,
                        "hash_after": prod_hash_after,
                        "unchanged": prod_hash_before == prod_hash_after},
@@ -2309,6 +2316,41 @@ def _journal_records(data_dir: Path) -> int:
     for path in directory.glob("*.jsonl"):
         with path.open("r", encoding="utf-8") as fh:
             total += sum(1 for line in fh if line.strip())
+    return total
+
+
+def _journal_tool_calls(data_dir: Path) -> int:
+    """How many tool calls every recorded exchange in this directory made.
+
+    Read back from the journal rather than counted in memory, for the same
+    reason an exit's share count is read back from ``position_exits``: the
+    recording is what happened, and a counter kept alongside it drifts.
+
+    It exists because the tools made a decision cost real work — measured at
+    ~23 calls per decision — and a result reported without its cost is not a
+    finding, it is an advertisement. A reader comparing two windows has to be
+    able to see that one of them bought its result with four times the model
+    traffic.
+    """
+    directory = data_dir / llm_journal.JOURNAL_DIRNAME
+    if not directory.is_dir():
+        return 0
+    total = 0
+    for path in directory.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        # A half-written final line is not a reason to lose the
+                        # count of every line before it.
+                        continue
+                    total += len(record.get("tool_calls") or [])
+        except OSError as exc:
+            logger.warning("Tool-call count skipped %s: %s", path.name, exc)
     return total
 
 
@@ -2458,6 +2500,11 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "model_expected": ctx.decider == "llm",
         "model_calls_made": model["journal_after"] - model["journal_before"],
         "model_journal_total": model["journal_after"],
+        #: What the agent's questions cost. Recorded beside the orders so a
+        #: window's result cannot be read without its price.
+        "agent_tool_calls": model.get("tool_calls"),
+        "max_turns_per_decision": ctx.max_turns,
+        "trader_tools_enabled": bool(getattr(ctx, "trader_tools", False)),
         "model_usage_ok": model_usage_ok,
         "model_usage_detail": model_usage_detail,
         "decider_counters": dict(ctx.counters),
@@ -2562,6 +2609,7 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"共享语料 size+mtime（诊断） {_corpus_changes_line(result['corpus']['changes'])}",
         f"模型调用与声明一致          {'是' if model_usage_ok else '**否**'}"
         f"（{model_usage_detail}）",
+        *_tool_call_lines(result),
         f"抛错的日-阶段               {len(result['errors'])}"
         f"{_error_kinds(result['errors'])}",
         "",
@@ -2612,6 +2660,30 @@ def _learning_lines(result: dict) -> list[str]:
         "且晋升由人审批、管线不驱动 status",
     ]
     return lines
+
+
+def _tool_call_lines(result: dict) -> list[str]:
+    """What the agent's questions cost, next to what they bought.
+
+    The tools changed what a decision is: measured on a 3-day window, ~23
+    tool calls per decision. A report that shows the orders but not the
+    traffic lets a reader compare two windows as if both cost the same —
+    and the one with tools spends several times the model calls to get its
+    answer. The cost is part of the result.
+
+    Empty for a run with no model, because "0 tool calls" beside a
+    placeholder run is a number about nothing.
+    """
+    calls = (result.get("model_calls") or {}).get("tool_calls")
+    if calls is None:
+        return []
+    buys = sum(1 for f in result["fills"] if f.get("side") == "buy")
+    per = f"{calls / buys:.1f}" if buys else "—"
+    return [
+        f"agent 工具调用              {calls}"
+        f"（买入 {buys} 笔，约 {per} 次/笔；只有它们能让"
+        f"「结果」和「代价」一起被判断）",
+    ]
 
 
 def _error_kinds(errors: list[dict]) -> str:

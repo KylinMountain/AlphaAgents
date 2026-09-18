@@ -73,9 +73,21 @@ DECIDER_NAME = "t1_llm"
 #: Turns one decision may take, including tool round-trips.
 #:
 #: The number lives here and nowhere else. A tool call costs a turn, so this
-#: is ``1 + tool budget``, sized from the first tool-enabled recording: the
-#: model spent three rounds issuing up to six parallel calls each before it
-#: was ready to answer.
+#: is ``1 + tool budget``.
+#:
+#: **Sized from measurement, twice.** The first tool-enabled recording showed
+#: three rounds of up to six parallel calls; 8 was set from that. A 3-day
+#: window then measured what 8 actually bought: 211 tool calls across 9
+#: decisions — ~23 per decision, with only **one** repeated (tool, arguments)
+#: pair among them, so it was reconnoitering different names rather than
+#: looping. Even so, 5 of 9 decisions exhausted the budget, and a decision
+#: that never answers is a day with no order.
+#:
+#: 24 is that measurement taken seriously rather than trimmed: the observed
+#: worst case was 15 cumulative calls, and reconnaissance over a 40-name
+#: panel is legitimately deep. It stays a ceiling — a model that loops still
+#: cannot spend the window — and the report now counts tool calls so the cost
+#: of a decision is visible next to its result.
 #:
 #: It was briefly declared twice — here and in the runner's ``--max-turns``.
 #: The two disagreed (8 against 3), the runner always passes its own value,
@@ -83,7 +95,7 @@ DECIDER_NAME = "t1_llm"
 #: produced 40 unreadable decisions and no trades. The runner now defaults to
 #: ``None`` and defers to this constant, and a test asserts nothing overrides
 #: it accidentally.
-DEFAULT_MAX_TURNS = 8
+DEFAULT_MAX_TURNS = 24
 
 #: The prompt is the *user message*, not the system instructions: it is the
 #: task, and it holds every placeholder the runner fills. Kept in a file so a

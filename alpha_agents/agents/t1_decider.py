@@ -61,6 +61,7 @@ import re
 from pathlib import Path
 
 from agents import Agent, Runner
+from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.config import PROMPTS_DIR
 
@@ -337,7 +338,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str = "", knowledge: str = "",
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
-                  max_turns: int = 3, market: dict | None = None,
+                  max_turns: int = 8, market: dict | None = None,
                   phase: str = "open", tools: list | None = None) -> dict:
     """Ask the model for today's orders.
 
@@ -346,12 +347,18 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     call is recorded and a second run of the same window answers from the
     recording instead of re-sampling.
 
-    ``max_turns`` is 3 rather than 1: a tool call costs a turn, so a
-    single-turn cap makes the tools unusable. Three is enough for
-    "look at the market → look at this name → answer" and small enough that a
-    looping model cannot spend the day's budget. ``tools=None`` keeps the old
-    behaviour for a caller that wants a bare picker; the runner passes the
-    six trader tools.
+    ``max_turns`` is 8, and the number came from measurement rather than
+    taste. The first tool-enabled replay was run at 3 and died on its first
+    decision with ``MaxTurnsExceeded``: the model issued **six parallel tool
+    calls** in round one (market regime + four stock contexts + theme state),
+    six more in round two (including two memories and its own state), and was
+    cut off before it could answer. Giving a trader tools makes its reasoning
+    longer, and a budget set before that was known was a guess.
+
+    Eight is ``1 + a tool budget``: enough for the three rounds the recording
+    actually shows plus room to answer, and still a ceiling — a model that
+    loops cannot spend the day's budget. ``tools=None`` keeps the bare-picker
+    behaviour for a caller that wants it.
 
     Every tool call is journaled like the rest of the exchange
     (``llm_journal`` records ``tool_calls`` and ``tool_results``), so a replay
@@ -370,7 +377,27 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model,
                   tools=list(tools) if tools else [])
-    result = await Runner.run(agent, message, max_turns=max_turns)
+    try:
+        result = await Runner.run(agent, message, max_turns=max_turns)
+    except MaxTurnsExceeded as exc:
+        # A model that spends its whole turn budget asking questions has not
+        # said what to buy, and "it did not answer" is not "buy nothing" — the
+        # two must not share an outcome. Measured: the first tool-enabled run
+        # died on its opening decision because a six-call round plus a second
+        # round exhausted a budget of three, and because the exception escaped
+        # `propose` it took the **whole window** down rather than one day.
+        #
+        # Returned as an unreadable reply rather than raised: the runner
+        # already counts `decider_unreadable`, the day is recorded as a
+        # failure, and the rest of the window still runs. Raising here would
+        # make one over-thinking morning cost forty simulated days.
+        logger.warning(
+            "%s: decider exceeded %d turns without answering — treating the "
+            "day as undecided (not as 'no orders')", day, max_turns)
+        parsed = {"orders": [], "refused": [], "raw": "",
+                  "parse_error": f"MaxTurnsExceeded after {max_turns} turns "
+                                 f"({exc})"}
+        return parsed
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})
     parsed["raw"] = raw

@@ -205,3 +205,60 @@ class TestTheTimeContractSurvivesWiring:
             assert forbidden not in src, (
                 f"trader_tools contains {forbidden!r} — these tools answer "
                 f"questions, they do not change the book")
+
+
+class TestATooLongDeliberationIsADayNotAWindow:
+    """Two findings from the first real tool-enabled replay, both measured.
+
+    The run was started with a turn budget of 3 — a guess made before any
+    recording existed. The model's opening decision issued **six parallel
+    tool calls**, then six more, and the SDK raised `MaxTurnsExceeded`. The
+    exception escaped `propose` and killed the entire window: one
+    over-thinking morning cost forty simulated days.
+    """
+
+    def test_the_default_budget_fits_what_the_recording_shows(self):
+        import inspect
+        sig = inspect.signature(t1_decider.propose)
+        assert sig.parameters["max_turns"].default >= 6, (
+            "the recorded deliberation needed three rounds of six calls plus "
+            "an answer; a smaller default is a budget that fails in practice")
+
+    def test_exceeding_the_budget_is_reported_not_raised(self, monkeypatch):
+        from agents import Runner
+        from agents.exceptions import MaxTurnsExceeded as MTE
+
+        async def _blow_up(agent, message, **kw):
+            raise MTE("Max turns (3) exceeded")
+
+        monkeypatch.setattr(Runner, "run", staticmethod(_blow_up))
+        out = asyncio.run(t1_decider.propose(
+            day="2026-01-05", prev_day="2026-01-02", panel=PANEL,
+            news=[], template=_minimal_template(), model=_StubModel(),
+            tools=TT.TRADER_TOOLS, max_turns=3))
+
+        assert out["orders"] == []
+        assert out["parse_error"], (
+            "'it never answered' must not be reported as 'it chose nothing'")
+        assert "MaxTurnsExceeded" in out["parse_error"]
+
+    def test_the_runner_treats_that_as_a_failed_day_not_a_failed_run(self):
+        """The runner already has the right shape for this — `parse_error`
+        is counted and the day is skipped — so the fix is that `propose`
+        returns instead of raising. Checked on the AST rather than by
+        substring: the handler's own comment says "raise here would...", and
+        a text search cannot tell a comment from a statement."""
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(t1_decider.propose))
+        handlers = [h for node in ast.walk(tree)
+                    if isinstance(node, ast.Try)
+                    for h in node.handlers
+                    if h.type is not None
+                    and "MaxTurnsExceeded" in ast.dump(h.type)]
+        assert handlers, "propose does not handle MaxTurnsExceeded"
+        for h in handlers:
+            raises = [n for n in ast.walk(h) if isinstance(n, ast.Raise)]
+            assert not raises, (
+                "the MaxTurnsExceeded handler re-raises, which is the "
+                "window-killing behaviour")

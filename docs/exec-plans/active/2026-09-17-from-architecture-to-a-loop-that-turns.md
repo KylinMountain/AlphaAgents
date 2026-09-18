@@ -200,6 +200,85 @@ size 差异算改变、弃权 vs 下单算改变、理由不同不算改变、0�
 它们需要的是**改输出**（把 `recommendation: 可介入` 换成可核验事实），
 属于 ③ 的工具改造范围，不与本步混做。
 
-### ⏳ ③ 问题型工具接进 T1 Trader —— 未开始
+### ✅ ③ 问题型工具接进 T1 Trader —— 已完成
 
-### ⏳ ④ RSI golden path 真实跑通 —— 未开始（依赖 ①②③）
+`alpha_agents/tools/trader_tools.py`（六个工具 + 时间契约）+
+`agents/t1_decider.py`（接线）+ `prompts/t1_decide.md`（告诉它可以用）+
+`scripts/walk_forward.py`（`--no-trader-tools` / `--max-turns`）。
+
+**六个工具**：`get_market_regime` / `get_theme_state` / `get_stock_context` /
+`get_intraday_shape` / `get_stock_memory` / `get_my_state`。
+只输出事实，运行时（payload 断言）与静态（`lint_policy.py` 扫描述）双重把关。
+
+**时间契约是硬约束**：回放目录里 `market_snapshots.db` / `market_history.db`
+是指向生产库的**符号链接**，库隔离挡不住泄漏；每个工具按
+`replay_mode` 的 as-of 截断，`tests/test_trader_tools_time_travel.py`
+在两个时钟上驱动每个工具。
+
+**真实运行结果（2026-08-18 起 20 天，record 模式）**：
+
+| | |
+|---|---|
+| 前 8 条决策的工具调用 | **24 次** |
+| 分布 | `get_stock_context` 11、`get_theme_state` 5、`get_market_regime` 3、`get_my_state` 2、`get_intraday_shape` 2、`get_stock_memory` 1 |
+| 每轮并行调用 | 2–5 个 |
+| 模型自带的 `as_of` | 每次调用都传（如 `2026-08-18 09:00`） |
+
+**六个工具全部被用到**，包括「我认识这只票吗」和「我今天手顺不顺」——
+它开始问关于**自己**的问题了。
+
+**这一轮抓到两个真缺陷**（都由真实运行暴露，不是单测）：
+
+1. **契约测试抓到 `get_market_regime` 的日期泄漏**：只按 `captured_at <= cut`
+   过滤，于是查询一个没有快照的日期会返回**上一个交易日**的宽度数据，
+   还标成 `as_of: 那天`——报告一个从未存在过的市场状态。已限定到当天。
+2. **`max_turns=3` 是拍脑袋定的**：模型首条决策就发起 6 个并行调用，
+   第二轮又 6 个，`MaxTurnsExceeded` 逃出 `propose`，**整个窗口挂掉**——
+   一个想得太多的早晨让 40 个模拟日归零。默认改为 8（按录制里看到的
+   轮数定），并把该异常收成"这一天没决策"（`decider_unreadable`），
+   与"它选择不下单"区分开。
+
+### ⏸ ④ RSI golden path —— **被数据前提阻塞，不是被代码阻塞**
+
+逐层查证后的结论：**链条本身是接好的，回放里跑不出行为差异。**
+
+| 环节 | 状态 |
+|---|---|
+| `episode → candidate` | ✅ 生产库有 23 个 episode、8 个 observation 候选 |
+| `candidate → variant` | ✅ `variant.py` 可构建，`policy_variants` 表存在 |
+| `variant → decision` | ✅ `decision_snapshots.policy_ref` 记录版本 |
+| **变体改变决定** | ❌ **回放里不可能** |
+
+原因链条（每一步都查过）：
+
+1. 变体目前**只有一个基因位点**：`("t1_change_rank", "down"/"up")` →
+   `theme_gate.w_rel ∓0.05`（`evolution/variant.py:74-76`）。
+2. `theme_gate.w_rel` 只在 `theme_gate.theme_gate()` 里被读，
+   而该函数要求 `theme_lines.trend_score` **非 None**
+   （`data/theme_gate.py:112`）——`trend_score is None` 时**按设计放行**。
+3. 回放用 `--theme WALK-PLACEHOLDER`，回放库里
+   `theme_lines = 1 行（WALK-PLACEHOLDER），trend_score = NULL`。
+   生产库有 63 行、17 行有评分，但那是**当前**评分，回放的历史日期
+   没有 as-of 的主题评分快照。
+
+**所以：无论 `w_rel` 怎么变，回放里每一个订单都照样通过 gate，
+`counterfactual_change_rate` 必然是 0——不是因为学习没用，而是因为
+唯一能变的那个参数在回放中不参与任何决策。**
+
+这不是可以靠写代码绕过的：伪造一个主题评分就是伪造证据。**要做 ④，
+必须先给回放补上 as-of 的主题评分历史**（`theme_lines` 的
+`trend_score` 在历史日期上的值），或者把变体扩展到回放真正读的参数上。
+
+**两条路，都需要你定：**
+
+- **路 A：补历史主题评分。** 从 `sector_flow_snapshots`（376k 行）按日
+  重建 `theme_score`，写进回放库。工作量大，但一旦有了，④ 能真跑通，
+  且未来所有主题门实验都受益。
+- **路 B：把变体扩展到回放读的参数。** 回放的买入路径读的是
+  `entry_zone` / `stop_pct` / `panel_size` 这些**直接传给 runner 的参数**，
+  而不是 `decision_params`。把变体支持一个这类参数，④ 立刻可做——
+  代价是变异的是"策略形状"而不是"主题门权重"。
+
+**我的建议是 B 先做、A 随后**：B 能在这一轮就把
+`counterfactual_change_rate > 0` 跑出来（④ 的验收标准），
+而 A 是更大的数据工程，且它的价值不依赖 ④。

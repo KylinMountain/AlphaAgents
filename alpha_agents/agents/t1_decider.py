@@ -23,6 +23,26 @@ The decision stands at 09:00 on ``day``. It is given:
 It is *not* given today's bar, and it cannot ask for one: this module has no
 corpus handle, so the day it trades is not reachable from here at all.
 
+Tools, and why they are not a leak
+----------------------------------
+The decider used to run with ``tools=[]`` and ``max_turns=1``: it read a
+package the platform had assembled (panel, breadth, news, book) and picked
+from it. It could not say "I am unsure about this one — let me check three
+things". That is the gap between a driver with a dashboard and one who can
+turn their head.
+
+The six tools in ``alpha_agents.tools.trader_tools`` close it. They are not
+a hole in the "no today's bar" rule above, and the reason is that they do not
+carry the date: each reads ``evolution.replay_mode``'s as-of and truncates
+there. Under a replay the as-of is the decision instant, so a 09:00 call sees
+yesterday's close and a 14:55 call sees the session so far — the same boundary
+the rest of the run obeys. Outside a replay the as-of is None and they answer
+from now, which is what a live scan wants.
+
+The boundary is enforced twice: ``tests/test_trader_tools_time_travel.py``
+drives each tool at two clocks over known data, and each tool declares its
+time column in ``trader_tools.AS_OF_FIELDS``.
+
 What it refuses
 ---------------
 A code outside the panel, a malformed zone (``entry_low`` not below
@@ -317,14 +337,26 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str = "", knowledge: str = "",
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
-                  max_turns: int = 1, market: dict | None = None,
-                  phase: str = "open") -> dict:
+                  max_turns: int = 3, market: dict | None = None,
+                  phase: str = "open", tools: list | None = None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
     not a convenience: it is what makes a replay reproducible, because the
     call is recorded and a second run of the same window answers from the
     recording instead of re-sampling.
+
+    ``max_turns`` is 3 rather than 1: a tool call costs a turn, so a
+    single-turn cap makes the tools unusable. Three is enough for
+    "look at the market → look at this name → answer" and small enough that a
+    looping model cannot spend the day's budget. ``tools=None`` keeps the old
+    behaviour for a caller that wants a bare picker; the runner passes the
+    six trader tools.
+
+    Every tool call is journaled like the rest of the exchange
+    (``llm_journal`` records ``tool_calls`` and ``tool_results``), so a replay
+    can show *which* questions the agent decided to ask — the evidence that
+    this is a tool-using trader and not a scorer.
     """
     if model is None:
         from alpha_agents.model_factory import create_model
@@ -336,7 +368,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         market=market, phase=phase)
 
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
-                  instructions=SYSTEM_INSTRUCTIONS, model=model)
+                  instructions=SYSTEM_INSTRUCTIONS, model=model,
+                  tools=list(tools) if tools else [])
     result = await Runner.run(agent, message, max_turns=max_turns)
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})

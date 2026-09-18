@@ -1087,6 +1087,21 @@ def _build_model(timeout: float | None):
     return create_model(timeout=timeout)
 
 
+def _trader_tools(ctx):
+    """The six question-shaped tools the buy-side decider may call, or [].
+
+    Empty when the run was told not to give the model tools, which keeps the
+    old bare-picker behaviour reachable for a comparison run.
+
+    Imported lazily: a placeholder run makes no model calls and must not pull
+    the ``agents`` SDK in through the tool wrappers.
+    """
+    if not getattr(ctx, "trader_tools", False):
+        return []
+    from alpha_agents.tools.trader_tools import TRADER_TOOLS
+    return TRADER_TOOLS
+
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """One model call, then the same intent door the placeholder uses.
@@ -1137,7 +1152,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
         news=_news_window(day, prev_day, ctx.news_limit, phase),
         book=book, knowledge=knowledge, market=market,
         trader_note=ctx.trader_note, picks=ctx.picks,
-        template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase)
+        template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase,
+        tools=_trader_tools(ctx), max_turns=ctx.max_turns)
     if verdict["parse_error"]:
         # A reply we could not read is not the same as "it chose nothing",
         # and the two must not share a counter.
@@ -1953,6 +1969,19 @@ class Context:
         #: number. The user asked to disable the take-profit as its own
         #: experiment.
         self.mechanical_target = getattr(args, "mechanical_target", True)
+        #: Whether the buy-side decider may **call tools**. On by default for
+        #: the llm decider: a trader that cannot ask a question is a scorer,
+        #: and the whole point of the last review's finding was that the
+        #: decider had ``tools=[]`` and one turn.
+        #:
+        #: Off is still reachable (``--no-trader-tools``) so the two
+        #: configurations can be compared on one window — the tool-using
+        #: trader against the bare picker, same panel, same days.
+        self.trader_tools = getattr(args, "trader_tools", True)
+        #: Turns allowed per decision. A tool call costs a turn, so this is
+        #: ``1 + tool budget``: three lets the agent look at the market, look
+        #: at one name, and answer.
+        self.max_turns = getattr(args, "max_turns", 3)
         self.panel_size = args.panel_size
         self.news_limit = args.news_limit
         #: The window's first session, carried so an observation can name the
@@ -2795,6 +2824,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agent-exits", action="store_true",
         help="让 agent 决定卖出（每天多一次模型调用；机械硬止损始终先跑）")
+    parser.add_argument(
+        "--no-trader-tools", dest="trader_tools",
+        action="store_false", default=True,
+        help="不给买入决策器工具（回到'只能从面板里挑'的旧行为；"
+             "用来和会用工具的版本跑同一窗口做对照）")
+    parser.add_argument(
+        "--max-turns", type=int, default=3,
+        help="每次买入决策允许的轮数（默认 3；一次工具调用占一轮，"
+             "1 等于没有工具）")
     parser.add_argument("--panel-size", type=int, default=40,
                         help="securities the model may choose from (llm only).")
     parser.add_argument("--news-limit", type=int, default=60,

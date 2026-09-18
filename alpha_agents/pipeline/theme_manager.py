@@ -222,12 +222,16 @@ def update_theme_strength(name: str, signals: dict, today: str | None = None) ->
 
 
 def _percentile(values: list[float], value: float) -> float:
-    """Where ``value`` sits in ``values``, as 0–1. Mid-rank for ties."""
-    if not values:
-        return 0.5
-    below = sum(1 for v in values if v < value)
-    equal = sum(1 for v in values if v == value)
-    return (below + equal / 2) / len(values)
+    """Where ``value`` sits in ``values``, as 0–1. Mid-rank for ties.
+
+    A thin alias: the arithmetic lives in ``data.scoring.percentile`` because
+    ``evolution``'s counterfactual needs it and the layer order
+    (``data → … → evolution → pipeline``) forbids evolution importing
+    pipeline. One definition, so the replay's gate and production's cannot
+    measure on different scales.
+    """
+    from alpha_agents.data import scoring
+    return scoring.percentile(values, value)
 
 
 def theme_gate_params(params: dict | None = None) -> dict:

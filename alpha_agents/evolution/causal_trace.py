@@ -433,3 +433,71 @@ def summary_lines(*, limit: int = 200,
             "• 行为改变：**尚无 ON/OFF 配对**（同一个决策在不同 policy 下各跑一次），"
             "所以行为改变率是未定义而不是 0% —— 没有任何决策被反事实验证过")
     return out
+
+
+def single_step_counterfactual(*, theme: str, day: str, board_row: dict,
+                               params_a: dict, params_b: dict) -> dict:
+    """Would a different policy have admitted this theme, on this board?
+
+    The whole-window ON/OFF comparison cannot attribute a difference to the
+    policy, and the reason is structural rather than a bug: the first model
+    sample differs, so the two arms buy different names, so from the second
+    decision onward their books differ and their prompts differ (measured:
+    39 journal entries, **only the first** with an identical `request_hash`).
+    A recording therefore cannot be shared, and the divergence is the model's
+    noise, not the policy's effect.
+
+    This is the step that *can* be attributed. Hold the world fixed — one
+    board, one day, one score — and ask each policy the same question. The
+    only thing that differs is the numbers in ``params_a`` / ``params_b``, so
+    a difference is caused by them and nothing else.
+
+    What it measures, stated plainly: **admission**, not trading. It answers
+    "would this name have been allowed through the gate", which is the whole
+    of what the variant's current single gene (`theme_gate.w_rel`) touches.
+    A variant that changed position size or entry logic would need a
+    different instrument, and this function says so by taking the parameters
+    rather than a candidate id.
+
+    ``board_row`` is the theme's board as of ``day``: it needs
+    ``net_flow_yi``, ``change_pct`` and the frame it was ranked in (see
+    ``rebuild_theme_scores.score_day``). The frame matters — a percentile of
+    a pre-filtered list is not a percentile.
+    """
+    from alpha_agents.data.scoring import percentile as _percentile
+
+    if not board_row or "frame_flows" not in board_row:
+        return {"comparable": False,
+                "reason": "board_row needs the frame it was ranked in "
+                          "(frame_flows / frame_changes); a percentile over "
+                          "a pre-filtered list is not a percentile"}
+
+    def _verdict(params: dict) -> dict:
+        gate = {**params}
+        flow_pct = _percentile(board_row["frame_flows"],
+                               board_row["net_flow_yi"])
+        rel_pct = _percentile(board_row["frame_changes"],
+                              board_row["change_pct"])
+        confirm = float(board_row.get("confirm") or 0.0)
+        score = (gate["w_flow"] * flow_pct + gate["w_rel"] * rel_pct
+                 + gate["w_confirm"] * confirm)
+        bar = gate["admit_score"]
+        return {"score": round(score, 6), "admit_score": bar,
+                "admitted": score >= bar, "flow_pct": round(flow_pct, 4),
+                "rel_pct": round(rel_pct, 4), "confirm": confirm}
+
+    a, b = _verdict(params_a), _verdict(params_b)
+    return {
+        "comparable": True,
+        "theme": theme,
+        "as_of": day,
+        "a": a, "b": b,
+        "changed": a["admitted"] != b["admitted"],
+        # The size of the effect window, which is the honest measure of how
+        # much a weight change *could* matter: only a score within this
+        # distance of the bar can flip.
+        "flip_margin": round(abs(b["score"] - a["score"]), 6),
+        "note": (
+            "Same board, same day, two parameter sets: a difference here is "
+            "caused by the parameters. It measures admission, not trading."),
+    }

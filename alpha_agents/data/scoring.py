@@ -402,6 +402,27 @@ DEFAULT_DECISION_PARAMS: dict = {
 }
 
 
+def percentile(values: list[float], value: float) -> float:
+    """Where ``value`` sits in ``values``, as 0–1. Mid-rank for ties.
+
+    Moved down from ``pipeline.theme_manager`` when a counterfactual in
+    ``evolution`` needed it: the layer order is
+    ``data → … → evolution → pipeline``, so evolution importing pipeline is a
+    backwards dependency and the lint refuses it. The arithmetic belongs in
+    ``data`` anyway — it is a statistic, not a pipeline concern — and a second
+    copy would be a second definition of "percentile", which is exactly how
+    two gates end up measuring on different scales.
+
+    The frame matters and is the caller's job: a percentile taken over a
+    pre-filtered list means "40th of the leaders", not "40th of the market".
+    """
+    if not values:
+        return 0.5
+    below = sum(1 for v in values if v < value)
+    equal = sum(1 for v in values if v == value)
+    return (below + equal / 2) / len(values)
+
+
 def decision_params_of(version_id: int | None) -> dict:
     """One version's decision parameters, with the defaults merged in.
 

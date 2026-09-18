@@ -191,3 +191,78 @@ class TestAReplayArmInstallsOnce:
         src = inspect.getsource(RP.install)
         assert "installs once" in src, (
             "the once-only guard is what keeps an arm from becoming two")
+
+
+class TestTheSingleStepCounterfactual:
+    """The step that *can* be attributed, and what it revealed.
+
+    A whole-window ON/OFF comparison cannot attribute a difference to the
+    policy: the first model sample differs, the arms buy different names, and
+    from the second decision on their books and prompts differ (measured: 39
+    journal entries, only the first with an identical request_hash). So this
+    holds the world fixed — one board, one day, one score — and swaps only
+    the parameters.
+    """
+
+    FRAME = [{"net_flow_yi": f, "change_pct": f} for f in
+             (-30.0, -10.0, 0.0, 10.0, 30.0)]
+
+    def _row(self, flow, change, confirm=0.0):
+        return {"net_flow_yi": flow, "change_pct": change, "confirm": confirm,
+                "frame_flows": [r["net_flow_yi"] for r in self.FRAME],
+                "frame_changes": [r["change_pct"] for r in self.FRAME]}
+
+    def _params(self, w_rel=0.35):
+        return {"w_flow": 0.45, "w_rel": w_rel, "w_confirm": 0.20,
+                "admit_score": 0.5, "cancel_score": 0.35}
+
+    def test_a_weight_change_can_flip_a_borderline_name(self):
+        """Just below the bar, and a big enough rel_pct to cross it."""
+        # score = .45*flow_pct + .35*rel_pct; pick a board at the top of both
+        # percentiles so the +0.05 weight moves the score by ~0.05.
+        row = self._row(flow=30.0, change=30.0)
+        out = CT.single_step_counterfactual(
+            theme="t", day="2026-09-09", board_row=row,
+            params_a=self._params(0.35), params_b=self._params(0.40))
+        assert out["comparable"] is True
+        assert out["flip_margin"] > 0.0
+
+    def test_it_reports_the_margin_that_could_flip(self):
+        """The honest size of a weight change's effect window: only a score
+        within `flip_margin` of the bar can change sides."""
+        row = self._row(flow=30.0, change=30.0)
+        out = CT.single_step_counterfactual(
+            theme="t", day="d", board_row=row,
+            params_a=self._params(0.35), params_b=self._params(0.40))
+        a, b = out["a"], out["b"]
+        assert out["flip_margin"] == pytest.approx(
+            abs(b["score"] - a["score"]), abs=1e-9)
+        assert (a["admitted"] != b["admitted"]) == out["changed"]
+
+    def test_a_name_far_from_the_bar_cannot_flip(self):
+        """Measured on the real window: every theme's distance from
+        admit_score exceeded the shift, so w_rel ±0.05 flipped nothing."""
+        row = self._row(flow=-30.0, change=-30.0)      # bottom of the frame
+        out = CT.single_step_counterfactual(
+            theme="t", day="d", board_row=row,
+            params_a=self._params(0.35), params_b=self._params(0.40))
+        assert out["a"]["admitted"] is False
+        assert out["changed"] is False
+
+    def test_it_refuses_a_board_without_its_frame(self):
+        """A percentile over a pre-filtered list is not a percentile — the
+        same trap this repository already documented once."""
+        out = CT.single_step_counterfactual(
+            theme="t", day="d", board_row={"net_flow_yi": 1.0,
+                                           "change_pct": 1.0},
+            params_a=self._params(), params_b=self._params(0.40))
+        assert out["comparable"] is False
+        assert "percentile" in out["reason"]
+
+    def test_it_says_what_it_measures(self):
+        """Admission, not trading. A reader must not take this for a
+        statement about behaviour."""
+        out = CT.single_step_counterfactual(
+            theme="t", day="d", board_row=self._row(30.0, 30.0),
+            params_a=self._params(), params_b=self._params(0.40))
+        assert "admission, not trading" in out["note"]

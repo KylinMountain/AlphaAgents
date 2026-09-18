@@ -212,6 +212,16 @@ CORPUS_FILES = ("market_history.db", "market_snapshots.db", "stocks.db")
 #: mistake the window's result for a statement about a strategy.
 DECIDER = "momentum_placeholder"
 
+#: Turns the buy-side decider gets per decision.
+#:
+#: **Not defined here.** The number belongs to ``t1_decider``, which owns the
+#: decision budget, and ``--max-turns`` defaults to ``None`` meaning "whatever
+#: the decider says". It used to be defined in both places and the two drifted:
+#: the decider was raised to 8 while this file kept 3, the runner always passes
+#: its own value, so the function default became unreachable — a 20-day window
+#: then spent 2.5 hours producing 40 unreadable decisions and zero trades.
+#: One number, one owner.
+
 #: A change this large or more is treated as the previous session's own limit-up,
 #: and the name is skipped. Without it the placeholder would spend most of its
 #: picks on stocks already locked, and the run would measure the one-way-limit
@@ -1978,10 +1988,10 @@ class Context:
         #: configurations can be compared on one window — the tool-using
         #: trader against the bare picker, same panel, same days.
         self.trader_tools = getattr(args, "trader_tools", True)
-        #: Turns allowed per decision. A tool call costs a turn, so this is
-        #: ``1 + tool budget``: three lets the agent look at the market, look
-        #: at one name, and answer.
-        self.max_turns = getattr(args, "max_turns", 3)
+        #: Turns allowed per decision. ``None`` means "the decider's own
+        #: default" — see the note on ``--max-turns``; the number has one
+        #: owner, and it is not this file.
+        self.max_turns = getattr(args, "max_turns", None)
         self.panel_size = args.panel_size
         self.news_limit = args.news_limit
         #: The window's first session, carried so an observation can name the
@@ -2830,9 +2840,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="不给买入决策器工具（回到'只能从面板里挑'的旧行为；"
              "用来和会用工具的版本跑同一窗口做对照）")
     parser.add_argument(
-        "--max-turns", type=int, default=3,
-        help="每次买入决策允许的轮数（默认 3；一次工具调用占一轮，"
-             "1 等于没有工具）")
+        "--max-turns", type=int, default=None,
+        help="每次买入决策允许的轮数。不传则用决策器自己的默认值"
+             "（t1_decider.propose，当前 8）；一次工具调用占一轮，"
+             "1 等于没有工具。定义只存在一处，避免 CLI 与函数默认值漂移。")
     parser.add_argument("--panel-size", type=int, default=40,
                         help="securities the model may choose from (llm only).")
     parser.add_argument("--news-limit", type=int, default=60,

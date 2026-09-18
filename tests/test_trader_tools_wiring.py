@@ -64,10 +64,12 @@ class TestTheToolsAreWired:
                     f"({why}): {desc[:80]}")
 
     def test_the_decider_defaults_to_more_than_one_turn(self):
-        """A tool call costs a turn, so max_turns=1 makes tools unusable."""
-        import inspect
-        sig = inspect.signature(t1_decider.propose)
-        assert sig.parameters["max_turns"].default > 1
+        """A tool call costs a turn, so a budget of 1 makes tools unusable.
+
+        The signature default is ``None`` — "use `DEFAULT_MAX_TURNS`" — so the
+        constant is what must be big enough. See
+        `TestTheTurnBudgetHasOneOwner` for why the number has one owner."""
+        assert t1_decider.DEFAULT_MAX_TURNS > 1
 
     def test_tools_can_be_turned_off_for_a_comparison_run(self):
         import inspect
@@ -218,11 +220,10 @@ class TestATooLongDeliberationIsADayNotAWindow:
     """
 
     def test_the_default_budget_fits_what_the_recording_shows(self):
-        import inspect
-        sig = inspect.signature(t1_decider.propose)
-        assert sig.parameters["max_turns"].default >= 6, (
-            "the recorded deliberation needed three rounds of six calls plus "
-            "an answer; a smaller default is a budget that fails in practice")
+        assert t1_decider.DEFAULT_MAX_TURNS >= 4, (
+            "the recorded deliberation needed three rounds of up to six "
+            "parallel calls plus an answer; a smaller budget fails in "
+            "practice — it did, on the first two tool-enabled runs")
 
     def test_exceeding_the_budget_is_reported_not_raised(self, monkeypatch):
         from agents import Runner
@@ -262,3 +263,53 @@ class TestATooLongDeliberationIsADayNotAWindow:
             assert not raises, (
                 "the MaxTurnsExceeded handler re-raises, which is the "
                 "window-killing behaviour")
+
+
+class TestTheTurnBudgetHasOneOwner:
+    """The worst run of this project, and it was a duplicated default.
+
+    `propose` was raised to 8 while the runner's `--max-turns` stayed at 3.
+    The runner always passes its own value, so the decider's default was
+    unreachable: a 20-day window spent 2.5 hours producing 40 unreadable
+    decisions (`MaxTurnsExceeded` on every one) and zero trades. The report
+    said `decider_unreadable 40`, `买入 0 笔`, `区间收益 +0.000%`.
+
+    The number now has one owner — the decider — and the runner's flag
+    defaults to None, meaning "whatever the decider says".
+    """
+
+    def test_the_runner_does_not_declare_its_own_default(self):
+        import argparse
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        parser = wf.build_parser()
+        action = [a for a in parser._actions if a.dest == "max_turns"][0]
+        assert action.default is None, (
+            f"the runner declares max_turns={action.default!r}; a second "
+            f"default is a second answer, and they drifted once already")
+
+    def test_none_means_the_deciders_default_not_zero(self, monkeypatch):
+        """`max_turns=None` must resolve to the constant, never reach the SDK
+        as None or 0 — both would make every decision unanswerable."""
+        from agents import Agent, Runner
+
+        seen: dict = {}
+
+        async def _fake_run(agent, message, **kw):
+            seen.update(kw)
+            return _FakeResult(final=json.dumps({"orders": []}))
+
+        monkeypatch.setattr(Runner, "run", staticmethod(_fake_run))
+        asyncio.run(t1_decider.propose(
+            day="2026-01-05", prev_day="2026-01-02", panel=PANEL,
+            news=[], template=_minimal_template(), model=_StubModel(),
+            tools=TT.TRADER_TOOLS, max_turns=None))
+
+        assert seen["max_turns"] == t1_decider.DEFAULT_MAX_TURNS
+
+    def test_the_budget_covers_three_tool_rounds_and_an_answer(self):
+        """One turn per round-trip plus one to answer, from the recording."""
+        assert t1_decider.DEFAULT_MAX_TURNS >= 4

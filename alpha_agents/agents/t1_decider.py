@@ -70,6 +70,21 @@ logger = logging.getLogger(__name__)
 #: Names the decider in the run report and in every order's ``reason`` prefix.
 DECIDER_NAME = "t1_llm"
 
+#: Turns one decision may take, including tool round-trips.
+#:
+#: The number lives here and nowhere else. A tool call costs a turn, so this
+#: is ``1 + tool budget``, sized from the first tool-enabled recording: the
+#: model spent three rounds issuing up to six parallel calls each before it
+#: was ready to answer.
+#:
+#: It was briefly declared twice — here and in the runner's ``--max-turns``.
+#: The two disagreed (8 against 3), the runner always passes its own value,
+#: so the value here was unreachable: a 20-day window spent 2.5 hours and
+#: produced 40 unreadable decisions and no trades. The runner now defaults to
+#: ``None`` and defers to this constant, and a test asserts nothing overrides
+#: it accidentally.
+DEFAULT_MAX_TURNS = 8
+
 #: The prompt is the *user message*, not the system instructions: it is the
 #: task, and it holds every placeholder the runner fills. Kept in a file so a
 #: prompt change does not need a code change — and so the text the model was
@@ -338,7 +353,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str = "", knowledge: str = "",
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
-                  max_turns: int = 8, market: dict | None = None,
+                  max_turns: int | None = None, market: dict | None = None,
                   phase: str = "open", tools: list | None = None) -> dict:
     """Ask the model for today's orders.
 
@@ -347,10 +362,13 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     call is recorded and a second run of the same window answers from the
     recording instead of re-sampling.
 
-    ``max_turns`` is 8, and the number came from measurement rather than
-    taste. The first tool-enabled replay was run at 3 and died on its first
-    decision with ``MaxTurnsExceeded``: the model issued **six parallel tool
-    calls** in round one (market regime + four stock contexts + theme state),
+    ``max_turns`` defaults to :data:`DEFAULT_MAX_TURNS`, and passing ``None``
+    means that default rather than zero. It is declared once, here, because
+    this module owns the decision budget: the runner's ``--max-turns`` also
+    defaults to ``None`` and simply does not override it. Defining the number
+    in both places is what produced the worst run of this project — the
+    decider said 8, the CLI said 3, the CLI won, and 2.5 hours of model calls
+    produced 40 unreadable decisions and no trades.
     six more in round two (including two memories and its own state), and was
     cut off before it could answer. Giving a trader tools makes its reasoning
     longer, and a budget set before that was known was a guess.
@@ -368,6 +386,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     if model is None:
         from alpha_agents.model_factory import create_model
         model = create_model()
+    if max_turns is None:
+        max_turns = DEFAULT_MAX_TURNS
     message = build_message(
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,

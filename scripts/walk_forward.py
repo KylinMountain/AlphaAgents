@@ -1303,6 +1303,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
             selected=selected,
             research={"themes": selected} if selected else None,
             refusals=refusals,
+            parse_error=verdict.get("parse_error"),
         )
     except Exception as exc:                          # noqa: BLE001
         ctx.counters["theme_opportunity_journal_errors"] += 1

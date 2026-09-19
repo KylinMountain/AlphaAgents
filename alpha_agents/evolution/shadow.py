@@ -497,19 +497,6 @@ def _rename_legacy_producer_column(conn: sqlite3.Connection) -> None:
 
 
 
-def _migrate_run_contract_columns(conn: sqlite3.Connection) -> None:
-    """Add experiment binding/seal columns to databases created before them."""
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(shadow_runs)")}
-    additions = {
-        "manifest_id": "INTEGER",
-        "sealed_at": "TEXT",
-        "gate_decision_id": "INTEGER",
-    }
-    for name, kind in additions.items():
-        if name not in columns:
-            conn.execute(f"ALTER TABLE shadow_runs ADD COLUMN {name} {kind}")
-
-
 def manifest_for_run(run_id: int) -> dict | None:
     """The immutable experiment question bound to a shadow run."""
     conn = memory_store._get_conn()
@@ -570,20 +557,7 @@ def assert_run_evaluable(run: dict) -> dict | None:
     return manifest
 
 
-def seal_run(run_id: int, *, gate_decision_id: int, reason: str,
-             sealed_at: str | None = None) -> None:
-    """Seal a preregistered experiment after its final persisted verdict."""
-    _positive_id(run_id, "run_id")
-    _positive_id(gate_decision_id, "gate_decision_id")
-    reason = _text(reason, "reason")
-    when = _text(sealed_at, "sealed_at") if sealed_at else _today()
-    with memory_store._write_lock:
-        conn = memory_store._get_conn()
-        init_schema(conn)
-        with conn:
-            experiment_manifest.seal(
-                conn, run_id=run_id, gate_decision_id=gate_decision_id,
-                reason=reason, sealed_at=when)
+seal_run = experiment_manifest.seal_run
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -592,7 +566,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_PREDICTIONS)
     experiment_manifest.init_schema(conn)
     _rename_legacy_producer_column(conn)
-    _migrate_run_contract_columns(conn)
     for statement in _INDEXES:
         conn.execute(statement)
 

@@ -12,6 +12,8 @@ import hashlib
 import json
 import sqlite3
 
+from alpha_agents.data import clock, memory_store
+
 EVALUATOR = "paired_brier_v1"
 METRIC = "brier"
 STOPPING_RULE = "one_verdict_at_or_after_minimum_paired_samples"
@@ -46,6 +48,16 @@ class ManifestError(ValueError):
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TABLE)
+    columns = {row[1] for row in conn.execute(
+        "PRAGMA table_info(shadow_runs)")}
+    additions = {
+        "manifest_id": "INTEGER",
+        "sealed_at": "TEXT",
+        "gate_decision_id": "INTEGER",
+    }
+    for name, kind in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE shadow_runs ADD COLUMN {name} {kind}")
     for guard in _GUARDS:
         conn.execute(guard)
 
@@ -130,3 +142,24 @@ def seal(conn: sqlite3.Connection, *, run_id: int, gate_decision_id: int,
         "gate_decision_id=?, closed_at=COALESCE(closed_at, ?), "
         "reason=reason || ' | sealed: ' || ? WHERE id=?",
         (sealed_at, gate_decision_id, sealed_at, reason, run_id))
+
+
+
+def seal_run(*, run_id: int, gate_decision_id: int, reason: str,
+             sealed_at: str | None = None) -> None:
+    """Persist the one final look at an experiment."""
+    if type(run_id) is not int or run_id <= 0:
+        raise ManifestError(f"run_id must be a positive integer, got {run_id!r}")
+    if type(gate_decision_id) is not int or gate_decision_id <= 0:
+        raise ManifestError(
+            f"gate_decision_id must be a positive integer, got "
+            f"{gate_decision_id!r}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ManifestError("A sealed experiment needs a nonempty reason.")
+    when = sealed_at or clock.today()
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        init_schema(conn)
+        with conn:
+            seal(conn, run_id=run_id, gate_decision_id=gate_decision_id,
+                 reason=reason.strip(), sealed_at=str(when))

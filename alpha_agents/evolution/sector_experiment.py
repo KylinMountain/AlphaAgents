@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ARMS = {
     "A": {
@@ -42,6 +43,24 @@ RISK_KEYS = (
     "max_theme_cluster_exposure_pct",
 )
 
+IDENTITY_KEYS = (
+    "code_ref",
+    "policy_ref",
+    "input_hash",
+)
+
+DECISION_KEYS = (
+    "trader",
+    "picks_per_day",
+    "panel_size",
+    "participation",
+    "trader_tools_enabled",
+    "max_turns_per_decision",
+    "news_limit",
+    "model_timeout_seconds",
+    "pace_seconds",
+)
+
 
 class SectorExperimentError(ValueError):
     pass
@@ -63,6 +82,8 @@ def template(*, capabilities_hash: str) -> dict:
         "schema_version": SCHEMA_VERSION,
         "capabilities_hash": capabilities_hash,
         "architecture_arms": ARMS,
+        "baseline_identity": {key: None for key in IDENTITY_KEYS},
+        "decision_config": None,
         "model": None,
         "research_budget": None,
         "cost_model": None,
@@ -71,6 +92,7 @@ def template(*, capabilities_hash: str) -> dict:
         "validation_windows": [],
         "forward_start": None,
         "primary_metric": None,
+        "minimum_meaningful_improvement_pct": None,
         "minimum_days": 50,
         "stopping_rule": None,
         "risk_boundaries": {key: None for key in RISK_KEYS},
@@ -97,10 +119,58 @@ def validate(manifest: dict) -> list[str]:
         errors.append("architecture_arms must match the frozen A/B/C/D contract")
 
     for field in (
-            "capabilities_hash", "model", "research_budget", "cost_model",
-            "exit_policy", "forward_start", "primary_metric", "stopping_rule"):
+            "capabilities_hash", "decision_config", "model",
+            "research_budget", "cost_model", "exit_policy", "forward_start",
+            "primary_metric", "stopping_rule"):
         if _empty(manifest.get(field)):
             errors.append(f"{field} is required")
+
+    identity = manifest.get("baseline_identity") or {}
+    for key in IDENTITY_KEYS:
+        if _empty(identity.get(key)):
+            errors.append(f"baseline_identity.{key} is required")
+
+    decision = manifest.get("decision_config") or {}
+    for key in DECISION_KEYS:
+        if key not in decision:
+            errors.append(f"decision_config.{key} is required")
+    for key in ("picks_per_day", "panel_size", "news_limit"):
+        value = decision.get(key)
+        if key in decision and (
+                not isinstance(value, int) or isinstance(value, bool)
+                or value <= 0):
+            errors.append(f"decision_config.{key} must be a positive integer")
+    participation = decision.get("participation")
+    if participation is not None and (
+            not isinstance(participation, (int, float))
+            or isinstance(participation, bool)
+            or not 0 < float(participation) <= 1):
+        errors.append("decision_config.participation must be in (0, 1]")
+    tools_enabled = decision.get("trader_tools_enabled")
+    if tools_enabled is not None and not isinstance(tools_enabled, bool):
+        errors.append("decision_config.trader_tools_enabled must be boolean")
+    max_turns = decision.get("max_turns_per_decision")
+    if max_turns is not None and (
+            not isinstance(max_turns, int) or isinstance(max_turns, bool)
+            or max_turns <= 0):
+        errors.append(
+            "decision_config.max_turns_per_decision must be null or positive int")
+    for key in ("model_timeout_seconds", "pace_seconds"):
+        value = decision.get(key)
+        if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or float(value) < 0):
+            errors.append(f"decision_config.{key} must be non-negative numeric")
+    if decision.get("model_timeout_seconds") == 0:
+        errors.append("decision_config.model_timeout_seconds must be > 0")
+
+    minimum_improvement = manifest.get("minimum_meaningful_improvement_pct")
+    if not isinstance(minimum_improvement, (int, float)):
+        errors.append("minimum_meaningful_improvement_pct must be numeric")
+    elif minimum_improvement < 0:
+        errors.append(
+            "minimum_meaningful_improvement_pct must be >= 0")
 
     training = manifest.get("training_window") or {}
     if _empty(training.get("start")) or _empty(training.get("end")):
@@ -147,3 +217,26 @@ def require_valid(manifest: dict) -> str:
         raise SectorExperimentError(
             "invalid sector experiment manifest: " + "; ".join(errors))
     return manifest_hash(manifest)
+
+
+def register(manifest: dict, root: Path) -> Path:
+    """Archive one validated manifest under its content hash.
+
+    Registration is content-addressed and never overwrites an existing file.
+    Re-registering byte-equivalent content is idempotent; any changed protocol
+    necessarily receives a different path and hash.
+    """
+    digest = require_valid(manifest)
+    directory = Path(root) / "manifests"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{digest}.json"
+    payload = _dump(manifest) + "\n"
+    try:
+        with target.open("x", encoding="utf-8") as fh:
+            fh.write(payload)
+    except FileExistsError:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing != manifest or manifest_hash(existing) != digest:
+            raise SectorExperimentError(
+                f"registered manifest collision at {target}")
+    return target

@@ -7,6 +7,16 @@ Audit is read-only:
 Verify refuses incomplete preregistration:
   uv run python scripts/sector_first.py verify \
       --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
+
+Register a validated protocol without overwriting an older version:
+  uv run python scripts/sector_first.py register \
+      --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
+
+Run one preregistered validation window across all four isolated arms:
+  uv run python scripts/sector_first.py run-matrix \
+      --manifest /tmp/sf/manifests/<hash>.json \
+      --sector-membership /path/to/pit-membership.json \
+      --corpus data --window-index 0 --out /tmp/sf/window-0
 """
 
 from __future__ import annotations
@@ -14,7 +24,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import sqlite3
+import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parent.parent
@@ -65,6 +78,16 @@ def _audit(args) -> int:
     return 0
 
 
+def _register(args) -> int:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    path = sector_experiment.register(manifest, args.out)
+    print(json.dumps({
+        "registered_manifest": str(path),
+        "manifest_hash": sector_experiment.require_valid(manifest),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _freeze_directions(args) -> int:
     payload = frozen_direction_archive.export(run_id=args.run_id)
     frozen_direction_archive.write(args.out_file, payload)
@@ -75,6 +98,215 @@ def _freeze_directions(args) -> int:
         "archive_hash": payload["archive_hash"],
     }, ensure_ascii=False, indent=2))
     return 0
+
+
+_ARM_ARCHITECTURES = {
+    "A": "dual_rank_v0",
+    "B": "sector_first_v0",
+    "C": "sector_first_simple_selector",
+    "D": "sector_first_no_flow",
+}
+
+
+def _registered_manifest(path: Path) -> tuple[dict, str]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    digest = sector_experiment.require_valid(manifest)
+    if path.name != f"{digest}.json" or path.parent.name != "manifests":
+        raise sector_experiment.SectorExperimentError(
+            "run-matrix requires the content-addressed manifest produced by "
+            "sector_first.py register; an editable working copy is not a "
+            "preregistered protocol")
+    return manifest, digest
+
+
+def _window_session_count(corpus: Path, start: str, end: str) -> int:
+    db = corpus / "market_history.db"
+    if not db.exists():
+        raise FileNotFoundError(f"market history not found: {db}")
+    conn = sqlite3.connect(f"file:{db.resolve()}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT date FROM daily_kline "
+            "WHERE date >= ? AND date <= ? ORDER BY date",
+            (start, end),
+        ).fetchall()
+    finally:
+        conn.close()
+    days = [str(row[0]) for row in rows]
+    if not days or days[0] != start or days[-1] != end:
+        raise sector_experiment.SectorExperimentError(
+            f"registered window {start}..{end} is not fully present in "
+            f"{db}; observed endpoints are "
+            f"{days[0] if days else None}..{days[-1] if days else None}")
+    return len(days)
+
+
+def _walk_command(*, manifest: dict, manifest_path: Path,
+                  membership_path: Path, target: Path, out: Path,
+                  start: str, days: int, arm: str, run_id: str,
+                  frozen_directions: Path | None = None) -> list[str]:
+    architecture = _ARM_ARCHITECTURES[arm]
+    decision = manifest["decision_config"]
+    exit_policy = manifest["exit_policy"]
+    cmd = [
+        sys.executable, str(REPO / "scripts" / "walk_forward.py"),
+        "--target", str(target),
+        "--start", start,
+        "--days", str(days),
+        "--decider", "llm",
+        "--selection-architecture", architecture,
+        "--sector-membership", str(membership_path),
+        "--experiment-manifest", str(manifest_path),
+        "--experiment-arm", arm,
+        "--run-id", run_id,
+        "--out", str(out),
+        "--trader", str(decision["trader"]),
+        "--picks", str(decision["picks_per_day"]),
+        "--panel-size", str(decision["panel_size"]),
+        "--participation", str(decision["participation"]),
+        "--news-limit", str(decision["news_limit"]),
+        "--model-timeout", str(decision["model_timeout_seconds"]),
+        "--pace-seconds", str(decision["pace_seconds"]),
+    ]
+    if not decision["trader_tools_enabled"]:
+        cmd.append("--no-trader-tools")
+    if decision["max_turns_per_decision"] is not None:
+        cmd.extend([
+            "--max-turns", str(decision["max_turns_per_decision"])])
+    if not exit_policy["mechanical_stop"]:
+        cmd.append("--no-stop-loss")
+    if not exit_policy["mechanical_target"]:
+        cmd.append("--no-take-profit")
+    if exit_policy["agent_exits"]:
+        cmd.append("--agent-exits")
+    if arm == "C":
+        if frozen_directions is None:
+            raise sector_experiment.SectorExperimentError(
+                "C requires B's frozen direction archive")
+        cmd.extend(["--frozen-directions", str(frozen_directions)])
+    elif frozen_directions is not None:
+        raise sector_experiment.SectorExperimentError(
+            "only C may receive --frozen-directions")
+    return cmd
+
+
+def _run_child(cmd: list[str], *, env: dict[str, str]) -> None:
+    print("+ " + " ".join(cmd), flush=True)
+    completed = subprocess.run(cmd, env=env, check=False)
+    if completed.returncode != 0:
+        raise sector_experiment.SectorExperimentError(
+            f"child command failed with exit {completed.returncode}: "
+            + " ".join(cmd))
+
+
+def _run_matrix(args) -> int:
+    manifest, digest = _registered_manifest(args.manifest)
+    windows = manifest["validation_windows"]
+    if not 0 <= args.window_index < len(windows):
+        raise sector_experiment.SectorExperimentError(
+            f"window-index must be 0..{len(windows) - 1}")
+    if not args.sector_membership.exists():
+        raise FileNotFoundError(args.sector_membership)
+    if manifest["exit_policy"].get("agent_exits"):
+        raise sector_experiment.SectorExperimentError(
+            "Sector-First formal arms do not support agent_exits yet; "
+            "freeze agent_exits=false until the close-buy path is wired")
+
+    window = windows[args.window_index]
+    start = str(window["start"])[:10]
+    end = str(window["end"])[:10]
+    days = _window_session_count(args.corpus, start, end)
+
+    root = args.out
+    state_root = root / "state"
+    arms_root = root / "arms"
+    frozen = root / "frozen_b_directions.json"
+    prefix = args.run_prefix or (
+        f"sector-{digest[:10]}-w{args.window_index}")
+    record_path = root / "matrix_run.json"
+    if record_path.exists():
+        raise sector_experiment.SectorExperimentError(
+            f"{record_path} already exists; formal matrix runs are append-by-"
+            "directory, not overwrite-in-place")
+
+    root.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["ALPHAAGENTS_LLM_MODE"] = "record"
+    completed_arms = []
+
+    def bootstrap(arm: str) -> Path:
+        target = state_root / arm
+        _run_child([
+            sys.executable, str(REPO / "scripts" / "walk_bootstrap.py"),
+            "--target", str(target), "--corpus", str(args.corpus),
+        ], env=env)
+        return target
+
+    def replay(arm: str, *, frozen_directions: Path | None = None) -> None:
+        target = bootstrap(arm)
+        run_id = f"{prefix}-{arm}"
+        _run_child(_walk_command(
+            manifest=manifest,
+            manifest_path=args.manifest,
+            membership_path=args.sector_membership,
+            target=target,
+            out=arms_root / arm,
+            start=start,
+            days=days,
+            arm=arm,
+            run_id=run_id,
+            frozen_directions=frozen_directions,
+        ), env=env)
+        completed_arms.append(arm)
+
+    status = {
+        "manifest_hash": digest,
+        "manifest": str(args.manifest),
+        "membership": str(args.sector_membership),
+        "window_index": args.window_index,
+        "window": {"start": start, "end": end, "trading_days": days},
+        "completed_arms": completed_arms,
+        "status": "running",
+    }
+    write_json(record_path, status)
+    try:
+        replay("A")
+        write_json(record_path, status)
+        replay("B")
+        write_json(record_path, status)
+
+        freeze_env = dict(env)
+        freeze_env["ALPHAAGENTS_DATA_DIR"] = str(state_root / "B")
+        _run_child([
+            sys.executable, str(REPO / "scripts" / "sector_first.py"),
+            "freeze-directions",
+            "--run-id", f"{prefix}-B",
+            "--out-file", str(frozen),
+        ], env=freeze_env)
+        if not frozen.exists():
+            raise sector_experiment.SectorExperimentError(
+                "B direction freeze command returned success but produced no archive")
+
+        replay("C", frozen_directions=frozen)
+        write_json(record_path, status)
+        replay("D")
+        status["status"] = "arms_complete"
+        write_json(record_path, status)
+
+        report = sector_experiment_compare.compare(
+            manifest=manifest,
+            arm_dirs={arm: arms_root / arm for arm in _ARM_ARCHITECTURES},
+        )
+        write_json(root / "comparison.json", report)
+        status["status"] = report["status"]
+        status["comparison"] = str(root / "comparison.json")
+        write_json(record_path, status)
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 0 if report["status"] == "ready_for_human_review" else 3
+    except Exception:
+        status["status"] = "failed"
+        write_json(record_path, status)
+        raise
 
 
 def _compare(args) -> int:
@@ -111,9 +343,21 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--as-of", required=True)
     audit.add_argument("--out", type=Path, required=True)
 
+    register = sub.add_parser("register")
+    register.add_argument("--manifest", type=Path, required=True)
+    register.add_argument("--out", type=Path, required=True)
+
     freeze = sub.add_parser("freeze-directions")
     freeze.add_argument("--run-id", required=True)
     freeze.add_argument("--out-file", type=Path, required=True)
+
+    matrix = sub.add_parser("run-matrix")
+    matrix.add_argument("--manifest", type=Path, required=True)
+    matrix.add_argument("--sector-membership", type=Path, required=True)
+    matrix.add_argument("--corpus", type=Path, default=DATA_DIR)
+    matrix.add_argument("--window-index", type=int, required=True)
+    matrix.add_argument("--run-prefix", default=None)
+    matrix.add_argument("--out", type=Path, required=True)
 
     compare = sub.add_parser("compare")
     compare.add_argument("--manifest", type=Path, required=True)
@@ -127,8 +371,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "audit":
         return _audit(args)
+    if args.cmd == "register":
+        return _register(args)
     if args.cmd == "freeze-directions":
         return _freeze_directions(args)
+    if args.cmd == "run-matrix":
+        return _run_matrix(args)
     if args.cmd == "compare":
         return _compare(args)
     return _verify(args)

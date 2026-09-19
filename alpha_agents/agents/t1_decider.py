@@ -145,8 +145,8 @@ def format_panel(panel: list[dict]) -> str:
     sector_first = any(row.get("primary_theme") for row in panel)
     if sector_first:
         lines = [
-            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向 | 辅方向 |",
-            "|---|---|---|---|---|---|---|---|---|---|",
+            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     else:
         lines = [
@@ -162,7 +162,18 @@ def format_panel(panel: list[dict]) -> str:
         if sector_first:
             primary = row.get("primary_theme") or "-"
             supporting = row.get("supporting_themes") or []
-            tail = f"{primary} | {'、'.join(supporting) if supporting else '-'} |"
+            peer_rel = row.get("primary_theme_peer_relative_5d_pct")
+            peer_covered = row.get("primary_theme_peer_covered")
+            peer_total = row.get("primary_theme_peer_total")
+            peer_text = (
+                "-"
+                if peer_rel is None
+                else f"{peer_rel:+.2f}% ({peer_covered}/{peer_total})"
+            )
+            tail = (
+                f"{peer_text} | {primary} | "
+                f"{'、'.join(supporting) if supporting else '-'} |"
+            )
         else:
             tail = f"{'、'.join(concepts) if concepts else '-'} |"
         lines.append(

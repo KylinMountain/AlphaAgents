@@ -79,6 +79,10 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
         "adv20": 100000,
         "primary_theme": "AI",
         "supporting_themes": ["算力"],
+        "membership_snapshot_id": "m1",
+        "membership_hash": "membership-hash",
+        "primary_theme_relation_evidence_id": "rel-primary",
+        "supporting_theme_relation_evidence_ids": ["rel-supporting"],
     }]
     monkeypatch.setattr(
         wf, "_sector_first_stage", lambda *a, **k: (panel, None))
@@ -108,6 +112,11 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     assert got[0]["supporting_themes"] == ["算力"]
     assert captured["theme"] == "AI"
     assert captured["theme"] != ctx.theme
+    assert got[0]["membership_snapshot_id"] == "m1"
+    assert got[0]["membership_hash"] == "membership-hash"
+    assert got[0]["primary_theme_relation_evidence_id"] == "rel-primary"
+    assert got[0]["supporting_theme_relation_evidence_ids"] == [
+        "rel-supporting"]
 
 
 def test_dual_rank_default_keeps_run_theme(monkeypatch):
@@ -215,4 +224,85 @@ def test_sector_trade_plan_is_toolless(monkeypatch):
         panel=[{"code": "600001"}], news=[], market={},
         book="", knowledge="")
     assert captured["tools"] == []
+    assert captured["research_budget"] is None
+
+
+
+def test_sector_stock_card_renders_leave_one_out_peer_strength():
+    panel = [{
+        "code": "600001",
+        "name": "甲",
+        "close": 10.0,
+        "change_pct": 2.0,
+        "adv20": 100000,
+        "turnover_rate": 3.0,
+        "primary_theme": "AI",
+        "supporting_themes": ["算力"],
+        "primary_theme_peer_covered": 3,
+        "primary_theme_peer_total": 4,
+        "primary_theme_peer_relative_5d_pct": 1.234,
+    }]
+    rendered = t1_decider.format_panel(panel)
+    assert "主方向去自身5日相对" in rendered
+    assert "+1.23% (3/4)" in rendered
+
+
+
+def test_formal_dual_rank_arm_uses_the_preregistered_research_budget(monkeypatch):
+    from alpha_agents.tools.budget import ResearchBudget
+
+    ctx = _Ctx()
+    ctx.selection_architecture = "dual_rank_v0"
+    ctx.experiment_manifest = {"bound": True}
+    panel = [{
+        "code": "600001",
+        "name": "甲",
+        "adv20": 100000,
+    }]
+    monkeypatch.setattr(wf, "_build_panel", lambda *a, **k: panel)
+    _wire_common(monkeypatch)
+
+    captured = {}
+    monkeypatch.setattr(
+        t1_decider,
+        "propose_sync",
+        lambda **kwargs: captured.update(kwargs) or {
+            "orders": [],
+            "refused": [],
+            "parse_error": None,
+            "raw": "{}",
+            "research_budget": kwargs["research_budget"].summary(),
+        },
+    )
+
+    wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
+    assert isinstance(captured["research_budget"], ResearchBudget)
+    assert captured["research_budget"].max_total_calls == 20
+
+
+def test_ordinary_dual_rank_run_keeps_legacy_unbounded_research(monkeypatch):
+    ctx = _Ctx()
+    ctx.selection_architecture = "dual_rank_v0"
+    panel = [{
+        "code": "600001",
+        "name": "甲",
+        "adv20": 100000,
+    }]
+    monkeypatch.setattr(wf, "_build_panel", lambda *a, **k: panel)
+    _wire_common(monkeypatch)
+
+    captured = {}
+    monkeypatch.setattr(
+        t1_decider,
+        "propose_sync",
+        lambda **kwargs: captured.update(kwargs) or {
+            "orders": [],
+            "refused": [],
+            "parse_error": None,
+            "raw": "{}",
+            "research_budget": None,
+        },
+    )
+
+    wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
     assert captured["research_budget"] is None

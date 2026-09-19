@@ -18,6 +18,22 @@ from alpha_agents.evolution import sector_experiment_compare as C
 def _manifest():
     manifest = E.template(capabilities_hash="a" * 64)
     manifest.update({
+        "baseline_identity": {
+            "code_ref": "72ce91a96e8ab0ee499dae0d6e71deef36e67ddd",
+            "policy_ref": "policy-v1",
+            "input_hash": "i" * 64,
+        },
+        "decision_config": {
+            "trader": "pullback",
+            "picks_per_day": 2,
+            "panel_size": 40,
+            "participation": 0.10,
+            "trader_tools_enabled": True,
+            "max_turns_per_decision": None,
+            "news_limit": 60,
+            "model_timeout_seconds": 120.0,
+            "pace_seconds": 0.0,
+        },
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},
@@ -32,6 +48,7 @@ def _manifest():
         ],
         "forward_start": "2027-01-01",
         "primary_metric": "portfolio_net_return_pct",
+        "minimum_meaningful_improvement_pct": 0.10,
         "minimum_days": 50,
         "stopping_rule": {"validation_windows": 4, "then": "freeze"},
         "risk_boundaries": {
@@ -128,6 +145,19 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
     assert got["promotion_eligible"] is False
     assert got["paired_daily"]["B_minus_A"]["n_days"] == 60
     assert got["arms"]["B"]["risk"]["passed"] is True
+    assert got["arms"]["B"]["layers"]["direction"]["sets"] == 60
+    assert got["arms"]["B"]["layers"]["stock"]["sets"] == 60
+    assert got["arms"]["B"]["layers"]["execution"]["fills"] == 1
+    assert (
+        got["arms"]["B"]["layers"]["portfolio"]
+        == got["arms"]["B"]["portfolio"]
+    )
+    assert got["measurement_contract"]["portfolio"].startswith("ledger")
+    assert got["evidence_status"]["data"]["B"] == "complete"
+    assert got["evidence_status"]["execution"]["B"] == "has_fills"
+    assert got["paired_daily"]["B_minus_A"]["evidence"] in {
+        "positive_beyond_floor", "negative_beyond_floor", "inconclusive",
+    }
 
 
 def test_missing_cluster_exposure_is_insufficient_not_assumed_safe(tmp_path):
@@ -254,3 +284,61 @@ def test_replay_window_must_equal_a_preregistered_window():
     with pytest.raises(SystemExit, match="not one of"):
         wf._verify_experiment_window(
             ctx, ["2026-01-02", "2026-01-15", "2026-03-31"])
+
+
+
+def test_ci_that_does_not_clear_preregistered_floor_is_inconclusive(tmp_path):
+    manifest = _manifest()
+    manifest["minimum_meaningful_improvement_pct"] = 99.0
+    arms = _arms(tmp_path)
+    digest = E.require_valid(manifest)
+    for root in arms.values():
+        path = root / "run.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["experiment_manifest_hash"] = digest
+        path.write_text(json.dumps(meta), encoding="utf-8")
+
+    got = C.compare(manifest=manifest, arm_dirs=arms)
+    assert got["paired_daily"]["B_minus_A"]["evidence"] == "inconclusive"
+    assert got["promotion_eligible"] is False
+
+
+def test_no_fill_sample_is_reported_separately(tmp_path):
+    arms = _arms(tmp_path)
+    for root in arms.values():
+        _write_csv(root / "fills.csv", ["side", "amount"], [])
+    got = C.compare(manifest=_manifest(), arm_dirs=arms)
+    assert got["status"] == "insufficient"
+    assert set(got["evidence_status"]["execution"].values()) == {"no_fills"}
+    assert "no arm produced an executable fill sample" in got["reasons"]
+
+
+
+def test_formal_replay_refuses_runtime_that_differs_from_manifest():
+    args = wf.build_parser().parse_args([
+        "--start", "2026-01-01",
+        "--decider", "llm",
+    ])
+    manifest = _manifest()
+    actual = wf._experiment_runtime_contract(args)
+    manifest.update(actual)
+    wf._verify_experiment_runtime(args, manifest)
+
+    changed = dict(manifest)
+    changed["cost_model"] = dict(manifest["cost_model"])
+    changed["cost_model"]["commission_rate"] += 0.001
+    with pytest.raises(SystemExit, match="frozen manifest"):
+        wf._verify_experiment_runtime(args, changed)
+
+
+def test_runtime_contract_names_full_virtual_cost_model():
+    args = wf.build_parser().parse_args([
+        "--start", "2026-01-01",
+        "--decider", "llm",
+    ])
+    cost = wf._experiment_runtime_contract(args)["cost_model"]
+    assert cost["commission_rate"] > 0
+    assert cost["min_commission_rmb"] > 0
+    assert cost["stamp_duty_sell_rate"] > 0
+    assert cost["transfer_fee_rate"] > 0
+    assert cost["slippage_rate"] > 0

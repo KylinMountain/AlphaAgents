@@ -81,3 +81,31 @@ def test_concepts_by_code_inverts_the_same_snapshot(tmp_path):
     }])
     snapshot = M.load(path)[0]
     assert M.concepts_by_code(snapshot)["600001"] == ["AI", "算力"]
+
+
+
+def test_relation_evidence_id_is_stable_and_membership_bound(tmp_path):
+    path = _write(tmp_path, [{
+        "snapshot_id": "m1",
+        "available_at": "2026-01-01 00:00:00",
+        "source": "fixture",
+        "sector_type": "concept",
+        "point_in_time": True,
+        "members": {
+            "AI": ["600001", "600002"],
+            "算力": ["600001"],
+        },
+    }])
+    snapshot = M.load(path)[0]
+    first = M.relation_evidence_id(
+        snapshot, sector_id="AI", code="600001")
+    second = M.relation_evidence_id(
+        snapshot, sector_id="AI", code="600001")
+    other = M.relation_evidence_id(
+        snapshot, sector_id="算力", code="600001")
+
+    assert first == second
+    assert first != other
+    with pytest.raises(SectorSnapshotError, match="not a member"):
+        M.relation_evidence_id(
+            snapshot, sector_id="算力", code="600002")

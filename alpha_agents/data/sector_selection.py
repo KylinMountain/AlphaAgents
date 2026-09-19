@@ -314,6 +314,84 @@ def build_sector_snapshots(*, membership: MembershipSnapshot,
     return out
 
 
+def candidate_leave_one_out_5d(*, membership: MembershipSnapshot,
+                               decision_at: str, as_of_session: str,
+                               sessions: list[str],
+                               bars_by_day: dict[str, dict[str, dict]],
+                               market_codes: set[str] | None = None,
+                               strict_pit: bool = True) -> dict[str, dict[str, dict]]:
+    """Peer 5-day strength for each candidate with the candidate removed.
+
+    This prevents circular evidence: a stock cannot make its sector look strong
+    and then cite that same sector strength as independent support for itself.
+    Missing peer bars stay missing and are named by coverage rather than filled
+    with zero.
+    """
+    membership.validate(decision_at, strict_pit=strict_pit)
+    if not sessions or sessions != sorted(sessions):
+        raise SectorSnapshotError("sessions must be non-empty and sorted")
+    index = _session_index(sessions, as_of_session)
+    if as_of_session > decision_at[:10]:
+        raise SectorSnapshotError(
+            "sector facts cannot come from a session after the decision date")
+    if index < 5:
+        return {
+            sector_id: {
+                code: {
+                    "peer_covered": 0,
+                    "peer_total": max(0, len(set(codes)) - 1),
+                    "peer_5d_median_pct": None,
+                    "peer_relative_5d_pct": None,
+                }
+                for code in sorted(set(codes))
+            }
+            for sector_id, codes in sorted(membership.members.items())
+        }
+
+    if market_codes is None:
+        market_codes = set(bars_by_day.get(as_of_session, {}))
+    market_5d_by_code = {
+        code: _window_return(
+            bars_by_day, sessions, index, code, 5)
+        for code in sorted(set(market_codes))
+    }
+
+    out: dict[str, dict[str, dict]] = {}
+    for sector_id, raw_codes in sorted(membership.members.items()):
+        codes = tuple(sorted(set(raw_codes)))
+        returns = {
+            code: _window_return(
+                bars_by_day, sessions, index, code, 5)
+            for code in codes
+        }
+        per_code = {}
+        for code in codes:
+            peers = [
+                value for peer, value in returns.items()
+                if peer != code and value is not None
+            ]
+            median = _median(peers)
+            market_peers = [
+                value for peer, value in market_5d_by_code.items()
+                if peer != code and value is not None
+            ]
+            market_median = _median(market_peers)
+            per_code[code] = {
+                "peer_covered": len(peers),
+                "peer_total": max(0, len(codes) - 1),
+                "peer_5d_median_pct": median,
+                "market_peer_covered": len(market_peers),
+                "market_5d_median_ex_candidate_pct": market_median,
+                "peer_relative_5d_pct": (
+                    round(median - market_median, 6)
+                    if median is not None and market_median is not None
+                    else None
+                ),
+            }
+        out[sector_id] = per_code
+    return out
+
+
 def rank_sector_snapshots(snapshots: list[SectorSnapshot]) -> list[dict]:
     """Transparent v0 shortlist ranking from three observable columns."""
     required = [

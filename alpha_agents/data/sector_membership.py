@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -76,6 +77,27 @@ def concepts_by_code(snapshot: MembershipSnapshot) -> dict[str, list[str]]:
     return out
 
 
+
+def relation_evidence_id(snapshot: MembershipSnapshot, *,
+                         sector_id: str, code: str) -> str:
+    """Stable proof that a code belonged to a sector in this PIT world."""
+    sector = str(sector_id or "").strip()
+    stock = str(code or "").strip()
+    members = set(snapshot.members.get(sector, ()))
+    if not sector or not stock or stock not in members:
+        raise SectorSnapshotError(
+            f"{stock!r} is not a member of {sector!r} in "
+            f"snapshot {snapshot.snapshot_id!r}")
+    payload = {
+        "snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "sector_id": sector,
+        "code": stock,
+    }
+    blob = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def by_id(archive: tuple[MembershipSnapshot, ...], snapshot_id: str,
           expected_hash: str | None = None) -> MembershipSnapshot:

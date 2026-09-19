@@ -1218,6 +1218,20 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
     limit_pool = _limit_pool_map(ctx, day)
     fund_flow = _fund_flow_map(ctx, ranking_day)
     concepts = sector_membership.concepts_by_code(membership)
+    index = ctx.corpus.index.get(ranking_day)
+    if index is None:
+        raise ValueError(f"ranking day {ranking_day} is outside the corpus")
+    loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
+    loo_bars = {session: ctx.corpus.bars(session) for session in loo_sessions}
+    leave_one_out = sector_selection.candidate_leave_one_out_5d(
+        membership=membership,
+        decision_at=f"{day} 09:00:00",
+        as_of_session=ranking_day,
+        sessions=loo_sessions,
+        bars_by_day=loo_bars,
+        market_codes=set(ctx.corpus.bars(ranking_day)),
+        strict_pit=True,
+    )
 
     candidate_codes = set()
     for sector in selected:
@@ -1259,6 +1273,16 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
         code = item["code"]
         row, adv = raw_rows[code]
         board = limit_pool.get(code) or {}
+        peer = (
+            leave_one_out.get(item["primary_theme"], {}).get(code, {})
+        )
+        primary_relation = sector_membership.relation_evidence_id(
+            membership, sector_id=item["primary_theme"], code=code)
+        supporting_relations = [
+            sector_membership.relation_evidence_id(
+                membership, sector_id=theme, code=code)
+            for theme in item["supporting_themes"]
+        ]
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
@@ -1269,6 +1293,16 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
             "concepts": concepts.get(code, []),
             "primary_theme": item["primary_theme"],
             "supporting_themes": item["supporting_themes"],
+            "membership_snapshot_id": membership.snapshot_id,
+            "membership_hash": membership.content_hash,
+            "primary_theme_relation_evidence_id": primary_relation,
+            "supporting_theme_relation_evidence_ids": supporting_relations,
+            "primary_theme_peer_covered": peer.get("peer_covered"),
+            "primary_theme_peer_total": peer.get("peer_total"),
+            "primary_theme_peer_5d_median_pct": peer.get(
+                "peer_5d_median_pct"),
+            "primary_theme_peer_relative_5d_pct": peer.get(
+                "peer_relative_5d_pct"),
             "consecutive_limits": board.get("consecutive_limits"),
             "limit_sector": board.get("sector"),
             "net_amount": (fund_flow.get(code) or {}).get("net_amount"),
@@ -1505,6 +1539,13 @@ def _decide_llm(ctx, day: str, prev_day: str,
             ctx, day, ranking_day, market, news)
     else:
         panel = _build_panel(ctx, day, ranking_day, ctx.panel_size)
+        # A formal A/B/C/D comparison promises one shared research budget.
+        # The incumbent path historically ran without one; keep that behavior
+        # for ordinary dual_rank_v0 runs, but bind the preregistered A arm to
+        # the same finite budget used by the Sector-First stock selector.
+        if getattr(ctx, "experiment_manifest", None) is not None:
+            from alpha_agents.tools.budget import ResearchBudget
+            shared_budget = ResearchBudget()
 
     if phase == "close":
         unavailable = _unavailable_codes(ctx)
@@ -1583,7 +1624,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             phase=phase,
             tools=_trader_tools(ctx),
             max_turns=ctx.max_turns,
-            research_budget=None,
+            research_budget=shared_budget,
         )
 
     try:
@@ -1707,6 +1748,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
             "order_id": order_id,
             "theme": order_theme,
             "supporting_themes": row.get("supporting_themes") or [],
+            "membership_snapshot_id": row.get("membership_snapshot_id"),
+            "membership_hash": row.get("membership_hash"),
+            "primary_theme_relation_evidence_id": row.get(
+                "primary_theme_relation_evidence_id"),
+            "supporting_theme_relation_evidence_ids": row.get(
+                "supporting_theme_relation_evidence_ids") or [],
             "reason": order["reason"],
         })
     return placed
@@ -2485,6 +2532,73 @@ def _experiment_contract(args, *, architecture: str,
     return manifest, digest
 
 
+def _experiment_runtime_contract(args) -> dict:
+    """Behavioral runtime facts a formal A/B/C/D run must freeze.
+
+    A manifest that names costs/model/budget but does not bind them to the
+    process is decoration. Keep this separate from the arm contract so tests
+    can prove both sides independently and so ordinary non-experiment replays
+    retain their existing flexibility.
+    """
+    from alpha_agents.data import portfolio, portfolio_exit
+    from alpha_agents.model_factory import model_identity
+    from alpha_agents.tools.budget import ResearchBudget
+
+    budget = ResearchBudget()
+    return {
+        "decision_config": {
+            "trader": str(args.trader),
+            "picks_per_day": int(args.picks),
+            "panel_size": int(args.panel_size),
+            "participation": float(args.participation),
+            "trader_tools_enabled": bool(args.trader_tools),
+            "max_turns_per_decision": args.max_turns,
+            "news_limit": int(args.news_limit),
+            "model_timeout_seconds": float(args.model_timeout),
+            "pace_seconds": float(args.pace_seconds),
+        },
+        "model": model_identity(),
+        "research_budget": {
+            "max_total_calls": budget.max_total_calls,
+            "max_market_calls": budget.max_market_calls,
+            "max_theme_calls": budget.max_theme_calls,
+            "max_stock_calls": budget.max_stock_calls,
+            "max_self_calls": budget.max_self_calls,
+            "max_deep_dive_names": budget.max_deep_dive_names,
+            "max_calls_per_name": budget.max_calls_per_name,
+        },
+        "cost_model": {
+            "name": "virtual_a_share_v1",
+            "commission_rate": portfolio_exit.COMMISSION_RATE,
+            "min_commission_rmb": portfolio_exit.MIN_COMMISSION,
+            "stamp_duty_sell_rate": portfolio_exit.STAMP_DUTY_SELL_RATE,
+            "transfer_fee_rate": portfolio_exit.TRANSFER_FEE_RATE,
+            "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
+        },
+        "exit_policy": {
+            "mechanical_stop": bool(args.mechanical_stop),
+            "mechanical_target": bool(args.mechanical_target),
+            "agent_exits": bool(args.agent_exits),
+            "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
+        },
+    }
+
+
+def _verify_experiment_runtime(args, manifest: dict | None) -> None:
+    if manifest is None:
+        return
+    actual = _experiment_runtime_contract(args)
+    mismatches = {}
+    for field, observed in actual.items():
+        frozen = manifest.get(field)
+        if frozen != observed:
+            mismatches[field] = {"manifest": frozen, "runtime": observed}
+    if mismatches:
+        raise SystemExit(
+            "formal experiment runtime does not match its frozen manifest: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
+
+
 def _verify_experiment_window(ctx, window: list[str]) -> None:
     if ctx.experiment_manifest is None:
         return
@@ -2529,6 +2643,7 @@ class Context:
                 membership_archive=self.sector_membership_archive,
             )
         )
+        _verify_experiment_runtime(args, self.experiment_manifest)
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
                 "sector_first_no_flow"}:

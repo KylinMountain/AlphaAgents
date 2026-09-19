@@ -87,6 +87,8 @@ def formal_errors(report: dict) -> list[str]:
         errors.append("fund_flow grade A requires verification.verified_by")
     if not str(verification.get("verified_at") or "").strip():
         errors.append("fund_flow grade A requires verification.verified_at")
+    if not str(verification.get("evidence") or "").strip():
+        errors.append("fund_flow grade A requires verification.evidence")
     return errors
 
 

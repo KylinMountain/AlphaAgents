@@ -377,3 +377,80 @@ class TestFundFlowReachesThePanel:
         assert "主力净额" in text
         assert "放量上涨且主力净流入" in text
         assert "〔先验" in text
+
+class TestTheConceptAblationArm:
+    """--no-concepts empties the column and counts what it removed.
+
+    The ablation is a data-level single difference: the prompt text, the
+    header and every other column are identical between the arms, so an
+    order difference between two same-window runs is attributable to the
+    concept column alone. These tests pin the three properties that make
+    the comparison readable: the flag empties, the default does not, and
+    the removal is counted before it happens.
+    """
+
+    def _ctx(self):
+        from collections import Counter
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+
+        class _Corpus:
+            instruments = {"600001": {"name": "甲"}, "600002": {"name": "乙"}}
+            days = ["2026-01-05", "2026-01-06"]
+
+            def bars(self, day):
+                if day == "2026-01-06":
+                    return {}
+                return {
+                    "600001": {"change_pct": 3.0, "close": 10.0,
+                               "turnover_rate": 10.0},
+                    "600002": {"change_pct": 1.0, "close": 10.0,
+                               "turnover_rate": 20.0},
+                }
+
+            def previous(self, day):
+                return "2026-01-05"
+
+            def adv20(self, code, day):
+                return 1_000_000
+
+        class _Ctx:
+            corpus = _Corpus()
+            counters = Counter()
+            _concepts = {"600001": ["半导体", "AI"]}
+            panel_size = 4
+
+        return wf, _Ctx()
+
+    def test_the_flag_empties_the_column_and_counts_the_removal(
+            self, monkeypatch):
+        wf, ctx = self._ctx()
+        ctx.concepts = False
+        monkeypatch.setattr(wf, "_eligibility", lambda *a, **kw: None)
+        panel = wf._build_panel(ctx, "2026-01-06", "2026-01-05", 4)
+        assert all(p["concepts"] == [] for p in panel), (
+            "the ablation arm still carried concepts")
+        assert ctx.counters["concepts_ablated_rows"] == 1, (
+            "the removed concepts were not counted: the acceptance check "
+            "comparing the arms row counts would read zero on both sides")
+
+    def test_without_the_flag_the_panel_keeps_its_concepts(
+            self, monkeypatch):
+        wf, ctx = self._ctx()
+        monkeypatch.setattr(wf, "_eligibility", lambda *a, **kw: None)
+        panel = wf._build_panel(ctx, "2026-01-06", "2026-01-05", 4)
+        kept = [p for p in panel if p["code"] == "600001"]
+        assert kept and kept[0]["concepts"] == ["半导体", "AI"], (
+            "the default arm changed: existing replays are no longer "
+            "comparable with their predecessors")
+        assert "concepts_ablated_rows" not in ctx.counters
+
+    def test_a_context_without_the_attribute_keeps_the_old_behaviour(
+            self, monkeypatch):
+        wf, ctx = self._ctx()
+        monkeypatch.setattr(wf, "_eligibility", lambda *a, **kw: None)
+        panel = wf._build_panel(ctx, "2026-01-06", "2026-01-05", 4)
+        kept = [p for p in panel if p["code"] == "600001"]
+        assert kept and kept[0]["concepts"] == ["半导体", "AI"]

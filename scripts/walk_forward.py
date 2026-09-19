@@ -289,10 +289,22 @@ LLM_LIMITATIONS = (
     "from production's, and no window here says what production would decide",
 )
 
+#: The ablation arm has its own caveat. It is separate from
+#: LLM_LIMITATIONS because it describes an arm, not the decider: a run
+#: without the flag must not carry a caveat about a column it showed.
+CONCEPTS_ABLATED_LIMITATION = (
+    "ablation arm: the concept column (current membership) was removed from "
+    "the panel by --no-concepts; against a same-window run without the flag, "
+    "every order difference is attributable to that column alone",
+)
+
 
 def _limitations(ctx) -> tuple[str, ...]:
     extra = LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS
-    return LIMITATIONS + extra
+    out = LIMITATIONS + extra
+    if ctx.decider == "llm" and not getattr(ctx, "concepts", True):
+        out += (CONCEPTS_ABLATED_LIMITATION,)
+    return out
 
 
 # ── the corpus, read through the kernel's own readers ───────────────────────
@@ -640,6 +652,9 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     """
     bars_prev = ctx.corpus.bars(prev_day)
     concepts = _concepts_map(ctx)
+    #: Both arms read the map: the ablation arm needs it to count what
+    #: it removed, and the read touches no decision data.
+    show_concepts = getattr(ctx, "concepts", True)
     limit_pool = _limit_pool_map(ctx, day)
     fund_flow = _fund_flow_map(ctx, prev_day)
     ranked = []
@@ -700,6 +715,8 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             # established is not offered at all.
             continue
         seen.add(code)
+        if not show_concepts and concepts.get(code):
+            ctx.counters["concepts_ablated_rows"] += 1
         board = limit_pool.get(code) or {}
         panel.append({
             "code": code,
@@ -708,7 +725,10 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             "change_pct": round(chg, 2),
             "adv20": adv,
             "turnover_rate": round(float(row.get("turnover_rate") or 0.0), 2),
-            "concepts": concepts.get(code, []),
+            # The ablation empties the column, not the explanation: the
+            # header and the prompt still describe concepts, so the arms
+            # differ by the data alone.
+            "concepts": (concepts.get(code, []) if show_concepts else []),
             # Only present for names that were on the previous session's
             # 涨停 list. The column is blank for everything else, which is
             # the fact — not every name has a limit history.
@@ -1994,6 +2014,11 @@ class Context:
         #: configurations can be compared on one window — the tool-using
         #: trader against the bare picker, same panel, same days.
         self.trader_tools = getattr(args, "trader_tools", True)
+        #: Ablation arm for the panel concept column, from --no-concepts.
+        #: Default on, and read through getattr rather than assumed:
+        #: hand-built Contexts in tests predate the flag and must keep the
+        #: behaviour they were written against.
+        self.concepts = getattr(args, "concepts", True)
         #: Turns allowed per decision. ``None`` means "the decider's own
         #: default" — see the note on ``--max-turns``; the number has one
         #: owner, and it is not this file.
@@ -2511,6 +2536,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "agent_tool_calls": model.get("tool_calls"),
         "max_turns_per_decision": ctx.max_turns,
         "trader_tools_enabled": bool(getattr(ctx, "trader_tools", False)),
+        "concepts_ablated": not getattr(ctx, "concepts", True),
         "model_usage_ok": model_usage_ok,
         "model_usage_detail": model_usage_detail,
         "decider_counters": dict(ctx.counters),
@@ -2924,6 +2950,12 @@ def build_parser() -> argparse.ArgumentParser:
              "1 等于没有工具。定义只存在一处，避免 CLI 与函数默认值漂移。")
     parser.add_argument("--panel-size", type=int, default=40,
                         help="securities the model may choose from (llm only).")
+    parser.add_argument(
+        "--no-concepts", dest="concepts", action="store_false", default=True,
+        help="ablation arm: strip the concept column from the panel (llm "
+             "only). The prompt text, the header and every other column stay "
+             "identical between the arms, so an order difference between two "
+             "same-window runs is attributable to this column alone.")
     parser.add_argument("--news-limit", type=int, default=60,
                         help="news items in the 09:00 window (llm only).")
     parser.add_argument("--model-timeout", type=float, default=120.0,

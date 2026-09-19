@@ -71,6 +71,7 @@ def template(*, capabilities_hash: str) -> dict:
         "capabilities_hash": capabilities_hash,
         "architecture_arms": ARMS,
         "baseline_identity": {key: None for key in IDENTITY_KEYS},
+        "decision_config": None,
         "model": None,
         "research_budget": None,
         "cost_model": None,
@@ -106,8 +107,9 @@ def validate(manifest: dict) -> list[str]:
         errors.append("architecture_arms must match the frozen A/B/C/D contract")
 
     for field in (
-            "capabilities_hash", "model", "research_budget", "cost_model",
-            "exit_policy", "forward_start", "primary_metric", "stopping_rule"):
+            "capabilities_hash", "decision_config", "model",
+            "research_budget", "cost_model", "exit_policy", "forward_start",
+            "primary_metric", "stopping_rule"):
         if _empty(manifest.get(field)):
             errors.append(f"{field} is required")
 

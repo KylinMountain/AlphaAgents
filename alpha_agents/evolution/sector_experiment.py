@@ -49,6 +49,18 @@ IDENTITY_KEYS = (
     "input_hash",
 )
 
+DECISION_KEYS = (
+    "trader",
+    "picks_per_day",
+    "panel_size",
+    "participation",
+    "trader_tools_enabled",
+    "max_turns_per_decision",
+    "news_limit",
+    "model_timeout_seconds",
+    "pace_seconds",
+)
+
 
 class SectorExperimentError(ValueError):
     pass
@@ -117,6 +129,41 @@ def validate(manifest: dict) -> list[str]:
     for key in IDENTITY_KEYS:
         if _empty(identity.get(key)):
             errors.append(f"baseline_identity.{key} is required")
+
+    decision = manifest.get("decision_config") or {}
+    for key in DECISION_KEYS:
+        if key not in decision:
+            errors.append(f"decision_config.{key} is required")
+    for key in ("picks_per_day", "panel_size", "news_limit"):
+        value = decision.get(key)
+        if key in decision and (
+                not isinstance(value, int) or isinstance(value, bool)
+                or value <= 0):
+            errors.append(f"decision_config.{key} must be a positive integer")
+    participation = decision.get("participation")
+    if participation is not None and (
+            not isinstance(participation, (int, float))
+            or isinstance(participation, bool)
+            or not 0 < float(participation) <= 1):
+        errors.append("decision_config.participation must be in (0, 1]")
+    tools_enabled = decision.get("trader_tools_enabled")
+    if tools_enabled is not None and not isinstance(tools_enabled, bool):
+        errors.append("decision_config.trader_tools_enabled must be boolean")
+    max_turns = decision.get("max_turns_per_decision")
+    if max_turns is not None and (
+            not isinstance(max_turns, int) or isinstance(max_turns, bool)
+            or max_turns <= 0):
+        errors.append(
+            "decision_config.max_turns_per_decision must be null or positive int")
+    for key in ("model_timeout_seconds", "pace_seconds"):
+        value = decision.get(key)
+        if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or float(value) < 0):
+            errors.append(f"decision_config.{key} must be non-negative numeric")
+    if decision.get("model_timeout_seconds") == 0:
+        errors.append("decision_config.model_timeout_seconds must be > 0")
 
     minimum_improvement = manifest.get("minimum_meaningful_improvement_pct")
     if not isinstance(minimum_improvement, (int, float)):

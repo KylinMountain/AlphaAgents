@@ -113,7 +113,7 @@ def test_run_scores_only_forward_parent_sets_and_seals(store):
     parent, variant = _versions(store)
     run = SS.open_run(
         parent_version_id=parent, variant_version_id=variant,
-        opened_on="2026-01-05", minimum_sets=1, conn=store)
+        opened_on="2026-01-04", minimum_sets=1, conn=store)
     _set(store)
     history = _history()
 
@@ -129,7 +129,7 @@ def test_sealed_run_never_grows(store):
     parent, variant = _versions(store)
     run = SS.open_run(
         parent_version_id=parent, variant_version_id=variant,
-        opened_on="2026-01-05", minimum_sets=1, conn=store)
+        opened_on="2026-01-04", minimum_sets=1, conn=store)
     _set(store)
     history = _history()
     SS.process(run_id=run, history_conn=history, conn=store)

@@ -134,7 +134,11 @@ def open_run(*, parent_version_id: int, variant_version_id: int,
         "parent_version_id": parent_version_id,
         "variant_version_id": variant_version_id,
         "changed_genes": changed,
+        # Strictly forward: opportunity sets on the open day are ambiguous
+        # because the run row records a date, not an intra-day timestamp.
+        # The first eligible decision is therefore the next trading day.
         "opened_on": opened_on,
+        "forward_rule": "opportunity_set.day > opened_on",
         "horizon": int(horizon),
         "minimum_sets": int(minimum_sets),
         "minimum_behavior_changes": int(minimum_behavior_changes),
@@ -229,7 +233,7 @@ def process(*, run_id: int, history_conn,
         "SELECT s.* FROM opportunity_sets s "
         "LEFT JOIN selection_shadow_rows r "
         "ON r.run_id=? AND r.opportunity_set_id=s.id "
-        "WHERE r.id IS NULL AND s.day>=? AND s.policy_ref=? "
+        "WHERE r.id IS NULL AND s.day>? AND s.policy_ref=? "
         "ORDER BY s.day, s.id",
         (run_id, run["opened_on"], parent_ref)).fetchall()
 

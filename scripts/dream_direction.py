@@ -29,6 +29,14 @@ from alpha_agents.data import theme_opportunity_outcomes as O  # noqa: E402
 from alpha_agents.evolution import dream_direction as D  # noqa: E402
 
 
+def _write(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _world(args):
     return D.build_world(
         start=args.start,
@@ -59,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             "sector_first_v0", "sector_first_simple_selector",
             "sector_first_no_flow"))
     report.add_argument("--min-coverage", type=float, default=0.5)
+    report.add_argument("--out-file", type=Path, default=None)
 
     baseline = sub.add_parser("baseline")
     baseline.add_argument("--start", required=True)
@@ -73,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "sector_first_no_flow"))
     baseline.add_argument("--top-k", type=int, default=3)
     baseline.add_argument("--min-coverage", type=float, default=0.5)
+    baseline.add_argument("--out-file", type=Path, default=None)
 
     args = parser.parse_args(argv)
     if args.cmd == "sweep":
@@ -95,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
             min_coverage=args.min_coverage,
         )
 
+    if getattr(args, "out_file", None) is not None:
+        _write(args.out_file, result)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 

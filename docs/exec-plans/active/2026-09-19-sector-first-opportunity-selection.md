@@ -454,3 +454,11 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 - 新增 append-only 方向级 Opportunity Journal，区分 selected、researched-not-selected、offered-not-researched、agent-rejected、evaluated-not-offered、unassessable。
 
 本提交仍不切换默认 T1 候选池，也不把 current concept_stocks 冒充 PIT 数据。下一步是 S0 audit/manifest 与 S2 opt-in challenger 接线。
+
+
+### 2026-09-19 实施记录：S0 audit / manifest
+
+- 新增只读 sector source probe：当前 membership 表没有时点列时明确标为 C/current-only；出现 time-like 字段时也只标 U，未验证语义前不会自动升级为 PIT；
+- 新增 A/B/C/D 固定实验契约与 manifest validator；风险边界、四个验证窗口、模型、预算、成本、退出、主指标、停止规则或 block 方法任一缺失都会拒绝；
+- 新增 sector_first.py audit / verify。audit 生成 capabilities.json 与故意不完整的 experiment_manifest.json；verify 在填写并冻结之前返回非零。
+- 尚未实现 compare，也尚未切换任何交易路径。

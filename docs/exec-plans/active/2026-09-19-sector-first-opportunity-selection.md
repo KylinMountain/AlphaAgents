@@ -331,12 +331,14 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 ### S1：时点关系与方向快照
 
 - [x] 固定输入连续构建两次，方向 membership 与 feature/input hashes 一致。
-- [ ] **partial**：未来 membership 与未来 bar 已有注入测试且不会改变早先 snapshot；
-      仍需补“资金修订”和“公告结果”两个独立未来污染 fixture。
+- [ ] **partial**：未来 membership 与未来 bar 已有注入测试；event expectation/realization
+      以 decision cutoff 读取 PIT snapshot refs，后续 expectation 修订和 realization 不会倒灌，
+      且已修复一个此前把 `cutoff` 写成不存在的 `cut`、导致 event refs 静默为空的 wiring bug。
+      仍需补资金流 revision/vintage 的 available-at 污染 fixture。
 - [x] 剔除头部 1/3 名与候选股票级 leave-one-out 均已实现并有 fixture；
       候选自己的价格变化不能改变“剔除自己后的主方向 5 日证据”，并直接展示在股票卡片。
-- [ ] **partial**：缺失资金与真实零值已严格区分；还需把负流入与 provider unsupported
-      的完整 coverage/refusal contract 一起钉死。
+- [ ] **partial**：缺失、真实零值与负流入已有独立 fixture，负流入不会被折叠为 missing；
+      仍需把 provider unsupported 与 fund-flow vintage/coverage 的 refusal contract 钉死。
 - [x] 方向级 Opportunity Journal 区分 selected、agent-rejected、offered-not-researched、
       evaluated-not-offered、unassessable 和 unreadable decision，且 append-only。
 
@@ -358,7 +360,8 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 - [x] Sector-First 只替换候选/选择路径，订单继续进入原 `create_pending_order`、
       Reservation / Settlement / Ledger；没有新增第二套撮合实现。
-- [ ] 原入场、止损、T+1、涨跌停/停牌、费用、部分成交/拒绝回归需以本分支完整 CI 通过为准。
+- [x] 原入场、止损、T+1、涨跌停/停牌、费用、部分成交/拒绝回归已随 #8 的完整 CI 通过；
+      Tests、Harness/knowledge-base checks 与 build 均为 green。
 - [x] 多概念重叠仍只形成一份股票订单；side-car exposure 对 primary/supporting themes
       都计入组合风险，缺 mark 时返回 unverified 而不是 0。
 - [ ] 关系/来源未知导致拒绝时有独立事件与原因，且不能表现为“模型主动空仓”。
@@ -367,9 +370,10 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 ### S4：四臂历史比较与失败结论
 
-- [ ] **partial**：A/B/C/D architecture、manifest/runtime binding、C 的 frozen-B directions、
-      D 的 no-flow 消融及 compare 已实现；`run-matrix` 已能一条命令按 A→B→freeze→C→D→compare
-      跑隔离四臂。仍缺将每臂预算/拒绝/coverage 汇总成单一顶层实验报告的验收。
+- [x] A/B/C/D architecture、manifest/runtime binding、C 的 frozen-B directions、
+      D 的 no-flow 消融及 compare 已实现；`run-matrix` 能按 A→B→freeze→C→D→compare 跑隔离四臂。
+      `comparison.json` 还会顶层汇总每臂的模型/工具预算、decision/refusal counters、
+      capability/coverage 与 errors，正式评审无需再人工拼四份 run artifacts。
 - [x] `comparison.json` 显式携带 direction / stock / execution / portfolio 四层证据；
       direction/stock 是标签/选择诊断，portfolio 来自 Ledger equity，语义不混写。
 - [x] A-B / B-C / B-D 在共同交易日上做 moving-block bootstrap；
@@ -559,6 +563,20 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
 Sector-First 的 S5。
 
+同一轮审计还修复了一个 event provenance wiring 缺陷：`_event_snapshot_refs()`
+误传未定义变量 `cut`，异常被 fail-soft 捕获后会让所有事件引用静默变成空列表。
+现已改为真实 decision `cutoff`，并用测试钉住 as-of、subjects 与窗口参数；已有
+Event Expectations 的 PIT 测试继续证明后续 expectation revision / realization 不会倒灌。
+资金流侧新增负流入 fixture，但 revision/vintage contract 仍保留为未完成项。
+
+2026-09-20 在 #8 合入并通过 CI 后，又补齐了 S4 的 operational summary：
+
+- comparator 顶层新增 `operational_summary`，按 A/B/C/D 汇总
+  `agent_tool_calls / model_calls_made / decision_counters / capability_matrix / errors`；
+- 每臂对象同步暴露 `decision_counters` 与 `coverage`，报告读取路径唯一；
+- 新增针对性测试，确保 refusal/budget/coverage 不会在 compare 阶段丢失；
+- 因 #8 的 Tests、Invariants/knowledge base 与 build 均已成功，S3 的原执行回归项正式完成。
+
 随后同一分支继续补了：
 
 - formal replay 的 runtime binding：manifest 声称的 model、ResearchBudget、完整 A 股成本模型、
@@ -571,5 +589,5 @@ Sector-First 的 S5。
   非成员关系不能生成；股票 panel 与 placed order 都带 snapshot id/hash 和主/辅方向证据。
 
 下一工程阶段优先补 S1 的 fund-flow/event vintage 污染 fixture、S2 的 theme thesis /
-独立事件关系契约和顶层 budget/refusal 汇总；之后再建立 Sector-First 专属 forward shadow /
-exact-gene evaluator。
+独立事件关系契约；S4 顶层 budget/refusal/coverage 汇总已补齐。之后再建立 Sector-First
+专属 forward shadow / exact-gene evaluator。

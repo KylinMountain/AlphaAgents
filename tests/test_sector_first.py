@@ -176,6 +176,20 @@ def test_missing_fund_flow_is_not_zero_fund_flow():
     assert with_zero[0].fund_flow["available"] is True
     assert with_zero[0].fund_flow["net_amount_sum"] == 0.0
 
+    with_outflow = S.build_sector_snapshots(
+        membership=membership,
+        decision_at="2026-01-30 09:00:00",
+        as_of_session="2026-01-30",
+        sessions=sessions,
+        bars_by_day=bars,
+        fund_flow_by_code={
+            code: {"net_amount": -10.0, "net_amount_rate": -1.0}
+            for code in bars["2026-01-30"]
+        })
+    assert with_outflow[0].fund_flow["available"] is True
+    assert with_outflow[0].fund_flow["net_amount_sum"] < 0
+    assert with_outflow[0].fund_flow["net_amount_rate_median"] < 0
+
 
 def test_candidate_leave_one_out_cannot_be_improved_by_its_own_price():
     sessions, bars, membership = _world()

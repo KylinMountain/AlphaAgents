@@ -16,6 +16,7 @@ from agents import Agent, Runner
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.agents import t1_decider
+from alpha_agents.agents.json_reply import json_body
 from alpha_agents.config import PROMPTS_DIR
 
 
@@ -28,13 +29,6 @@ SYSTEM_INSTRUCTIONS = (
     "不负责决定价格、止损、目标或仓位。只能使用当前消息和工具事实。"
     "输出必须是单个JSON对象。"
 )
-
-_TICKS = chr(96) * 3
-_FENCE = re.compile(
-    re.escape(_TICKS) + r"(?:json)?\s*(.*?)" + re.escape(_TICKS),
-    re.IGNORECASE | re.DOTALL,
-)
-
 
 class StockSelectorError(RuntimeError):
     pass
@@ -72,21 +66,8 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
     return text
 
 
-def _body(text: str) -> str:
-    text = (text or "").strip()
-    if not text:
-        return ""
-    blocks = _FENCE.findall(text)
-    if blocks:
-        return blocks[-1].strip()
-    if text.startswith("{"):
-        return text
-    start, end = text.rfind("{"), text.rfind("}")
-    return text[start:end + 1] if start >= 0 and end > start else text
-
-
 def parse(text: str, offered: set[str], *, picks: int) -> dict:
-    body = _body(text)
+    body = json_body(text)
     if not body:
         return {"stocks": [], "refused": [], "parse_error": "empty reply"}
     try:

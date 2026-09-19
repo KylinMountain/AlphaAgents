@@ -1,8 +1,8 @@
 # 板块优先的选股架构：先选方向，再选交易，而不是继续优化双榜
 
-状态：active（S0–S4 实验基础设施已大部实现；正式四臂验证尚未完成，Sector-First 专属 S5 前向影子尚未实现；默认仍为 `dual_rank_v0`）
+状态：active（S0–S4 验证基础设施已基本就绪；正式四臂被 fund-flow strict-PIT capability 门控，策略结果仍为 n=0；Sector-First 专属 S5 尚未实现；默认仍为 `dual_rank_v0`）
 创建：2026-09-19
-代码核对基线：`main@72ce91a96e8ab0ee499dae0d6e71deef36e67ddd`；2026-09-20 进度校准与补实现见本文末记录
+代码核对基线：初始 `main@72ce91a96e8ab0ee499dae0d6e71deef36e67ddd`；本次最终校准至 `main@88329e8e91ba2ddcb83bdddb2f16d2a2b5e566ea`
 策略效果：n=0（尚未完成预注册 A/B/C/D 正式验证；不声明收益改善）
 范围：A 股模拟交易的候选生成、决策契约及验证；不接真实券商，不改变账本与交易物理规则。
 
@@ -353,7 +353,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
       `supporting_themes`，不再统一写成 run-level theme。
 - [ ] **partial**：strict PIT membership、未来 membership 和 outside-shortlist 均 fail closed；
       每个 `code × theme` 已有 membership-bound `relation_evidence_id`，panel/placed order
-      携带 snapshot id/hash 与主/辅方向关系证据；`theme_thesis_id` 及独立事件关系类型仍未落地。
+      携带 snapshot id/hash 与主/辅方向关系证据；执行前还会从 frozen membership 按 id/hash
+      重算主/辅 relation evidence，缺失或篡改统一写成 `theme_unresolved` refusal，不再 fallback
+      到 run-level theme。仍缺 `theme_thesis_id` 及独立事件关系类型。
 - [ ] 主题观察名单可含不可买龙头；交易名单/执行拒绝另有记录。
 - [ ] **partial**：方向选择与个股选择复用同一个 `ResearchBudget`，并已有 top-8 / 0..3 /
       panel-size / picks 等代码上限；还缺统一的超限 refusal code 与全阶段预算验收测试。
@@ -368,7 +370,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
       Tests、Harness/knowledge-base checks 与 build 均为 green。
 - [x] 多概念重叠仍只形成一份股票订单；side-car exposure 对 primary/supporting themes
       都计入组合风险，缺 mark 时返回 unverified 而不是 0。
-- [ ] 关系/来源未知导致拒绝时有独立事件与原因，且不能表现为“模型主动空仓”。
+- [x] 关系/来源缺失、membership hash 错配或 relation evidence 被篡改会在 Intent 前
+      fail closed，并作为 `theme_unresolved` / `relation_validation` refusal 写入
+      Opportunity Journal；Sector-First 已移除缺主主题时回退 `ctx.theme` 的路径。
 - [ ] Sector-First 专属 forward shadow 尚未接入；不能拿旧 `selection_rank` shadow
       的隔离性代替本条验收。
 
@@ -383,8 +387,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
       direction/stock 是标签/选择诊断，portfolio 来自 Ledger equity，语义不混写。
 - [x] A-B / B-C / B-D 在共同交易日上做 moving-block bootstrap；
       block 长度与重复数来自预注册 manifest，同一天多股票不会伪增独立样本。
-- [ ] **partial**：validation window 与 training window 重叠会被拒绝，方向 outcome 的停牌/缺失进入 coverage；
-      还需补完整的未来标签、部分成熟和退市 fixture。
+- [x] validation window 与 training window 重叠会被拒绝；方向 outcome 未达到完整 horizon 时
+      保持 pending、不提前落标签；成员后续缺 bar / 中途消失仍保留在 frozen membership 分母，
+      只降低 coverage，不补 0、不静默删除。对应部分成熟与缺失成员 fixture 已通过全量测试。
 - [x] comparator 永远 `promotion_eligible=false`，只输出开发证据；
       B 不优于 A、C 更简单或 D 消融更好都不会自动切换策略。
 - [x] 数据/风险证据不完整、统计 CI 不足以区分、以及完全无 executable fills
@@ -455,8 +460,9 @@ uv run python scripts/lint_docs.py
 uv run python scripts/lint_policy.py
 ```
 
-2026-09-20 本分支同时包含实现与文档校准。完整回归、Harness lint 与 Docs lint
-以该分支 PR 的 CI 为准；CI 未完成前，不把 S3 的“原执行回归通过”改成已完成。
+2026-09-20 的实现按 PR CI 验收：#8–#12 均在完整 Tests 成功后才合入，相关
+Invariants / build / CodeQL 也通过。#9/#10 曾有独立 GitHub Advanced Security agent job
+在“Processing Request”阶段失败，但对应 CodeQL 成功；该 agent job 未被当作代码通过证据。
 静态阅读只用于定位 contract，不替代实跑结果。
 
 ## 11. 决策记录
@@ -579,6 +585,25 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
 Sector-First 的 S5。
 
+### 2026-09-20 继续实现：relation evidence execution gate
+
+- Sector-First 不再允许 `primary_theme` 缺失时退回 run-level `ctx.theme`。
+- 每个待下单股票在 Intent 前重新从 frozen membership snapshot 按 id/hash 取回世界，
+  重算 primary/supporting `relation_evidence_id`；缺字段、hash 错配、关系不成立或 evidence
+  被改动都会产生结构化 `theme_unresolved` refusal。
+- refusal 进入 Opportunity Journal，因此“没有下单”可以区分模型主动放弃、模型输出不可读、
+  交易约束拒绝和关系 provenance 失败。
+- 正反测试证明合法 evidence 可下单、缺 evidence 零下单、篡改 membership hash 被拒；
+  #11 全量 Tests / Invariants / build / CodeQL / security 通过后合入。
+
+### 2026-09-20 继续实现：direction outcome maturity / coverage fixtures
+
+- 未达到最大 forward horizon 时，方向 outcome 保持 pending，不写半成熟标签。
+- 某个 frozen member 后续不再产生 bar 时，市场窗口仍可成熟，但该成员继续留在 denominator；
+  coverage 从 2/2 降为 1/2，缺失收益不补 0，也不会把成员从历史世界删掉。
+- #12 只补验收 fixture、不改变 outcome 算法；完整 Tests / Invariants / build /
+  CodeQL / security 均通过后合入。
+
 ### 2026-09-20 继续实现：formal capability gate
 
 - fund-flow source probe 不再把“有 `trade_date`”等同于严格 PIT：没有 capture/revision vintage
@@ -615,6 +640,7 @@ Event Expectations 的 PIT 测试继续证明后续 expectation revision / reali
 - PIT relation provenance：每个 `code × theme` 关系有稳定、membership-bound 的 evidence id，
   非成员关系不能生成；股票 panel 与 placed order 都带 snapshot id/hash 和主/辅方向证据。
 
-下一工程阶段优先补 S1 的 fund-flow/event vintage 污染 fixture、S2 的 theme thesis /
-独立事件关系契约；S4 顶层 budget/refusal/coverage 汇总已补齐。之后再建立 Sector-First
-专属 forward shadow / exact-gene evaluator。
+下一工程阶段的真实阻塞已经收敛为三类：先取得/验证可严格回放的 fund-flow vintage
+数据源或归档；再补 S2 的 morning/T1 统一关系与资格 contract、theme thesis / 独立事件关系、
+观察名单与统一预算拒绝；最后才建立 Sector-First 专属 forward shadow / exact-gene evaluator。
+S4 的四层报告、统计状态、operational summary 与 outcome maturity/coverage 验收已补齐。

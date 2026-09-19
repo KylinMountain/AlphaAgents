@@ -226,3 +226,21 @@ def test_direction_journal_is_append_only(store):
         store.execute(
             "UPDATE theme_opportunity_sets SET architecture='x' WHERE id=?",
             (set_id,))
+
+
+
+def test_direction_journal_distinguishes_unreadable_decision(store):
+    set_id = J.record(
+        run_id="r2", trader_id="t1", day="2026-01-30", phase="open",
+        information_cutoff="2026-01-30 09:00:00",
+        architecture="sector_first_v0",
+        snapshots=[
+            {"sector_id": "AI", "rank": 1, "snapshot_hash": "a"},
+            {"sector_id": "未知", "rank": None,
+             "reason": "missing_required_fact", "snapshot_hash": "b"},
+        ],
+        shortlist=["AI"], selected=[],
+        parse_error="JSONDecodeError: bad reply", conn=store)
+    got = {row["sector_id"]: row for row in J.items(set_id, store)}
+    assert got["AI"]["status"] == "unreadable_decision"
+    assert got["未知"]["status"] == "unassessable"

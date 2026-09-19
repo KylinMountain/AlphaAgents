@@ -169,3 +169,75 @@ def test_registered_manifest_is_content_addressed_and_never_overwritten(tmp_path
     third = E.register(changed, tmp_path)
     assert third != first
     assert first.read_text(encoding="utf-8") != third.read_text(encoding="utf-8")
+
+
+def test_dated_fund_flow_without_vintage_is_not_strict_pit(tmp_path):
+    path = tmp_path / "market_snapshots.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE stock_fund_flow_daily ("
+        "code TEXT, trade_date TEXT, net_amount REAL, net_amount_rate REAL)")
+    conn.execute(
+        "INSERT INTO stock_fund_flow_daily VALUES "
+        "('600001','20260105',1.0,0.1)")
+    conn.commit()
+    conn.close()
+
+    got = P.probe_all(tmp_path)["fund_flow"]
+    assert got["status"] == "available"
+    assert got["time_field"] == "trade_date"
+    assert got["point_in_time_grade"] == "B"
+    assert got["strict_replay_eligible"] is False
+    assert "revision" in got["note"]
+
+
+def test_capability_report_is_content_addressed_and_formal_gate_is_explicit(
+        tmp_path):
+    report = P.with_content_hash({
+        "as_of": "2026-09-20",
+        "data_dir": "/fixture",
+        "capabilities": {
+            "fund_flow": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "test-reviewer",
+                    "verified_at": "2026-09-20T09:00:00+08:00",
+                    "evidence": "provider revision semantics + archived vintages checked",
+                },
+            },
+        },
+    })
+    assert P.formal_errors(report) == []
+
+    first = P.register(report, tmp_path)
+    second = P.register(dict(report), tmp_path)
+    assert first == second
+    assert first.parent.name == "capabilities"
+    assert first.name == f"{report['content_hash']}.json"
+
+    tampered = dict(report)
+    tampered["data_dir"] = "/changed"
+    errors = P.formal_errors(tampered)
+    assert "capability report content_hash mismatch" in errors
+
+
+def test_fund_flow_grade_a_needs_named_verification_evidence():
+    report = P.with_content_hash({
+        "capabilities": {
+            "fund_flow": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "reviewer",
+                    "verified_at": "2026-09-20",
+                },
+            },
+        },
+    })
+    assert (
+        "fund_flow grade A requires verification.evidence"
+        in P.formal_errors(report)
+    )

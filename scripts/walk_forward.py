@@ -295,7 +295,7 @@ LLM_LIMITATIONS = (
 CONCEPTS_ABLATED_LIMITATION = (
     "ablation arm: the concept column (current membership) was removed from "
     "the panel by --no-concepts; against a same-window run without the flag, "
-    "every order difference is attributable to that column alone",
+    "every order difference is attributable to that column alone"
 )
 
 

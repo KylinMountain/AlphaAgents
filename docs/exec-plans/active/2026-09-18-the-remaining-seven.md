@@ -155,6 +155,11 @@ challenger vs incumbent 的 forward sample。」
 
 **成本**：中（要做一次消融回放）。
 
+**2026-09-19 结果：量化完成，按跑前写死的规则保留现状。**
+
+- 双臂 20 天 LLM 回放（2026-08-18 起，mimo-v2.5）：17 个有买入日中 15 天订单不同；已平仓收益中位数保留臂 +0.98% vs 消融臂 -7.99%。概念列承载了真实的板块判断，**不能删**。
+- 前视仍在：成分表依旧无日期，面板仍标「当前成分」。修复的触发条件是拿到 dated membership 源；在那之前警示即边界。证据与解读：[2026-09-19-concept-lookahead-ablation.md](2026-09-19-concept-lookahead-ablation.md)。
+
 ### ⑤ knowledge render 未逐 decision 落盘
 
 **评审原话**：P2——「causal trace 还不能证明具体哪条经验被读取」。
@@ -214,7 +219,7 @@ challenger vs incumbent 的 forward sample。」
                               必须绑定 producer 执行的基因位点；生产
                               run #2/#3 因因果无效被关闭（0 配对样本）。
                               见 2026-09-18-shadow-gene-contract.md
-  → ④ concept 前视的消融    ← 下一件：量化，再决定是否修
+  ✓ ④ concept 前视的消融    ← 2026-09-19 完成：15/17 日订单改变，消融臂中位 -7.99% vs +0.98%
   ◦ ② 重开合规 shadow      ← 基因契约生效后 run #2/#3 已关；需绑定覆盖
                               changed genes 的 producer 再开（与 ④ 并行）
 
@@ -245,3 +250,4 @@ challenger vs incumbent 的 forward sample。」
   "能否起作用"已由 C 回答（能），"步长多大算对"是收益归因问题，
   等 ② 的前向样本。
 - 2026-09-19：基因契约插队（commit f61ca8d）——shadow 证据因因果无效的积累中止，run #2/#3 关闭（0 配对样本）。② 的验收回到未达成，重开前先决定由谁执行 theme_gate 位点。
+- 2026-09-19：④ 量化完成——概念列删掉后 88% 交易日订单改变、消融臂中位数 -7.99%（保留臂 +0.98%）：列承载真实板块判断，保留现状，警示即边界，等 dated 源再修。

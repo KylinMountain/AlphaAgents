@@ -1311,3 +1311,13 @@ class TestTheAblationLimitationTracksTheArm:
     def test_a_placeholder_never_carries_it(self):
         lines = walk_forward._limitations(self._ctx("placeholder", False))
         assert walk_forward.CONCEPTS_ABLATED_LIMITATION not in lines
+
+    def test_every_limitation_is_a_plain_string(self):
+        """A trailing comma turns the constant into a tuple, and the
+        summary then renders the caveat as its repr. This happened: the
+        first ablation run printed the caveat wrapped in parentheses.
+        Membership checks above pass either way, so the type is pinned
+        separately."""
+        for line in walk_forward._limitations(self._ctx("llm", False)):
+            assert isinstance(line, str), (
+                "a limitation rendered as " + type(line).__name__)

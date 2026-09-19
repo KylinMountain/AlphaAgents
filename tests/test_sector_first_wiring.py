@@ -306,3 +306,26 @@ def test_ordinary_dual_rank_run_keeps_legacy_unbounded_research(monkeypatch):
 
     wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
     assert captured["research_budget"] is None
+
+
+def test_event_snapshot_refs_use_the_decision_cutoff(monkeypatch):
+    from alpha_agents.data import event_expectations as EE
+
+    captured = {}
+
+    def fake_snapshot_refs(**kwargs):
+        captured.update(kwargs)
+        return [{"event_key": "earnings-600001"}]
+
+    monkeypatch.setattr(EE, "snapshot_refs", fake_snapshot_refs)
+    cutoff = "2026-01-30 09:00:00"
+    got = wf._event_snapshot_refs(
+        [{"code": "600001"}, {"code": "600001"}, {"code": ""}],
+        cutoff,
+    )
+
+    assert got == [{"event_key": "earnings-600001"}]
+    assert captured["as_of"] == cutoff
+    assert captured["subjects"] == ["600001", "600001"]
+    assert captured["days_back"] == 30
+    assert captured["days_ahead"] == 30

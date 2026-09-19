@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from alpha_agents.config import DATA_DIR  # noqa: E402
+from alpha_agents.evolution import selection_gate as G  # noqa: E402
 from alpha_agents.evolution import selection_shadow as S  # noqa: E402
 
 
@@ -50,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("status")
     st.add_argument("--run", type=int, required=True)
 
+    gt = sub.add_parser("gate")
+    gt.add_argument("--run", type=int, required=True)
+
     args = parser.parse_args(argv)
     if args.cmd == "open":
         run_id = S.open_run(
@@ -66,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             hist.close()
         result = S.summary(args.run)
+    elif args.cmd == "gate":
+        result = G.run_gate(args.run)
     else:
         result = S.summary(args.run)
 

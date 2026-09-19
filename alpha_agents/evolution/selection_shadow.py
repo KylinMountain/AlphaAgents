@@ -112,7 +112,8 @@ def _version_ref(version_id: int) -> str:
 
 def open_run(*, parent_version_id: int, variant_version_id: int,
              opened_on: str | None = None, horizon: int = 5,
-             minimum_sets: int = 20,
+             minimum_sets: int = 20, minimum_behavior_changes: int = 5,
+             minimum_mean_delta: float = 0.0,
              conn: sqlite3.Connection | None = None) -> int:
     changed = dream_agent.changed_genes(
         parent_version_id, variant_version_id)
@@ -124,8 +125,9 @@ def open_run(*, parent_version_id: int, variant_version_id: int,
         raise SelectionShadowError(
             "selection shadow cannot observe changed gene(s): " +
             ", ".join(bad))
-    if horizon <= 0 or minimum_sets <= 0:
-        raise SelectionShadowError("horizon and minimum_sets must be positive")
+    if horizon <= 0 or minimum_sets <= 0 or minimum_behavior_changes <= 0:
+        raise SelectionShadowError(
+            "horizon, minimum_sets and minimum_behavior_changes must be positive")
     opened_on = str(opened_on or clock.today())[:10]
     manifest = {
         "schema_version": 1,
@@ -135,6 +137,8 @@ def open_run(*, parent_version_id: int, variant_version_id: int,
         "opened_on": opened_on,
         "horizon": int(horizon),
         "minimum_sets": int(minimum_sets),
+        "minimum_behavior_changes": int(minimum_behavior_changes),
+        "minimum_mean_delta": float(minimum_mean_delta),
         "evidence_scope": EVIDENCE_SCOPE,
         "promotion_eligible": False,
     }

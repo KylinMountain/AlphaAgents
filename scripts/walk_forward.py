@@ -164,10 +164,11 @@ _RUN_AS_SCRIPT = Path(sys.argv[0]).resolve() == Path(__file__).resolve()
 _REPLAY_DIR = _bind_to(_choose_data_dir(sys.argv[1:])) if _RUN_AS_SCRIPT else None
 
 from alpha_agents import llm_journal  # noqa: E402
-from alpha_agents.config import DATA_DIR, TRADABLE_PREFIXES  # noqa: E402
+from alpha_agents.config import DATA_DIR, PROMPTS_DIR, TRADABLE_PREFIXES  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, market_history as mh, market_rules, portfolio as P,
-    portfolio_exit, reservations, selection_policy, t1_settlement as S,
+    portfolio_exit, reservations, sector_membership, sector_panel,
+    sector_selection, selection_policy, t1_settlement as S,
 )
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
@@ -869,13 +870,12 @@ def _book_and_knowledge(ctx, day: str,
     return book, "\n\n".join(p for p in parts if p)
 
 
-def _load_prompt_text() -> str:
-    """The decider's prompt, read once per run.
-
-    Imported lazily so a placeholder run — which is most of them — does not
-    depend on the ``agents`` layer at all.
-    """
+def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
+    """The stock decider prompt, frozen once per replay window."""
     from alpha_agents.agents import t1_decider
+    if selection_architecture == "sector_first_v0":
+        return t1_decider.load_prompt(
+            PROMPTS_DIR / "t1_decide_sector_first.md")
     return t1_decider.load_prompt()
 
 
@@ -2012,6 +2012,23 @@ class Context:
         self.trader = args.trader
         self.picks = args.picks
         self.theme = args.theme
+        self.selection_architecture = getattr(
+            args, "selection_architecture", "dual_rank_v0")
+        membership_path = getattr(args, "sector_membership", None)
+        self.sector_membership_archive = (
+            sector_membership.load(membership_path)
+            if membership_path is not None else ())
+        if self.selection_architecture == "sector_first_v0":
+            if args.decider != "llm":
+                raise SystemExit(
+                    "sector_first_v0 requires --decider llm")
+            if not self.sector_membership_archive:
+                raise SystemExit(
+                    "sector_first_v0 requires --sector-membership with PIT snapshots")
+            if getattr(args, "agent_exits", False):
+                raise SystemExit(
+                    "sector_first_v0 close-buy path is not wired yet; "
+                    "run without --agent-exits")
         self.participation = args.participation
         self.stop_pct = args.stop_pct
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])
@@ -2066,7 +2083,9 @@ class Context:
         #: ``KeyError: 'news'``, while the report still described one window.
         #: The hash goes in the report so a reader can tell which prompt a
         #: window actually ran under.
-        self.prompt = _load_prompt_text() if args.decider == "llm" else None
+        self.prompt = (
+            _load_prompt_text(self.selection_architecture)
+            if args.decider == "llm" else None)
         self.prompt_sha256 = (hashlib.sha256(self.prompt.encode("utf-8"))
                               .hexdigest() if self.prompt else None)
         #: Static, so read once: the trader's prompt file does not change
@@ -2547,6 +2566,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "decider": _decider_name(ctx),
         "trader": ctx.trader,
         "theme": ctx.theme,
+        "selection_architecture": ctx.selection_architecture,
         "picks_per_day": ctx.picks,
         "participation": ctx.participation,
         "stop_pct": ctx.stop_pct,
@@ -2959,6 +2979,14 @@ def build_parser() -> argparse.ArgumentParser:
                         default="placeholder",
                         help="placeholder: rank T-1 change, no model (default). "
                              "llm: the model chooses from an as-of panel.")
+    parser.add_argument(
+        "--selection-architecture",
+        choices=("dual_rank_v0", "sector_first_v0"),
+        default="dual_rank_v0",
+        help="candidate architecture; sector_first_v0 is opt-in only")
+    parser.add_argument(
+        "--sector-membership", type=Path, default=None,
+        help="PIT membership archive required by sector_first_v0")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,

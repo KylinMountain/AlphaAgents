@@ -142,6 +142,11 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
         == got["arms"]["B"]["portfolio"]
     )
     assert got["measurement_contract"]["portfolio"].startswith("ledger")
+    assert got["evidence_status"]["data"]["B"] == "complete"
+    assert got["evidence_status"]["execution"]["B"] == "has_fills"
+    assert got["paired_daily"]["B_minus_A"]["evidence"] in {
+        "positive_beyond_floor", "negative_beyond_floor", "inconclusive",
+    }
 
 
 def test_missing_cluster_exposure_is_insufficient_not_assumed_safe(tmp_path):
@@ -268,3 +273,30 @@ def test_replay_window_must_equal_a_preregistered_window():
     with pytest.raises(SystemExit, match="not one of"):
         wf._verify_experiment_window(
             ctx, ["2026-01-02", "2026-01-15", "2026-03-31"])
+
+
+
+def test_ci_that_does_not_clear_preregistered_floor_is_inconclusive(tmp_path):
+    manifest = _manifest()
+    manifest["minimum_meaningful_improvement_pct"] = 99.0
+    arms = _arms(tmp_path)
+    digest = E.require_valid(manifest)
+    for root in arms.values():
+        path = root / "run.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["experiment_manifest_hash"] = digest
+        path.write_text(json.dumps(meta), encoding="utf-8")
+
+    got = C.compare(manifest=manifest, arm_dirs=arms)
+    assert got["paired_daily"]["B_minus_A"]["evidence"] == "inconclusive"
+    assert got["promotion_eligible"] is False
+
+
+def test_no_fill_sample_is_reported_separately(tmp_path):
+    arms = _arms(tmp_path)
+    for root in arms.values():
+        _write_csv(root / "fills.csv", ["side", "amount"], [])
+    got = C.compare(manifest=_manifest(), arm_dirs=arms)
+    assert got["status"] == "insufficient"
+    assert set(got["evidence_status"]["execution"].values()) == {"no_fills"}
+    assert "no arm produced an executable fill sample" in got["reasons"]

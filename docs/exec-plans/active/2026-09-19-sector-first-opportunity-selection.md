@@ -462,3 +462,12 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 - 新增 A/B/C/D 固定实验契约与 manifest validator；风险边界、四个验证窗口、模型、预算、成本、退出、主指标、停止规则或 block 方法任一缺失都会拒绝；
 - 新增 sector_first.py audit / verify。audit 生成 capabilities.json 与故意不完整的 experiment_manifest.json；verify 在填写并冻结之前返回非零。
 - 尚未实现 compare，也尚未切换任何交易路径。
+
+
+### 2026-09-19 实施记录：S2 方向选择契约
+
+- 新增 sector_selector_v0：输入紧凑方向状态卡，只负责从 offered sectors 中选择 0..3 个继续研究的方向，不下单、不定仓位；
+- JSON 契约要求每个方向写 thesis、counterevidence、unknowns、invalidations；空 themes 是合法决定；
+- outside shortlist、重复方向、超过 3 个、invalidations 结构错误都会作为 refusal 留下；
+- selector 可复用同一个 ResearchBudget 对象，后续接入股票阶段时总预算可跨两个阶段共享；
+- 本轮仍未切换 incumbent；下一步直接提交 opt-in sector_first_v0 接线和 per-stock primary theme。

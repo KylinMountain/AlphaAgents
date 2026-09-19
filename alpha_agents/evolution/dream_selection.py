@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import statistics
 
+from alpha_agents.config import DATA_DIR
+from alpha_agents.data import opportunity_outcomes, scoring, selection_policy
+from alpha_agents.evolution import dream_agent
 from alpha_agents.evolution.dream_world import OpportunityDreamWorld
 
 EVIDENCE_SCOPE = "historical_dream_only"
@@ -179,3 +182,166 @@ class SelectionDreamAgent:
         return ranking_baseline(
             world, feature=feature, horizon=horizon, top_k=top_k,
             descending=descending)
+
+
+
+def _history_conn():
+    import sqlite3
+    conn = sqlite3.connect(
+        f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _adv20(history_conn, code: str, before: str) -> float | None:
+    rows = history_conn.execute(
+        "SELECT volume FROM daily_kline WHERE code=? AND date<=? "
+        "ORDER BY date DESC LIMIT 20", (code, before)).fetchall()
+    if len(rows) < 20:
+        return None
+    vols = [float(row["volume"] or 0) for row in rows]
+    return sum(vols) / len(vols) if vols else None
+
+
+def _policy_panel(group, *, params: dict, history_conn) -> list[str]:
+    pool = group.context.get("candidate_pool") or []
+    limit = int(group.context.get("panel_limit") or 0)
+    ranking_day = str(group.context.get("ranking_day") or "")
+    if not pool or limit <= 0 or not ranking_day:
+        return []
+
+    ordered = selection_policy.rank_candidate_rows(
+        pool, limit=limit, params=params)
+    chosen = []
+    seen = set()
+    for row in ordered:
+        code = str(row["code"])
+        if code in seen:
+            continue
+        seen.add(code)
+        if _adv20(history_conn, code, ranking_day) is None:
+            continue
+        chosen.append(code)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def panel_policy_counterfactual(
+        world: OpportunityDreamWorld, *,
+        parent_version_id: int, variant_version_id: int,
+        horizon: int = 5, history_conn=None) -> dict:
+    """Replay the actual T1 panel-construction gene on the same candidate pools.
+
+    This evaluates panel quality, not the LLM's final stock choice. It is the
+    missing causal bridge for t1_change_rank: the live panel, the Dream replay
+    and the policy variant all execute selection_rank.change_share.
+    """
+    changed = dream_agent.changed_genes(
+        parent_version_id, variant_version_id)
+    unsupported = [
+        gene for gene in changed
+        if not gene.startswith("decision.selection_rank.")
+    ]
+    if unsupported:
+        raise ValueError(
+            "selection evaluator cannot observe changed gene(s): " +
+            ", ".join(unsupported))
+
+    own = history_conn is None
+    history = history_conn or _history_conn()
+    parent_params = scoring.decision_params_of(parent_version_id)
+    variant_params = scoring.decision_params_of(variant_version_id)
+
+    comparable = changed_sets = missing_context = missing_outcomes = 0
+    parent_returns = []
+    variant_returns = []
+    added_returns = []
+    removed_returns = []
+    rows = []
+
+    try:
+        for group in world.sets:
+            parent_codes = _policy_panel(
+                group, params=parent_params, history_conn=history)
+            variant_codes = _policy_panel(
+                group, params=variant_params, history_conn=history)
+            if not parent_codes or not variant_codes:
+                missing_context += 1
+                continue
+
+            union = sorted(set(parent_codes) | set(variant_codes))
+            outcomes = {}
+            for code in union:
+                got = opportunity_outcomes.compute(
+                    code=code, day=group.day, phase=group.phase,
+                    history_conn=history)
+                if got is None:
+                    missing_outcomes += 1
+                    continue
+                value = (
+                    got.get("forward_close_return_pct") or {}
+                ).get(str(horizon))
+                if value is not None:
+                    outcomes[code] = float(value)
+
+            if any(code not in outcomes for code in union):
+                continue
+
+            parent_values = [outcomes[code] for code in parent_codes]
+            variant_values = [outcomes[code] for code in variant_codes]
+            added = sorted(set(variant_codes) - set(parent_codes))
+            removed = sorted(set(parent_codes) - set(variant_codes))
+
+            comparable += 1
+            if added or removed:
+                changed_sets += 1
+            parent_returns.extend(parent_values)
+            variant_returns.extend(variant_values)
+            added_returns.extend(outcomes[code] for code in added)
+            removed_returns.extend(outcomes[code] for code in removed)
+            rows.append({
+                "set_id": group.set_id,
+                "day": group.day,
+                "parent_codes": parent_codes,
+                "variant_codes": variant_codes,
+                "added": added,
+                "removed": removed,
+                "parent_mean_return": _mean(parent_values),
+                "variant_mean_return": _mean(variant_values),
+            })
+    finally:
+        if own:
+            history.close()
+
+    pmean = _mean(parent_returns)
+    vmean = _mean(variant_returns)
+    return {
+        "world_hash": world.world_hash,
+        "parent_version_id": parent_version_id,
+        "variant_version_id": variant_version_id,
+        "changed_genes": changed,
+        "horizon": horizon,
+        "evidence_scope": EVIDENCE_SCOPE,
+        "promotion_eligible": False,
+        "comparable_sets": comparable,
+        "behavior_changed_sets": changed_sets,
+        "behavior_change_rate": (
+            round(changed_sets / comparable, 4) if comparable else None),
+        "parent_panel": _summary(parent_returns),
+        "variant_panel": _summary(variant_returns),
+        "variant_minus_parent_mean": (
+            round(vmean - pmean, 4)
+            if pmean is not None and vmean is not None else None),
+        "added_names": _summary(added_returns),
+        "removed_names": _summary(removed_returns),
+        "coverage": {
+            "missing_context_sets": missing_context,
+            "missing_outcome_rows": missing_outcomes,
+        },
+        "rows": rows,
+        "note": (
+            "This replays panel construction only. It proves a selection gene "
+            "changes the opportunity surface; final LLM choice remains a "
+            "separate evaluator."),
+    }

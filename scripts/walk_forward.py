@@ -167,7 +167,7 @@ from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.config import DATA_DIR, TRADABLE_PREFIXES  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, market_history as mh, market_rules, portfolio as P,
-    portfolio_exit, reservations, t1_settlement as S,
+    portfolio_exit, reservations, selection_policy, t1_settlement as S,
 )
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
@@ -660,6 +660,7 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
         ranked.append((float(chg), code, row))
 
     if not ranked:
+        ctx.last_panel_candidate_pool = []
         return []
 
     # Ranked by change, as before — but the *pool* is widened before the cut
@@ -672,21 +673,13 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     by_turnover = sorted(
         ranked, key=lambda t: (t[2].get("turnover_rate") or 0.0), reverse=True)
 
-    # **Interleaved, not concatenated.** The first version appended the
-    # turnover ranking after the change ranking and then took the first
-    # `limit` — so every slot was still filled from the change ranking and
-    # the widening did nothing. It was caught by a counter: the run reported
-    # `panel_offered_liquid: 0`. Alternating is what actually mixes them.
-    pool: list[tuple] = []
-    ci = ti = 0
-    while (len(pool) < limit * 4
-           and (ci < len(by_change) or ti < len(by_turnover))):
-        if ci < len(by_change):
-            pool.append(by_change[ci])
-            ci += 1
-        if ti < len(by_turnover):
-            pool.append(by_turnover[ti])
-            ti += 1
+    # The historical behavior was strict alternation. It is now the explicit
+    # default gene selection_rank.change_share=0.5, so changing the gene moves
+    # this exact live path instead of an unrelated theme weight.
+    ctx.last_panel_candidate_pool = selection_policy.candidate_pool_rows(
+        by_change, by_turnover, lane_depth=limit * 4)
+    pool = selection_policy.weighted_merge(
+        by_change, by_turnover, total=limit * 4)
     ctx.counters["panel_pool"] += len(pool)
 
     panel: list[dict] = []
@@ -1191,6 +1184,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "run_theme": ctx.theme,
                 "ranking_day": ranking_day,
                 "market": market,
+                "candidate_pool": getattr(
+                    ctx, "last_panel_candidate_pool", []),
+                "panel_limit": ctx.panel_size,
+                "selection_rank": selection_policy.in_force_params(),
             })
     except Exception as exc:                          # noqa: BLE001
         # Audit enrichment must never turn a valid trading decision into a

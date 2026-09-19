@@ -384,6 +384,13 @@ DEFAULT_DECISION_PARAMS: dict = {
     "confidence_priors": {"high": 0.58, "medium": 0.53, "low": 0.50},
     "dim_step": 0.04,
     "dim_base": 0.44,
+    # Which deterministic lane contributes the next candidate while the
+    # T1 panel is assembled. 0.5 reproduces the historical alternating
+    # change/turnover merge exactly. This is deliberately a *selection* gene:
+    # evidence about T-1 ranking must not mutate an unrelated theme gate.
+    "selection_rank": {
+        "change_share": 0.50,
+    },
     # The theme gate travels with the same pointer, because it is the same kind
     # of thing: a number the trading path reads when it decides. `w_*` are the
     # weights of today's cross-sectionally normalised theme score (see

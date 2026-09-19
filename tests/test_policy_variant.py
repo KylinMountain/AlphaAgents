@@ -101,13 +101,13 @@ class TestItInheritsFromItsParent:
         before = scoring.decision_params_of(parent)
         after = scoring.decision_params_of(built.version_id)
 
-        assert after["theme_gate"]["w_rel"] == pytest.approx(
-            before["theme_gate"]["w_rel"] - 0.05)
+        assert after["selection_rank"]["change_share"] == pytest.approx(
+            before["selection_rank"]["change_share"] - 0.10)
         # Everything else is inherited verbatim. This is the load-bearing
         # assertion: a variant built from the code defaults would revert any
         # other promoted parameter and still look like a one-field change.
         for key in before:
-            if key == "theme_gate":
+            if key == "selection_rank":
                 continue
             assert after[key] == before[key], f"{key} was not inherited"
 
@@ -232,7 +232,7 @@ class TestTheVariantIsArchived:
         assert doc["candidate_id"] == cid
         assert doc["policy_version_id"] == built.version_id
         assert doc["parent_version_id"] == parent
-        assert doc["change"]["param"] == "w_rel"
+        assert doc["change"]["param"] == "change_share"
         assert "not in force" in doc["note"]
 
     def test_the_file_can_be_skipped(self, store, parent):
@@ -247,7 +247,7 @@ class TestTheVariantIsArchived:
                                   built_by="analyst").summary()
         assert summary["candidate_id"] == cid
         assert summary["changes"][0]["field"] == "t1_change_rank"
-        assert summary["changes"][0]["step"] == -0.05
+        assert summary["changes"][0]["step"] == -0.10
 
 
 class TestTheSearchMustBeDeclared:

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS theme_opportunity_sets (
     shortlist_json TEXT NOT NULL,
     selected_json TEXT NOT NULL,
     research_json TEXT,
+    parse_error TEXT,
     refusals_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -79,6 +80,13 @@ def _hash(value) -> str:
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SET_TABLE)
     conn.execute(_ITEM_TABLE)
+    columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info('theme_opportunity_sets')").fetchall()
+    }
+    if "parse_error" not in columns:
+        conn.execute(
+            "ALTER TABLE theme_opportunity_sets ADD COLUMN parse_error TEXT")
     for statement in _GUARDS:
         conn.execute(statement)
 
@@ -101,7 +109,8 @@ def _refusal_map(refusals: list[dict]) -> dict[str, dict]:
 
 def classify(*, snapshots: list[dict], shortlist: list[str],
              selected: list[str], research: dict | None,
-             refusals: list[dict]) -> list[dict]:
+             refusals: list[dict],
+             parse_error: str | None = None) -> list[dict]:
     shortlisted = {str(value).strip() for value in shortlist}
     selected_set = {str(value).strip() for value in selected}
     researched = _research_set(research)
@@ -117,6 +126,9 @@ def classify(*, snapshots: list[dict], shortlist: list[str],
         if rank is None:
             status = "unassessable"
             reason = str(snapshot.get("reason") or "missing_required_fact")
+        elif parse_error:
+            status = "unreadable_decision"
+            reason = parse_error
         elif sector_id in selected_set:
             status = "agent_selected"
         elif sector_id in refused:
@@ -146,6 +158,7 @@ def record(*, run_id: str, trader_id: str, day: str, phase: str,
            snapshots: list[dict], shortlist: list[str],
            selected: list[str], research: dict | None = None,
            refusals: list[dict] | None = None,
+           parse_error: str | None = None,
            conn: sqlite3.Connection | None = None) -> int:
     if phase not in {"open", "close"}:
         raise ValueError(f"phase must be open/close, got {phase!r}")
@@ -165,11 +178,12 @@ def record(*, run_id: str, trader_id: str, day: str, phase: str,
         "shortlist": shortlist,
         "selected": selected,
         "research": research,
+        "parse_error": parse_error,
         "refusals": refusals,
     }
     items = classify(
         snapshots=snapshots, shortlist=shortlist, selected=selected,
-        research=research, refusals=refusals)
+        research=research, refusals=refusals, parse_error=parse_error)
 
     target = conn if conn is not None else memory_store._get_conn()
 
@@ -179,14 +193,14 @@ def record(*, run_id: str, trader_id: str, day: str, phase: str,
             "INSERT INTO theme_opportunity_sets "
             "(run_id,trader_id,day,phase,information_cutoff,architecture,"
             "policy_ref,shortlist_json,selected_json,research_json,"
-            "refusals_json,content_hash,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "parse_error,refusals_json,content_hash,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (payload["run_id"], payload["trader_id"], payload["day"],
              payload["phase"], payload["information_cutoff"],
              payload["architecture"], payload["policy_ref"],
              _dump(shortlist), _dump(selected),
              _dump(research) if research is not None else None,
-             _dump(refusals), _hash(payload), clock.today()))
+             parse_error, _dump(refusals), _hash(payload), clock.today()))
         set_id = int(cursor.lastrowid)
         target.executemany(
             "INSERT INTO theme_opportunity_items "

@@ -1150,7 +1150,7 @@ def _event_snapshot_refs(panel: list[dict], cutoff: str) -> list[dict]:
     try:
         from alpha_agents.data import event_expectations as EE
         return EE.snapshot_refs(
-            as_of=cut,
+            as_of=cutoff,
             subjects=[row["code"] for row in panel if row.get("code")],
             days_back=30,
             days_ahead=30)

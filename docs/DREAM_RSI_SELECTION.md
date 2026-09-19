@@ -1,6 +1,6 @@
 # Dream RSI — Opportunity World & Selection Evaluation
 
-Status: **Design accepted for implementation**
+Status: **Opportunity RSI core implemented; event-aware Dream integration pending**
 
 This document extends the first bounded Dream Agent. The current implementation
 can replay one narrow class of intervention — confidence-label → probability
@@ -13,7 +13,7 @@ The next world is built from **opportunities**, not only trades.
 
 Implemented today:
 
-\`\`\`text
+```text
 scored champion predictions
         ↓
 Prediction DreamWorld
@@ -25,7 +25,7 @@ confidence_brier_v1
 survivor / retire / insufficient
         ↓
 forward shadow only
-\`\`\`
+```
 
 Hard properties already in place:
 
@@ -35,13 +35,25 @@ Hard properties already in place:
 - a survivor may pay the cost of forward shadow, but Dream never moves the
   active policy pointer.
 
-Not implemented yet:
+Implemented after the original design:
 
-- "what else was available that day?";
-- outcome of researched-but-not-selected names;
-- outcome of names the Agent never researched;
-- ranking / selection skill;
-- theme-gate counterfactuals over many real opportunity sets.
+- the full Opportunity Journal surface: selected / researched-not-selected /
+  offered-not-researched / execution refusal / unreadable decision;
+- immutable 1/3/5-session forward market labels for every offered name;
+- OpportunityDreamWorld and selection-skill diagnostics;
+- deterministic ranking baselines;
+- PIT theme-gate counterfactuals on real selected opportunities;
+- a real live gene, `selection_rank.change_share`, executed by the T1 panel builder;
+- Dream counterfactuals for that same selection gene;
+- strictly-forward selection shadow with a preregistered sample floor;
+- a selection gate persisted into the same human approval / promotion boundary.
+
+Still pending in this track:
+
+- provider-backed Event Expectations ingestion;
+- event snapshots included in the DreamWorld hash;
+- event/surprise policy genes, only after their live and evaluator paths exist;
+- richer selection genes beyond the first change-vs-turnover lane mix.
 
 ## 2. Why Opportunity World is necessary
 
@@ -55,12 +67,12 @@ They cannot answer:
 
 A day may look like:
 
-\`\`\`text
+```text
 A — researched → selected
 B — researched → not selected
 C — offered → not researched
 D — offered → not researched
-\`\`\`
+```
 
 If A returns +2% but B returns +14%, the trade is profitable while selection
 has high opportunity cost. Conversely, A losing -1% can still be a strong
@@ -68,7 +80,7 @@ selection if the rest of the panel lost -8%.
 
 Therefore RSI needs:
 
-\`\`\`text
+```text
 Opportunity Journal
       ↓
 historical outcome labels for every offered code
@@ -78,7 +90,7 @@ Opportunity DreamWorld
 selection diagnostics / deterministic ranking baselines
       ↓
 later: frozen ranking/theme policy variants
-\`\`\`
+```
 
 ## 3. Opportunity outcome contract
 
@@ -94,9 +106,9 @@ Entry mark:
 
 Forward label for horizon H:
 
-\`\`\`text
+```text
 return_H = close(entry session + H trading sessions) / entry_mark - 1
-\`\`\`
+```
 
 Also record:
 
@@ -116,7 +128,7 @@ Partially matured rows stay unlabeled rather than being updated every day.
 
 The world groups immutable opportunity sets and matured outcomes:
 
-\`\`\`text
+```text
 OpportunitySet
 ├── information_cutoff
 ├── phase
@@ -130,7 +142,7 @@ OpportunitySet
     ├── research status
     ├── selected / not selected
     └── forward outcome labels
-\`\`\`
+```
 
 World hash includes both the decision-time facts and the matured outcome labels.
 Changing a label source or feature definition creates a different world.
@@ -176,7 +188,7 @@ score. It must not infer theme state from later outcomes.
 
 For each selected intent:
 
-\`\`\`text
+```text
 same opportunity set
 + same theme score snapshot
 + parent gate parameters
@@ -185,7 +197,7 @@ same opportunity set
 admit/refuse flip
         ↓
 join to the selected opportunity's matured outcome
-\`\`\`
+```
 
 Only then can Dream answer:
 
@@ -238,7 +250,7 @@ Local probe decides.
 
 A probe must be read-only by default and emit:
 
-\`\`\`text
+```text
 provider
 dataset
 sdk_available
@@ -250,7 +262,7 @@ revision/vintage_field
 sample_fields
 point_in_time_grade
 notes
-\`\`\`
+```
 
 Grades:
 
@@ -264,16 +276,19 @@ Dream/Replay manifests consume the grade; they never silently upgrade C/U to A.
 
 ## 9. Delivery order
 
-\`\`\`text
-M1  Opportunity Journal                         DONE
-M2  Opportunity Outcomes                       NEXT
-M3  Opportunity DreamWorld + selection skill   NEXT
-M4  deterministic ranking baselines
-M5  theme context + theme-gate Dream evaluator
-M6  event source probe + provider adapters
-M7  Event Expectations in DreamWorld hash
-M8  only then evolve ranking/event policy genes
-\`\`\`
+```text
+M1  Opportunity Journal                                  DONE
+M2  Opportunity Outcomes                                DONE
+M3  Opportunity DreamWorld + selection skill            DONE
+M4  deterministic ranking baselines                     DONE
+M5  theme context + theme-gate Dream evaluator          DONE
+M6a event source probe                                   DONE
+M6b provider adapters / normalized ingest               NEXT
+M7  Event Expectations in Opportunity/DreamWorld hash   NEXT
+M8a first live selection gene                           DONE
+M8b forward selection shadow + sealed gate              DONE
+M9  event/surprise policy genes                         BLOCKED ON M6b/M7
+```
 
 ## 10. Acceptance criteria for this iteration
 
@@ -285,3 +300,38 @@ M8  only then evolve ranking/event policy genes
 - event design no longer assumes source history is absent;
 - local source probe can tell us what Tushare / AKShare / local archives
   actually provide before we write an ingest adapter.
+
+
+## 11. Current governed selection loop
+
+The first selection gene now has one semantic path end to end:
+
+```text
+Evidence about T-1 ranking
+        ↓
+Candidate
+        ↓
+selection_rank.change_share
+        ↓
+Live T1 panel builder
+        ↓
+Opportunity Journal
+        ↓
+Opportunity Outcomes
+        ↓
+Dream panel-policy counterfactual
+        ↓
+Forward Selection Shadow
+        ↓
+sealed preregistered sample
+        ↓
+Selection Gate
+        ↓
+Human Approve
+        ↓
+PolicyRegistry Promote
+```
+
+Important: Dream evidence is still non-promotable. The gate only becomes
+candidate-policy evidence after the strictly-forward selection shadow seals.
+The human approval boundary remains unchanged.

@@ -2,7 +2,8 @@
 """Operate forward selection shadow experiments.
 
 Open:
-  uv run python scripts/selection_shadow.py open --parent 1 --variant 4
+  uv run python scripts/selection_shadow.py open --parent 1 --variant 4 \
+      --minimum-sets 20 --minimum-behavior-changes 5 --minimum-mean-delta 0
 
 Process newly matured Opportunity Journal sets:
   uv run python scripts/selection_shadow.py process --run 1
@@ -44,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     op.add_argument("--opened-on", default=None)
     op.add_argument("--horizon", type=int, default=5)
     op.add_argument("--minimum-sets", type=int, default=20)
+    op.add_argument(
+        "--minimum-behavior-changes", type=int, default=5,
+        help="minimum number of forward sets whose panel composition must flip")
+    op.add_argument(
+        "--minimum-mean-delta", type=float, default=0.0,
+        help="required challenger-minus-parent mean panel return, in percentage points")
 
     pr = sub.add_parser("process")
     pr.add_argument("--run", type=int, required=True)
@@ -61,7 +68,9 @@ def main(argv: list[str] | None = None) -> int:
             variant_version_id=args.variant,
             opened_on=args.opened_on,
             horizon=args.horizon,
-            minimum_sets=args.minimum_sets)
+            minimum_sets=args.minimum_sets,
+            minimum_behavior_changes=args.minimum_behavior_changes,
+            minimum_mean_delta=args.minimum_mean_delta)
         result = S.summary(run_id)
     elif args.cmd == "process":
         hist = _history()

@@ -27,7 +27,6 @@ Run one preregistered validation window across all four isolated arms:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -44,16 +43,6 @@ from alpha_agents.data import frozen_direction_archive  # noqa: E402
 from alpha_agents.data import sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
-
-
-def _dump(value) -> str:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        allow_nan=False)
-
-
-def _hash(value) -> str:
-    return hashlib.sha256(_dump(value).encode("utf-8")).hexdigest()
 
 
 def _audit(args) -> int:

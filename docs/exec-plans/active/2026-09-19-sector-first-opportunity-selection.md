@@ -406,6 +406,7 @@ uv run python scripts/lint_policy.py
 | 主主题由股票论点绑定 | 所有订单沿用 `ctx.theme` | 防止门控、风险与复盘归因错位 |
 | 复用执行/治理，扩展证据 contract | 为 sector-first 新造回测与晋升系统 | 避免规则分叉和自我授权 |
 | 数据能力由本地 probe 决定 | 断言没有历史，或拿最新值假装历史 | 尊重历史数据与版本语义的不确定性 |
+| S1 先实现纯 PIT 方向状态与方向级 Journal，不立刻接交易路径 | 一次把数据、Agent、执行都改完 | 先把世界和证据对象做对，再让行为改变 |
 | 先风险有效，再检验组合改善 | 面板均值更高就晋升整个 Trader | 局部选择收益不能覆盖整体交易风险 |
 
 ## 12. 风险、回退与待定项
@@ -440,3 +441,16 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
   支持记录所有候选与控制选择偏差；本文采用的日期块验证仍需本项目实证，不宣称消除了过拟合。
 - [R4: Tushare 个股资金流向口径](https://tushare.pro/document/2?doc_id=170)：
   用于区分订单分类统计与真实机构持仓；不将其字段口径推广到其他 provider。
+
+
+### 2026-09-19 实施记录：S1 第一刀
+
+已开始实现，不改变 incumbent 行为：
+
+- 新增纯数据层的 PIT membership contract 与 sector snapshot builder；
+- 状态表包含 1/5/20 日中位收益、相对市场中位数、上涨广度、跑赢市场广度、5 日广度变化、剔除头部 1/3 名后的 5 日中位数、资金覆盖与原始净额统计；
+- sector_first_v0 粗排只对三个可观测字段做平均名次，不把资金、事件或标签压成一个未验证总分；
+- strict replay 会拒绝 current-only membership；传入未来 bar 也不会改变过去 snapshot hash；
+- 新增 append-only 方向级 Opportunity Journal，区分 selected、researched-not-selected、offered-not-researched、agent-rejected、evaluated-not-offered、unassessable。
+
+本提交仍不切换默认 T1 候选池，也不把 current concept_stocks 冒充 PIT 数据。下一步是 S0 audit/manifest 与 S2 opt-in challenger 接线。

@@ -77,6 +77,14 @@ def _theme_exposure(run_dir: Path) -> float | None:
     if not path.exists():
         return None
     rows = _read_csv(path)
+    if not rows:
+        return None
+    complete = {
+        str(row.get("complete") or "").strip().lower()
+        for row in rows
+    }
+    if not complete.issubset({"1", "true"}):
+        return None
     values = [
         _float(row.get("max_theme_cluster_exposure_pct"))
         for row in rows

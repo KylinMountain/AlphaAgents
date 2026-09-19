@@ -1171,6 +1171,29 @@ def _decide_llm(ctx, day: str, prev_day: str,
         trader_note=ctx.trader_note, picks=ctx.picks,
         template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase,
         tools=_trader_tools(ctx), max_turns=ctx.max_turns)
+
+    # Preserve the whole opportunity set before execution mutates anything.
+    # "Not bought" is not one fact: researched-and-rejected, never researched,
+    # malformed, and unreadable are different learning evidence. This journal
+    # records the decision surface; orders/fills remain in their own ledgers.
+    try:
+        from alpha_agents.data import opportunity_journal as OJ
+        cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
+        OJ.record_decision(
+            run_id=str(ctx.run_id), trader_id=ctx.trader, day=day, phase=phase,
+            information_cutoff=cutoff, panel=panel,
+            orders=verdict.get("orders") or [],
+            refusals=verdict.get("refused") or [],
+            research=verdict.get("research_budget"),
+            parse_error=verdict.get("parse_error"),
+            raw=verdict.get("raw") or "")
+    except Exception as exc:                          # noqa: BLE001
+        # Audit enrichment must never turn a valid trading decision into a
+        # missed trade. The report counter makes degradation visible.
+        ctx.counters["opportunity_journal_errors"] += 1
+        logger.warning("%s %s: opportunity journal failed: %s",
+                       day, phase, exc)
+
     research = verdict.get("research_budget")
     if research:
         ctx.counters["research_tool_calls"] += int(research.get("used") or 0)

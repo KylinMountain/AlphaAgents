@@ -24,17 +24,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from alpha_agents.report_io import write_json  # noqa: E402
 from alpha_agents.data import sector_membership  # noqa: E402
 from alpha_agents.data import theme_opportunity_outcomes as O  # noqa: E402
 from alpha_agents.evolution import dream_direction as D  # noqa: E402
-
-
-def _write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
 
 
 def _world(args):
@@ -106,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if getattr(args, "out_file", None) is not None:
-        _write(args.out_file, result)
+        write_json(args.out_file, result)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 

@@ -119,6 +119,9 @@ def load_arm(run_dir: Path, arm: str) -> dict:
     return {
         "arm": arm,
         "architecture": actual,
+        "experiment_arm": meta.get("experiment_arm"),
+        "experiment_manifest_hash": meta.get("experiment_manifest_hash"),
+        "frozen_directions_hash": meta.get("frozen_directions_hash"),
         "window": meta.get("window") or {},
         "run_id": meta.get("run_id"),
         "errors": meta.get("errors") or [],
@@ -246,6 +249,23 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         for arm in sorted(_ARM_ARCHITECTURES)
     }
 
+    binding_errors = {}
+    for arm, value in arms.items():
+        problems = []
+        if value["experiment_arm"] != arm:
+            problems.append(
+                f"experiment_arm={value['experiment_arm']!r}, expected {arm}")
+        if value["experiment_manifest_hash"] != manifest_hash:
+            problems.append("experiment_manifest_hash mismatch")
+        if arm == "C" and not value["frozen_directions_hash"]:
+            problems.append("C is missing frozen_directions_hash")
+        if problems:
+            binding_errors[arm] = problems
+    if binding_errors:
+        raise SectorCompareError(
+            "experiment binding mismatch: " + json.dumps(
+                binding_errors, ensure_ascii=False, sort_keys=True))
+
     windows = {
         (str(value["window"].get("start")),
          str(value["window"].get("end")))
@@ -328,6 +348,9 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
             arm: {
                 "architecture": value["architecture"],
                 "run_id": value["run_id"],
+                "experiment_arm": value["experiment_arm"],
+                "experiment_manifest_hash":
+                    value["experiment_manifest_hash"],
                 "portfolio": value["portfolio"],
                 "budget": {
                     "agent_tool_calls": value["agent_tool_calls"],

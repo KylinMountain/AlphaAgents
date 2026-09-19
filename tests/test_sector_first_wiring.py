@@ -11,6 +11,8 @@ import walk_forward as wf  # noqa: E402
 
 from alpha_agents.agents import t1_decider  # noqa: E402
 from alpha_agents.data import opportunity_journal as OJ  # noqa: E402
+from alpha_agents.data import sector_membership as SM  # noqa: E402
+from alpha_agents.data import sector_selection as SS  # noqa: E402
 
 
 class _Ctx:
@@ -73,16 +75,29 @@ def _wire_common(monkeypatch):
 
 def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",), "算力": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    primary_relation = SM.relation_evidence_id(
+        snapshot, sector_id="AI", code="600001")
+    supporting_relation = SM.relation_evidence_id(
+        snapshot, sector_id="算力", code="600001")
     panel = [{
         "code": "600001",
         "name": "甲",
         "adv20": 100000,
         "primary_theme": "AI",
         "supporting_themes": ["算力"],
-        "membership_snapshot_id": "m1",
-        "membership_hash": "membership-hash",
-        "primary_theme_relation_evidence_id": "rel-primary",
-        "supporting_theme_relation_evidence_ids": ["rel-supporting"],
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "primary_theme_relation_evidence_id": primary_relation,
+        "supporting_theme_relation_evidence_ids": [supporting_relation],
     }]
     monkeypatch.setattr(
         wf, "_sector_first_stage", lambda *a, **k: (panel, None))
@@ -113,10 +128,10 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     assert captured["theme"] == "AI"
     assert captured["theme"] != ctx.theme
     assert got[0]["membership_snapshot_id"] == "m1"
-    assert got[0]["membership_hash"] == "membership-hash"
-    assert got[0]["primary_theme_relation_evidence_id"] == "rel-primary"
+    assert got[0]["membership_hash"] == snapshot.content_hash
+    assert got[0]["primary_theme_relation_evidence_id"] == primary_relation
     assert got[0]["supporting_theme_relation_evidence_ids"] == [
-        "rel-supporting"]
+        supporting_relation]
 
 
 def test_dual_rank_default_keeps_run_theme(monkeypatch):
@@ -329,3 +344,90 @@ def test_event_snapshot_refs_use_the_decision_cutoff(monkeypatch):
     assert captured["subjects"] == ["600001", "600001"]
     assert captured["days_back"] == 30
     assert captured["days_ahead"] == 30
+
+
+def test_sector_first_missing_relation_is_refused_before_intent(monkeypatch):
+    ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    panel = [{
+        "code": "600001",
+        "name": "甲",
+        "adv20": 100000,
+        "primary_theme": "AI",
+        "supporting_themes": [],
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        # Deliberately absent: primary_theme_relation_evidence_id.
+        "supporting_theme_relation_evidence_ids": [],
+    }]
+    monkeypatch.setattr(
+        wf, "_sector_first_stage", lambda *a, **k: (panel, None))
+    monkeypatch.setattr(
+        wf, "_sector_stock_choice",
+        lambda *a, **k: {
+            "stocks": [{"code": "600001", "reason": "pick"}],
+            "refused": [], "parse_error": None, "research_budget": None,
+        })
+    monkeypatch.setattr(
+        wf, "_sector_trade_plan",
+        lambda *a, **k: {
+            "orders": [_order()], "refused": [], "parse_error": None,
+            "raw": "{}", "research_budget": None,
+        })
+    _wire_common(monkeypatch)
+
+    journal = {}
+    monkeypatch.setattr(
+        OJ, "record_decision", lambda **kwargs: journal.update(kwargs) or 1)
+    monkeypatch.setattr(
+        wf, "create_pending_order",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("unresolved relation must never create an intent")),
+    )
+
+    got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
+
+    assert got == []
+    refusal = next(
+        row for row in journal["refusals"]
+        if row.get("why") == "theme_unresolved")
+    assert refusal["code"] == "600001"
+    assert refusal["stage"] == "relation_validation"
+    assert "primary_relation_evidence_mismatch" in refusal["detail"]
+
+
+def test_sector_relation_validation_rejects_tampered_membership_hash():
+    ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    panel = [{
+        "code": "600001",
+        "primary_theme": "AI",
+        "supporting_themes": [],
+        "membership_snapshot_id": "m1",
+        "membership_hash": "tampered",
+        "primary_theme_relation_evidence_id": SM.relation_evidence_id(
+            snapshot, sector_id="AI", code="600001"),
+        "supporting_theme_relation_evidence_ids": [],
+    }]
+    accepted, refused = wf._validate_sector_order_relations(
+        ctx, panel, [{"code": "600001"}])
+
+    assert accepted == []
+    assert refused[0]["why"] == "theme_unresolved"
+    assert "hash mismatch" in refused[0]["detail"]

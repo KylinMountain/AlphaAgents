@@ -301,12 +301,25 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         aligned = _aligned(
             arms[left]["daily_returns_pct"],
             arms[right]["daily_returns_pct"])
-        pairings[f"{right}_minus_{left}"] = _moving_block_ci(
+        result = _moving_block_ci(
             [value for _day, value in aligned],
             block=int(block["block_length_days"]),
             repetitions=int(block["repetitions"]),
             seed=seed + ord(left) + ord(right),
         )
+        floor = float(manifest["minimum_meaningful_improvement_pct"])
+        ci = result.get("ci95")
+        if result["status"] != "ok" or ci is None:
+            evidence = "insufficient"
+        elif ci[0] > floor:
+            evidence = "positive_beyond_floor"
+        elif ci[1] < -floor:
+            evidence = "negative_beyond_floor"
+        else:
+            evidence = "inconclusive"
+        result["evidence"] = evidence
+        result["minimum_meaningful_improvement_pct"] = floor
+        pairings[f"{right}_minus_{left}"] = result
 
     risk = {arm: _risk_check(value, manifest) for arm, value in arms.items()}
     required_layers = {
@@ -325,6 +338,26 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
 
     minimum_days = int(manifest["minimum_days"])
     observed_days = int(actual_window.get("trading_days") or 0)
+    execution_status = {
+        arm: (
+            "has_fills"
+            if value["portfolio"]["buy_fills"] + value["portfolio"]["sell_fills"]
+            else "no_fills"
+        )
+        for arm, value in arms.items()
+    }
+    statistical_status = {
+        name: value["evidence"] for name, value in pairings.items()
+    }
+    data_status = {
+        arm: (
+            "incomplete"
+            if missing_layers[arm] or risk[arm]["unverified"]
+            else "complete"
+        )
+        for arm in arms
+    }
+
     reasons = []
     if observed_days < minimum_days:
         reasons.append(
@@ -335,6 +368,12 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         reasons.append("one or more arms fail or cannot verify risk boundaries")
     if any(missing_layers.values()):
         reasons.append("layer reports are incomplete")
+    if any(
+            value["status"] == "insufficient"
+            for value in pairings.values()):
+        reasons.append("one or more paired comparisons lack enough days for CI")
+    if all(value == "no_fills" for value in execution_status.values()):
+        reasons.append("no arm produced an executable fill sample")
 
     return {
         "manifest_hash": manifest_hash,
@@ -371,6 +410,11 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
             for arm, value in arms.items()
         },
         "paired_daily": pairings,
+        "evidence_status": {
+            "data": data_status,
+            "statistics": statistical_status,
+            "execution": execution_status,
+        },
         "measurement_contract": {
             "direction": "forward direction labels / selection diagnostics",
             "stock": "stock preselection and planner diagnostics",

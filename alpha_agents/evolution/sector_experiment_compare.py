@@ -289,9 +289,15 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         )
 
     risk = {arm: _risk_check(value, manifest) for arm, value in arms.items()}
+    required_layers = {
+        "A": ("stock",),
+        "B": ("direction", "stock"),
+        "C": ("direction", "stock"),
+        "D": ("direction", "stock"),
+    }
     missing_layers = {
         arm: [
-            layer for layer in ("direction", "stock")
+            layer for layer in required_layers[arm]
             if value["layers"].get(layer) is None
         ]
         for arm, value in arms.items()

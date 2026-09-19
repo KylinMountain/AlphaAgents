@@ -25,14 +25,14 @@
 
 只输出一个 JSON 对象：
 
-{
+{{
   "themes": [
-    {
+    {{
       "sector_id": "必须来自表格",
       "thesis": "为什么值得继续研究；只引用当前可见事实",
       "counterevidence": "最重要的反证或风险",
       "unknowns": "现在还不知道什么",
       "invalidations": ["什么事实出现后不再继续研究"]
-    }
+    }}
   ]
-}
+}}

@@ -1276,6 +1276,13 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
         peer = (
             leave_one_out.get(item["primary_theme"], {}).get(code, {})
         )
+        primary_relation = sector_membership.relation_evidence_id(
+            membership, sector_id=item["primary_theme"], code=code)
+        supporting_relations = [
+            sector_membership.relation_evidence_id(
+                membership, sector_id=theme, code=code)
+            for theme in item["supporting_themes"]
+        ]
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
@@ -1286,6 +1293,10 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
             "concepts": concepts.get(code, []),
             "primary_theme": item["primary_theme"],
             "supporting_themes": item["supporting_themes"],
+            "membership_snapshot_id": membership.snapshot_id,
+            "membership_hash": membership.content_hash,
+            "primary_theme_relation_evidence_id": primary_relation,
+            "supporting_theme_relation_evidence_ids": supporting_relations,
             "primary_theme_peer_covered": peer.get("peer_covered"),
             "primary_theme_peer_total": peer.get("peer_total"),
             "primary_theme_peer_5d_median_pct": peer.get(
@@ -1730,6 +1741,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
             "order_id": order_id,
             "theme": order_theme,
             "supporting_themes": row.get("supporting_themes") or [],
+            "membership_snapshot_id": row.get("membership_snapshot_id"),
+            "membership_hash": row.get("membership_hash"),
+            "primary_theme_relation_evidence_id": row.get(
+                "primary_theme_relation_evidence_id"),
+            "supporting_theme_relation_evidence_ids": row.get(
+                "supporting_theme_relation_evidence_ids") or [],
             "reason": order["reason"],
         })
     return placed

@@ -2689,6 +2689,7 @@ def _run_window(ctx, args) -> dict:
     corpus_before = _corpus_fingerprint(_REPLAY_DIR)
 
     equity_rows, fill_rows, settle_rows, event_rows = [], [], [], []
+    theme_exposure_rows = []
     learning_rows = []
     by_status = Counter()
     cancels = Counter()
@@ -2771,6 +2772,29 @@ def _run_window(ctx, args) -> dict:
                                    "error": f"{type(exc).__name__}: {exc}"})
             with replay_as_of(day):
                 equity = _value(ctx, day)
+                close_marks = {
+                    code: float(row["close"])
+                    for code, row in ctx.corpus.bars(day).items()
+                    if row.get("close") is not None
+                }
+                exposure = order_theme_exposure.snapshot(
+                    trader_id=ctx.trader,
+                    price_map=close_marks,
+                    equity=float(equity["equity"]),
+                    membership_archive=ctx.sector_membership_archive,
+                )
+                theme_exposure_rows.append({
+                    "date": day,
+                    "complete": int(bool(exposure["complete"])),
+                    "max_theme_cluster_exposure_pct":
+                        exposure["max_theme_cluster_exposure_pct"],
+                    "overlap_orders": exposure["overlap_orders"],
+                    "active_orders": exposure["active_orders"],
+                    "theme_exposure_json": exposure["theme_exposure_json"],
+                    "missing_json": json.dumps(
+                        exposure["missing"], ensure_ascii=False,
+                        sort_keys=True, separators=(",", ":")),
+                })
                 # Inside the day's as-of, and after the book is marked: the
                 # labels are derived from the ledger, so they have to be
                 # written at a moment where "today" is the day that just
@@ -2828,6 +2852,7 @@ def _run_window(ctx, args) -> dict:
     return {
         "ctx": ctx, "window": window, "equity": equity_rows, "fills": fill_rows,
         "settlement": settle_rows, "events": event_rows,
+        "theme_exposure": theme_exposure_rows,
         "by_status": by_status, "cancels": cancels, "errors": errors,
         "learning": learning_rows,
         "model_calls": {
@@ -3081,6 +3106,11 @@ def write_report(result: dict, out_dir: Path) -> dict:
     _write_csv(out_dir / "events.csv", result["events"], [
         "date", "kind", "status", "code", "order_id", "position_id",
         "entry_low", "entry_high", "open", "reason"])
+
+    _write_csv(out_dir / "theme_exposure.csv", result["theme_exposure"], [
+        "date", "complete", "max_theme_cluster_exposure_pct",
+        "overlap_orders", "active_orders", "theme_exposure_json",
+        "missing_json"])
 
     summary = _summary(
         result, out_dir, model_usage_ok, model_usage_detail,

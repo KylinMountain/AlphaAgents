@@ -18,6 +18,11 @@ from alpha_agents.evolution import sector_experiment_compare as C
 def _manifest():
     manifest = E.template(capabilities_hash="a" * 64)
     manifest.update({
+        "baseline_identity": {
+            "code_ref": "72ce91a96e8ab0ee499dae0d6e71deef36e67ddd",
+            "policy_ref": "policy-v1",
+            "input_hash": "i" * 64,
+        },
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},
@@ -32,6 +37,7 @@ def _manifest():
         ],
         "forward_start": "2027-01-01",
         "primary_metric": "portfolio_net_return_pct",
+        "minimum_meaningful_improvement_pct": 0.10,
         "minimum_days": 50,
         "stopping_rule": {"validation_windows": 4, "then": "freeze"},
         "risk_boundaries": {

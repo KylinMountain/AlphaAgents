@@ -125,7 +125,12 @@ def test_cli_default_does_not_change_incumbent_architecture():
     assert args.sector_membership is None
 
 
-def test_sector_first_context_requires_pit_archive(tmp_path):
+def test_sector_first_context_requires_pit_archive(tmp_path, monkeypatch):
+    class _Corpus:
+        def __init__(self, _data_dir):
+            pass
+
+    monkeypatch.setattr(wf, "Corpus", _Corpus)
     args = wf.build_parser().parse_args([
         "--start", "2026-01-30",
         "--decider", "llm",

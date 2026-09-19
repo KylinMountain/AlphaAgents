@@ -37,7 +37,6 @@ def test_cards_keep_missing_distinct_from_zero():
     text = S.format_sector_cards(SECTORS)
     assert "AI" in text and "存储" in text
     row = next(line for line in text.splitlines() if "存储" in line)
-    assert "|-|".replace("|-|", "|-|") or row
     assert "0/9" in row
     assert "|-|" in row
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from alpha_agents.data import clock, memory_store
+from alpha_agents.data import clock, memory_store, sector_membership
 
 
 _TABLE = """
@@ -99,7 +99,7 @@ def for_order(order_id: int,
 
 
 def snapshot(*, trader_id: str, price_map: dict[str, float],
-             equity: float,
+             equity: float, membership_archive=(),
              conn: sqlite3.Connection | None = None) -> dict:
     """Committed open+pending exposure by theme at one mark.
 
@@ -113,7 +113,8 @@ def snapshot(*, trader_id: str, price_map: dict[str, float],
         raise ThemeExposureError("positive equity is required")
 
     positions = target.execute(
-        "SELECT id,code,theme,status,shares,open_price FROM virtual_portfolio "
+        "SELECT id,code,theme,status,shares,open_price,order_date "
+        "FROM virtual_portfolio "
         "WHERE trader_id=? AND status IN ('pending','open') ORDER BY id",
         (trader_id,),
     ).fetchall()
@@ -121,19 +122,38 @@ def snapshot(*, trader_id: str, price_map: dict[str, float],
     cluster_amount: dict[str, float] = {}
     missing = []
     overlap_orders = 0
+    attribution_counts: dict[str, int] = {}
     for row in positions:
         order_id = int(row["id"])
-        themes = for_order(order_id, target)
-        if themes:
-            labels = [str(item["theme"]) for item in themes]
-        else:
-            fallback = str(row["theme"] or "").strip()
-            labels = [fallback] if fallback else []
+        labels = []
+        attribution = "none"
+        if membership_archive:
+            try:
+                membership = sector_membership.as_of(
+                    membership_archive,
+                    f"{str(row['order_date'])[:10]} 09:00:00")
+                labels = sector_membership.concepts_by_code(
+                    membership).get(str(row["code"]), [])
+                if labels:
+                    attribution = "pit_membership"
+            except Exception as exc:                  # noqa: BLE001
+                missing.append({
+                    "order_id": order_id, "code": row["code"],
+                    "reason": f"membership_lookup_failed:{type(exc).__name__}",
+                })
+                continue
+        if not labels:
+            themes = for_order(order_id, target)
+            if themes:
+                labels = [str(item["theme"]) for item in themes]
+                attribution = "order_sidecar"
         if not labels:
             missing.append({
                 "order_id": order_id, "code": row["code"],
                 "reason": "missing_theme_attribution"})
             continue
+        attribution_counts[attribution] = (
+            attribution_counts.get(attribution, 0) + 1)
         if len(labels) > 1:
             overlap_orders += 1
 
@@ -177,4 +197,5 @@ def snapshot(*, trader_id: str, price_map: dict[str, float],
         "missing": missing,
         "overlap_orders": overlap_orders,
         "active_orders": len(positions),
+        "attribution_counts": attribution_counts,
     }

@@ -143,6 +143,7 @@ class OpportunitySetObservation:
     set_id: int
     day: str
     phase: str
+    information_cutoff: str
     trader_id: str
     policy_ref: str | None
     parse_error: str | None
@@ -252,6 +253,7 @@ def build_opportunity_world(*, start: str, end: str,
             set_id=int(set_row["id"]),
             day=str(set_row["day"]),
             phase=str(set_row["phase"]),
+            information_cutoff=str(set_row["information_cutoff"]),
             trader_id=str(set_row["trader_id"]),
             policy_ref=set_row["policy_ref"],
             parse_error=set_row["parse_error"],

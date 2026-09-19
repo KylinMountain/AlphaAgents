@@ -216,3 +216,23 @@ def test_sector_trade_plan_is_toolless(monkeypatch):
         book="", knowledge="")
     assert captured["tools"] == []
     assert captured["research_budget"] is None
+
+
+
+def test_sector_stock_card_renders_leave_one_out_peer_strength():
+    panel = [{
+        "code": "600001",
+        "name": "甲",
+        "close": 10.0,
+        "change_pct": 2.0,
+        "adv20": 100000,
+        "turnover_rate": 3.0,
+        "primary_theme": "AI",
+        "supporting_themes": ["算力"],
+        "primary_theme_peer_covered": 3,
+        "primary_theme_peer_total": 4,
+        "primary_theme_peer_relative_5d_pct": 1.234,
+    }]
+    rendered = t1_decider.format_panel(panel)
+    assert "主方向去自身5日相对" in rendered
+    assert "+1.23% (3/4)" in rendered

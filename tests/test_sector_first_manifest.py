@@ -56,6 +56,7 @@ def test_frozen_four_arm_manifest_is_valid():
             "policy_ref": "policy-v1",
             "input_hash": "i" * 64,
         },
+        "decision_config": {"fixture": "frozen"},
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},
@@ -98,6 +99,7 @@ def test_manifest_identity_and_improvement_floor_are_required():
     assert "baseline_identity.code_ref is required" in errors
     assert "baseline_identity.policy_ref is required" in errors
     assert "baseline_identity.input_hash is required" in errors
+    assert "decision_config is required" in errors
     assert "minimum_meaningful_improvement_pct must be numeric" in errors
 
 
@@ -109,6 +111,7 @@ def test_registered_manifest_is_content_addressed_and_never_overwritten(tmp_path
             "policy_ref": "policy-v1",
             "input_hash": "i" * 64,
         },
+        "decision_config": {"fixture": "frozen"},
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},

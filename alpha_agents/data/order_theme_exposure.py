@@ -142,6 +142,11 @@ def snapshot(*, trader_id: str, price_map: dict[str, float],
                     "reason": f"membership_lookup_failed:{type(exc).__name__}",
                 })
                 continue
+        if not labels and membership_archive:
+            missing.append({
+                "order_id": order_id, "code": row["code"],
+                "reason": "code_absent_from_pit_membership"})
+            continue
         if not labels:
             themes = for_order(order_id, target)
             if themes:

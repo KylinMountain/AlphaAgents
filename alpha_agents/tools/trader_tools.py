@@ -53,6 +53,8 @@ AS_OF_FIELDS = {
                           "这只票是什么状态"),
     "get_intraday_shape": ("market_snapshots.db", "captured_at",
                            "今天分时怎么走的"),
+    "get_event_context": ("market_snapshots.db", "captured_at",
+                          "这条消息相对市场原来的预期是什么"),
     "get_stock_memory": ("memory.db", "open_date",
                          "我认识这只票吗"),
     "get_my_state": ("memory.db", "close_date",
@@ -802,6 +804,192 @@ def get_intraday_shape(code: str, as_of: str = "") -> str:
     return get_intraday_shape_fn(code, as_of)
 
 
+
+
+# ── ⑤ get_event_context ───────────────────────────────────────────────
+
+
+def _event_positioning(code: str, event: dict, cut: str) -> dict:
+    """Price path knowable by cut, with an explicit as-of date.
+
+    This is a proxy for positioning, not consensus. The tool reports it beside
+    expectation data rather than converting it into a priced-in verdict.
+    """
+    eod_cut = _eod_cut()
+    event_day = str(event.get("scheduled_at") or "")[:10]
+    position_day = min(eod_cut, event_day) if event_day else eod_cut
+    try:
+        conn = _conn(_HISTORY)
+    except Exception as exc:
+        return {"available": False, "reason": f"行情库不可用: {exc}"}
+    try:
+        rows = conn.execute(
+            "SELECT date, open, high, low, close, volume, turnover_rate, "
+            "change_pct FROM daily_kline WHERE code=? AND date<=? "
+            "ORDER BY date DESC LIMIT 61", (code, position_day)).fetchall()
+        if not rows:
+            return {
+                "available": False,
+                "reason": f"{code} 在 {position_day} 及之前没有日线",
+            }
+        rows = list(reversed(rows))
+        closes = [float(row["close"]) for row in rows
+                  if row["close"] is not None]
+        if not closes:
+            return {"available": False, "reason": "没有可用收盘价"}
+
+        def _ret(n):
+            if len(closes) <= n or not closes[-1 - n]:
+                return None
+            return round((closes[-1] / closes[-1 - n] - 1) * 100, 2)
+
+        recent20 = rows[-20:]
+        vols = [float(row["volume"] or 0) for row in recent20]
+        turns = [float(row["turnover_rate"] or 0) for row in recent20]
+        return {
+            "available": True,
+            "as_of": rows[-1]["date"],
+            "return_pct": {"1d": _ret(1), "5d": _ret(5), "20d": _ret(20)},
+            "last_change_pct": rows[-1]["change_pct"],
+            "last_turnover_rate": rows[-1]["turnover_rate"],
+            "volume_20d_mean": (
+                round(sum(vols) / len(vols), 2) if vols else None),
+            "turnover_20d_mean": (
+                round(sum(turns) / len(turns), 2) if turns else None),
+        }
+    finally:
+        conn.close()
+
+
+def _event_reaction(code: str, event: dict, cut: str) -> dict:
+    """Daily reaction after a realization becomes knowable."""
+    realization = event.get("realization")
+    if not realization:
+        return {"available": False, "reason": "事件结果在截断点尚不可见"}
+    announced = str(realization.get("announced_at") or "")
+    if not announced:
+        return {"available": False, "reason": "事件结果缺少 announced_at"}
+    event_day = announced[:10]
+    event_time = announced[11:19] if len(announced) >= 19 else ""
+    eod_cut = _eod_cut()
+    try:
+        conn = _conn(_HISTORY)
+    except Exception as exc:
+        return {"available": False, "reason": f"行情库不可用: {exc}"}
+    try:
+        prior = conn.execute(
+            "SELECT date, close FROM daily_kline "
+            "WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+            (code, event_day)).fetchone()
+        if event_time and event_time < "15:00:00":
+            prior = conn.execute(
+                "SELECT date, close FROM daily_kline "
+                "WHERE code=? AND date<? ORDER BY date DESC LIMIT 1",
+                (code, event_day)).fetchone()
+            first_cmp = ">="
+        else:
+            first_cmp = ">"
+        if prior is None or prior["close"] is None:
+            return {"available": False, "reason": "公告前基准收盘价不可用"}
+        prior_close = float(prior["close"])
+        rows = conn.execute(
+            f"SELECT date, open, high, low, close, volume, turnover_rate "
+            f"FROM daily_kline WHERE code=? AND date {first_cmp} ? AND date<=? "
+            "ORDER BY date LIMIT 5",
+            (code, event_day, eod_cut)).fetchall()
+        if not rows:
+            return {
+                "available": False,
+                "reason": "公告后的交易日尚未成熟或行情缺失",
+                "announced_at": announced,
+            }
+        first = rows[0]
+
+        def _close_ret(row):
+            return (round((float(row["close"]) / prior_close - 1) * 100, 2)
+                    if row["close"] is not None and prior_close else None)
+
+        follow = {}
+        for n in (1, 3, 5):
+            if len(rows) >= n:
+                follow[f"{n}d"] = _close_ret(rows[n - 1])
+        return {
+            "available": True,
+            "announced_at": announced,
+            "reaction_start": first["date"],
+            "prior_close_date": prior["date"],
+            "open_gap_pct": (
+                round((float(first["open"]) / prior_close - 1) * 100, 2)
+                if first["open"] is not None and prior_close else None),
+            "first_close_return_pct": _close_ret(first),
+            "follow_through_close_return_pct": follow,
+            "convention": (
+                "announcement before 15:00 -> same-day daily bar; "
+                "15:00 or later/date-only -> next trading day"),
+        }
+    finally:
+        conn.close()
+
+
+def get_event_context_fn(code: str, as_of: str = "",
+                         days_back: int = 30,
+                         days_ahead: int = 30) -> str:
+    """Event, prior expectation, positioning and realized reaction — facts only."""
+    if not code:
+        return _no_data("event_context", "必须给 code")
+    cut = as_of or _snapshot_cut()
+    _guard_read("event expectation snapshot", cut[:10])
+    try:
+        from alpha_agents.data import event_expectations
+        conn = _conn(_SNAPSHOTS)
+    except Exception as exc:
+        return _no_data("event_context", f"事件库不可用: {exc}", code=code)
+    try:
+        try:
+            rows = event_expectations.context(
+                as_of=cut, subject=code, days_back=days_back,
+                days_ahead=days_ahead, conn=conn)
+        except Exception as exc:
+            return _no_data(
+                "event_context", f"事件数据不可用: {exc}", code=code)
+        if not rows:
+            return _no_data(
+                "event_context",
+                f"{code} 在截断点前后没有已知事件/预期快照",
+                code=code, as_of=cut)
+        enriched = []
+        for event in rows[-8:]:
+            enriched.append({
+                **event,
+                "positioning": _event_positioning(code, event, cut),
+                "reaction": _event_reaction(code, event, cut),
+            })
+        return _json({
+            "available": True,
+            "as_of": cut,
+            "code": code,
+            "events": enriched,
+            "note": (
+                "positioning 是价格/量能事实，不等于 priced-in 判断；"
+                "expectation 缺失时不要自行补 consensus。"),
+        })
+    finally:
+        conn.close()
+
+
+@function_tool
+@with_timeout
+def get_event_context(code: str, as_of: str = "",
+                      days_back: int = 30, days_ahead: int = 30) -> str:
+    """这只票附近有什么可知的事件：披露日历、当时 consensus/隐含预期、
+    公司实际 guidance/结果、事件前价格位置，以及结果可见后的价格反应。
+
+    只返回事实，不判断“利好兑现”“利空出尽”或是否 priced in。没有可靠
+    expectation snapshot 时会明确缺失，不会替市场编一个预期。
+    """
+    return get_event_context_fn(code, as_of, days_back, days_ahead)
+
+
 @function_tool
 @with_timeout
 def get_stock_memory(code: str) -> str:
@@ -826,13 +1014,14 @@ def get_my_state() -> str:
     return get_my_state_fn()
 
 
-#: 接进 T1 Trader 的六个问题型工具。**不是** registry 里那 30 个——
+#: 接进 T1 Trader 的七个问题型工具。**不是** registry 里那 30 个——
 #: 工具越多，模型越容易按名字的形状挑，而不是按它需要知道什么挑。
 TRADER_TOOLS = [
     get_market_regime,
     get_theme_state,
     get_stock_context,
     get_intraday_shape,
+    get_event_context,
     get_stock_memory,
     get_my_state,
 ]

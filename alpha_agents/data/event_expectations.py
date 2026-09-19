@@ -214,21 +214,28 @@ def _json(value):
 
 
 def context(*, as_of: str, subject: str | None = None,
-            scope: str | None = None, days_ahead: int = 14,
+            scope: str | None = None, days_back: int = 30,
+            days_ahead: int = 14,
             conn: sqlite3.Connection | None = None) -> list[dict]:
     """Return latest event and expectation facts knowable at as_of.
 
     Upcoming events are restricted to days_ahead. Realization is attached only
     when its announcement timestamp is already <= as_of.
     """
-    if days_ahead < 0:
-        raise EventExpectationError("days_ahead cannot be negative")
+    if days_back < 0 or days_ahead < 0:
+        raise EventExpectationError("days_back/days_ahead cannot be negative")
     target = conn or connect(readonly=True)
     close = conn is None
     try:
-        where = ["c.captured_at <= ?",
-                 "c.scheduled_at <= datetime(?, ? || ' days')"]
-        params: list = [as_of, as_of, f"+{days_ahead}"]
+        where = [
+            "c.captured_at <= ?",
+            "c.scheduled_at >= datetime(?, ? || ' days')",
+            "c.scheduled_at <= datetime(?, ? || ' days')",
+        ]
+        params: list = [
+            as_of, as_of, f"-{days_back}",
+            as_of, f"+{days_ahead}",
+        ]
         if subject is not None:
             where.append("c.subject = ?")
             params.append(subject)

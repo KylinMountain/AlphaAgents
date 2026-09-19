@@ -52,7 +52,8 @@ TOOL_TIMEOUT = int(os.environ.get("TOOL_TIMEOUT", "25"))
 _MARKET_TOOLS = frozenset({"get_market_regime"})
 _THEME_TOOLS = frozenset({"get_theme_state"})
 _STOCK_TOOLS = frozenset({
-    "get_stock_context", "get_intraday_shape", "get_stock_memory",
+    "get_stock_context", "get_intraday_shape", "get_event_context",
+    "get_stock_memory",
 })
 _SELF_TOOLS = frozenset({"get_my_state"})
 

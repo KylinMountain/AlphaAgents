@@ -126,9 +126,9 @@ fund_flow
 
 ## Agent 最终应该看到什么
 
-未来增加一个事实型工具：
+已经增加事实型工具：
 
-`get_event_context(code/theme/market)`
+`get_event_context(code, as_of)`
 
 返回类似：
 
@@ -263,9 +263,9 @@ sample_fields
 
 1. Opportunity Journal（已实现）：保存当时没买的机会。
 2. Event Calendar + append-only Expectation Snapshot。
-3. `get_event_context` 事实型工具。
-4. Replay Capability Matrix 增加 event_expectation 覆盖率。
-5. DreamWorld 纳入 event snapshot hash。
+3. `get_event_context` 事实型工具。**已实现**
+4. Replay Capability Matrix 增加 event_expectation 覆盖率。**已实现**
+5. Opportunity/DreamWorld 纳入 event snapshot hash。**下一步**
 6. 之后才研究 “priced-in / surprise” policy 是否真的改善选择。
 
 核心原则：

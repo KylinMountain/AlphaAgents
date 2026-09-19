@@ -1170,6 +1170,13 @@ def _decide_llm(ctx, day: str, prev_day: str,
         trader_note=ctx.trader_note, picks=ctx.picks,
         template=ctx.prompt, model=ctx.model, loop=ctx.loop, phase=phase,
         tools=_trader_tools(ctx), max_turns=ctx.max_turns)
+    research = verdict.get("research_budget")
+    if research:
+        ctx.counters["research_tool_calls"] += int(research.get("used") or 0)
+        ctx.counters["research_budget_denied"] += int(
+            research.get("denied") or 0)
+        ctx.counters["research_deep_dive_names"] += len(
+            research.get("deep_dive_names") or [])
     if verdict["parse_error"]:
         # A reply we could not read is not the same as "it chose nothing",
         # and the two must not share a counter.

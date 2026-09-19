@@ -416,7 +416,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
                   max_turns: int | None = None, market: dict | None = None,
-                  phase: str = "open", tools: list | None = None) -> dict:
+                  phase: str = "open", tools: list | None = None,
+                  research_budget=None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -456,11 +457,21 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         template=template if template is not None else load_prompt(),
         market=market, phase=phase)
 
+    budget = research_budget
+    if tools:
+        from alpha_agents.tools.budget import ResearchBudget, use_research_budget
+        budget = budget or ResearchBudget()
+        message += "\n\n" + budget.prompt_hint()
+
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model,
                   tools=list(tools) if tools else [])
     try:
-        result = await Runner.run(agent, message, max_turns=max_turns)
+        if budget is None:
+            result = await Runner.run(agent, message, max_turns=max_turns)
+        else:
+            with use_research_budget(budget):
+                result = await Runner.run(agent, message, max_turns=max_turns)
     except MaxTurnsExceeded as exc:
         # A model that spends its whole turn budget asking questions has not
         # said what to buy, and "it did not answer" is not "buy nothing" — the
@@ -479,10 +490,12 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         parsed = {"orders": [], "refused": [], "raw": "",
                   "parse_error": f"MaxTurnsExceeded after {max_turns} turns "
                                  f"({exc})"}
+        parsed["research_budget"] = budget.summary() if budget else None
         return parsed
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})
     parsed["raw"] = raw
+    parsed["research_budget"] = budget.summary() if budget else None
     logger.info("%s: decider proposed %d, refused %d, parse_error=%s",
                 day, len(parsed["orders"]), len(parsed["refused"]),
                 parsed["parse_error"])

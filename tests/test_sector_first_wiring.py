@@ -29,6 +29,7 @@ class _Ctx:
     run_id = "r1"
     trader_tools = False
     counters = Counter()
+    capacity = {}
     last_panel_candidate_pool = []
     last_sector_context = {}
 

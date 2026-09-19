@@ -184,3 +184,55 @@ def test_outcome_history_is_append_only(store, membership, history):
         store.execute(
             "UPDATE theme_opportunity_outcomes "
             "SET sector_id='x' WHERE id=1")
+
+
+def test_partial_direction_horizon_stays_pending(
+        store, membership, history):
+    _journal(store, membership)
+    history.execute(
+        "DELETE FROM daily_kline WHERE date > '2026-01-12'")
+    history.commit()
+
+    got = O.sweep(
+        membership_archive=(membership,),
+        conn=store,
+        history_conn=history,
+    )
+
+    assert got["written"] == 0
+    assert got["pending"] == 3
+    coverage = O.coverage(store)
+    assert coverage["labeled"] == 0
+    assert coverage["pending"] == 3
+
+
+def test_missing_future_member_bar_remains_in_coverage_denominator(
+        membership, history):
+    # Simulate one member disappearing after the fifth session. Market dates
+    # still mature through the full horizon because the rest of the universe
+    # continues trading; the missing member must not be silently removed.
+    history.execute(
+        "DELETE FROM daily_kline "
+        "WHERE code='600004' AND date >= '2026-01-12'")
+    history.commit()
+
+    got = O.compute(
+        sector_id="存储",
+        membership_snapshot=membership,
+        day="2026-01-05",
+        phase="open",
+        history_conn=history,
+    )
+
+    assert got is not None
+    assert got["coverage"]["5"] == {
+        "covered": 1,
+        "members": 2,
+        "ratio": 0.5,
+    }
+    assert got["coverage"]["10"] == {
+        "covered": 1,
+        "members": 2,
+        "ratio": 0.5,
+    }
+    assert got["forward_median_return_pct"]["5"] is not None

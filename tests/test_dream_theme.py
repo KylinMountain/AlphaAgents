@@ -84,7 +84,7 @@ def test_theme_variant_flips_a_real_selected_intent(store):
         conn=store)
 
     store.execute(
-        "CREATE TABLE theme_score_history ("
+        "CREATE TABLE IF NOT EXISTS theme_score_history ("
         "id INTEGER PRIMARY KEY, theme TEXT, as_of TEXT, score REAL, "
         "flow_pct REAL, rel_pct REAL, confirm REAL, source TEXT)")
     store.execute(

@@ -14,9 +14,12 @@ announcement from leaking into the same day's 09:00 replay.
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from typing import Iterable
 
 from alpha_agents.data import event_expectations as events
+
+logger = logging.getLogger(__name__)
 
 
 class EventIngestError(ValueError):
@@ -42,8 +45,8 @@ def pit_timestamp(value) -> str:
     if len(text) == 10:
         try:
             parsed = datetime.strptime(text, "%Y-%m-%d")
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.debug("not an ISO date-only timestamp %r: %s", text, exc)
         else:
             return parsed.strftime("%Y-%m-%d 23:59:59")
     # Keep provider times, but normalize ISO T to a space for SQLite ordering.
@@ -68,8 +71,9 @@ def _records(rows) -> list[dict]:
     if callable(to_dict):
         try:
             return [dict(row) for row in to_dict("records")]
-        except TypeError:
-            pass
+        except TypeError as exc:
+            logger.debug("to_dict('records') unsupported for %s: %s",
+                         type(rows).__name__, exc)
     return [dict(row) for row in rows]
 
 

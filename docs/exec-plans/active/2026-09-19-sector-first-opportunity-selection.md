@@ -333,7 +333,8 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 - [x] 固定输入连续构建两次，方向 membership 与 feature/input hashes 一致。
 - [ ] **partial**：未来 membership 与未来 bar 已有注入测试且不会改变早先 snapshot；
       仍需补“资金修订”和“公告结果”两个独立未来污染 fixture。
-- [ ] **partial**：剔除头部 1/3 名的指标与 fixture 已有；候选股票级 leave-one-out 证据尚未实现。
+- [x] 剔除头部 1/3 名与候选股票级 leave-one-out 均已实现并有 fixture；
+      候选自己的价格变化不能改变“剔除自己后的主方向 5 日证据”，并直接展示在股票卡片。
 - [ ] **partial**：缺失资金与真实零值已严格区分；还需把负流入与 provider unsupported
       的完整 coverage/refusal contract 一起钉死。
 - [x] 方向级 Opportunity Journal 区分 selected、agent-rejected、offered-not-researched、
@@ -345,7 +346,8 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 - [x] Sector-First 订单使用每只股票自己的 `primary_theme`；重叠主题进入
       `supporting_themes`，不再统一写成 run-level theme。
 - [ ] **partial**：strict PIT membership、未来 membership 和 outside-shortlist 均 fail closed；
-      但 richer `relation_evidence_ids / theme_thesis_id` 关系证明契约尚未完整落地。
+      每个 `code × theme` 已有 membership-bound `relation_evidence_id`，panel/placed order
+      携带 snapshot id/hash 与主/辅方向关系证据；`theme_thesis_id` 及独立事件关系类型仍未落地。
 - [ ] 主题观察名单可含不可买龙头；交易名单/执行拒绝另有记录。
 - [ ] **partial**：方向选择与个股选择复用同一个 `ResearchBudget`，并已有 top-8 / 0..3 /
       panel-size / picks 等代码上限；还缺统一的超限 refusal code 与全阶段预算验收测试。
@@ -365,8 +367,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 ### S4：四臂历史比较与失败结论
 
-- [ ] **partial**：A/B/C/D architecture、manifest binding、C 的 frozen-B directions、
-      D 的 no-flow 消融及 compare 已实现；仍缺“一条命令跑完四臂并产出全部报告”的 orchestration。
+- [ ] **partial**：A/B/C/D architecture、manifest/runtime binding、C 的 frozen-B directions、
+      D 的 no-flow 消融及 compare 已实现；`run-matrix` 已能一条命令按 A→B→freeze→C→D→compare
+      跑隔离四臂。仍缺将每臂预算/拒绝/coverage 汇总成单一顶层实验报告的验收。
 - [x] `comparison.json` 显式携带 direction / stock / execution / portfolio 四层证据；
       direction/stock 是标签/选择诊断，portfolio 来自 Ledger equity，语义不混写。
 - [x] A-B / B-C / B-D 在共同交易日上做 moving-block bootstrap；
@@ -401,10 +404,17 @@ uv run python scripts/sector_first.py audit --as-of DATE --out DIR
 uv run python scripts/sector_first.py verify --manifest DIR/experiment_manifest.json --out DIR
 uv run python scripts/sector_first.py register --manifest DIR/experiment_manifest.json --out DIR
 
-# B 跑完后给 C 冻结完全相同的方向选择
-uv run python scripts/sector_first.py freeze-directions --run-id B_RUN --out-file DIR/frozen_b_directions.json
+# 推荐：正式窗口使用一条 fail-closed orchestration。
+# 每个 arm 有独立 replay state；B 完成后自动 freeze directions 给 C。
+uv run python scripts/sector_first.py run-matrix \
+  --manifest DIR/manifests/<manifest_hash>.json \
+  --sector-membership PIT_MEMBERSHIP.json \
+  --corpus data \
+  --window-index 0 \
+  --out DIR/window-0
 
-# A/B/C/D 已分别写入 ARMS_DIR/A..D 后
+# 低层命令仍保留，便于诊断单个 arm：
+uv run python scripts/sector_first.py freeze-directions --run-id B_RUN --out-file DIR/frozen_b_directions.json
 uv run python scripts/sector_first.py compare \
   --manifest DIR/manifests/<manifest_hash>.json \
   --arms-dir ARMS_DIR \
@@ -412,8 +422,9 @@ uv run python scripts/sector_first.py compare \
 ```
 
 `audit` 默认只读、不自动购买/扩张 API 权限；`verify` 只验证协议完整性；
-`register` 负责不可覆盖的 content-addressed 归档；`compare` 只写隔离实验结果。
-这些命令都没有 `promote` 后门。
+`register` 负责不可覆盖的 content-addressed 归档；`run-matrix` 只接受注册后的 manifest，
+并把四个 arm 放在独立 replay state 中，模型/预算/费用/退出/decision config 与 manifest
+不一致时开跑前即拒绝；`compare` 只写隔离实验结果。所有命令都没有 `promote` 后门。
 
 各阶段提交前使用现有命令：
 
@@ -546,5 +557,19 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 
 仍然**没有**做的事：没有跑完正式四臂窗口，没有改变 active policy，没有声明
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
-Sector-First 的 S5。下一工程阶段应先补完 S1/S2 的关系与污染 fixture、四臂 orchestration，
-再建立 Sector-First 专属 forward shadow / exact-gene evaluator。
+Sector-First 的 S5。
+
+随后同一分支继续补了：
+
+- formal replay 的 runtime binding：manifest 声称的 model、ResearchBudget、完整 A 股成本模型、
+  exit policy 与 decision config 必须和实际进程逐项相等，否则开跑前拒绝；
+- `run-matrix`：四臂各自 bootstrap 独立 trader state，共享只读 corpus，按
+  A → B → freeze B directions → C → D → compare 顺序执行；复用输出目录会拒绝覆盖；
+- candidate leave-one-out：股票不能用自己制造出来的板块强度给自己背书，股票卡片直接展示
+  剔除自身后的主方向 5 日相对收益和 peer coverage；
+- PIT relation provenance：每个 `code × theme` 关系有稳定、membership-bound 的 evidence id，
+  非成员关系不能生成；股票 panel 与 placed order 都带 snapshot id/hash 和主/辅方向证据。
+
+下一工程阶段优先补 S1 的 fund-flow/event vintage 污染 fixture、S2 的 theme thesis /
+独立事件关系契约和顶层 budget/refusal 汇总；之后再建立 Sector-First 专属 forward shadow /
+exact-gene evaluator。

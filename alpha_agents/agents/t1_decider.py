@@ -142,22 +142,36 @@ def format_panel(panel: list[dict]) -> str:
     """
     if not panel:
         return "（今天没有可交易的候选）"
-    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    sector_first = any(row.get("primary_theme") for row in panel)
+    if sector_first:
+        lines = [
+            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向 | 辅方向 |",
+            "|---|---|---|---|---|---|---|---|---|---|",
+        ]
+    else:
+        lines = [
+            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
     for row in panel:
         adv = row.get("adv20")
         turn = row.get("turnover_rate")
         concepts = row.get("concepts") or []
         streak = row.get("consecutive_limits")
         net = row.get("net_amount")
+        if sector_first:
+            primary = row.get("primary_theme") or "-"
+            supporting = row.get("supporting_themes") or []
+            tail = f"{primary} | {'、'.join(supporting) if supporting else '-'} |"
+        else:
+            tail = f"{'、'.join(concepts) if concepts else '-'} |"
         lines.append(
             f"| {row['code']} | {row.get('name', '')} | {row.get('close')} | "
             f"{row.get('change_pct')}% | "
             f"{'-' if turn is None else turn} | "
             f"{'-' if adv is None else int(adv)} | "
             f"{'-' if not streak else str(int(streak)) + '板'} | "
-            f"{'-' if net is None else f'{net:+,.0f}'} | "
-            f"{'、'.join(concepts) if concepts else '-'} |")
+            f"{'-' if net is None else f'{net:+,.0f}'} | {tail}")
     return "\n".join(lines)
 
 

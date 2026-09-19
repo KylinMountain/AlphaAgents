@@ -13,6 +13,7 @@ from pathlib import Path
 from agents import Agent, Runner
 from agents.exceptions import MaxTurnsExceeded
 
+from alpha_agents.agents.json_reply import json_body
 from alpha_agents.config import PROMPTS_DIR
 
 
@@ -26,13 +27,6 @@ SYSTEM_INSTRUCTIONS = (
     "你的任务是选择值得继续研究的方向，不是直接下单。"
     "输出必须是单个JSON对象，没有其它文字。"
 )
-
-_TICKS = chr(96) * 3
-_FENCE = re.compile(
-    re.escape(_TICKS) + r"(?:json)?\s*(.*?)" + re.escape(_TICKS),
-    re.IGNORECASE | re.DOTALL,
-)
-
 
 class SectorSelectorError(RuntimeError):
     pass
@@ -94,22 +88,9 @@ def build_message(*, day: str, as_of_session: str, sectors: list[dict],
     return text
 
 
-def _body(text: str) -> str:
-    text = (text or "").strip()
-    if not text:
-        return ""
-    blocks = _FENCE.findall(text)
-    if blocks:
-        return blocks[-1].strip()
-    if text.startswith("{"):
-        return text
-    start, end = text.rfind("{"), text.rfind("}")
-    return text[start:end + 1] if start >= 0 and end > start else text
-
-
 def parse_selection(text: str, offered: set[str],
                     max_selected: int = MAX_SELECTED) -> dict:
-    body = _body(text)
+    body = json_body(text)
     if not body:
         return {"themes": [], "refused": [], "parse_error": "empty reply"}
     try:

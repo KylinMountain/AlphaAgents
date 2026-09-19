@@ -82,7 +82,7 @@ def materialize(*, candidates: dict[str, dict],
                 seen.add(code)
                 themes = [
                     value for value in support.get(code, [])
-                    if value in selected_set
+                    if value in selected_set and value != sector
                 ]
                 out.append({
                     "code": code,

@@ -909,7 +909,7 @@ def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
             "sector_first_v0", "sector_first_simple_selector",
             "sector_first_no_flow"}:
         return t1_decider.load_prompt(
-            PROMPTS_DIR / "t1_decide_sector_first.md")
+            PROMPTS_DIR / "sector_trade_plan.md")
     return t1_decider.load_prompt()
 
 
@@ -1409,6 +1409,66 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
     return panel, budget
 
 
+
+def _sector_stock_choice(ctx, *, day: str, prev_day: str,
+                         panel: list[dict], news: list[dict],
+                         market: dict, book: str, knowledge: str,
+                         research_budget) -> dict:
+    """B/D use the model; C swaps only this choice for a transparent rule."""
+    from alpha_agents.agents import sector_stock_selector
+
+    if ctx.selection_architecture == "sector_first_simple_selector":
+        return sector_stock_selector.simple(panel, picks=ctx.picks)
+    return sector_stock_selector.propose_sync(
+        day=day,
+        prev_day=prev_day,
+        panel=panel,
+        news=news,
+        market=market,
+        book=book,
+        knowledge=knowledge,
+        trader_note=ctx.trader_note,
+        picks=ctx.picks,
+        model=ctx.model,
+        loop=ctx.loop,
+        tools=_trader_tools(ctx),
+        research_budget=research_budget,
+        max_turns=min(
+            ctx.max_turns or sector_stock_selector.DEFAULT_MAX_TURNS,
+            sector_stock_selector.DEFAULT_MAX_TURNS),
+    )
+
+
+def _sector_trade_plan(ctx, *, day: str, prev_day: str,
+                       panel: list[dict], news: list[dict],
+                       market: dict, book: str, knowledge: str) -> dict:
+    """Shared B/C/D order planner. It cannot research or widen the stock set."""
+    from alpha_agents.agents import t1_decider
+
+    if not panel:
+        return {
+            "orders": [], "refused": [], "raw": "",
+            "parse_error": None, "research_budget": None,
+        }
+    return t1_decider.propose_sync(
+        day=day,
+        prev_day=prev_day,
+        panel=panel,
+        news=news,
+        book=book,
+        knowledge=knowledge,
+        market=market,
+        trader_note=ctx.trader_note,
+        picks=len(panel),
+        template=ctx.prompt,
+        model=ctx.model,
+        loop=ctx.loop,
+        phase="open",
+        tools=[],
+        max_turns=ctx.max_turns,
+        research_budget=None,
+    )
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """Model-backed buy decision through the declared selection architecture."""
@@ -1422,8 +1482,11 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ctx.last_sector_context = {}
     shared_budget = None
-    if ctx.selection_architecture in {
-            "sector_first_v0", "sector_first_no_flow"}:
+    sector_mode = ctx.selection_architecture in {
+        "sector_first_v0", "sector_first_simple_selector",
+        "sector_first_no_flow",
+    }
+    if sector_mode:
         if phase != "open":
             raise RuntimeError(
                 f"{ctx.selection_architecture} currently supports the strict "
@@ -1445,28 +1508,81 @@ def _decide_llm(ctx, day: str, prev_day: str,
         return []
 
     book, knowledge = _book_and_knowledge(ctx, day, phase)
-    verdict = t1_decider.propose_sync(
-        day=day,
-        prev_day=prev_day,
-        panel=panel,
-        news=news,
-        book=book,
-        knowledge=knowledge,
-        market=market,
-        trader_note=ctx.trader_note,
-        picks=ctx.picks,
-        template=ctx.prompt,
-        model=ctx.model,
-        loop=ctx.loop,
-        phase=phase,
-        tools=_trader_tools(ctx),
-        max_turns=ctx.max_turns,
-        research_budget=shared_budget,
-    )
+    stock_choice = None
+    planner_panel = panel
+
+    if sector_mode:
+        stock_choice = _sector_stock_choice(
+            ctx,
+            day=day,
+            prev_day=prev_day,
+            panel=panel,
+            news=news,
+            market=market,
+            book=book,
+            knowledge=knowledge,
+            research_budget=shared_budget,
+        )
+        choice_error = stock_choice.get("parse_error")
+        if choice_error:
+            verdict = {
+                "orders": [],
+                "refused": stock_choice.get("refused") or [],
+                "raw": stock_choice.get("raw") or "",
+                "parse_error": f"stock_selector: {choice_error}",
+                "research_budget": stock_choice.get("research_budget"),
+            }
+            planner_panel = []
+        else:
+            by_code = {row["code"]: row for row in panel}
+            chosen_codes = [
+                row["code"] for row in stock_choice.get("stocks") or []
+            ]
+            planner_panel = [
+                by_code[code] for code in chosen_codes if code in by_code
+            ]
+            verdict = _sector_trade_plan(
+                ctx,
+                day=day,
+                prev_day=prev_day,
+                panel=planner_panel,
+                news=news,
+                market=market,
+                book=book,
+                knowledge=knowledge,
+            )
+            verdict["research_budget"] = stock_choice.get("research_budget")
+            verdict["refused"] = (
+                list(stock_choice.get("refused") or [])
+                + list(verdict.get("refused") or [])
+            )
+    else:
+        verdict = t1_decider.propose_sync(
+            day=day,
+            prev_day=prev_day,
+            panel=panel,
+            news=news,
+            book=book,
+            knowledge=knowledge,
+            market=market,
+            trader_note=ctx.trader_note,
+            picks=ctx.picks,
+            template=ctx.prompt,
+            model=ctx.model,
+            loop=ctx.loop,
+            phase=phase,
+            tools=_trader_tools(ctx),
+            max_turns=ctx.max_turns,
+            research_budget=None,
+        )
 
     try:
         from alpha_agents.data import opportunity_journal as OJ
         cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
+        stock_preselection = (
+            [row["code"] for row in (stock_choice or {}).get("stocks") or []]
+            if sector_mode else None
+        )
         OJ.record_decision(
             run_id=str(ctx.run_id),
             trader_id=ctx.trader,
@@ -1493,6 +1609,15 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     else None),
                 "sector_first": getattr(
                     ctx, "last_sector_context", {}),
+                "stock_preselection": stock_preselection,
+                "stock_preselection_mode": (
+                    "transparent_panel_prefix"
+                    if ctx.selection_architecture
+                    == "sector_first_simple_selector"
+                    else ("llm" if sector_mode else None)),
+                "planner_panel": [
+                    row["code"] for row in planner_panel
+                ] if sector_mode else None,
                 "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
             })
     except Exception as exc:                          # noqa: BLE001
@@ -1515,9 +1640,11 @@ def _decide_llm(ctx, day: str, prev_day: str,
         return []
 
     for refusal in verdict["refused"]:
-        ctx.counters[f"decider_refused:{refusal['why']}"] += 1
+        why = refusal.get("why") or "unknown"
+        ctx.counters[f"decider_refused:{why}"] += 1
         logger.info("%s: refused %s (%s) %s",
-                    day, refusal["code"], refusal["why"], refusal["detail"])
+                    day, refusal.get("code") or "", why,
+                    refusal.get("detail") or "")
 
     by_code = {row["code"]: row for row in panel}
     placed = []
@@ -1550,6 +1677,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             "code": order["code"],
             "order_id": order_id,
             "theme": order_theme,
+            "supporting_themes": row.get("supporting_themes") or [],
             "reason": order["reason"],
         })
     return placed

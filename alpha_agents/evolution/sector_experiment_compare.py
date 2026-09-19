@@ -356,6 +356,14 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
                     "agent_tool_calls": value["agent_tool_calls"],
                     "model_calls_made": value["model_calls_made"],
                 },
+                "layers": {
+                    "direction": value["layers"]["direction"],
+                    "stock": value["layers"]["stock"],
+                    "execution": value["layers"]["execution"],
+                    "portfolio": value["portfolio"],
+                },
+                # Keep the two established top-level fields for callers that
+                # predate the explicit four-layer comparison contract.
                 "execution": value["layers"]["execution"],
                 "risk": risk[arm],
                 "missing_layers": missing_layers[arm],
@@ -363,6 +371,12 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
             for arm, value in arms.items()
         },
         "paired_daily": pairings,
+        "measurement_contract": {
+            "direction": "forward direction labels / selection diagnostics",
+            "stock": "stock preselection and planner diagnostics",
+            "execution": "orders/fills/errors from the shared execution path",
+            "portfolio": "ledger equity, turnover and risk after execution",
+        },
         "note": (
             "No arm is declared a winner here. Historical architecture "
             "comparison remains development evidence; promotion still requires "

@@ -2,8 +2,14 @@
 
 import csv
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import walk_forward as wf  # noqa: E402
 
 from alpha_agents.evolution import sector_experiment as E
 from alpha_agents.evolution import sector_experiment_compare as C
@@ -188,3 +194,63 @@ def test_c_without_frozen_direction_hash_is_refused(tmp_path):
     path.write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(C.SectorCompareError, match="frozen_directions_hash"):
         C.compare(manifest=_manifest(), arm_dirs=arms)
+
+
+
+def test_replay_binds_to_the_frozen_manifest_and_arm(tmp_path):
+    manifest = _manifest()
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    args = SimpleNamespace(
+        experiment_manifest=path,
+        experiment_arm="B",
+        decider="llm",
+    )
+    loaded, digest = wf._experiment_contract(
+        args,
+        architecture="sector_first_v0",
+        membership_archive=(object(),),
+    )
+    assert loaded == manifest
+    assert digest == E.require_valid(manifest)
+
+
+def test_replay_refuses_an_arm_with_the_wrong_architecture(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    args = SimpleNamespace(
+        experiment_manifest=path,
+        experiment_arm="B",
+        decider="llm",
+    )
+    with pytest.raises(SystemExit, match="arm B requires"):
+        wf._experiment_contract(
+            args,
+            architecture="dual_rank_v0",
+            membership_archive=(object(),),
+        )
+
+
+def test_formal_a_arm_also_requires_the_pit_membership_archive(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    args = SimpleNamespace(
+        experiment_manifest=path,
+        experiment_arm="A",
+        decider="llm",
+    )
+    with pytest.raises(SystemExit, match="same --sector-membership"):
+        wf._experiment_contract(
+            args,
+            architecture="dual_rank_v0",
+            membership_archive=(),
+        )
+
+
+def test_replay_window_must_equal_a_preregistered_window():
+    ctx = SimpleNamespace(experiment_manifest=_manifest())
+    wf._verify_experiment_window(
+        ctx, ["2026-01-01", "2026-01-15", "2026-03-31"])
+    with pytest.raises(SystemExit, match="not one of"):
+        wf._verify_experiment_window(
+            ctx, ["2026-01-02", "2026-01-15", "2026-03-31"])

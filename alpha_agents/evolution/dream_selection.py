@@ -105,6 +105,140 @@ def selection_skill(world: OpportunityDreamWorld, *, horizon: int = 5) -> dict:
     }
 
 
+def preselection_skill(world: OpportunityDreamWorld, *,
+                       horizon: int = 5) -> dict:
+    """Evaluate stock choice before the shared trade planner.
+
+    OpportunityObservation.selected means a final order survived planning.
+    Sector-first runs additionally freeze context.stock_preselection: names
+    chosen by the stock selector before entry/stop/target construction.
+
+    A missing context key is different from an explicit empty selection.
+    Incumbent dual-rank runs have no stock-preselection stage and therefore
+    report available=False instead of being treated as abstentions.
+    """
+    preselected_all = []
+    panel_all = []
+    regrets = []
+    above_median = 0
+    comparable_sets = 0
+    abstained_sets = 0
+    missing_context_sets = 0
+    unreadable_sets = 0
+    final_from_preselected = 0
+    preselected_count = 0
+    planner_rejected_returns = []
+
+    for group in world.sets:
+        if group.parse_error:
+            unreadable_sets += 1
+            continue
+        if "stock_preselection" not in group.context:
+            missing_context_sets += 1
+            continue
+
+        selected_codes = {
+            str(code) for code in (
+                group.context.get("stock_preselection") or [])
+        }
+        pairs = [(item, _ret(item, horizon)) for item in group.items]
+        pairs = [(item, ret) for item, ret in pairs if ret is not None]
+        if not pairs:
+            continue
+
+        values = [ret for _, ret in pairs]
+        panel_all.extend(values)
+        chosen_pairs = [
+            (item, ret) for item, ret in pairs
+            if item.code in selected_codes
+        ]
+
+        if not selected_codes:
+            abstained_sets += 1
+            continue
+        if not chosen_pairs:
+            continue
+
+        comparable_sets += 1
+        chosen = [ret for _, ret in chosen_pairs]
+        preselected_all.extend(chosen)
+        preselected_count += len(chosen_pairs)
+        final_codes = {
+            item.code for item, _ret_value in pairs if item.selected
+        }
+        final_from_preselected += sum(
+            item.code in final_codes for item, _ret_value in chosen_pairs)
+        planner_rejected_returns.extend(
+            ret for item, ret in chosen_pairs
+            if item.code not in final_codes)
+
+        best_selected = max(chosen)
+        best_panel = max(values)
+        regrets.append(best_panel - best_selected)
+        if best_selected > statistics.median(values):
+            above_median += 1
+
+    preselected_mean = _mean(preselected_all)
+    panel_mean = _mean(panel_all)
+    return {
+        "world_hash": world.world_hash,
+        "horizon": horizon,
+        "evidence_scope": EVIDENCE_SCOPE,
+        "promotion_eligible": False,
+        "available": missing_context_sets < world.n_sets,
+        "sets": world.n_sets,
+        "comparable_sets": comparable_sets,
+        "abstained_sets": abstained_sets,
+        "missing_context_sets": missing_context_sets,
+        "unreadable_sets": unreadable_sets,
+        "preselected": _summary(preselected_all),
+        "panel": _summary(panel_all),
+        "preselection_lift_vs_panel_mean": (
+            round(preselected_mean - panel_mean, 4)
+            if preselected_mean is not None and panel_mean is not None
+            else None),
+        "mean_regret": _mean(regrets),
+        "preselected_above_panel_median_rate": (
+            round(above_median / comparable_sets, 4)
+            if comparable_sets else None),
+        "planner_acceptance_rate": (
+            round(final_from_preselected / preselected_count, 4)
+            if preselected_count else None),
+        "planner_rejected_preselection": _summary(
+            planner_rejected_returns),
+        "note": (
+            "Preselection is stock-choice evidence. Final orders are a later "
+            "trade-planning layer and are reported separately."),
+    }
+
+
+def stock_layer_report(world: OpportunityDreamWorld, *,
+                       horizon: int = 5) -> dict:
+    """One stable artifact for A/B/C/D stock-layer comparison."""
+    architectures = sorted({
+        str(group.context.get("selection_architecture") or "unknown")
+        for group in world.sets
+    })
+    final_skill = selection_skill(world, horizon=horizon)
+    preselection = preselection_skill(world, horizon=horizon)
+    return {
+        "world_hash": world.world_hash,
+        "horizon": horizon,
+        "evidence_scope": EVIDENCE_SCOPE,
+        "promotion_eligible": False,
+        "architectures": architectures,
+        "final_order_skill": final_skill,
+        "preselection_skill": preselection,
+        "layer_semantics": {
+            "panel": "all stocks offered to stock choice / planning",
+            "preselection": (
+                "stock chooser output before shared price/risk planning; "
+                "absent on legacy dual-rank runs"),
+            "final_order": "orders that survived trade planning",
+        },
+    }
+
+
 _RANK_FIELDS = {
     "change_pct": True,
     "turnover_rate": True,

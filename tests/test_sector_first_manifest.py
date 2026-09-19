@@ -51,6 +51,11 @@ def test_incomplete_manifest_is_refused():
 def test_frozen_four_arm_manifest_is_valid():
     manifest = E.template(capabilities_hash="a" * 64)
     manifest.update({
+        "baseline_identity": {
+            "code_ref": "72ce91a96e8ab0ee499dae0d6e71deef36e67ddd",
+            "policy_ref": "policy-v1",
+            "input_hash": "i" * 64,
+        },
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},
@@ -65,6 +70,7 @@ def test_frozen_four_arm_manifest_is_valid():
         ],
         "forward_start": "2026-07-01",
         "primary_metric": "portfolio_net_return_pct",
+        "minimum_meaningful_improvement_pct": 0.10,
         "stopping_rule": {"validation_windows": 4, "then": "freeze"},
         "risk_boundaries": {
             "max_drawdown_pct": 12.0,
@@ -83,3 +89,60 @@ def test_frozen_four_arm_manifest_is_valid():
     first = E.require_valid(manifest)
     second = E.require_valid(dict(manifest))
     assert first == second
+
+
+
+def test_manifest_identity_and_improvement_floor_are_required():
+    manifest = E.template(capabilities_hash="a" * 64)
+    errors = E.validate(manifest)
+    assert "baseline_identity.code_ref is required" in errors
+    assert "baseline_identity.policy_ref is required" in errors
+    assert "baseline_identity.input_hash is required" in errors
+    assert "minimum_meaningful_improvement_pct must be numeric" in errors
+
+
+def test_registered_manifest_is_content_addressed_and_never_overwritten(tmp_path):
+    manifest = E.template(capabilities_hash="a" * 64)
+    manifest.update({
+        "baseline_identity": {
+            "code_ref": "72ce91a96e8ab0ee499dae0d6e71deef36e67ddd",
+            "policy_ref": "policy-v1",
+            "input_hash": "i" * 64,
+        },
+        "model": {"name": "model-x", "temperature": 0},
+        "research_budget": {"max_total_calls": 20},
+        "cost_model": {"commission_bps": 3},
+        "exit_policy": {"name": "incumbent"},
+        "training_window": {"start": "2025-01-01", "end": "2025-12-31"},
+        "validation_windows": [
+            {"start": "2026-01-01", "end": "2026-02-15"},
+            {"start": "2026-02-16", "end": "2026-03-31"},
+            {"start": "2026-04-01", "end": "2026-05-15"},
+            {"start": "2026-05-16", "end": "2026-06-30"},
+        ],
+        "forward_start": "2026-07-01",
+        "primary_metric": "portfolio_net_return_pct",
+        "minimum_meaningful_improvement_pct": 0.10,
+        "stopping_rule": {"validation_windows": 4, "then": "freeze"},
+        "risk_boundaries": {
+            "max_drawdown_pct": 12.0,
+            "max_tail_loss_pct": 8.0,
+            "max_turnover_ratio": 6.0,
+            "max_theme_cluster_exposure_pct": 35.0,
+        },
+        "block_method": {
+            "method": "moving_block",
+            "block_length_days": 5,
+            "repetitions": 1000,
+        },
+    })
+    first = E.register(manifest, tmp_path)
+    second = E.register(dict(manifest), tmp_path)
+    assert first == second
+    assert first.name == f"{E.require_valid(manifest)}.json"
+
+    changed = dict(manifest)
+    changed["model"] = {"name": "model-y", "temperature": 0}
+    third = E.register(changed, tmp_path)
+    assert third != first
+    assert first.read_text(encoding="utf-8") != third.read_text(encoding="utf-8")

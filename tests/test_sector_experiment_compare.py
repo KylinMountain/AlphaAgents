@@ -23,6 +23,7 @@ def _manifest():
             "policy_ref": "policy-v1",
             "input_hash": "i" * 64,
         },
+        "decision_config": {"fixture": "frozen"},
         "model": {"name": "model-x", "temperature": 0},
         "research_budget": {"max_total_calls": 20},
         "cost_model": {"commission_bps": 3},
@@ -300,3 +301,34 @@ def test_no_fill_sample_is_reported_separately(tmp_path):
     assert got["status"] == "insufficient"
     assert set(got["evidence_status"]["execution"].values()) == {"no_fills"}
     assert "no arm produced an executable fill sample" in got["reasons"]
+
+
+
+def test_formal_replay_refuses_runtime_that_differs_from_manifest():
+    args = wf.build_parser().parse_args([
+        "--start", "2026-01-01",
+        "--decider", "llm",
+    ])
+    manifest = _manifest()
+    actual = wf._experiment_runtime_contract(args)
+    manifest.update(actual)
+    wf._verify_experiment_runtime(args, manifest)
+
+    changed = dict(manifest)
+    changed["cost_model"] = dict(manifest["cost_model"])
+    changed["cost_model"]["commission_rate"] += 0.001
+    with pytest.raises(SystemExit, match="frozen manifest"):
+        wf._verify_experiment_runtime(args, changed)
+
+
+def test_runtime_contract_names_full_virtual_cost_model():
+    args = wf.build_parser().parse_args([
+        "--start", "2026-01-01",
+        "--decider", "llm",
+    ])
+    cost = wf._experiment_runtime_contract(args)["cost_model"]
+    assert cost["commission_rate"] > 0
+    assert cost["min_commission_rmb"] > 0
+    assert cost["stamp_duty_sell_rate"] > 0
+    assert cost["transfer_fee_rate"] > 0
+    assert cost["slippage_rate"] > 0

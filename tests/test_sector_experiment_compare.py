@@ -92,8 +92,14 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
         "model_usage_ok": True,
         "agent_tool_calls": 100,
         "model_calls_made": 60,
-        "decider_counters": {},
-        "capability_matrix": {},
+        "decider_counters": {
+            "decider_refused:outside_panel": 2,
+            "research_budget_denied": 1,
+        },
+        "capability_matrix": {
+            "strict_pit_membership": True,
+            "news_replay": "free_flash_only",
+        },
     }
     (root / "run.json").write_text(
         json.dumps(meta), encoding="utf-8")
@@ -153,6 +159,15 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
         == got["arms"]["B"]["portfolio"]
     )
     assert got["measurement_contract"]["portfolio"].startswith("ledger")
+    operational = got["operational_summary"]["B"]
+    assert operational["budget"] == {
+        "agent_tool_calls": 100,
+        "model_calls_made": 60,
+    }
+    assert operational["decision_counters"]["decider_refused:outside_panel"] == 2
+    assert operational["coverage"]["strict_pit_membership"] is True
+    assert got["arms"]["B"]["decision_counters"] == operational["decision_counters"]
+    assert got["arms"]["B"]["coverage"] == operational["coverage"]
     assert got["evidence_status"]["data"]["B"] == "complete"
     assert got["evidence_status"]["execution"]["B"] == "has_fills"
     assert got["paired_daily"]["B_minus_A"]["evidence"] in {

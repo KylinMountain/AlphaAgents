@@ -8,6 +8,10 @@ Verify refuses incomplete preregistration:
   uv run python scripts/sector_first.py verify \
       --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
 
+Register a validated source-capability report after semantic review:
+  uv run python scripts/sector_first.py register-capabilities \
+      --capabilities /tmp/sf/capabilities.json --out /tmp/sf
+
 Register a validated protocol without overwriting an older version:
   uv run python scripts/sector_first.py register \
       --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
@@ -15,6 +19,7 @@ Register a validated protocol without overwriting an older version:
 Run one preregistered validation window across all four isolated arms:
   uv run python scripts/sector_first.py run-matrix \
       --manifest /tmp/sf/manifests/<hash>.json \
+      --capabilities /tmp/sf/capabilities/<hash>.json \
       --sector-membership /path/to/pit-membership.json \
       --corpus data --window-index 0 --out /tmp/sf/window-0
 """
@@ -22,7 +27,6 @@ Run one preregistered validation window across all four isolated arms:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,24 +45,13 @@ from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
 
 
-def _dump(value) -> str:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        allow_nan=False)
-
-
-def _hash(value) -> str:
-    return hashlib.sha256(_dump(value).encode("utf-8")).hexdigest()
-
-
 def _audit(args) -> int:
     capabilities = sector_source_probe.probe_all(DATA_DIR)
-    report = {
+    report = sector_source_probe.with_content_hash({
         "as_of": args.as_of,
         "data_dir": str(DATA_DIR),
         "capabilities": capabilities,
-    }
-    report["content_hash"] = _hash(report)
+    })
 
     out = args.out
     write_json(out / "capabilities.json", report)
@@ -84,6 +77,18 @@ def _register(args) -> int:
     print(json.dumps({
         "registered_manifest": str(path),
         "manifest_hash": sector_experiment.require_valid(manifest),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _register_capabilities(args) -> int:
+    report = json.loads(args.capabilities.read_text(encoding="utf-8"))
+    path = sector_source_probe.register(report, args.out)
+    sealed = json.loads(path.read_text(encoding="utf-8"))
+    print(json.dumps({
+        "registered_capabilities": str(path),
+        "capabilities_hash": sealed["content_hash"],
+        "formal_errors": sector_source_probe.formal_errors(sealed),
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -117,6 +122,27 @@ def _registered_manifest(path: Path) -> tuple[dict, str]:
             "sector_first.py register; an editable working copy is not a "
             "preregistered protocol")
     return manifest, digest
+
+
+def _registered_capabilities(path: Path, manifest: dict) -> tuple[dict, str]:
+    report = json.loads(path.read_text(encoding="utf-8"))
+    digest = sector_source_probe.report_hash(report)
+    if report.get("content_hash") != digest:
+        raise sector_experiment.SectorExperimentError(
+            "capability report content hash does not match its payload")
+    if path.name != f"{digest}.json" or path.parent.name != "capabilities":
+        raise sector_experiment.SectorExperimentError(
+            "run-matrix requires the content-addressed capability report "
+            "produced by sector_first.py register-capabilities")
+    if manifest.get("capabilities_hash") != digest:
+        raise sector_experiment.SectorExperimentError(
+            "manifest capabilities_hash does not match the registered "
+            "capability report")
+    errors = sector_source_probe.formal_errors(report)
+    if errors:
+        raise sector_experiment.SectorExperimentError(
+            "formal A/B/C/D capability gate failed: " + "; ".join(errors))
+    return report, digest
 
 
 def _window_session_count(corpus: Path, start: str, end: str) -> int:
@@ -201,6 +227,8 @@ def _run_child(cmd: list[str], *, env: dict[str, str]) -> None:
 
 def _run_matrix(args) -> int:
     manifest, digest = _registered_manifest(args.manifest)
+    _capabilities, capabilities_digest = _registered_capabilities(
+        args.capabilities, manifest)
     windows = manifest["validation_windows"]
     if not 0 <= args.window_index < len(windows):
         raise sector_experiment.SectorExperimentError(
@@ -262,6 +290,8 @@ def _run_matrix(args) -> int:
     status = {
         "manifest_hash": digest,
         "manifest": str(args.manifest),
+        "capabilities_hash": capabilities_digest,
+        "capabilities": str(args.capabilities),
         "membership": str(args.sector_membership),
         "window_index": args.window_index,
         "window": {"start": start, "end": end, "trading_days": days},
@@ -343,6 +373,10 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--as-of", required=True)
     audit.add_argument("--out", type=Path, required=True)
 
+    register_caps = sub.add_parser("register-capabilities")
+    register_caps.add_argument("--capabilities", type=Path, required=True)
+    register_caps.add_argument("--out", type=Path, required=True)
+
     register = sub.add_parser("register")
     register.add_argument("--manifest", type=Path, required=True)
     register.add_argument("--out", type=Path, required=True)
@@ -353,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
 
     matrix = sub.add_parser("run-matrix")
     matrix.add_argument("--manifest", type=Path, required=True)
+    matrix.add_argument("--capabilities", type=Path, required=True)
     matrix.add_argument("--sector-membership", type=Path, required=True)
     matrix.add_argument("--corpus", type=Path, default=DATA_DIR)
     matrix.add_argument("--window-index", type=int, required=True)
@@ -371,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "audit":
         return _audit(args)
+    if args.cmd == "register-capabilities":
+        return _register_capabilities(args)
     if args.cmd == "register":
         return _register(args)
     if args.cmd == "freeze-directions":

@@ -332,13 +332,17 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 - [x] 固定输入连续构建两次，方向 membership 与 feature/input hashes 一致。
 - [ ] **partial**：未来 membership 与未来 bar 已有注入测试；event expectation/realization
-      以 decision cutoff 读取 PIT snapshot refs，后续 expectation 修订和 realization 不会倒灌，
-      且已修复一个此前把 `cutoff` 写成不存在的 `cut`、导致 event refs 静默为空的 wiring bug。
-      仍需补资金流 revision/vintage 的 available-at 污染 fixture。
+      以 decision cutoff 读取 PIT snapshot refs，后续 expectation 修订和 realization 不会倒灌。
+      fund-flow audit 现在会把只有 `trade_date`、没有 revision/capture vintage 的本地归档标为
+      B 级且 `strict_replay_eligible=false`；正式 B/D 对照会 fail closed。仍缺真正可验证的
+      fund-flow vintage 源/归档，不能把“被门控”写成“已经有严格 PIT 数据”。
 - [x] 剔除头部 1/3 名与候选股票级 leave-one-out 均已实现并有 fixture；
       候选自己的价格变化不能改变“剔除自己后的主方向 5 日证据”，并直接展示在股票卡片。
-- [ ] **partial**：缺失、真实零值与负流入已有独立 fixture，负流入不会被折叠为 missing；
-      仍需把 provider unsupported 与 fund-flow vintage/coverage 的 refusal contract 钉死。
+- [ ] **partial**：缺失、真实零值与负流入已有独立 fixture；source probe 也会把 missing /
+      trade-date-only / 未验证 captured-at 分别保留为不可正式回放状态。正式四臂必须绑定
+      content-addressed capability report，fund-flow 只有人工验证为 A 级、带 reviewer /
+      verified_at / evidence 后才可启动。仍缺 provider-backed vintage 数据本身与更细的
+      snapshot-level unsupported reason。
 - [x] 方向级 Opportunity Journal 区分 selected、agent-rejected、offered-not-researched、
       evaluated-not-offered、unassessable 和 unreadable decision，且 append-only。
 
@@ -372,7 +376,8 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 - [x] A/B/C/D architecture、manifest/runtime binding、C 的 frozen-B directions、
       D 的 no-flow 消融及 compare 已实现；`run-matrix` 能按 A→B→freeze→C→D→compare 跑隔离四臂。
-      `comparison.json` 还会顶层汇总每臂的模型/工具预算、decision/refusal counters、
+      正式运行还必须绑定注册后的 capability report；fund-flow 未达到 A/strict-PIT 会在开跑前拒绝。
+      `comparison.json` 顶层汇总每臂的模型/工具预算、decision/refusal counters、
       capability/coverage 与 errors，正式评审无需再人工拼四份 run artifacts。
 - [x] `comparison.json` 显式携带 direction / stock / execution / portfolio 四层证据；
       direction/stock 是标签/选择诊断，portfolio 来自 Ledger equity，语义不混写。
@@ -404,7 +409,15 @@ seal / gate / human approve / promote 链，可复用其治理模式，但它只
 
 ```bash
 uv run python scripts/sector_first.py audit --as-of DATE --out DIR
-# 人工填写 DIR/experiment_manifest.json 中所有预注册字段
+
+# audit 不会自己把 fund-flow 升级成 A。先人工核验 provider / 归档的 revision semantics，
+# 在 DIR/capabilities.json 记录 point_in_time_grade=A、
+# strict_replay_eligible=true、verified_by / verified_at / evidence，再注册。
+uv run python scripts/sector_first.py register-capabilities \
+  --capabilities DIR/capabilities.json --out DIR
+
+# capability 内容一旦变化 hash 就变化；把注册后的 hash 写回 manifest.capabilities_hash，
+# 再填写其余预注册字段、验证并注册 protocol。
 uv run python scripts/sector_first.py verify --manifest DIR/experiment_manifest.json --out DIR
 uv run python scripts/sector_first.py register --manifest DIR/experiment_manifest.json --out DIR
 
@@ -412,6 +425,7 @@ uv run python scripts/sector_first.py register --manifest DIR/experiment_manifes
 # 每个 arm 有独立 replay state；B 完成后自动 freeze directions 给 C。
 uv run python scripts/sector_first.py run-matrix \
   --manifest DIR/manifests/<manifest_hash>.json \
+  --capabilities DIR/capabilities/<capabilities_hash>.json \
   --sector-membership PIT_MEMBERSHIP.json \
   --corpus data \
   --window-index 0 \
@@ -425,10 +439,12 @@ uv run python scripts/sector_first.py compare \
   --out DIR
 ```
 
-`audit` 默认只读、不自动购买/扩张 API 权限；`verify` 只验证协议完整性；
-`register` 负责不可覆盖的 content-addressed 归档；`run-matrix` 只接受注册后的 manifest，
-并把四个 arm 放在独立 replay state 中，模型/预算/费用/退出/decision config 与 manifest
-不一致时开跑前即拒绝；`compare` 只写隔离实验结果。所有命令都没有 `promote` 后门。
+`audit` 默认只读、不自动购买/扩张 API 权限，也不会凭字段名自动把数据升成严格 PIT；
+`register-capabilities` 对人工核验后的 capability report 做 content-addressed 封存；
+`verify` 只验证 protocol 完整性，`register` 封存 manifest；`run-matrix` 同时要求注册后的
+manifest 与 capabilities，二者 hash 必须绑定，fund-flow 未经 A 级语义验证会在开跑前拒绝。
+四个 arm 使用独立 replay state，模型/预算/费用/退出/decision config 漂移同样 fail closed；
+`compare` 只写隔离实验结果。所有命令都没有 `promote` 后门。
 
 各阶段提交前使用现有命令：
 
@@ -562,6 +578,17 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 仍然**没有**做的事：没有跑完正式四臂窗口，没有改变 active policy，没有声明
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
 Sector-First 的 S5。
+
+### 2026-09-20 继续实现：formal capability gate
+
+- fund-flow source probe 不再把“有 `trade_date`”等同于严格 PIT：没有 capture/revision vintage
+  的本地归档明确标为 B，`strict_replay_eligible=false`；即使存在 `captured_at` 也先标 U，
+  直到 provider revision semantics 被验证。
+- capability report 自身改成 content-addressed artifact；内容被改动后旧 hash 立即失效。
+- 正式 `run-matrix` 同时绑定 manifest 与 capability hash；B/D 资金流消融只有在
+  fund-flow 被人工验证为 A 级，并留下 `verified_by / verified_at / evidence` 时才允许开跑。
+- 这是 fail-closed 数据资格门，不是对数据质量的自动认证。当前本地 trade-date-only 资金流
+  仍不满足正式四臂要求，因此策略效果继续保持 n=0。
 
 同一轮审计还修复了一个 event provenance wiring 缺陷：`_event_snapshot_refs()`
 误传未定义变量 `cut`，异常被 fail-soft 捕获后会让所有事件引用静默变成空列表。

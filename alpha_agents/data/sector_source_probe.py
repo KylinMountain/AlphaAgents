@@ -7,6 +7,8 @@ can grade the source before strict replay consumes it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +20,76 @@ _TIME_FIELDS = {
     "trade_date", "start_date", "end_date", "created_at", "updated_at",
 }
 _MEMBERSHIP_WORDS = ("concept", "industry", "sector", "theme")
+
+
+class CapabilityError(ValueError):
+    """A source capability report is missing, mutable or not formal-grade."""
+
+
+def _dump(value) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False)
+
+
+def report_hash(report: dict) -> str:
+    """Hash a capability report without trusting its stored hash field."""
+    payload = {key: value for key, value in report.items()
+               if key != "content_hash"}
+    return hashlib.sha256(_dump(payload).encode("utf-8")).hexdigest()
+
+
+def with_content_hash(report: dict) -> dict:
+    payload = {key: value for key, value in report.items()
+               if key != "content_hash"}
+    return {**payload, "content_hash": report_hash(payload)}
+
+
+def register(report: dict, root: Path) -> Path:
+    """Content-address one audited/verified capability report."""
+    canonical = with_content_hash(report)
+    digest = canonical["content_hash"]
+    directory = Path(root) / "capabilities"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{digest}.json"
+    text = _dump(canonical) + "\n"
+    try:
+        with target.open("x", encoding="utf-8") as fh:
+            fh.write(text)
+    except FileExistsError:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if with_content_hash(existing) != canonical:
+            raise CapabilityError(
+                f"registered capability collision at {target}")
+    return target
+
+
+def formal_errors(report: dict) -> list[str]:
+    """Requirements for the preregistered A/B/C/D fund-flow ablation."""
+    errors = []
+    stored = str(report.get("content_hash") or "")
+    computed = report_hash(report)
+    if not stored:
+        errors.append("capability report is missing content_hash")
+    elif stored != computed:
+        errors.append("capability report content_hash mismatch")
+
+    fund = (report.get("capabilities") or {}).get("fund_flow") or {}
+    if fund.get("status") != "available":
+        errors.append("fund_flow capability is not available")
+    if fund.get("point_in_time_grade") != "A":
+        errors.append(
+            "fund_flow point_in_time_grade must be A for formal B/D comparison")
+    if fund.get("strict_replay_eligible") is not True:
+        errors.append("fund_flow must be strict_replay_eligible")
+    verification = fund.get("verification") or {}
+    if not str(verification.get("verified_by") or "").strip():
+        errors.append("fund_flow grade A requires verification.verified_by")
+    if not str(verification.get("verified_at") or "").strip():
+        errors.append("fund_flow grade A requires verification.verified_at")
+    if not str(verification.get("evidence") or "").strip():
+        errors.append("fund_flow grade A requires verification.evidence")
+    return errors
 
 
 def _tables(path: Path) -> list[str]:
@@ -121,15 +193,45 @@ def _coverage(path: Path, table: str,
         conn.close()
 
 
+def _fund_flow_capability(data_dir: Path) -> dict:
+    result = _coverage(
+        data_dir / "market_snapshots.db",
+        "stock_fund_flow_daily",
+        ("captured_at", "trade_date", "date"))
+    if result.get("status") != "available":
+        return {
+            **result,
+            "point_in_time_grade": "U",
+            "strict_replay_eligible": False,
+            "note": "fund-flow source is not available for semantic verification",
+        }
+
+    columns = set(result.get("columns") or [])
+    if "captured_at" in columns:
+        grade = "U"
+        note = (
+            "captured_at exists, but revision/vintage semantics still need "
+            "provider verification before strict replay")
+    else:
+        grade = "B"
+        note = (
+            "historical trade_date exists but no capture/revision vintage is "
+            "stored; later provider revisions cannot be excluded")
+    return {
+        **result,
+        "point_in_time_grade": grade,
+        "strict_replay_eligible": False,
+        "verification": None,
+        "note": note,
+    }
+
+
 def probe_all(data_dir: Path = DATA_DIR) -> dict:
     return {
         "membership_sources": probe_membership_sources(data_dir),
         "daily_price": _coverage(
             data_dir / "market_history.db", "daily_kline", ("date",)),
-        "fund_flow": _coverage(
-            data_dir / "market_snapshots.db",
-            "stock_fund_flow_daily",
-            ("trade_date", "date", "captured_at")),
+        "fund_flow": _fund_flow_capability(data_dir),
         "event_expectations": _coverage(
             data_dir / "market_snapshots.db",
             "event_expectation_snapshots",

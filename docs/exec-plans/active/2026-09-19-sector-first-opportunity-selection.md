@@ -1,9 +1,9 @@
 # 板块优先的选股架构：先选方向，再选交易，而不是继续优化双榜
 
-状态：active（设计方案；本次仅提交文档，以下新流程尚未实现）
+状态：active（S0–S4 实验基础设施已大部实现；正式四臂验证尚未完成，Sector-First 专属 S5 前向影子尚未实现；默认仍为 `dual_rank_v0`）
 创建：2026-09-19
-代码核对基线：`eed1d2487f0c16f79ed6ad3dd16e528994682221`
-策略效果：n=0（本方案尚未进行新旧架构对照；不声明收益改善）
+代码核对基线：`main@72ce91a96e8ab0ee499dae0d6e71deef36e67ddd`；2026-09-20 进度校准与补实现见本文末记录
+策略效果：n=0（尚未完成预注册 A/B/C/D 正式验证；不声明收益改善）
 范围：A 股模拟交易的候选生成、决策契约及验证；不接真实券商，不改变账本与交易物理规则。
 
 ## 目标
@@ -313,54 +313,76 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 ## 10. 实施阶段与验收
 
-所有未勾选项都是未来工作。本方案的 S0..S5 是局部里程碑，
-不替代 Trader Core 的全局阶段定义。先修 CI，再增加行为。
+勾选只表示对应工程 contract 已有实现与针对性测试，不表示策略效果已被证明。
+未勾选项保留为真实缺口；“partial”说明已有一部分机制，但还不足以满足整条验收。
+本方案的 S0..S5 是局部里程碑，不替代 Trader Core 的全局阶段定义。
 
 ### S0：基线、数据与协议冻结
 
-- [ ] 固定 A 的 code/policy/model/input hashes；两次 recorded replay 的意图与账本一致。
-- [ ] 本地数据探测输出 `capabilities.json`，逐项标明 PIT/unknown/current-only、权限与覆盖；
-      不出现“未调用就认定没有历史”的状态。
-- [ ] 生成 `experiment_manifest.json`，包含 A/B/C/D 定义、日期切分、主指标、
-      风险边界、样本与停止规则；任一必填项为空时退出码非 0。
-- [ ] 在开始结果比较前归档协议；后续每次修改产生新版本，不覆盖。
+- [ ] **partial**：manifest 已强制冻结 A 的 `code_ref / policy_ref / input_hash`，模型也在协议内；
+      仍缺“两次 recorded A replay 的意图与账本逐项一致”这一条端到端证明。
+- [x] 本地数据探测输出 `capabilities.json`，逐项标明 PIT/unknown/current-only、权限与覆盖；
+      未实测来源保持 unknown，不把“未调用”写成“没有历史”。
+- [x] `experiment_manifest.json` 固定 A/B/C/D、模型、预算、成本、退出、日期切分、主指标、
+      最小有意义改善幅度、风险边界、样本/停止规则和 block 方法；任一必填项为空会验证失败。
+- [x] 协议可用 `register` 按内容 hash 归档为 `manifests/<hash>.json`；
+      同内容幂等，任何修改产生新 hash/新文件，不覆盖旧协议。
 
 ### S1：时点关系与方向快照
 
-- [ ] 固定输入连续构建两次，所有方向的成员与 feature hashes 一致。
-- [ ] 注入未来概念成员、资金修订、公告结果后，早先快照 hash 不变。
-- [ ] leave-one-out 及剔除头部计算通过小型人工可核对 fixture；
-      单个龙头拉升不能同时制造无来源的“普遍强势”。
-- [ ] 缺失项、零值、负流入可区分；历史不支持则返回明确 coverage/unsupported。
-- [ ] 方向级 Opportunity Journal 保留被选择、被拒绝、未研究与不可评估方向。
+- [x] 固定输入连续构建两次，方向 membership 与 feature/input hashes 一致。
+- [ ] **partial**：未来 membership 与未来 bar 已有注入测试且不会改变早先 snapshot；
+      仍需补“资金修订”和“公告结果”两个独立未来污染 fixture。
+- [ ] **partial**：剔除头部 1/3 名的指标与 fixture 已有；候选股票级 leave-one-out 证据尚未实现。
+- [ ] **partial**：缺失资金与真实零值已严格区分；还需把负流入与 provider unsupported
+      的完整 coverage/refusal contract 一起钉死。
+- [x] 方向级 Opportunity Journal 区分 selected、agent-rejected、offered-not-researched、
+      evaluated-not-offered、unassessable 和 unreadable decision，且 append-only。
 
 ### S2：统一决策契约与主题归属
 
 - [ ] 默认晨扫与 T1 对同一 frozen fixture 使用相同关系解析与资格校验结果。
-- [ ] 测试中股票 A 属于主题 X、股票 B 属于 Y 时，两个订单不再被写为同一 run theme。
-- [ ] 未解析关系、不成立的 theme ID、未来关系不能形成可执行新模式订单。
+- [x] Sector-First 订单使用每只股票自己的 `primary_theme`；重叠主题进入
+      `supporting_themes`，不再统一写成 run-level theme。
+- [ ] **partial**：strict PIT membership、未来 membership 和 outside-shortlist 均 fail closed；
+      但 richer `relation_evidence_ids / theme_thesis_id` 关系证明契约尚未完整落地。
 - [ ] 主题观察名单可含不可买龙头；交易名单/执行拒绝另有记录。
-- [ ] 总预算跨阶段共享；代码强制候选、深挖与订单数量上限，超限有明确拒绝码。
-- [ ] 原双榜默认行为及当前 active policy 不变；仅 opt-in challenger 使用新路径。
+- [ ] **partial**：方向选择与个股选择复用同一个 `ResearchBudget`，并已有 top-8 / 0..3 /
+      panel-size / picks 等代码上限；还缺统一的超限 refusal code 与全阶段预算验收测试。
+- [x] 原 `dual_rank_v0` 仍为 CLI 默认值，Sector-First 仅 opt-in challenger；
+      当前 active policy 未被本计划自动修改。
 
 ### S3：接入原执行内核与组合检查
 
-- [ ] 新旧模式均经过原 Intent、Reservation、Settlement、Ledger，不新增撮合实现。
-- [ ] 入场、止损、T+1、涨跌停/停牌、费用、部分成交/拒绝等原回归测试通过。
-- [ ] 多概念重叠只形成一份股票订单，但组合风险计算不漏掉相关簇。
-- [ ] 关系/来源未知导致拒绝时有事件与原因；不能表现为“模型主动空仓”。
-- [ ] 影子失败不影响 incumbent 下单，账本/经验/模型 journal 相互隔离。
+- [x] Sector-First 只替换候选/选择路径，订单继续进入原 `create_pending_order`、
+      Reservation / Settlement / Ledger；没有新增第二套撮合实现。
+- [ ] 原入场、止损、T+1、涨跌停/停牌、费用、部分成交/拒绝回归需以本分支完整 CI 通过为准。
+- [x] 多概念重叠仍只形成一份股票订单；side-car exposure 对 primary/supporting themes
+      都计入组合风险，缺 mark 时返回 unverified 而不是 0。
+- [ ] 关系/来源未知导致拒绝时有独立事件与原因，且不能表现为“模型主动空仓”。
+- [ ] Sector-First 专属 forward shadow 尚未接入；不能拿旧 `selection_rank` shadow
+      的隔离性代替本条验收。
 
 ### S4：四臂历史比较与失败结论
 
-- [ ] 一份冻结 manifest 可生成 A/B/C/D 报告、预算报告、覆盖率与拒绝明细。
-- [ ] 报告含方向/个股/执行/组合四层结果，严格区分标签收益与账本净收益。
-- [ ] 统计以预注册日期块处理相关性；同一天增加股票数不会伪增独立日期数。
-- [ ] 验证中使用训练期/未来标签会被测试拒绝；部分成熟、停牌与退市不静默删除。
-- [ ] 若 B 不优于 A、或 C 比 B 更划算，报告保留结论且不自动换策略。
-- [ ] 数据不足、CI 未过、没有可执行样本分别返回状态，不写 PASS。
+- [ ] **partial**：A/B/C/D architecture、manifest binding、C 的 frozen-B directions、
+      D 的 no-flow 消融及 compare 已实现；仍缺“一条命令跑完四臂并产出全部报告”的 orchestration。
+- [x] `comparison.json` 显式携带 direction / stock / execution / portfolio 四层证据；
+      direction/stock 是标签/选择诊断，portfolio 来自 Ledger equity，语义不混写。
+- [x] A-B / B-C / B-D 在共同交易日上做 moving-block bootstrap；
+      block 长度与重复数来自预注册 manifest，同一天多股票不会伪增独立样本。
+- [ ] **partial**：validation window 与 training window 重叠会被拒绝，方向 outcome 的停牌/缺失进入 coverage；
+      还需补完整的未来标签、部分成熟和退市 fixture。
+- [x] comparator 永远 `promotion_eligible=false`，只输出开发证据；
+      B 不优于 A、C 更简单或 D 消融更好都不会自动切换策略。
+- [x] 数据/风险证据不完整、统计 CI 不足以区分、以及完全无 executable fills
+      分别进入 `evidence_status.data/statistics/execution`，不会写成 PASS。
 
 ### S5：前向影子与受控演化
+
+Sector-First 专属 S5 **尚未实现**。仓库已有严格的 `selection_rank` forward shadow /
+seal / gate / human approve / promote 链，可复用其治理模式，但它只观察
+`decision.selection_rank.*`，不能冒充新架构的 forward evidence。
 
 - [ ] 前向注册时间由真实记录约束，不能传入过去 `opened_on` 将历史伪装成前向。
 - [ ] producer/evaluator 的 exact changed-gene coverage 有正例和负例测试；
@@ -371,17 +393,27 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 
 ### 命令与交付约定
 
-以下是实施阶段需要交付的接口契约，**不是当前已有命令**：
+以下命令已经存在；正式比较前必须先验证并注册协议：
 
 ```bash
 uv run python scripts/sector_first.py audit --as-of DATE --out DIR
-uv run python scripts/sector_first.py compare --manifest FILE --out DIR
-uv run python scripts/sector_first.py verify --manifest FILE --report DIR
+# 人工填写 DIR/experiment_manifest.json 中所有预注册字段
+uv run python scripts/sector_first.py verify --manifest DIR/experiment_manifest.json --out DIR
+uv run python scripts/sector_first.py register --manifest DIR/experiment_manifest.json --out DIR
+
+# B 跑完后给 C 冻结完全相同的方向选择
+uv run python scripts/sector_first.py freeze-directions --run-id B_RUN --out-file DIR/frozen_b_directions.json
+
+# A/B/C/D 已分别写入 ARMS_DIR/A..D 后
+uv run python scripts/sector_first.py compare \
+  --manifest DIR/manifests/<manifest_hash>.json \
+  --arms-dir ARMS_DIR \
+  --out DIR
 ```
 
-`audit` 默认只读、不自动购买/扩张 API 权限；`compare` 只写隔离实验目录；
-`verify` 返回 0 只代表协议与证据格式有效，策略胜负另有结果字段。
-不提供一个绕过既有批准链的 `promote` 子命令。
+`audit` 默认只读、不自动购买/扩张 API 权限；`verify` 只验证协议完整性；
+`register` 负责不可覆盖的 content-addressed 归档；`compare` 只写隔离实验结果。
+这些命令都没有 `promote` 后门。
 
 各阶段提交前使用现有命令：
 
@@ -392,8 +424,9 @@ uv run python scripts/lint_docs.py
 uv run python scripts/lint_policy.py
 ```
 
-本次是文档提交，不声称上述新功能通过了测试。无法执行完整回归时明确报告缺口，
-以对应提交的 CI 为准，不用静态阅读代替实跑结果。
+2026-09-20 本分支同时包含实现与文档校准。完整回归、Harness lint 与 Docs lint
+以该分支 PR 的 CI 为准；CI 未完成前，不把 S3 的“原执行回归通过”改成已完成。
+静态阅读只用于定位 contract，不替代实跑结果。
 
 ## 11. 决策记录
 
@@ -491,3 +524,27 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 - selection_skill 分开报告 direction discovery lift、Agent selection lift、regret、abstention best available、selected head-dependence gap；这些仍是 historical_dream_only，不具备 promotion 资格；
 - 新增 transparent_rank_baseline：在同一方向世界里比较 Agent 选择与 sector_first_v0 的透明粗排 Top-K；
 - 新增 scripts/dream_direction.py sweep/report/baseline，下一阶段据此接 A/B/C/D architecture compare，而不是直接把历史 Dream 结果当晋升证据。
+
+
+### 2026-09-20 进度校准与 S0/S4 补实现
+
+本次先按代码与测试证据回填 S0–S4，而不是把 2026-09-19 的“设计稿”状态继续留在顶部。
+同时补了四个会直接影响正式实验可信度的缺口：
+
+- Sector Experiment manifest 升级为 schema v2，正式协议必须冻结
+  `code_ref / policy_ref / input_hash`，并预注册
+  `minimum_meaningful_improvement_pct`；缺任一项即验证失败。
+- 新增 content-addressed `register`：验证后的 manifest 写到
+  `manifests/<hash>.json`，同内容重复注册幂等，任何字段变化得到新的文件；
+  不再依赖“大家约定不要覆盖 experiment_manifest.json”。
+- architecture comparator 现在把 direction / stock / execution / portfolio
+  四层证据都写进 `comparison.json`，并保留原有 portfolio/execution 顶层字段兼容旧调用。
+- 比较结果新增独立的 `evidence_status`：data、statistics、execution 分开；
+  moving-block CI 相对预注册最小改善幅度输出
+  `positive_beyond_floor / negative_beyond_floor / inconclusive / insufficient`，
+  “没有任何可执行成交样本”也单独命名，不再都塞进一个模糊的 insufficient。
+
+仍然**没有**做的事：没有跑完正式四臂窗口，没有改变 active policy，没有声明
+Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
+Sector-First 的 S5。下一工程阶段应先补完 S1/S2 的关系与污染 fixture、四臂 orchestration，
+再建立 Sector-First 专属 forward shadow / exact-gene evaluator。

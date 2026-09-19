@@ -7,6 +7,10 @@ Audit is read-only:
 Verify refuses incomplete preregistration:
   uv run python scripts/sector_first.py verify \
       --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
+
+Register a validated protocol without overwriting an older version:
+  uv run python scripts/sector_first.py register \
+      --manifest /tmp/sf/experiment_manifest.json --out /tmp/sf
 """
 
 from __future__ import annotations
@@ -65,6 +69,16 @@ def _audit(args) -> int:
     return 0
 
 
+def _register(args) -> int:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    path = sector_experiment.register(manifest, args.out)
+    print(json.dumps({
+        "registered_manifest": str(path),
+        "manifest_hash": sector_experiment.require_valid(manifest),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _freeze_directions(args) -> int:
     payload = frozen_direction_archive.export(run_id=args.run_id)
     frozen_direction_archive.write(args.out_file, payload)
@@ -111,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--as-of", required=True)
     audit.add_argument("--out", type=Path, required=True)
 
+    register = sub.add_parser("register")
+    register.add_argument("--manifest", type=Path, required=True)
+    register.add_argument("--out", type=Path, required=True)
+
     freeze = sub.add_parser("freeze-directions")
     freeze.add_argument("--run-id", required=True)
     freeze.add_argument("--out-file", type=Path, required=True)
@@ -127,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "audit":
         return _audit(args)
+    if args.cmd == "register":
+        return _register(args)
     if args.cmd == "freeze-directions":
         return _freeze_directions(args)
     if args.cmd == "compare":

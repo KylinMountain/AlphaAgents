@@ -481,3 +481,13 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 - stock panel 冻结 primary_theme/supporting_themes，真实订单使用股票自己的 primary_theme，不再统一挂 run-level theme；
 - 方向级 ThemeOpportunityJournal 与股票级 OpportunityJournal 同时写入，并在股票 context 中记录 selection_architecture、membership hash、shortlist、selected themes；
 - sector-first close-buy 仍 fail-closed，不能和 agent_exits 同时开启；这是下一阶段单独接线，避免拿 dual-rank close panel 冒充 sector-first。
+
+
+### 2026-09-19 实施记录：S3 方向 outcome / Dream
+
+- 新增 theme_forward_median_v1：按冻结的 membership snapshot 对方向内所有成员计算 1/3/5/10 日 forward median/mean、上涨成员占比、覆盖率与剔除未来头部 1 名后的中位收益；
+- outcome 使用交易所实际出现的未来交易日做 horizon，停牌/缺失成员不会被填 0，而是进入 coverage；membership id/hash 不一致直接拒绝；
+- 新增 DirectionDreamWorld：只在方向 Journal 的可评估项 outcome 成熟后冻结历史世界，Dream hash 覆盖方向状态、选择结果和未来标签；
+- selection_skill 分开报告 direction discovery lift、Agent selection lift、regret、abstention best available、selected head-dependence gap；这些仍是 historical_dream_only，不具备 promotion 资格；
+- 新增 transparent_rank_baseline：在同一方向世界里比较 Agent 选择与 sector_first_v0 的透明粗排 Top-K；
+- 新增 scripts/dream_direction.py sweep/report/baseline，下一阶段据此接 A/B/C/D architecture compare，而不是直接把历史 Dream 结果当晋升证据。

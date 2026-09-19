@@ -78,10 +78,22 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
         "name": "甲",
         "adv20": 100000,
         "primary_theme": "AI",
-        "supporting_themes": ["AI", "算力"],
+        "supporting_themes": ["算力"],
     }]
     monkeypatch.setattr(
         wf, "_sector_first_stage", lambda *a, **k: (panel, None))
+    monkeypatch.setattr(
+        wf, "_sector_stock_choice",
+        lambda *a, **k: {
+            "stocks": [{"code": "600001", "reason": "pick"}],
+            "refused": [], "parse_error": None, "research_budget": None,
+        })
+    monkeypatch.setattr(
+        wf, "_sector_trade_plan",
+        lambda *a, **k: {
+            "orders": [_order()], "refused": [], "parse_error": None,
+            "raw": "{}", "research_budget": None,
+        })
     _wire_common(monkeypatch)
 
     captured = {}
@@ -93,6 +105,7 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
 
     got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
     assert got[0]["theme"] == "AI"
+    assert got[0]["supporting_themes"] == ["算力"]
     assert captured["theme"] == "AI"
     assert captured["theme"] != ctx.theme
 
@@ -161,3 +174,45 @@ def test_no_flow_arm_is_opt_in_cli_choice():
         "--selection-architecture", "sector_first_no_flow",
     ])
     assert args.selection_architecture == "sector_first_no_flow"
+
+
+
+def test_c_arm_simple_stock_choice_never_calls_llm_selector(monkeypatch):
+    from alpha_agents.agents import sector_stock_selector
+
+    ctx = _Ctx()
+    ctx.selection_architecture = "sector_first_simple_selector"
+    panel = [
+        {"code": "600001"},
+        {"code": "600002"},
+        {"code": "600003"},
+    ]
+    monkeypatch.setattr(
+        sector_stock_selector, "propose_sync",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("C must not call the LLM stock selector")),
+    )
+    got = wf._sector_stock_choice(
+        ctx, day="2026-01-30", prev_day="2026-01-29",
+        panel=panel, news=[], market={}, book="", knowledge="",
+        research_budget=None)
+    assert [row["code"] for row in got["stocks"]] == [
+        "600001", "600002"]
+
+
+def test_sector_trade_plan_is_toolless(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        t1_decider, "propose_sync",
+        lambda **kwargs: captured.update(kwargs) or {
+            "orders": [], "refused": [], "parse_error": None,
+            "raw": "", "research_budget": None,
+        })
+    ctx = _Ctx()
+    ctx.prompt = "plan"
+    wf._sector_trade_plan(
+        ctx, day="2026-01-30", prev_day="2026-01-29",
+        panel=[{"code": "600001"}], news=[], market={},
+        book="", knowledge="")
+    assert captured["tools"] == []
+    assert captured["research_budget"] is None

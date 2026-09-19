@@ -219,7 +219,7 @@ def _record(conn: sqlite3.Connection, manifest: dict, result: dict) -> int:
         (manifest["parent_version_id"], manifest["variant_version_id"],
          manifest["evaluator"], manifest["world"]["world_hash"],
          manifest_blob, _hash(manifest), result_blob, _hash(result),
-         clock.now().isoformat()))
+         clock.today()))
     return int(cursor.lastrowid)
 
 

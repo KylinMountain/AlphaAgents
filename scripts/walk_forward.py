@@ -1218,6 +1218,20 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
     limit_pool = _limit_pool_map(ctx, day)
     fund_flow = _fund_flow_map(ctx, ranking_day)
     concepts = sector_membership.concepts_by_code(membership)
+    index = ctx.corpus.index.get(ranking_day)
+    if index is None:
+        raise ValueError(f"ranking day {ranking_day} is outside the corpus")
+    loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
+    loo_bars = {session: ctx.corpus.bars(session) for session in loo_sessions}
+    leave_one_out = sector_selection.candidate_leave_one_out_5d(
+        membership=membership,
+        decision_at=f"{day} 09:00:00",
+        as_of_session=ranking_day,
+        sessions=loo_sessions,
+        bars_by_day=loo_bars,
+        market_codes=set(ctx.corpus.bars(ranking_day)),
+        strict_pit=True,
+    )
 
     candidate_codes = set()
     for sector in selected:
@@ -1259,6 +1273,9 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
         code = item["code"]
         row, adv = raw_rows[code]
         board = limit_pool.get(code) or {}
+        peer = (
+            leave_one_out.get(item["primary_theme"], {}).get(code, {})
+        )
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
@@ -1269,6 +1286,12 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
             "concepts": concepts.get(code, []),
             "primary_theme": item["primary_theme"],
             "supporting_themes": item["supporting_themes"],
+            "primary_theme_peer_covered": peer.get("peer_covered"),
+            "primary_theme_peer_total": peer.get("peer_total"),
+            "primary_theme_peer_5d_median_pct": peer.get(
+                "peer_5d_median_pct"),
+            "primary_theme_peer_relative_5d_pct": peer.get(
+                "peer_relative_5d_pct"),
             "consecutive_limits": board.get("consecutive_limits"),
             "limit_sector": board.get("sector"),
             "net_amount": (fund_flow.get(code) or {}).get("net_amount"),

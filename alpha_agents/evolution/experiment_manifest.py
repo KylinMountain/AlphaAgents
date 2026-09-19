@@ -145,7 +145,7 @@ def seal(conn: sqlite3.Connection, *, run_id: int, gate_decision_id: int,
 
 
 
-def seal_run(*, run_id: int, gate_decision_id: int, reason: str,
+def seal_run(run_id: int, *, gate_decision_id: int, reason: str,
              sealed_at: str | None = None) -> None:
     """Persist the one final look at an experiment."""
     if type(run_id) is not int or run_id <= 0:

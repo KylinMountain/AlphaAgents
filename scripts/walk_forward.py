@@ -1291,28 +1291,57 @@ def _direction_news(ctx, news: list[dict]) -> list[dict]:
 
 def _sector_first_stage(ctx, day: str, ranking_day: str,
                         market: dict, news: list[dict]) -> tuple[list[dict], object]:
-    """Select directions, journal them, then materialize the stock panel."""
+    """Resolve directions, journal them, then materialize the stock panel."""
     from alpha_agents.agents import sector_selector
     from alpha_agents.data import theme_opportunity_journal as TOJ
     from alpha_agents.tools.budget import ResearchBudget
 
     membership, cards, shortlist = _sector_cards(ctx, day, ranking_day)
-    budget = ResearchBudget() if ctx.trader_tools else None
-    verdict = sector_selector.propose_sync(
-        day=day,
-        as_of_session=ranking_day,
-        sectors=shortlist,
-        market=market,
-        news=_direction_news(ctx, news),
-        model=ctx.model,
-        loop=ctx.loop,
-        tools=[],
-        research_budget=budget,
-        max_turns=sector_selector.DEFAULT_MAX_TURNS,
-    )
-    selected = [
-        row["sector_id"] for row in verdict.get("themes") or []
-    ]
+    shortlist_ids = [row["sector_id"] for row in shortlist]
+    cutoff = f"{day} 09:00:00"
+    budget = None
+
+    if ctx.selection_architecture == "sector_first_simple_selector":
+        frozen = frozen_direction_archive.decision_for(
+            ctx.frozen_directions,
+            day=day,
+            information_cutoff=cutoff,
+            membership_snapshot_id=membership.snapshot_id,
+            membership_hash=membership.content_hash,
+            shortlist=shortlist_ids,
+        )
+        selected = list(frozen["selected"])
+        verdict = {
+            "themes": [{"sector_id": value} for value in selected],
+            "refused": [],
+            "parse_error": None,
+            "frozen_from_run": frozen["source_run_id"],
+            "frozen_archive_hash": frozen["archive_hash"],
+        }
+        research = {
+            "themes": selected,
+            "frozen_from_run": frozen["source_run_id"],
+            "frozen_archive_hash": frozen["archive_hash"],
+        }
+    else:
+        budget = ResearchBudget() if ctx.trader_tools else None
+        verdict = sector_selector.propose_sync(
+            day=day,
+            as_of_session=ranking_day,
+            sectors=shortlist,
+            market=market,
+            news=_direction_news(ctx, news),
+            model=ctx.model,
+            loop=ctx.loop,
+            tools=[],
+            research_budget=budget,
+            max_turns=sector_selector.DEFAULT_MAX_TURNS,
+        )
+        selected = [
+            row["sector_id"] for row in verdict.get("themes") or []
+        ]
+        research = {"themes": selected} if selected else None
+
     refusals = [
         {
             "sector_id": row.get("sector_id"),
@@ -1322,7 +1351,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
         }
         for row in verdict.get("refused") or []
     ]
-    cutoff = f"{day} 09:00:00"
+
     try:
         TOJ.record(
             run_id=str(ctx.run_id),
@@ -1332,9 +1361,9 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
             information_cutoff=cutoff,
             architecture=ctx.selection_architecture,
             snapshots=cards,
-            shortlist=[row["sector_id"] for row in shortlist],
+            shortlist=shortlist_ids,
             selected=selected,
-            research={"themes": selected} if selected else None,
+            research=research,
             refusals=refusals,
             parse_error=verdict.get("parse_error"),
         )
@@ -1345,12 +1374,14 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
     ctx.last_sector_context = {
         "membership_snapshot_id": membership.snapshot_id,
         "membership_hash": membership.content_hash,
-        "shortlist": [row["sector_id"] for row in shortlist],
+        "shortlist": shortlist_ids,
         "selected_themes": selected,
         "snapshot_hashes": {
             row["sector_id"]: row.get("snapshot_hash")
             for row in cards
         },
+        "frozen_direction_source_run": verdict.get("frozen_from_run"),
+        "frozen_direction_archive_hash": verdict.get("frozen_archive_hash"),
     }
 
     if verdict.get("parse_error"):

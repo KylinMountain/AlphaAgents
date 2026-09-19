@@ -20,6 +20,7 @@ import sys
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from alpha_agents.report_io import write_json  # noqa: E402
 from alpha_agents.config import DATA_DIR  # noqa: E402
 from alpha_agents.data import frozen_direction_archive  # noqa: E402
 from alpha_agents.data import sector_source_probe  # noqa: E402
@@ -37,13 +38,6 @@ def _hash(value) -> str:
     return hashlib.sha256(_dump(value).encode("utf-8")).hexdigest()
 
 
-def _write(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8")
-
-
 def _audit(args) -> int:
     capabilities = sector_source_probe.probe_all(DATA_DIR)
     report = {
@@ -54,10 +48,10 @@ def _audit(args) -> int:
     report["content_hash"] = _hash(report)
 
     out = args.out
-    _write(out / "capabilities.json", report)
+    write_json(out / "capabilities.json", report)
     manifest = sector_experiment.template(
         capabilities_hash=report["content_hash"])
-    _write(out / "experiment_manifest.json", manifest)
+    write_json(out / "experiment_manifest.json", manifest)
 
     print(json.dumps({
         "capabilities": str(out / "capabilities.json"),
@@ -90,7 +84,7 @@ def _compare(args) -> int:
     }
     report = sector_experiment_compare.compare(
         manifest=manifest, arm_dirs=arm_dirs)
-    _write(args.out / "comparison.json", report)
+    write_json(args.out / "comparison.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["status"] == "ready_for_human_review" else 3
 
@@ -104,7 +98,7 @@ def _verify(args) -> int:
         "manifest_hash": (
             sector_experiment.manifest_hash(manifest) if not errors else None),
     }
-    _write(args.out / "manifest_verification.json", result)
+    write_json(args.out / "manifest_verification.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not errors else 2
 

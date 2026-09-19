@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import sector_first as SF  # noqa: E402
 import walk_forward as WF  # noqa: E402
 
+from alpha_agents.data import sector_source_probe as P  # noqa: E402
 from alpha_agents.evolution import sector_experiment as E  # noqa: E402
 
 
@@ -151,3 +152,66 @@ def test_matrix_command_carries_all_frozen_decision_knobs(tmp_path):
     assert int(cmd[cmd.index("--panel-size") + 1]) == expected["panel_size"]
     assert float(cmd[cmd.index("--participation") + 1]) == expected["participation"]
     assert float(cmd[cmd.index("--model-timeout") + 1]) == expected["model_timeout_seconds"]
+
+
+def _formal_capabilities():
+    return P.with_content_hash({
+        "as_of": "2026-09-20",
+        "data_dir": "/fixture",
+        "capabilities": {
+            "fund_flow": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "fixture-reviewer",
+                    "verified_at": "2026-09-20T09:00:00+08:00",
+                    "evidence": "archived provider vintages verified",
+                },
+            },
+        },
+    })
+
+
+def test_run_matrix_binds_verified_capabilities_to_manifest(tmp_path):
+    report = _formal_capabilities()
+    path = P.register(report, tmp_path)
+    manifest = _manifest()
+    manifest["capabilities_hash"] = report["content_hash"]
+
+    loaded, digest = SF._registered_capabilities(path, manifest)
+    assert loaded == report
+    assert digest == report["content_hash"]
+
+
+def test_run_matrix_refuses_unverified_fund_flow_semantics(tmp_path):
+    report = P.with_content_hash({
+        "as_of": "2026-09-20",
+        "data_dir": "/fixture",
+        "capabilities": {
+            "fund_flow": {
+                "status": "available",
+                "time_field": "trade_date",
+                "point_in_time_grade": "B",
+                "strict_replay_eligible": False,
+                "verification": None,
+            },
+        },
+    })
+    path = P.register(report, tmp_path)
+    manifest = _manifest()
+    manifest["capabilities_hash"] = report["content_hash"]
+
+    with pytest.raises(
+            E.SectorExperimentError, match="capability gate failed"):
+        SF._registered_capabilities(path, manifest)
+
+
+def test_run_matrix_refuses_capability_report_bound_to_another_manifest(tmp_path):
+    report = _formal_capabilities()
+    path = P.register(report, tmp_path)
+    manifest = _manifest()
+
+    with pytest.raises(
+            E.SectorExperimentError, match="capabilities_hash does not match"):
+        SF._registered_capabilities(path, manifest)

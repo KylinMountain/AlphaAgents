@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO))
 from alpha_agents.config import DATA_DIR  # noqa: E402
 from alpha_agents.data import sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
+from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
 
 
 def _dump(value) -> str:
@@ -69,6 +70,18 @@ def _audit(args) -> int:
     return 0
 
 
+def _compare(args) -> int:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    arm_dirs = {
+        arm: args.arms_dir / arm for arm in ("A", "B", "C", "D")
+    }
+    report = sector_experiment_compare.compare(
+        manifest=manifest, arm_dirs=arm_dirs)
+    _write(args.out / "comparison.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["status"] == "ready_for_human_review" else 3
+
+
 def _verify(args) -> int:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     errors = sector_experiment.validate(manifest)
@@ -91,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--as-of", required=True)
     audit.add_argument("--out", type=Path, required=True)
 
+    compare = sub.add_parser("compare")
+    compare.add_argument("--manifest", type=Path, required=True)
+    compare.add_argument("--arms-dir", type=Path, required=True)
+    compare.add_argument("--out", type=Path, required=True)
+
     verify = sub.add_parser("verify")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--out", type=Path, required=True)
@@ -98,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "audit":
         return _audit(args)
+    if args.cmd == "compare":
+        return _compare(args)
     return _verify(args)
 
 

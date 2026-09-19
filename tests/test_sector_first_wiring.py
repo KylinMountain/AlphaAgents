@@ -140,3 +140,24 @@ def test_sector_first_context_requires_pit_archive(tmp_path, monkeypatch):
     args.run_id = "x"
     with pytest.raises(SystemExit, match="sector-membership"):
         wf.Context(args)
+
+
+
+def test_no_flow_arm_filters_direction_flow_news_only():
+    ctx = _Ctx()
+    ctx.selection_architecture = "sector_first_no_flow"
+    news = [
+        {"title": "AI 主力资金净流入 10 亿", "content": ""},
+        {"title": "AI 新产品发布", "content": "订单增长"},
+        {"title": "北向资金净买入", "content": "市场"},
+    ]
+    got = wf._direction_news(ctx, news)
+    assert [row["title"] for row in got] == ["AI 新产品发布"]
+
+
+def test_no_flow_arm_is_opt_in_cli_choice():
+    args = wf.build_parser().parse_args([
+        "--start", "2026-01-30",
+        "--selection-architecture", "sector_first_no_flow",
+    ])
+    assert args.selection_architecture == "sector_first_no_flow"

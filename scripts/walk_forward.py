@@ -293,8 +293,32 @@ LLM_LIMITATIONS = (
 
 
 def _limitations(ctx) -> tuple[str, ...]:
-    extra = LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS
-    return LIMITATIONS + extra
+    base = list(LIMITATIONS)
+    extra = list(
+        LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
+    if (ctx.decider == "llm"
+            and getattr(ctx, "selection_architecture", "") == "sector_first_v0"):
+        base = [
+            item for item in base
+            if "theme is a synthetic line" not in item
+        ]
+        extra = [
+            item for item in extra
+            if "fixed panel of the previous session's movers" not in item
+            and "one sampled model call per day" not in item
+        ]
+        extra.extend((
+            "sector_first_v0 uses two sampled model stages at 09:00: direction "
+            "selection and stock selection; one replay is not a distribution "
+            "over either model judgement",
+            "sector membership is accepted only from the explicit PIT archive "
+            "supplied to this run; the contract prevents current-only leakage "
+            "but does not itself prove the provider's historical semantics",
+            "selected directions are seeded into the existing theme gate "
+            "without an independent trend score, so this window tests "
+            "sector-first opportunity construction, not theme-gate alpha",
+        ))
+    return tuple(base + extra)
 
 
 # ── the corpus, read through the kernel's own readers ───────────────────────

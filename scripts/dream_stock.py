@@ -23,17 +23,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from alpha_agents.report_io import write_json  # noqa: E402
 from alpha_agents.data import opportunity_outcomes  # noqa: E402
 from alpha_agents.evolution import dream_selection  # noqa: E402
 from alpha_agents.evolution.dream_world import build_opportunity_world  # noqa: E402
-
-
-def _write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         result = dream_selection.stock_layer_report(
             world, horizon=args.horizon)
         if args.out_file is not None:
-            _write(args.out_file, result)
+            write_json(args.out_file, result)
 
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0

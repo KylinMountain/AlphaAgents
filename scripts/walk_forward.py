@@ -299,7 +299,8 @@ def _limitations(ctx) -> tuple[str, ...]:
         LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
     if (ctx.decider == "llm"
             and getattr(ctx, "selection_architecture", "") in {
-                "sector_first_v0", "sector_first_no_flow"}):
+                "sector_first_v0", "sector_first_simple_selector",
+                "sector_first_no_flow"}):
         base = [
             item for item in base
             if "theme is a synthetic line" not in item
@@ -309,10 +310,18 @@ def _limitations(ctx) -> tuple[str, ...]:
             if "fixed panel of the previous session's movers" not in item
             and "one sampled model call per day" not in item
         ]
+        if ctx.selection_architecture == "sector_first_simple_selector":
+            stage_note = (
+                "sector_first_simple_selector replays B's frozen direction "
+                "decision and uses a deterministic stock selector; only the "
+                "shared trade planner is sampled")
+        else:
+            stage_note = (
+                f"{ctx.selection_architecture} uses three sampled model stages "
+                "at 09:00: direction selection, stock selection and the shared "
+                "trade planner; one replay is not a distribution over them")
         extra.extend((
-            f"{ctx.selection_architecture} uses two sampled model stages at 09:00: direction "
-            "selection and stock selection; one replay is not a distribution "
-            "over either model judgement",
+            stage_note,
             "sector membership is accepted only from the explicit PIT archive "
             "supplied to this run; the contract prevents current-only leakage "
             "but does not itself prove the provider's historical semantics",

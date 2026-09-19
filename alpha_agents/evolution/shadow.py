@@ -73,6 +73,8 @@ missing them rather than scored as if it had answered.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -256,7 +258,8 @@ def _reference_version_id(version: dict) -> int | None:
 
 
 def producer_compatibility(policy_version_id: int,
-                           producer_name: str) -> dict:
+                           producer_name: str,
+                           reference_version_id: int | None = None) -> dict:
     """Whether a producer executes every frozen source gene that changed.
 
     A version id proves lineage, not intervention. More samples cannot repair an
@@ -283,7 +286,9 @@ def producer_compatibility(policy_version_id: int,
             "reason": f"policy version #{policy_version_id} does not exist",
         }
 
-    reference_id = _reference_version_id(version)
+    reference_id = (reference_version_id
+                    if reference_version_id is not None
+                    else _reference_version_id(version))
     if reference_id is None:
         return {
             "compatible": False, "reference_version_id": None,
@@ -432,6 +437,29 @@ def assert_pairable(report_type: str, *, days: int = 30) -> dict:
 
 # ── Schema, owned here ─────────────────────────────────────────────────
 
+
+_MANIFESTS = """
+CREATE TABLE IF NOT EXISTS shadow_manifests (
+    id INTEGER PRIMARY KEY,
+    policy_version_id INTEGER NOT NULL,
+    reference_version_id INTEGER,
+    producer TEXT NOT NULL,
+    report_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)
+"""
+
+_MANIFEST_GUARDS = (
+    "CREATE TRIGGER IF NOT EXISTS shadow_manifests_no_update "
+    "BEFORE UPDATE ON shadow_manifests BEGIN "
+    "SELECT RAISE(ABORT, 'shadow_manifests is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS shadow_manifests_no_delete "
+    "BEFORE DELETE ON shadow_manifests BEGIN "
+    "SELECT RAISE(ABORT, 'shadow_manifests is append-only'); END",
+)
+
 _RUNS = """
 CREATE TABLE IF NOT EXISTS shadow_runs (
     id INTEGER PRIMARY KEY,
@@ -491,13 +519,182 @@ def _rename_legacy_producer_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE shadow_runs RENAME COLUMN baseline TO producer")
 
 
+
+
+def _migrate_run_contract_columns(conn: sqlite3.Connection) -> None:
+    """Add experiment binding/seal columns to databases created before them."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(shadow_runs)")}
+    additions = {
+        "manifest_id": "INTEGER",
+        "sealed_at": "TEXT",
+        "gate_decision_id": "INTEGER",
+    }
+    for name, kind in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE shadow_runs ADD COLUMN {name} {kind}")
+
+
+def _manifest_hash(payload: dict) -> str:
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _manifest_payload(*, policy_version_id: int, report_type: str,
+                      producer_name: str, opened_at: str,
+                      compatibility: dict) -> dict:
+    producer = PRODUCERS[producer_name]
+    return {
+        "schema_version": 1,
+        "policy_version_id": policy_version_id,
+        "reference_version_id": compatibility["reference_version_id"],
+        "producer": producer_name,
+        "producer_kind": producer.kind,
+        "report_type": report_type,
+        "changed_genes": list(compatibility["changed_genes"]),
+        "observed_genes": sorted(producer.observed_genes),
+        "evaluator": "paired_brier_v1",
+        "metric": "brier",
+        "minimum_samples": int(holdout_gate.MIN_VALIDATION_SAMPLES),
+        "brier_tolerance": float(holdout_gate.BRIER_TOLERANCE),
+        "stopping_rule": "one_verdict_at_or_after_minimum_paired_samples",
+        "horizon_rule": "champion_declared_per_code",
+        "opened_at": opened_at,
+    }
+
+
+def _write_manifest(conn: sqlite3.Connection, payload: dict) -> int:
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+    cursor = conn.execute(
+        "INSERT INTO shadow_manifests "
+        "(policy_version_id, reference_version_id, producer, report_type, "
+        " payload_json, content_hash) VALUES (?, ?, ?, ?, ?, ?)",
+        (payload["policy_version_id"], payload["reference_version_id"],
+         payload["producer"], payload["report_type"], blob,
+         _manifest_hash(payload)))
+    return int(cursor.lastrowid)
+
+
+def manifest_for_run(run_id: int) -> dict | None:
+    """The immutable experiment question bound to a shadow run."""
+    conn = memory_store._get_conn()
+    init_schema(conn)
+    row = conn.execute(
+        "SELECT m.* FROM shadow_runs r "
+        "JOIN shadow_manifests m ON m.id = r.manifest_id "
+        "WHERE r.id = ?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    stored = dict(row)
+    try:
+        payload = json.loads(stored["payload_json"])
+    except (TypeError, ValueError) as exc:
+        raise ShadowError(
+            f"Shadow run #{run_id} has an unreadable experiment manifest: "
+            f"{exc}") from exc
+    if _manifest_hash(payload) != stored["content_hash"]:
+        raise ShadowError(
+            f"Shadow run #{run_id} has a manifest whose content hash no "
+            "longer matches. The experiment question changed after opening.")
+    return {**payload, "id": stored["id"],
+            "content_hash": stored["content_hash"]}
+
+
+def assert_run_evaluable(run: dict) -> dict | None:
+    """Validate the frozen question a run is accumulating evidence for.
+
+    Legacy baselines may have no manifest because their evidence is explicitly
+    non-promotable. Candidate-grade evidence never gets that exception.
+    """
+    producer = PRODUCERS.get(run["producer"])
+    if producer is None:
+        raise ShadowError(
+            f"Shadow run #{run['id']} names unregistered producer "
+            f"{run['producer']!r}.")
+
+    manifest = manifest_for_run(run["id"])
+    if manifest is None:
+        if producer.kind == KIND_BASELINE:
+            assert_producer_compatible(
+                run["policy_version_id"], run["producer"])
+            return None
+        raise ShadowError(
+            f"Shadow run #{run['id']} predates the immutable experiment "
+            "manifest. Candidate-grade evidence must state the intervention, "
+            "evaluator and stopping rule before samples accumulate.")
+
+    for field in ("policy_version_id", "producer", "report_type"):
+        if manifest[field] != run[field]:
+            raise ShadowError(
+                f"Shadow run #{run['id']} disagrees with its manifest on "
+                f"{field}: run={run[field]!r}, manifest={manifest[field]!r}.")
+
+    compatibility = producer_compatibility(
+        run["policy_version_id"], run["producer"],
+        reference_version_id=manifest["reference_version_id"])
+    if not compatibility["compatible"]:
+        raise ShadowError(compatibility["reason"])
+    if compatibility["changed_genes"] != manifest["changed_genes"]:
+        raise ShadowError(
+            f"Shadow run #{run['id']} changed-gene set no longer matches its "
+            "manifest.")
+    if sorted(producer.observed_genes) != manifest["observed_genes"]:
+        raise ShadowError(
+            f"Shadow run #{run['id']} producer observation surface changed "
+            "after the experiment opened.")
+    if manifest["evaluator"] != "paired_brier_v1"             or manifest["metric"] != "brier":
+        raise ShadowError(
+            f"Shadow run #{run['id']} names an evaluator this build does not "
+            "implement.")
+    if int(manifest["minimum_samples"]) <= 0:
+        raise ShadowError(
+            f"Shadow run #{run['id']} has a non-positive stopping floor.")
+    return manifest
+
+
+def seal_run(run_id: int, *, gate_decision_id: int, reason: str,
+             sealed_at: str | None = None) -> None:
+    """Seal one experiment after its preregistered final verdict.
+
+    A sealed run is closed to new forecasts and cannot be graded again. Looking
+    again with a larger sample is a new experiment, not another chance for the
+    same one to pass.
+    """
+    _positive_id(run_id, "run_id")
+    _positive_id(gate_decision_id, "gate_decision_id")
+    reason = _text(reason, "reason")
+    when = _text(sealed_at, "sealed_at") if sealed_at else _today()
+    with memory_store._write_lock:
+        conn = memory_store._get_conn()
+        init_schema(conn)
+        with conn:
+            row = conn.execute(
+                "SELECT sealed_at FROM shadow_runs WHERE id = ?",
+                (run_id,)).fetchone()
+            if row is None:
+                raise ShadowError(f"No shadow run #{run_id} to seal.")
+            if row["sealed_at"]:
+                raise ShadowError(
+                    f"Shadow run #{run_id} was already sealed at "
+                    f"{row['sealed_at']}. A second look needs a new manifest.")
+            conn.execute(
+                "UPDATE shadow_runs SET status='closed', sealed_at=?, "
+                "gate_decision_id=?, closed_at=COALESCE(closed_at, ?), "
+                "reason=reason || ' | sealed: ' || ? WHERE id=?",
+                (when, gate_decision_id, when, reason, run_id))
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create this module's tables on the supplied connection."""
     conn.execute(_RUNS)
     conn.execute(_PREDICTIONS)
+    conn.execute(_MANIFESTS)
     _rename_legacy_producer_column(conn)
+    _migrate_run_contract_columns(conn)
     for statement in _INDEXES:
         conn.execute(statement)
+    for guard in _MANIFEST_GUARDS:
+        conn.execute(guard)
 
 
 # ── Validation ─────────────────────────────────────────────────────────
@@ -557,7 +754,11 @@ def open_run(*, policy_version_id: int, reason: str,
         raise ShadowError(
             f"No policy version #{policy_version_id} to shadow: a run that "
             "cannot name the policy it is measuring could never be promoted.")
-    assert_producer_compatible(policy_version_id, producer)
+    compatibility = assert_producer_compatible(policy_version_id, producer)
+    manifest_payload = _manifest_payload(
+        policy_version_id=policy_version_id, report_type=report_type,
+        producer_name=producer, opened_at=when,
+        compatibility=compatibility)
     # Refuse a book that can never be paired, before writing the run row.
     # Checked here rather than in the CLI so both doors — the scheduled task
     # and ``scripts/policy.py`` — get the same answer.
@@ -579,11 +780,13 @@ def open_run(*, policy_version_id: int, reason: str,
                     f"{report_type} shadow of {producer} (run #{existing['id']}). "
                     "Close it before opening another, or the two will be "
                     "counted as one experiment.")
+            manifest_id = _write_manifest(conn, manifest_payload)
             cursor = conn.execute(
                 "INSERT INTO shadow_runs (policy_version_id, trader_id, "
-                "report_type, producer, status, reason, opened_at) "
-                "VALUES (?, ?, ?, ?, 'open', ?, ?)",
-                (policy_version_id, trader, report_type, producer, reason, when))
+                "report_type, producer, status, reason, opened_at, manifest_id) "
+                "VALUES (?, ?, ?, ?, 'open', ?, ?, ?)",
+                (policy_version_id, trader, report_type, producer, reason, when,
+                 manifest_id))
     return int(cursor.lastrowid)
 
 
@@ -776,9 +979,9 @@ def emit_for_date(run_id: int, date: str, *,
             "is not registered. Nothing can emit its forecasts: a row written "
             "by a producer the run does not name would be graded as the run's "
             "own, and its verdict would describe evidence it never produced.")
-    # Legacy runs can predate the contract; do not let them accumulate more
-    # evidence once their intervention is known to be unevaluable.
-    assert_producer_compatible(run["policy_version_id"], run["producer"])
+    # Re-check the immutable question before every write. Candidate runs that
+    # predate manifests stop here rather than being grandfathered.
+    assert_run_evaluable(run)
     if panel is None:
         panel = panel_for(date, run["report_type"])
     declared = champion_horizons(date, run["report_type"]) if horizon_days is None \
@@ -1020,6 +1223,9 @@ def coverage(run_id: int | None = None) -> dict:
             "  COUNT(DISTINCT CASE WHEN scored_at IS NOT NULL THEN date END) days "
             "FROM shadow_predictions WHERE run_id = ?", (run["id"],)).fetchone()
         paired = paired_count(run["id"])
+        manifest = manifest_for_run(run["id"])
+        needed = (int(manifest["minimum_samples"]) if manifest
+                  else holdout_gate.MIN_VALIDATION_SAMPLES)
         out.append({
             "run_id": run["id"],
             "policy_version_id": run["policy_version_id"],
@@ -1030,8 +1236,10 @@ def coverage(run_id: int | None = None) -> dict:
             "scored": int(row["scored"]),
             "scored_days": int(row["days"]),
             "paired": paired,
-            "needed": holdout_gate.MIN_VALIDATION_SAMPLES,
-            "remaining": max(0, holdout_gate.MIN_VALIDATION_SAMPLES - paired),
+            "needed": needed,
+            "remaining": max(0, needed - paired),
+            "manifest_id": run.get("manifest_id"),
+            "sealed_at": run.get("sealed_at"),
         })
     return {"runs": out}
 
@@ -1055,7 +1263,7 @@ def integrity() -> list[str]:
                 f"#{run['policy_version_id']}, which does not exist")
             continue
         try:
-            assert_producer_compatible(run["policy_version_id"], run["producer"])
+            assert_run_evaluable(run)
         except ShadowError as exc:
             problems.append(f"shadow run #{run['id']} is not evaluable: {exc}")
     for row in conn.execute(

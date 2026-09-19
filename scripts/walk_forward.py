@@ -167,7 +167,8 @@ from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.config import DATA_DIR, PROMPTS_DIR, TRADABLE_PREFIXES  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
-    market_rules, portfolio as P, portfolio_exit, reservations,
+    market_rules, order_theme_exposure, portfolio as P,
+    portfolio_exit, reservations,
     sector_membership, sector_panel, sector_selection, selection_policy,
     t1_settlement as S,
 )
@@ -1681,6 +1682,25 @@ def _decide_llm(ctx, day: str, prev_day: str,
         if order_id is None:
             ctx.counters["intent_refused"] += 1
             continue
+        if row.get("primary_theme"):
+            try:
+                order_theme_exposure.record(
+                    order_id=order_id,
+                    primary_theme=order_theme,
+                    supporting_themes=row.get("supporting_themes") or [],
+                    source=ctx.selection_architecture,
+                )
+            except Exception as exc:                  # noqa: BLE001
+                from alpha_agents.data.portfolio_intent import cancel_order
+                cancel_order(
+                    order_id,
+                    "theme exposure attribution failed: "
+                    f"{type(exc).__name__}")
+                ctx.counters["theme_attribution_failed"] += 1
+                logger.exception(
+                    "%s: cancelled order #%s after theme attribution failed",
+                    day, order_id)
+                continue
         ctx.capacity[order["code"]] = cap
         placed.append({
             "code": order["code"],

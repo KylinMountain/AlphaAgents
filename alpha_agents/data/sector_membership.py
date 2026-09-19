@@ -74,3 +74,17 @@ def concepts_by_code(snapshot: MembershipSnapshot) -> dict[str, list[str]]:
         for code in snapshot.members[sector]:
             out.setdefault(code, []).append(sector)
     return out
+
+
+
+def by_id(archive: tuple[MembershipSnapshot, ...], snapshot_id: str,
+          expected_hash: str | None = None) -> MembershipSnapshot:
+    matches = [item for item in archive if item.snapshot_id == snapshot_id]
+    if len(matches) != 1:
+        raise SectorSnapshotError(
+            f"membership snapshot {snapshot_id!r} is not uniquely available")
+    snapshot = matches[0]
+    if expected_hash is not None and snapshot.content_hash != expected_hash:
+        raise SectorSnapshotError(
+            f"membership snapshot {snapshot_id!r} hash mismatch")
+    return snapshot

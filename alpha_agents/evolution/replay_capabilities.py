@@ -25,6 +25,8 @@ _SOURCE_CAPABILITIES = {
         "market_snapshots.db", "all_quote_snapshots", "captured_at"),
     "fund_flow": (
         "market_snapshots.db", "stock_fund_flow_daily", "date"),
+    "event_expectations": (
+        "market_snapshots.db", "event_expectation_snapshots", "captured_at"),
 }
 
 

@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS opportunity_items (
 )
 """
 
+_CONTEXT_TABLE = """
+CREATE TABLE IF NOT EXISTS opportunity_contexts (
+    opportunity_set_id INTEGER PRIMARY KEY,
+    context_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    FOREIGN KEY(opportunity_set_id) REFERENCES opportunity_sets(id)
+)
+"""
+
 _GUARDS = (
     "CREATE TRIGGER IF NOT EXISTS opportunity_sets_no_update "
     "BEFORE UPDATE ON opportunity_sets BEGIN "
@@ -66,12 +75,19 @@ _GUARDS = (
     "CREATE TRIGGER IF NOT EXISTS opportunity_items_no_delete "
     "BEFORE DELETE ON opportunity_items BEGIN "
     "SELECT RAISE(ABORT, 'opportunity_items is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS opportunity_contexts_no_update "
+    "BEFORE UPDATE ON opportunity_contexts BEGIN "
+    "SELECT RAISE(ABORT, 'opportunity_contexts is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS opportunity_contexts_no_delete "
+    "BEFORE DELETE ON opportunity_contexts BEGIN "
+    "SELECT RAISE(ABORT, 'opportunity_contexts is append-only'); END",
 )
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SET_TABLE)
     conn.execute(_ITEM_TABLE)
+    conn.execute(_CONTEXT_TABLE)
     for statement in _GUARDS:
         conn.execute(statement)
 
@@ -154,7 +170,8 @@ def record_decision(*, run_id: str, trader_id: str, day: str, phase: str,
                     information_cutoff: str, panel: list[dict],
                     orders: list[dict], refusals: list[dict],
                     research: dict | None, parse_error: str | None,
-                    raw: str, conn: sqlite3.Connection | None = None) -> int:
+                    raw: str, context: dict | None = None,
+                    conn: sqlite3.Connection | None = None) -> int:
     """Append one opportunity set and its per-code classifications."""
     if phase not in {"open", "close"}:
         raise ValueError(f"phase must be open/close, got {phase!r}")
@@ -176,6 +193,7 @@ def record_decision(*, run_id: str, trader_id: str, day: str, phase: str,
         "research": research,
         "parse_error": parse_error,
         "raw_hash": raw_hash,
+        "context": context or {},
     }
     items = classify(
         panel=panel, orders=orders, refusals=refusals,
@@ -204,6 +222,12 @@ def record_decision(*, run_id: str, trader_id: str, day: str, phase: str,
             [(set_id, item["code"], item["status"],
               int(item["researched"]), int(item["selected"]), item["reason"],
               _dump(item["panel_row"])) for item in items])
+        if context:
+            target.execute(
+                "INSERT INTO opportunity_contexts "
+                "(opportunity_set_id, context_json, content_hash) "
+                "VALUES (?,?,?)",
+                (set_id, _dump(context), _content_hash(context)))
         return set_id
 
     if conn is not None:
@@ -230,3 +254,21 @@ def items(opportunity_set_id: int,
         "SELECT * FROM opportunity_items WHERE opportunity_set_id=? "
         "ORDER BY id", (opportunity_set_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+
+def context_for(opportunity_set_id: int,
+                conn: sqlite3.Connection | None = None) -> dict:
+    """Decision-time context recorded with an opportunity set, or empty."""
+    conn = conn if conn is not None else memory_store._get_conn()
+    init_schema(conn)
+    row = conn.execute(
+        "SELECT context_json, content_hash FROM opportunity_contexts "
+        "WHERE opportunity_set_id=?", (opportunity_set_id,)).fetchone()
+    if row is None:
+        return {}
+    payload = json.loads(row["context_json"])
+    if _content_hash(payload) != row["content_hash"]:
+        raise ValueError(
+            f"opportunity context #{opportunity_set_id} failed hash check")
+    return payload

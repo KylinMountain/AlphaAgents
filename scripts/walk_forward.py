@@ -1186,7 +1186,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
             refusals=verdict.get("refused") or [],
             research=verdict.get("research_budget"),
             parse_error=verdict.get("parse_error"),
-            raw=verdict.get("raw") or "")
+            raw=verdict.get("raw") or "",
+            context={
+                "run_theme": ctx.theme,
+                "ranking_day": ranking_day,
+                "market": market,
+            })
     except Exception as exc:                          # noqa: BLE001
         # Audit enrichment must never turn a valid trading decision into a
         # missed trade. The report counter makes degradation visible.

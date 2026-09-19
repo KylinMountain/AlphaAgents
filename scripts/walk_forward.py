@@ -175,7 +175,7 @@ from alpha_agents.data import (  # noqa: E402
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
-from alpha_agents.evolution import replay_capabilities  # noqa: E402
+from alpha_agents.evolution import replay_capabilities, sector_experiment  # noqa: E402
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
 
@@ -2448,6 +2448,62 @@ def _value(ctx, day: str) -> dict:
 # ── the run ─────────────────────────────────────────────────────────────────
 
 
+_EXPERIMENT_ARMS = frozenset({"A", "B", "C", "D"})
+
+
+def _experiment_contract(args, *, architecture: str,
+                         membership_archive) -> tuple[dict | None, str | None]:
+    """Bind one replay to one frozen experiment question, or run unbound."""
+    path = getattr(args, "experiment_manifest", None)
+    arm = getattr(args, "experiment_arm", None)
+    if (path is None) != (arm is None):
+        raise SystemExit(
+            "--experiment-manifest and --experiment-arm must be supplied together")
+    if path is None:
+        return None, None
+    if arm not in _EXPERIMENT_ARMS:
+        raise SystemExit(f"unknown experiment arm {arm!r}")
+
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        digest = sector_experiment.require_valid(manifest)
+    except sector_experiment.SectorExperimentError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    arm_spec = (manifest.get("architecture_arms") or {}).get(arm) or {}
+    expected = str(arm_spec.get("name") or "")
+    if expected != architecture:
+        raise SystemExit(
+            f"experiment arm {arm} requires {expected}, got {architecture}")
+    if args.decider != "llm":
+        raise SystemExit(
+            "A/B/C/D architecture experiments require --decider llm")
+    if not membership_archive:
+        raise SystemExit(
+            "A/B/C/D architecture experiments require the same "
+            "--sector-membership archive for cluster-risk attribution")
+    return manifest, digest
+
+
+def _verify_experiment_window(ctx, window: list[str]) -> None:
+    if ctx.experiment_manifest is None:
+        return
+    if not window:
+        raise SystemExit("experiment replay resolved to an empty trading window")
+    actual = {"start": window[0], "end": window[-1]}
+    registered = [
+        {
+            "start": str(item.get("start") or "")[:10],
+            "end": str(item.get("end") or "")[:10],
+        }
+        for item in ctx.experiment_manifest.get("validation_windows") or []
+    ]
+    if actual not in registered:
+        raise SystemExit(
+            f"run window {actual['start']}..{actual['end']} is not one of "
+            "the preregistered validation windows")
+
+
 class Context:
     def __init__(self, args):
         self.args = args
@@ -2465,6 +2521,14 @@ class Context:
         self.frozen_directions = (
             frozen_direction_archive.load(frozen_path)
             if frozen_path is not None else None)
+        self.experiment_arm = getattr(args, "experiment_arm", None)
+        self.experiment_manifest, self.experiment_manifest_hash = (
+            _experiment_contract(
+                args,
+                architecture=self.selection_architecture,
+                membership_archive=self.sector_membership_archive,
+            )
+        )
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
                 "sector_first_no_flow"}:
@@ -2676,6 +2740,7 @@ def _run_window(ctx, args) -> dict:
     _seed_theme(ctx)
 
     window = ctx.corpus.window(args.start, args.days)
+    _verify_experiment_window(ctx, window)
     journal_before = _journal_records(_REPLAY_DIR)
     #: Tool calls are read from the journal's own records rather than counted
     #: in memory, for the same reason the exit legs are read back from
@@ -3051,6 +3116,8 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "trader": ctx.trader,
         "theme": ctx.theme,
         "selection_architecture": ctx.selection_architecture,
+        "experiment_arm": ctx.experiment_arm,
+        "experiment_manifest_hash": ctx.experiment_manifest_hash,
         "frozen_directions_hash": (
             (ctx.frozen_directions or {}).get("archive_hash")
             if hasattr(ctx, "frozen_directions") else None),
@@ -3484,6 +3551,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frozen-directions", type=Path, default=None,
         help="B-arm frozen direction archive required by C")
+    parser.add_argument(
+        "--experiment-manifest", type=Path, default=None,
+        help="frozen A/B/C/D preregistration manifest")
+    parser.add_argument(
+        "--experiment-arm", choices=("A", "B", "C", "D"), default=None,
+        help="arm bound to --experiment-manifest")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,

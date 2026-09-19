@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ARMS = {
     "A": {
@@ -42,6 +43,12 @@ RISK_KEYS = (
     "max_theme_cluster_exposure_pct",
 )
 
+IDENTITY_KEYS = (
+    "code_ref",
+    "policy_ref",
+    "input_hash",
+)
+
 
 class SectorExperimentError(ValueError):
     pass
@@ -63,6 +70,7 @@ def template(*, capabilities_hash: str) -> dict:
         "schema_version": SCHEMA_VERSION,
         "capabilities_hash": capabilities_hash,
         "architecture_arms": ARMS,
+        "baseline_identity": {key: None for key in IDENTITY_KEYS},
         "model": None,
         "research_budget": None,
         "cost_model": None,
@@ -71,6 +79,7 @@ def template(*, capabilities_hash: str) -> dict:
         "validation_windows": [],
         "forward_start": None,
         "primary_metric": None,
+        "minimum_meaningful_improvement_pct": None,
         "minimum_days": 50,
         "stopping_rule": None,
         "risk_boundaries": {key: None for key in RISK_KEYS},
@@ -101,6 +110,18 @@ def validate(manifest: dict) -> list[str]:
             "exit_policy", "forward_start", "primary_metric", "stopping_rule"):
         if _empty(manifest.get(field)):
             errors.append(f"{field} is required")
+
+    identity = manifest.get("baseline_identity") or {}
+    for key in IDENTITY_KEYS:
+        if _empty(identity.get(key)):
+            errors.append(f"baseline_identity.{key} is required")
+
+    minimum_improvement = manifest.get("minimum_meaningful_improvement_pct")
+    if not isinstance(minimum_improvement, (int, float)):
+        errors.append("minimum_meaningful_improvement_pct must be numeric")
+    elif minimum_improvement < 0:
+        errors.append(
+            "minimum_meaningful_improvement_pct must be >= 0")
 
     training = manifest.get("training_window") or {}
     if _empty(training.get("start")) or _empty(training.get("end")):
@@ -147,3 +168,26 @@ def require_valid(manifest: dict) -> str:
         raise SectorExperimentError(
             "invalid sector experiment manifest: " + "; ".join(errors))
     return manifest_hash(manifest)
+
+
+def register(manifest: dict, root: Path) -> Path:
+    """Archive one validated manifest under its content hash.
+
+    Registration is content-addressed and never overwrites an existing file.
+    Re-registering byte-equivalent content is idempotent; any changed protocol
+    necessarily receives a different path and hash.
+    """
+    digest = require_valid(manifest)
+    directory = Path(root) / "manifests"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{digest}.json"
+    payload = _dump(manifest) + "\n"
+    try:
+        with target.open("x", encoding="utf-8") as fh:
+            fh.write(payload)
+    except FileExistsError:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing != manifest or manifest_hash(existing) != digest:
+            raise SectorExperimentError(
+                f"registered manifest collision at {target}")
+    return target

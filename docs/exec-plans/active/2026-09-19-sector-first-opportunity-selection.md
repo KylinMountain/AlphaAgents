@@ -1,6 +1,6 @@
 # 板块优先的选股架构：先选方向，再选交易，而不是继续优化双榜
 
-状态：active（S0–S4 实验基础设施已大部实现；正式四臂验证尚未完成，Sector-First 专属 S5 前向影子尚未实现；默认仍为 `dual_rank_v0`）
+状态：active（S0–S4 验证基础设施已基本就绪；正式四臂被 fund-flow strict-PIT capability 门控，策略结果仍为 n=0；Sector-First 专属 S5 尚未实现；默认仍为 `dual_rank_v0`）
 创建：2026-09-19
 代码核对基线：`main@72ce91a96e8ab0ee499dae0d6e71deef36e67ddd`；2026-09-20 进度校准与补实现见本文末记录
 策略效果：n=0（尚未完成预注册 A/B/C/D 正式验证；不声明收益改善）
@@ -353,7 +353,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
       `supporting_themes`，不再统一写成 run-level theme。
 - [ ] **partial**：strict PIT membership、未来 membership 和 outside-shortlist 均 fail closed；
       每个 `code × theme` 已有 membership-bound `relation_evidence_id`，panel/placed order
-      携带 snapshot id/hash 与主/辅方向关系证据；`theme_thesis_id` 及独立事件关系类型仍未落地。
+      携带 snapshot id/hash 与主/辅方向关系证据；执行前还会按 frozen membership 重新计算并校验
+      主/辅关系 evidence，缺失或篡改统一写成 `theme_unresolved` refusal，不再 fallback 到 run theme。
+      `theme_thesis_id` 及独立事件关系类型仍未落地。
 - [ ] 主题观察名单可含不可买龙头；交易名单/执行拒绝另有记录。
 - [ ] **partial**：方向选择与个股选择复用同一个 `ResearchBudget`，并已有 top-8 / 0..3 /
       panel-size / picks 等代码上限；还缺统一的超限 refusal code 与全阶段预算验收测试。
@@ -368,7 +370,9 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
       Tests、Harness/knowledge-base checks 与 build 均为 green。
 - [x] 多概念重叠仍只形成一份股票订单；side-car exposure 对 primary/supporting themes
       都计入组合风险，缺 mark 时返回 unverified 而不是 0。
-- [ ] 关系/来源未知导致拒绝时有独立事件与原因，且不能表现为“模型主动空仓”。
+- [x] 关系/来源缺失或 evidence/hash 错配会在 Intent 前 fail closed，并作为
+      `theme_unresolved` / `relation_validation` refusal 写入 Opportunity Journal；
+      Sector-First 已移除缺主主题时回退 `ctx.theme` 的路径，因此不会表现成模型主动空仓或错误主题订单。
 - [ ] Sector-First 专属 forward shadow 尚未接入；不能拿旧 `selection_rank` shadow
       的隔离性代替本条验收。
 
@@ -455,9 +459,10 @@ uv run python scripts/lint_docs.py
 uv run python scripts/lint_policy.py
 ```
 
-2026-09-20 本分支同时包含实现与文档校准。完整回归、Harness lint 与 Docs lint
-以该分支 PR 的 CI 为准；CI 未完成前，不把 S3 的“原执行回归通过”改成已完成。
-静态阅读只用于定位 contract，不替代实跑结果。
+2026-09-20 的实现均以 PR CI 为验收：#8、#9、#10、#11 的完整 Tests / Harness 或
+Invariants / build / CodeQL 已通过后才合入；静态阅读只用于定位 contract，不替代实跑结果。
+个别独立的 GitHub Advanced Security agent job 曾在“Processing Request”阶段失败，但对应
+CodeQL 分析成功，未被当成代码通过证据。
 
 ## 11. 决策记录
 
@@ -578,6 +583,17 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 仍然**没有**做的事：没有跑完正式四臂窗口，没有改变 active policy，没有声明
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
 Sector-First 的 S5。
+
+### 2026-09-20 继续实现：relation evidence execution gate
+
+- Sector-First 不再允许 `primary_theme` 缺失时退回 run-level `ctx.theme`。
+- 每个待下单股票在 Intent 前重新从 frozen membership snapshot 按 id/hash 取回世界，
+  重算 primary/supporting `relation_evidence_id`；缺字段、hash 错配、关系不成立或 evidence
+  被改动都会产生结构化 `theme_unresolved` refusal。
+- refusal 在 Opportunity Journal 的决策记录里可见，因此“没有下单”可以区分为模型主动放弃、
+  模型输出不可读、交易约束拒绝和关系 provenance 失败。
+- 正反测试分别证明合法证据可下单、缺 evidence 零下单、篡改 membership hash 被拒；#11
+  全量 Tests / Invariants / build / CodeQL / security 均通过后合入。
 
 ### 2026-09-20 继续实现：formal capability gate
 

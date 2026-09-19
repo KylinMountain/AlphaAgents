@@ -1096,6 +1096,25 @@ def _build_model(timeout: float | None):
     return create_model(timeout=timeout)
 
 
+def _event_snapshot_refs(panel: list[dict], cutoff: str) -> list[dict]:
+    """PIT event-vintage hashes that were part of this decision world.
+
+    Missing event tables are a capability gap, not a trading failure. The
+    journal stores an empty list and the run's Capability Matrix tells the
+    reader whether event expectations existed in that historical window.
+    """
+    try:
+        from alpha_agents.data import event_expectations as EE
+        return EE.snapshot_refs(
+            as_of=cut,
+            subjects=[row["code"] for row in panel if row.get("code")],
+            days_back=30,
+            days_ahead=30)
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("%s: event snapshot refs unavailable: %s", cutoff, exc)
+        return []
+
+
 def _trader_tools(ctx):
     """The six question-shaped tools the buy-side decider may call, or [].
 
@@ -1187,6 +1206,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     ctx, "last_panel_candidate_pool", []),
                 "panel_limit": ctx.panel_size,
                 "selection_rank": selection_policy.in_force_params(),
+                "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
             })
     except Exception as exc:                          # noqa: BLE001
         # Audit enrichment must never turn a valid trading decision into a

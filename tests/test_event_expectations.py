@@ -62,3 +62,18 @@ def test_snapshots_are_append_only(conn):
         conn.execute(
             "UPDATE event_expectation_snapshots "
             "SET source='rewritten' WHERE event_key='fed-2026-09'")
+
+
+
+def test_snapshot_refs_freeze_only_vintages_knowable_at_cutoff(conn):
+    _seed(conn)
+    early = E.snapshot_refs(
+        as_of="2026-09-15 09:00:00", subjects=["FOMC"], conn=conn)
+    late = E.snapshot_refs(
+        as_of="2026-09-20 03:00:00", subjects=["FOMC"], conn=conn)
+
+    assert len(early) == 1
+    assert early[0]["expectation_hash"] is not None
+    assert early[0]["realization_hash"] is None
+    assert late[0]["realization_hash"] is not None
+    assert early[0]["expectation_hash"] != late[0]["expectation_hash"]

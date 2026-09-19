@@ -283,8 +283,8 @@ M3  Opportunity DreamWorld + selection skill            DONE
 M4  deterministic ranking baselines                     DONE
 M5  theme context + theme-gate Dream evaluator          DONE
 M6a event source probe                                   DONE
-M6b provider adapters / normalized ingest               NEXT
-M7  Event Expectations in Opportunity/DreamWorld hash   NEXT
+M6b provider adapters / normalized ingest               IN PROGRESS
+M7  Event Expectations in Opportunity/DreamWorld hash   DONE
 M8a first live selection gene                           DONE
 M8b forward selection shadow + sealed gate              DONE
 M9  event/surprise policy genes                         BLOCKED ON M6b/M7

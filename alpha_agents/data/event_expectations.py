@@ -294,3 +294,70 @@ def context(*, as_of: str, subject: str | None = None,
     finally:
         if close:
             target.close()
+
+
+
+def snapshot_refs(*, as_of: str, subjects: list[str],
+                  days_back: int = 30, days_ahead: int = 30,
+                  conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Content-addressed PIT event state for a decision/Dream manifest.
+
+    Refs carry hashes, not prose summaries. The Opportunity Journal can freeze
+    them cheaply and a later Dream run can prove which calendar/expectation/
+    realization vintages were knowable at the decision cutoff.
+    """
+    target = conn or connect(readonly=True)
+    close = conn is None
+    out = []
+    try:
+        for subject in sorted({
+                str(value).strip() for value in subjects
+                if str(value).strip()}):
+            rows = target.execute(
+                "SELECT c.* FROM event_calendar_snapshots c "
+                "JOIN (SELECT event_key, MAX(captured_at) captured_at "
+                "      FROM event_calendar_snapshots "
+                "      WHERE captured_at<=? GROUP BY event_key) latest "
+                "ON latest.event_key=c.event_key "
+                "AND latest.captured_at=c.captured_at "
+                "WHERE c.subject=? AND c.captured_at<=? "
+                "AND c.scheduled_at>=datetime(?, ? || ' days') "
+                "AND c.scheduled_at<=datetime(?, ? || ' days') "
+                "ORDER BY c.scheduled_at,c.event_key",
+                (as_of, subject, as_of, as_of, f"-{days_back}",
+                 as_of, f"+{days_ahead}")).fetchall()
+            for row in rows:
+                exp = target.execute(
+                    "SELECT content_hash,captured_at "
+                    "FROM event_expectation_snapshots "
+                    "WHERE event_key=? AND captured_at<=? "
+                    "ORDER BY captured_at DESC,id DESC LIMIT 1",
+                    (row["event_key"], as_of)).fetchone()
+                actual = target.execute(
+                    "SELECT content_hash,announced_at "
+                    "FROM event_realizations "
+                    "WHERE event_key=? AND announced_at<=? "
+                    "ORDER BY announced_at DESC,id DESC LIMIT 1",
+                    (row["event_key"], as_of)).fetchone()
+                out.append({
+                    "event_key": row["event_key"],
+                    "subject": subject,
+                    "scheduled_at": row["scheduled_at"],
+                    "calendar_captured_at": row["captured_at"],
+                    "calendar_hash": row["content_hash"],
+                    "expectation_captured_at": (
+                        exp["captured_at"] if exp else None),
+                    "expectation_hash": (
+                        exp["content_hash"] if exp else None),
+                    "realization_announced_at": (
+                        actual["announced_at"] if actual else None),
+                    "realization_hash": (
+                        actual["content_hash"] if actual else None),
+                })
+        return out
+    except sqlite3.Error as exc:
+        raise EventExpectationError(
+            f"event snapshot refs unavailable: {exc}") from exc
+    finally:
+        if close:
+            target.close()

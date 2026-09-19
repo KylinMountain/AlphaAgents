@@ -265,7 +265,9 @@ sample_fields
 2. Event Calendar + append-only Expectation Snapshot。
 3. `get_event_context` 事实型工具。**已实现**
 4. Replay Capability Matrix 增加 event_expectation 覆盖率。**已实现**
-5. Opportunity/DreamWorld 纳入 event snapshot hash。**下一步**
+5. Opportunity/DreamWorld 纳入 event snapshot hash。**已实现：Opportunity Journal
+   冻结 calendar / expectation / realization 的 PIT content hash，DreamWorld hash
+   随 context 一起覆盖这些 refs**
 6. 之后才研究 “priced-in / surprise” policy 是否真的改善选择。
 
 核心原则：

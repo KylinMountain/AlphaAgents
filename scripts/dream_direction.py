@@ -35,6 +35,7 @@ def _world(args):
         end=args.end,
         trader_id=args.trader,
         run_id=args.run_id,
+        architecture=args.architecture,
     )
 
 
@@ -52,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--trader", default=None)
     report.add_argument("--run-id", default=None)
     report.add_argument("--horizon", type=int, default=5)
+    report.add_argument(
+        "--architecture", default="sector_first_v0",
+        choices=(
+            "sector_first_v0", "sector_first_simple_selector",
+            "sector_first_no_flow"))
     report.add_argument("--min-coverage", type=float, default=0.5)
 
     baseline = sub.add_parser("baseline")
@@ -60,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     baseline.add_argument("--trader", default=None)
     baseline.add_argument("--run-id", default=None)
     baseline.add_argument("--horizon", type=int, default=5)
+    baseline.add_argument(
+        "--architecture", default="sector_first_v0",
+        choices=(
+            "sector_first_v0", "sector_first_simple_selector",
+            "sector_first_no_flow"))
     baseline.add_argument("--top-k", type=int, default=3)
     baseline.add_argument("--min-coverage", type=float, default=0.5)
 

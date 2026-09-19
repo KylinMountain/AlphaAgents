@@ -2485,6 +2485,73 @@ def _experiment_contract(args, *, architecture: str,
     return manifest, digest
 
 
+def _experiment_runtime_contract(args) -> dict:
+    """Behavioral runtime facts a formal A/B/C/D run must freeze.
+
+    A manifest that names costs/model/budget but does not bind them to the
+    process is decoration. Keep this separate from the arm contract so tests
+    can prove both sides independently and so ordinary non-experiment replays
+    retain their existing flexibility.
+    """
+    from alpha_agents.data import portfolio, portfolio_exit
+    from alpha_agents.model_factory import model_identity
+    from alpha_agents.tools.budget import ResearchBudget
+
+    budget = ResearchBudget()
+    return {
+        "decision_config": {
+            "trader": str(args.trader),
+            "picks_per_day": int(args.picks),
+            "panel_size": int(args.panel_size),
+            "participation": float(args.participation),
+            "trader_tools_enabled": bool(args.trader_tools),
+            "max_turns_per_decision": args.max_turns,
+            "news_limit": int(args.news_limit),
+            "model_timeout_seconds": float(args.model_timeout),
+            "pace_seconds": float(args.pace_seconds),
+        },
+        "model": model_identity(),
+        "research_budget": {
+            "max_total_calls": budget.max_total_calls,
+            "max_market_calls": budget.max_market_calls,
+            "max_theme_calls": budget.max_theme_calls,
+            "max_stock_calls": budget.max_stock_calls,
+            "max_self_calls": budget.max_self_calls,
+            "max_deep_dive_names": budget.max_deep_dive_names,
+            "max_calls_per_name": budget.max_calls_per_name,
+        },
+        "cost_model": {
+            "name": "virtual_a_share_v1",
+            "commission_rate": portfolio_exit.COMMISSION_RATE,
+            "min_commission_rmb": portfolio_exit.MIN_COMMISSION,
+            "stamp_duty_sell_rate": portfolio_exit.STAMP_DUTY_SELL_RATE,
+            "transfer_fee_rate": portfolio_exit.TRANSFER_FEE_RATE,
+            "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
+        },
+        "exit_policy": {
+            "mechanical_stop": bool(args.mechanical_stop),
+            "mechanical_target": bool(args.mechanical_target),
+            "agent_exits": bool(args.agent_exits),
+            "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
+        },
+    }
+
+
+def _verify_experiment_runtime(args, manifest: dict | None) -> None:
+    if manifest is None:
+        return
+    actual = _experiment_runtime_contract(args)
+    mismatches = {}
+    for field, observed in actual.items():
+        frozen = manifest.get(field)
+        if frozen != observed:
+            mismatches[field] = {"manifest": frozen, "runtime": observed}
+    if mismatches:
+        raise SystemExit(
+            "formal experiment runtime does not match its frozen manifest: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
+
+
 def _verify_experiment_window(ctx, window: list[str]) -> None:
     if ctx.experiment_manifest is None:
         return
@@ -2529,6 +2596,7 @@ class Context:
                 membership_archive=self.sector_membership_archive,
             )
         )
+        _verify_experiment_runtime(args, self.experiment_manifest)
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
                 "sector_first_no_flow"}:

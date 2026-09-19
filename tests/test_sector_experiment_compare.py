@@ -128,6 +128,14 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
     assert got["promotion_eligible"] is False
     assert got["paired_daily"]["B_minus_A"]["n_days"] == 60
     assert got["arms"]["B"]["risk"]["passed"] is True
+    assert got["arms"]["B"]["layers"]["direction"]["sets"] == 60
+    assert got["arms"]["B"]["layers"]["stock"]["sets"] == 60
+    assert got["arms"]["B"]["layers"]["execution"]["fills"] == 1
+    assert (
+        got["arms"]["B"]["layers"]["portfolio"]
+        == got["arms"]["B"]["portfolio"]
+    )
+    assert got["measurement_contract"]["portfolio"].startswith("ledger")
 
 
 def test_missing_cluster_exposure_is_insufficient_not_assumed_safe(tmp_path):

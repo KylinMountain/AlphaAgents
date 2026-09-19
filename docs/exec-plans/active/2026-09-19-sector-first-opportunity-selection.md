@@ -331,12 +331,14 @@ v0 冻结方向粗排、名额、排序和风险参数；先比较架构，不�
 ### S1：时点关系与方向快照
 
 - [x] 固定输入连续构建两次，方向 membership 与 feature/input hashes 一致。
-- [ ] **partial**：未来 membership 与未来 bar 已有注入测试且不会改变早先 snapshot；
-      仍需补“资金修订”和“公告结果”两个独立未来污染 fixture。
+- [ ] **partial**：未来 membership 与未来 bar 已有注入测试；event expectation/realization
+      以 decision cutoff 读取 PIT snapshot refs，后续 expectation 修订和 realization 不会倒灌，
+      且已修复一个此前把 `cutoff` 写成不存在的 `cut`、导致 event refs 静默为空的 wiring bug。
+      仍需补资金流 revision/vintage 的 available-at 污染 fixture。
 - [x] 剔除头部 1/3 名与候选股票级 leave-one-out 均已实现并有 fixture；
       候选自己的价格变化不能改变“剔除自己后的主方向 5 日证据”，并直接展示在股票卡片。
-- [ ] **partial**：缺失资金与真实零值已严格区分；还需把负流入与 provider unsupported
-      的完整 coverage/refusal contract 一起钉死。
+- [ ] **partial**：缺失、真实零值与负流入已有独立 fixture，负流入不会被折叠为 missing；
+      仍需把 provider unsupported 与 fund-flow vintage/coverage 的 refusal contract 钉死。
 - [x] 方向级 Opportunity Journal 区分 selected、agent-rejected、offered-not-researched、
       evaluated-not-offered、unassessable 和 unreadable decision，且 append-only。
 
@@ -560,6 +562,12 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 仍然**没有**做的事：没有跑完正式四臂窗口，没有改变 active policy，没有声明
 Sector-First 优于旧双榜，也没有把旧 `selection_rank` 的 forward shadow 当成
 Sector-First 的 S5。
+
+同一轮审计还修复了一个 event provenance wiring 缺陷：`_event_snapshot_refs()`
+误传未定义变量 `cut`，异常被 fail-soft 捕获后会让所有事件引用静默变成空列表。
+现已改为真实 decision `cutoff`，并用测试钉住 as-of、subjects 与窗口参数；已有
+Event Expectations 的 PIT 测试继续证明后续 expectation revision / realization 不会倒灌。
+资金流侧新增负流入 fixture，但 revision/vintage contract 仍保留为未完成项。
 
 2026-09-20 在 #8 合入并通过 CI 后，又补齐了 S4 的 operational summary：
 

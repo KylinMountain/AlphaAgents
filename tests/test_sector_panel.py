@@ -42,7 +42,7 @@ def test_overlap_is_one_stock_with_supporting_themes():
     rows = [row for row in got if row["code"] == "600003"]
     assert len(rows) == 1
     assert rows[0]["primary_theme"] == "AI"
-    assert rows[0]["supporting_themes"] == ["AI", "存储"]
+    assert rows[0]["supporting_themes"] == ["存储"]
 
 
 def test_selected_sector_order_controls_primary_theme_deterministically():

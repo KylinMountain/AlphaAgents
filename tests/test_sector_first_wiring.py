@@ -79,6 +79,10 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
         "adv20": 100000,
         "primary_theme": "AI",
         "supporting_themes": ["算力"],
+        "membership_snapshot_id": "m1",
+        "membership_hash": "membership-hash",
+        "primary_theme_relation_evidence_id": "rel-primary",
+        "supporting_theme_relation_evidence_ids": ["rel-supporting"],
     }]
     monkeypatch.setattr(
         wf, "_sector_first_stage", lambda *a, **k: (panel, None))
@@ -108,6 +112,11 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     assert got[0]["supporting_themes"] == ["算力"]
     assert captured["theme"] == "AI"
     assert captured["theme"] != ctx.theme
+    assert got[0]["membership_snapshot_id"] == "m1"
+    assert got[0]["membership_hash"] == "membership-hash"
+    assert got[0]["primary_theme_relation_evidence_id"] == "rel-primary"
+    assert got[0]["supporting_theme_relation_evidence_ids"] == [
+        "rel-supporting"]
 
 
 def test_dual_rank_default_keeps_run_theme(monkeypatch):

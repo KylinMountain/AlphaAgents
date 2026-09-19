@@ -177,6 +177,27 @@ def test_missing_fund_flow_is_not_zero_fund_flow():
     assert with_zero[0].fund_flow["net_amount_sum"] == 0.0
 
 
+def test_candidate_leave_one_out_cannot_be_improved_by_its_own_price():
+    sessions, bars, membership = _world()
+    kwargs = dict(
+        membership=membership,
+        decision_at="2026-01-30 09:00:00",
+        as_of_session="2026-01-30",
+        sessions=sessions,
+        bars_by_day=bars,
+        market_codes=set(bars["2026-01-30"]),
+    )
+    before = S.candidate_leave_one_out_5d(**kwargs)
+    original = before["AI"]["600001"]
+
+    bars["2026-01-30"]["600001"]["close"] = 1000.0
+    after = S.candidate_leave_one_out_5d(**kwargs)["AI"]["600001"]
+
+    assert after == original
+    assert after["peer_covered"] == 3
+    assert after["peer_total"] == 3
+
+
 def test_ranking_is_stable():
     sessions, bars, membership = _world()
     snapshots = S.build_sector_snapshots(

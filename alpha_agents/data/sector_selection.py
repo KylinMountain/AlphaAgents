@@ -350,12 +350,11 @@ def candidate_leave_one_out_5d(*, membership: MembershipSnapshot,
 
     if market_codes is None:
         market_codes = set(bars_by_day.get(as_of_session, {}))
-    market_5d = _market_returns(
-        bars_by_day=bars_by_day,
-        sessions=sessions,
-        index=index,
-        market_codes=set(market_codes),
-    )[5]
+    market_5d_by_code = {
+        code: _window_return(
+            bars_by_day, sessions, index, code, 5)
+        for code in sorted(set(market_codes))
+    }
 
     out: dict[str, dict[str, dict]] = {}
     for sector_id, raw_codes in sorted(membership.members.items()):
@@ -372,13 +371,21 @@ def candidate_leave_one_out_5d(*, membership: MembershipSnapshot,
                 if peer != code and value is not None
             ]
             median = _median(peers)
+            market_peers = [
+                value for peer, value in market_5d_by_code.items()
+                if peer != code and value is not None
+            ]
+            market_median = _median(market_peers)
             per_code[code] = {
                 "peer_covered": len(peers),
                 "peer_total": max(0, len(codes) - 1),
                 "peer_5d_median_pct": median,
+                "market_peer_covered": len(market_peers),
+                "market_5d_median_ex_candidate_pct": market_median,
                 "peer_relative_5d_pct": (
-                    round(median - market_5d, 6)
-                    if median is not None and market_5d is not None else None
+                    round(median - market_median, 6)
+                    if median is not None and market_median is not None
+                    else None
                 ),
             }
         out[sector_id] = per_code

@@ -471,3 +471,13 @@ M0 尚需确定：本地能验证的历史分类/预期源；统一市场基准�
 - outside shortlist、重复方向、超过 3 个、invalidations 结构错误都会作为 refusal 留下；
 - selector 可复用同一个 ResearchBudget 对象，后续接入股票阶段时总预算可跨两个阶段共享；
 - 本轮仍未切换 incumbent；下一步直接提交 opt-in sector_first_v0 接线和 per-stock primary theme。
+
+
+### 2026-09-19 实施记录：S2 opt-in 主链接线
+
+- walk_forward 新增 selection_architecture=dual_rank_v0/sector_first_v0，默认仍为 dual_rank_v0；
+- sector_first_v0 强制要求 LLM decider 和显式 PIT membership archive；没有历史成员快照直接拒绝，不退回 current concept_stocks；
+- 09:00 路径现在是：PIT sector snapshots → top-8 direction cards → sector selector 选 0..3 → 方向内 round-robin stock panel → 原 T1 stock decider；
+- stock panel 冻结 primary_theme/supporting_themes，真实订单使用股票自己的 primary_theme，不再统一挂 run-level theme；
+- 方向级 ThemeOpportunityJournal 与股票级 OpportunityJournal 同时写入，并在股票 context 中记录 selection_architecture、membership hash、shortlist、selected themes；
+- sector-first close-buy 仍 fail-closed，不能和 agent_exits 同时开启；这是下一阶段单独接线，避免拿 dual-rank close panel 冒充 sector-first。

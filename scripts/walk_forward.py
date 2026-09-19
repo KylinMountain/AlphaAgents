@@ -297,7 +297,8 @@ def _limitations(ctx) -> tuple[str, ...]:
     extra = list(
         LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
     if (ctx.decider == "llm"
-            and getattr(ctx, "selection_architecture", "") == "sector_first_v0"):
+            and getattr(ctx, "selection_architecture", "") in {
+                "sector_first_v0", "sector_first_no_flow"}):
         base = [
             item for item in base
             if "theme is a synthetic line" not in item
@@ -308,7 +309,7 @@ def _limitations(ctx) -> tuple[str, ...]:
             and "one sampled model call per day" not in item
         ]
         extra.extend((
-            "sector_first_v0 uses two sampled model stages at 09:00: direction "
+            f"{ctx.selection_architecture} uses two sampled model stages at 09:00: direction "
             "selection and stock selection; one replay is not a distribution "
             "over either model judgement",
             "sector membership is accepted only from the explicit PIT archive "
@@ -318,6 +319,12 @@ def _limitations(ctx) -> tuple[str, ...]:
             "without an independent trend score, so this window tests "
             "sector-first opportunity construction, not theme-gate alpha",
         ))
+        if ctx.selection_architecture == "sector_first_no_flow":
+            extra += (
+                "direction-level structured fund-flow fields are ablated and "
+                "direction news mentioning flow terms is removed; stock-level "
+                "evidence remains unchanged so D isolates direction discovery",
+            )
     return tuple(base + extra)
 
 
@@ -1386,7 +1393,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
             "sector_first_v0", "sector_first_no_flow"}:
         if phase != "open":
             raise RuntimeError(
-                "sector_first_v0 currently supports the strict 09:00 buy path only")
+                f"{ctx.selection_architecture} currently supports the strict "
+                "09:00 buy path only")
         panel, shared_budget = _sector_first_stage(
             ctx, day, ranking_day, market, news)
     else:
@@ -2267,14 +2275,15 @@ class Context:
                 "sector_first_v0", "sector_first_no_flow"}:
             if args.decider != "llm":
                 raise SystemExit(
-                    "sector_first_v0 requires --decider llm")
+                    f"{self.selection_architecture} requires --decider llm")
             if not self.sector_membership_archive:
                 raise SystemExit(
-                    "sector_first_v0 requires --sector-membership with PIT snapshots")
+                    f"{self.selection_architecture} requires "
+                    "--sector-membership with PIT snapshots")
             if getattr(args, "agent_exits", False):
                 raise SystemExit(
-                    "sector_first_v0 close-buy path is not wired yet; "
-                    "run without --agent-exits")
+                    f"{self.selection_architecture} close-buy path is not "
+                    "wired yet; run without --agent-exits")
         self.participation = args.participation
         self.stop_pct = args.stop_pct
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])

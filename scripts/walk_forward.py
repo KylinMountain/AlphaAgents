@@ -166,9 +166,10 @@ _REPLAY_DIR = _bind_to(_choose_data_dir(sys.argv[1:])) if _RUN_AS_SCRIPT else No
 from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.config import DATA_DIR, PROMPTS_DIR, TRADABLE_PREFIXES  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
-    corpus_access, market_history as mh, market_rules, portfolio as P,
-    portfolio_exit, reservations, sector_membership, sector_panel,
-    sector_selection, selection_policy, t1_settlement as S,
+    corpus_access, frozen_direction_archive, market_history as mh,
+    market_rules, portfolio as P, portfolio_exit, reservations,
+    sector_membership, sector_panel, sector_selection, selection_policy,
+    t1_settlement as S,
 )
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
@@ -905,7 +906,8 @@ def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
     """The stock decider prompt, frozen once per replay window."""
     from alpha_agents.agents import t1_decider
     if selection_architecture in {
-            "sector_first_v0", "sector_first_no_flow"}:
+            "sector_first_v0", "sector_first_simple_selector",
+            "sector_first_no_flow"}:
         return t1_decider.load_prompt(
             PROMPTS_DIR / "t1_decide_sector_first.md")
     return t1_decider.load_prompt()
@@ -2271,8 +2273,13 @@ class Context:
         self.sector_membership_archive = (
             sector_membership.load(membership_path)
             if membership_path is not None else ())
+        frozen_path = getattr(args, "frozen_directions", None)
+        self.frozen_directions = (
+            frozen_direction_archive.load(frozen_path)
+            if frozen_path is not None else None)
         if self.selection_architecture in {
-                "sector_first_v0", "sector_first_no_flow"}:
+                "sector_first_v0", "sector_first_simple_selector",
+                "sector_first_no_flow"}:
             if args.decider != "llm":
                 raise SystemExit(
                     f"{self.selection_architecture} requires --decider llm")
@@ -2280,6 +2287,15 @@ class Context:
                 raise SystemExit(
                     f"{self.selection_architecture} requires "
                     "--sector-membership with PIT snapshots")
+            if self.selection_architecture == "sector_first_simple_selector":
+                if self.frozen_directions is None:
+                    raise SystemExit(
+                        "sector_first_simple_selector requires "
+                        "--frozen-directions exported from the B arm")
+            elif self.frozen_directions is not None:
+                raise SystemExit(
+                    "--frozen-directions is only valid for "
+                    "sector_first_simple_selector")
             if getattr(args, "agent_exits", False):
                 raise SystemExit(
                     f"{self.selection_architecture} close-buy path is not "
@@ -2822,6 +2838,9 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "trader": ctx.trader,
         "theme": ctx.theme,
         "selection_architecture": ctx.selection_architecture,
+        "frozen_directions_hash": (
+            (ctx.frozen_directions or {}).get("archive_hash")
+            if hasattr(ctx, "frozen_directions") else None),
         "picks_per_day": ctx.picks,
         "participation": ctx.participation,
         "stop_pct": ctx.stop_pct,
@@ -3236,12 +3255,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "llm: the model chooses from an as-of panel.")
     parser.add_argument(
         "--selection-architecture",
-        choices=("dual_rank_v0", "sector_first_v0", "sector_first_no_flow"),
+        choices=(
+            "dual_rank_v0", "sector_first_v0",
+            "sector_first_simple_selector", "sector_first_no_flow"),
         default="dual_rank_v0",
         help="candidate architecture; sector-first modes are opt-in only")
     parser.add_argument(
         "--sector-membership", type=Path, default=None,
-        help="PIT membership archive required by sector_first_v0")
+        help="PIT membership archive required by sector-first modes")
+    parser.add_argument(
+        "--frozen-directions", type=Path, default=None,
+        help="B-arm frozen direction archive required by C")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,

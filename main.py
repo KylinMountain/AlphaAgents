@@ -377,9 +377,11 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
     # Shadow experiments: 15:45, trading days only, behind the review so the
     # day's champion picks are final before the challenger is paired against
-    # them. Writes the challenger's forecasts and grades what matured; it never
-    # asks the gate — that is a person's call, and asking daily would only
-    # record the same "insufficient" verdict until the paired count fills. The
+    # them. Writes the challenger's forecasts and grades what matured. It asks
+    # the gate exactly once per experiment -- the day the preregistered paired
+    # sample first reaches the required count -- and never before or after:
+    # approve/promote remains a person's call, and asking daily would only
+    # record the same "insufficient" verdict until the sample fills. The
     # report carries each experiment's paired/needed progress instead.
     scheduler.add_task(Task("shadow_run", run_shadow_run, dtime(15, 45),
                             timeout_seconds=300, catch_up_grace_minutes=90))
@@ -446,6 +448,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             scheduler_task_name = {
                 "morning": "morning_scan", "opening": "opening_reminder",
                 "intraday": "intraday_monitor", "review": "review",
+                "shadow": "shadow_run", "archive": "daily_archive",
                 "night": "night_scan", "weekly": "weekly_report",
             }[task_name]
             try:

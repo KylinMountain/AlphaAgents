@@ -463,6 +463,16 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
             f"{report_type!r}. There is nothing on the challenger side of the "
             "comparison, and a comparison against nothing is not a verdict.")
 
+    # The gene contract, re-asserted here rather than trusted from open time:
+    # a run opened before the rule existed keeps existing in the record, and
+    # "the paired sample filled" is exactly how a stale experiment would try
+    # to become promotable. The producer must execute the genes the version
+    # changed, or the paired comparison is of two copies of the same number.
+    try:
+        shadow.assert_producer_compatible(policy_version_id, run["producer"])
+    except shadow.ShadowError as e:
+        raise GateError(str(e)) from e
+
     champion = forward_window(
         get_scored_predictions(days=_lookback_days(frozen_at, when),
                                report_type=report_type),

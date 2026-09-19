@@ -60,8 +60,16 @@ def experiment(store) -> dict:
                           reason="the incumbent", frozen_at=_day(-30))
     PR.install(version_id=incumbent, actor="kylin", reason="first policy")
     target = PR.freeze(
-        sources=_sources("candidate",
-                         {**scoring.DEFAULT_DECISION_PARAMS, "dim_step": 0.09}),
+        sources=_sources(
+            "candidate",
+            # A change the candidate producer actually executes: it maps the
+            # champion's label through ITS version's confidence_priors, so the
+            # staged change has to live in that block. A staged dim_step or
+            # theme_gate weight would open an experiment whose two arms can
+            # never differ -- the defect the gene contract refuses.
+            {**scoring.DEFAULT_DECISION_PARAMS,
+             "confidence_priors": {"high": 0.62, "medium": 0.53,
+                                   "low": 0.50}}),
         created_by="kylin", reason="a bolder mapping", frozen_at=_day(-30))
     run_id = shadow.open_run(policy_version_id=target, reason="measure it",
                              report_type="morning",
@@ -91,8 +99,9 @@ class TestItFeedsAndGrades:
         assert "写入 1 条预测" in report
         rows = shadow.predictions_for(experiment["run"])
         assert [(r["date"], r["code"]) for r in rows] == [(_day(0), CANDIDATE)]
-        # Its own version's mapping, not the one in force.
-        assert rows[0]["prob"] == pytest.approx(0.58)
+        # Its own version's mapping, not the one in force: the staged prior
+        # (0.62) against the in-force 0.58 is the whole of the experiment.
+        assert rows[0]["prob"] == pytest.approx(0.62)
 
     def test_an_empty_panel_is_reported_not_passed_off_as_quiet(
             self, store, experiment):

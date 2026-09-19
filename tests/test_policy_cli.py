@@ -311,11 +311,19 @@ class TestTheExperimentIsDrivable:
     DAY = "2026-06-02"
 
     def _seed(self, cli, store, capsys):
-        """An incumbent in force, a candidate frozen well in the past."""
+        """An incumbent in force, a candidate frozen well in the past.
+
+        The staged change lives in the confidence_priors block on purpose:
+        the run below binds remap_confidence, whose executed surface is
+        exactly that block. A candidate staged on dim_step or a theme weight
+        is a different version the producer never executes, and the gene
+        contract refuses to open it.
+        """
         assert _freeze(cli, "--at", self.FROZEN_AT) == 0
         assert _install(cli) == 0
-        assert _freeze(cli, "--at", self.FROZEN_AT,
-                       "--decision-json", '{"dim_step": 0.09}') == 0
+        assert _freeze(cli, "--at", self.FROZEN_AT, "--decision-json",
+                       '{"confidence_priors": {"high": 0.62, '
+                       '"medium": 0.53, "low": 0.50}}') == 0
         capsys.readouterr()
         # Read the id back rather than assume it: two freezes of *different*
         # configurations are two versions, and a test that hardcodes "2" would
@@ -391,9 +399,10 @@ class TestTheExperimentIsDrivable:
         assert "wrote 1 forecast(s)" in capsys.readouterr().out
         rows = shadow.predictions_for(1)
         assert [r["code"] for r in rows] == ["600000"]
-        # The version's own mapping, not the one in force.
-        assert rows[0]["prob"] == pytest.approx(
-            scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"])
+        # The version's own mapping, not the one in force: the run's version
+        # stages the high prior at 0.62 against the in-force 0.58, and the
+        # producer remaps the champion's label through ITS version's block.
+        assert rows[0]["prob"] == pytest.approx(0.62)
 
     def test_emitting_before_the_champion_says_so(self, cli, store, capsys):
         """An empty panel is reported, not passed off as a quiet day."""
@@ -449,7 +458,9 @@ class TestTheExperimentIsDrivable:
         verdict-shaped row behind."""
         _freeze(cli)                      # frozen on the kernel clock: today
         _install(cli)
-        assert _freeze(cli, "--decision-json", '{"dim_step": 0.09}') == 0
+        assert _freeze(cli, "--decision-json",
+                       '{"confidence_priors": {"high": 0.62, '
+                       '"medium": 0.53, "low": 0.50}}') == 0
         version = registry.versions_for()[-1]["id"]
         self._open(cli, version)
         capsys.readouterr()

@@ -785,7 +785,13 @@ class TestTheShippedCandidate:
         """
         incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
                               reason="the incumbent", frozen_at="2026-05-01")
-        target = PR.freeze(sources=_sources("target"), created_by="kylin",
+        target_sources = _sources("target")
+        # The change under test has to live on the shipped producer's surface:
+        # it maps labels through ITS version's confidence_priors, so that block
+        # is what a candidate of this producer may differ in.
+        target_sources["decision"]["confidence_priors"] = {
+            "high": 0.66, "medium": 0.55, "low": 0.50}
+        target = PR.freeze(sources=target_sources, created_by="kylin",
                            reason="the candidate", frozen_at=FROZEN_AT)
         PR.install(version_id=incumbent, actor="kylin", reason="first policy")
 

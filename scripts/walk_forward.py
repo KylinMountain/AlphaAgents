@@ -1539,6 +1539,13 @@ def _decide_llm(ctx, day: str, prev_day: str,
             ctx, day, ranking_day, market, news)
     else:
         panel = _build_panel(ctx, day, ranking_day, ctx.panel_size)
+        # A formal A/B/C/D comparison promises one shared research budget.
+        # The incumbent path historically ran without one; keep that behavior
+        # for ordinary dual_rank_v0 runs, but bind the preregistered A arm to
+        # the same finite budget used by the Sector-First stock selector.
+        if getattr(ctx, "experiment_manifest", None) is not None:
+            from alpha_agents.tools.budget import ResearchBudget
+            shared_budget = ResearchBudget()
 
     if phase == "close":
         unavailable = _unavailable_codes(ctx)
@@ -1617,7 +1624,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             phase=phase,
             tools=_trader_tools(ctx),
             max_turns=ctx.max_turns,
-            research_budget=None,
+            research_budget=shared_budget,
         )
 
     try:

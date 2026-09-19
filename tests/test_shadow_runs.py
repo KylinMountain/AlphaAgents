@@ -431,9 +431,12 @@ class TestIsolation:
         after = _dump(store)
         assert set(before) == set(after)
         changed = {name for name in before if before[name] != after[name]}
-        assert changed == {"shadow_runs", "shadow_predictions"}, (
-            f"the challenger changed {sorted(changed)}; it forecasts and is "
-            "graded, and it must not trade")
+        assert changed == {
+            "shadow_manifests", "shadow_runs", "shadow_predictions",
+        }, (
+            f"the challenger changed {sorted(changed)}; only its immutable "
+            "experiment contract and forecast tables may move, never the "
+            "trading book")
 
     def test_a_shadow_run_writes_no_order_position_or_intent(self, store, version):
         run = _open(version)
@@ -763,7 +766,8 @@ class TestCandidateProducerGeneContract:
             "SELECT id FROM shadow_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()["id"]
 
-        with pytest.raises(SH.ShadowError, match=r"theme_gate\.w_rel"):
+        with pytest.raises(
+                SH.ShadowError, match="immutable experiment manifest"):
             SH.emit_for_date(run_id, "2026-02-01", panel=["600000"])
         with pytest.raises(holdout_gate.GateError, match="cannot evaluate"):
             holdout_gate.run_gate(

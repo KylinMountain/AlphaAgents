@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from alpha_agents.config import DATA_DIR  # noqa: E402
+from alpha_agents.data import frozen_direction_archive  # noqa: E402
 from alpha_agents.data import sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
@@ -70,6 +71,18 @@ def _audit(args) -> int:
     return 0
 
 
+def _freeze_directions(args) -> int:
+    payload = frozen_direction_archive.export(run_id=args.run_id)
+    frozen_direction_archive.write(args.out_file, payload)
+    print(json.dumps({
+        "out_file": str(args.out_file),
+        "source_run_id": payload["source_run_id"],
+        "days": len(payload["days"]),
+        "archive_hash": payload["archive_hash"],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _compare(args) -> int:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     arm_dirs = {
@@ -104,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--as-of", required=True)
     audit.add_argument("--out", type=Path, required=True)
 
+    freeze = sub.add_parser("freeze-directions")
+    freeze.add_argument("--run-id", required=True)
+    freeze.add_argument("--out-file", type=Path, required=True)
+
     compare = sub.add_parser("compare")
     compare.add_argument("--manifest", type=Path, required=True)
     compare.add_argument("--arms-dir", type=Path, required=True)
@@ -116,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "audit":
         return _audit(args)
+    if args.cmd == "freeze-directions":
+        return _freeze_directions(args)
     if args.cmd == "compare":
         return _compare(args)
     return _verify(args)

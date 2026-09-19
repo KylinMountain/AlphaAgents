@@ -119,6 +119,12 @@ challenger vs incumbent 的 forward sample。」
   23:40 检查时窗口尚未收口——`score_due` 的 `evidence_window_closed`
   在 09-19 收盘前不会放行。**首次评分最早出现在 09-19 收盘之后。**
 
+**2026-09-19：基因契约生效，run #2/#3 关闭——验收回到未达成。**
+
+- shadow_runs 3 条 closed，10 条 forecast 全部未评分。验收「shadow_runs ≥ 1 且有已评分行」未达成。
+- 原因见 [2026-09-18-shadow-gene-contract.md](2026-09-18-shadow-gene-contract.md)：producer remap_confidence 只执行 confidence_priors，而 version #2/#3 的变化在 theme_gate——配对样本即使填满也是零差异。
+- 重新满足验收的前提：一个真正执行目标位点的 producer，或一个其变化落在 confidence_priors 里的候选版本。选哪条路是下一个决策。
+
 ---
 
 ## P2：消除误导（三件，都便宜）
@@ -209,6 +215,8 @@ challenger vs incumbent 的 forward sample。」
                               run #2/#3 因因果无效被关闭（0 配对样本）。
                               见 2026-09-18-shadow-gene-contract.md
   → ④ concept 前视的消融    ← 下一件：量化，再决定是否修
+  ◦ ② 重开合规 shadow      ← 基因契约生效后 run #2/#3 已关；需绑定覆盖
+                              changed genes 的 producer 再开（与 ④ 并行）
 
 第三批（依赖前两批的结论）
   ①A/B 扩展变异维度          ← 有了 C 的证据才谈调参/加维
@@ -232,8 +240,8 @@ challenger vs incumbent 的 forward sample。」
 - 2026-09-18：⑥⑦ 明确**缓做**并写明触发条件，避免它们以
   "评审提过"为由占用优先位置。
 - 2026-09-18 晚：①C 用**扫描全部 (日, 主题)** 代替"构造"——窗口不是挑
-- 2026-09-19：基因契约插队，commit f61ca8d——shadow 证据须绪累积无效，run #2/#3 关闭（0 配对样本）。
   出来的，是把可重建的每一天都测一遍，翻转带由 `single_step_counterfactual`
   自己判定，扫描器不携带第二份公式。A（加大步长）的决策顺延：位点
   "能否起作用"已由 C 回答（能），"步长多大算对"是收益归因问题，
   等 ② 的前向样本。
+- 2026-09-19：基因契约插队（commit f61ca8d）——shadow 证据因因果无效的积累中止，run #2/#3 关闭（0 配对样本）。② 的验收回到未达成，重开前先决定由谁执行 theme_gate 位点。

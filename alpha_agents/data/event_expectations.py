@@ -97,6 +97,18 @@ def connect(*, readonly: bool = True) -> sqlite3.Connection:
 def init_schema(conn: sqlite3.Connection) -> None:
     for sql in _SCHEMA:
         conn.execute(sql)
+    # Content hashes include event_key/source/timestamps, so these indexes make
+    # provider ingestion safely re-runnable without collapsing distinct
+    # revisions of the same event.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_calendar_content "
+        "ON event_calendar_snapshots(content_hash)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_expectation_content "
+        "ON event_expectation_snapshots(content_hash)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_realization_content "
+        "ON event_realizations(content_hash)")
     for table, label in _GUARDS:
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS {table}_no_update "
@@ -123,13 +135,17 @@ def record_event(*, event_key: str, event_type: str, scope: str, subject: str,
     try:
         init_schema(target)
         with target:
-            cur = target.execute(
-                "INSERT INTO event_calendar_snapshots "
+            digest = _hash(payload)
+            target.execute(
+                "INSERT OR IGNORE INTO event_calendar_snapshots "
                 "(event_key,event_type,scope,subject,scheduled_at,captured_at,"
                 " source,metadata_json,content_hash) VALUES (?,?,?,?,?,?,?,?,?)",
                 (event_key, event_type, scope, subject, scheduled_at,
-                 captured_at, source, _dump(metadata or {}), _hash(payload)))
-            return int(cur.lastrowid)
+                 captured_at, source, _dump(metadata or {}), digest))
+            row = target.execute(
+                "SELECT id FROM event_calendar_snapshots WHERE content_hash=?",
+                (digest,)).fetchone()
+            return int(row["id"])
     finally:
         if close:
             target.close()
@@ -148,15 +164,19 @@ def record_expectation(*, event_key: str, captured_at: str, source: str,
     try:
         init_schema(target)
         with target:
-            cur = target.execute(
-                "INSERT INTO event_expectation_snapshots "
+            digest = _hash(payload)
+            target.execute(
+                "INSERT OR IGNORE INTO event_expectation_snapshots "
                 "(event_key,captured_at,consensus_json,market_implied_json,"
                 " source,content_hash) VALUES (?,?,?,?,?,?)",
                 (event_key, captured_at,
                  _dump(consensus) if consensus is not None else None,
                  _dump(market_implied) if market_implied is not None else None,
-                 source, _hash(payload)))
-            return int(cur.lastrowid)
+                 source, digest))
+            row = target.execute(
+                "SELECT id FROM event_expectation_snapshots WHERE content_hash=?",
+                (digest,)).fetchone()
+            return int(row["id"])
     finally:
         if close:
             target.close()
@@ -174,12 +194,16 @@ def record_realization(*, event_key: str, announced_at: str, actual: dict,
     try:
         init_schema(target)
         with target:
-            cur = target.execute(
-                "INSERT INTO event_realizations "
+            digest = _hash(payload)
+            target.execute(
+                "INSERT OR IGNORE INTO event_realizations "
                 "(event_key,announced_at,actual_json,source,content_hash) "
                 "VALUES (?,?,?,?,?)",
-                (event_key, announced_at, _dump(actual), source, _hash(payload)))
-            return int(cur.lastrowid)
+                (event_key, announced_at, _dump(actual), source, digest))
+            row = target.execute(
+                "SELECT id FROM event_realizations WHERE content_hash=?",
+                (digest,)).fetchone()
+            return int(row["id"])
     finally:
         if close:
             target.close()

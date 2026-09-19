@@ -463,6 +463,14 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
             f"{report_type!r}. There is nothing on the challenger side of the "
             "comparison, and a comparison against nothing is not a verdict.")
 
+    try:
+        shadow.assert_producer_compatible(
+            policy_version_id, run["producer"])
+    except shadow.ShadowError as exc:
+        raise GateError(
+            f"Shadow run #{run['id']} cannot evaluate policy version "
+            f"#{policy_version_id}: {exc}") from exc
+
     champion = forward_window(
         get_scored_predictions(days=_lookback_days(frozen_at, when),
                                report_type=report_type),

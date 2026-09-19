@@ -59,10 +59,18 @@ def experiment(store) -> dict:
     incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
                           reason="the incumbent", frozen_at=_day(-30))
     PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+    priors = {
+        **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+        "high": 0.72,
+    }
+    decision = {
+        **scoring.DEFAULT_DECISION_PARAMS,
+        "confidence_priors": priors,
+    }
     target = PR.freeze(
-        sources=_sources("candidate",
-                         {**scoring.DEFAULT_DECISION_PARAMS, "dim_step": 0.09}),
-        created_by="kylin", reason="a bolder mapping", frozen_at=_day(-30))
+        sources=_sources("incumbent", decision), parent_id=incumbent,
+        created_by="kylin", reason="a bolder confidence mapping",
+        frozen_at=_day(-30))
     run_id = shadow.open_run(policy_version_id=target, reason="measure it",
                              report_type="morning",
                              producer=shadow.CANDIDATE_NAME,
@@ -92,7 +100,7 @@ class TestItFeedsAndGrades:
         rows = shadow.predictions_for(experiment["run"])
         assert [(r["date"], r["code"]) for r in rows] == [(_day(0), CANDIDATE)]
         # Its own version's mapping, not the one in force.
-        assert rows[0]["prob"] == pytest.approx(0.58)
+        assert rows[0]["prob"] == pytest.approx(0.72)
 
     def test_an_empty_panel_is_reported_not_passed_off_as_quiet(
             self, store, experiment):

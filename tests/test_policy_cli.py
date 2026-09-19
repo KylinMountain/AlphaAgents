@@ -314,8 +314,11 @@ class TestTheExperimentIsDrivable:
         """An incumbent in force, a candidate frozen well in the past."""
         assert _freeze(cli, "--at", self.FROZEN_AT) == 0
         assert _install(cli) == 0
-        assert _freeze(cli, "--at", self.FROZEN_AT,
-                       "--decision-json", '{"dim_step": 0.09}') == 0
+        assert _freeze(
+            cli, "--at", self.FROZEN_AT, "--parent-version", "1",
+            "--decision-json",
+            '{"confidence_priors": {"high": 0.72, "medium": 0.60, "low": 0.45}}'
+        ) == 0
         capsys.readouterr()
         # Read the id back rather than assume it: two freezes of *different*
         # configurations are two versions, and a test that hardcodes "2" would
@@ -392,8 +395,7 @@ class TestTheExperimentIsDrivable:
         rows = shadow.predictions_for(1)
         assert [r["code"] for r in rows] == ["600000"]
         # The version's own mapping, not the one in force.
-        assert rows[0]["prob"] == pytest.approx(
-            scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"])
+        assert rows[0]["prob"] == pytest.approx(0.72)
 
     def test_emitting_before_the_champion_says_so(self, cli, store, capsys):
         """An empty panel is reported, not passed off as a quiet day."""

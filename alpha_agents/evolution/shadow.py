@@ -142,6 +142,9 @@ class Producer:
     name: str
     kind: str
     forecast: Callable[[str, str, DecisionContext], float]
+    # Policy genes this producer actually executes while producing the number
+    # the gate grades. A parent path covers all of its leaf genes.
+    observed_genes: frozenset[str] = frozenset()
 
 
 #: The candidate producer's name, registered in :data:`PRODUCERS` below.
@@ -193,10 +196,15 @@ def remap_confidence(date: str, code: str, ctx: DecisionContext) -> float:
 #: frozen simple non-LLM baseline, and §12 forbids treating a model's confidence
 #: in itself as ground truth.
 PRODUCERS: dict[str, Producer] = {
-    BASELINE_NAME: Producer(name=BASELINE_NAME, kind=KIND_BASELINE,
-                            forecast=lambda date, code, ctx: BASELINE_PROB),
-    CANDIDATE_NAME: Producer(name=CANDIDATE_NAME, kind=KIND_CANDIDATE,
-                             forecast=remap_confidence),
+    BASELINE_NAME: Producer(
+        name=BASELINE_NAME, kind=KIND_BASELINE,
+        forecast=lambda date, code, ctx: BASELINE_PROB),
+    CANDIDATE_NAME: Producer(
+        name=CANDIDATE_NAME, kind=KIND_CANDIDATE,
+        forecast=remap_confidence,
+        # dims_passed is None in remap_confidence, so confidence_to_prob takes
+        # only this branch. dim_base/dim_step/theme_gate cannot affect it.
+        observed_genes=frozenset({"decision.confidence_priors"})),
 }
 
 
@@ -223,6 +231,132 @@ def scope_for(producer_name: str) -> str:
         f"Producer {producer_name!r} declares kind {producer.kind!r}, which "
         "this module does not define. A kind nobody defined cannot be read as "
         "either baseline or candidate.")
+
+
+def _flatten_genes(value, prefix: str = "") -> dict[str, object]:
+    """Flatten frozen policy sources into leaf gene paths."""
+    if not isinstance(value, dict):
+        return {prefix: value}
+    out: dict[str, object] = {}
+    for key in sorted(value):
+        child = f"{prefix}.{key}" if prefix else str(key)
+        out.update(_flatten_genes(value[key], child))
+    return out
+
+
+def _reference_version_id(version: dict) -> int | None:
+    """Return the policy version a candidate is compared against."""
+    parent = version.get("parent_id")
+    if parent:
+        return int(parent)
+    pointer = policy_registry.active(version["policy_key"])
+    if pointer and pointer["version_id"] != version["id"]:
+        return int(pointer["version_id"])
+    return None
+
+
+def producer_compatibility(policy_version_id: int,
+                           producer_name: str) -> dict:
+    """Whether a producer executes every frozen source gene that changed.
+
+    A version id proves lineage, not intervention. More samples cannot repair an
+    experiment whose producer never executes the changed policy gene.
+    """
+    producer = PRODUCERS.get(producer_name)
+    if producer is None:
+        return {
+            "compatible": False, "reference_version_id": None,
+            "changed_genes": [], "uncovered_genes": [],
+            "reason": f"producer {producer_name!r} is not registered",
+        }
+    if producer.kind == KIND_BASELINE:
+        return {
+            "compatible": True, "reference_version_id": None,
+            "changed_genes": [], "uncovered_genes": [], "reason": "baseline",
+        }
+
+    version = policy_registry.get_version(policy_version_id)
+    if version is None:
+        return {
+            "compatible": False, "reference_version_id": None,
+            "changed_genes": [], "uncovered_genes": [],
+            "reason": f"policy version #{policy_version_id} does not exist",
+        }
+
+    reference_id = _reference_version_id(version)
+    if reference_id is None:
+        return {
+            "compatible": False, "reference_version_id": None,
+            "changed_genes": [], "uncovered_genes": [],
+            "reason": (
+                f"policy version #{policy_version_id} has neither an explicit "
+                "parent nor a distinct incumbent. The experiment cannot "
+                "establish what changed, so candidate-grade evidence would be "
+                "a version label without an intervention."),
+        }
+
+    before_sources = policy_registry.sources_of(reference_id)
+    after_sources = policy_registry.sources_of(policy_version_id)
+    if not before_sources or not after_sources:
+        return {
+            "compatible": False, "reference_version_id": reference_id,
+            "changed_genes": [], "uncovered_genes": [],
+            "reason": (
+                f"policy version #{policy_version_id} or its reference "
+                f"#{reference_id} has no frozen sources to diff."),
+        }
+
+    before = _flatten_genes(before_sources)
+    after = _flatten_genes(after_sources)
+    missing = object()
+    changed = sorted(
+        key for key in (set(before) | set(after))
+        if before.get(key, missing) != after.get(key, missing)
+    )
+    if not changed:
+        return {
+            "compatible": False, "reference_version_id": reference_id,
+            "changed_genes": [], "uncovered_genes": [],
+            "reason": (
+                f"policy version #{policy_version_id} has no changed gene "
+                f"relative to reference version #{reference_id}; a candidate "
+                "shadow would compare a policy with itself."),
+        }
+
+    def observed(gene: str) -> bool:
+        return any(
+            gene == scope or gene.startswith(scope + ".")
+            for scope in producer.observed_genes
+        )
+
+    uncovered = [gene for gene in changed if not observed(gene)]
+    if uncovered:
+        return {
+            "compatible": False, "reference_version_id": reference_id,
+            "changed_genes": changed, "uncovered_genes": uncovered,
+            "reason": (
+                f"producer {producer_name!r} cannot evaluate policy version "
+                f"#{policy_version_id}: changed gene(s) "
+                f"{', '.join(uncovered)} are outside its observed genes "
+                f"{sorted(producer.observed_genes)}. A verdict would grade a "
+                "policy change the producer never executed."),
+        }
+
+    return {
+        "compatible": True, "reference_version_id": reference_id,
+        "changed_genes": changed, "uncovered_genes": [],
+        "reason": "all changed genes are observed by the producer",
+    }
+
+
+def assert_producer_compatible(policy_version_id: int,
+                               producer_name: str) -> dict:
+    """Return the experiment contract or refuse before evidence is written."""
+    result = producer_compatibility(policy_version_id, producer_name)
+    if not result["compatible"]:
+        raise ShadowError(result["reason"])
+    return result
+
 
 
 def prob_coverage(report_type: str, *, days: int = 30,
@@ -423,6 +557,7 @@ def open_run(*, policy_version_id: int, reason: str,
         raise ShadowError(
             f"No policy version #{policy_version_id} to shadow: a run that "
             "cannot name the policy it is measuring could never be promoted.")
+    assert_producer_compatible(policy_version_id, producer)
     # Refuse a book that can never be paired, before writing the run row.
     # Checked here rather than in the CLI so both doors — the scheduled task
     # and ``scripts/policy.py`` — get the same answer.
@@ -641,6 +776,9 @@ def emit_for_date(run_id: int, date: str, *,
             "is not registered. Nothing can emit its forecasts: a row written "
             "by a producer the run does not name would be graded as the run's "
             "own, and its verdict would describe evidence it never produced.")
+    # Legacy runs can predate the contract; do not let them accumulate more
+    # evidence once their intervention is known to be unevaluable.
+    assert_producer_compatible(run["policy_version_id"], run["producer"])
     if panel is None:
         panel = panel_for(date, run["report_type"])
     declared = champion_horizons(date, run["report_type"]) if horizon_days is None \
@@ -915,6 +1053,11 @@ def integrity() -> list[str]:
             problems.append(
                 f"shadow run #{run['id']} measures policy version "
                 f"#{run['policy_version_id']}, which does not exist")
+            continue
+        try:
+            assert_producer_compatible(run["policy_version_id"], run["producer"])
+        except ShadowError as exc:
+            problems.append(f"shadow run #{run['id']} is not evaluable: {exc}")
     for row in conn.execute(
             "SELECT s.id, s.run_id, s.policy_version_id FROM shadow_predictions s "
             "LEFT JOIN shadow_runs r ON r.id = s.run_id "

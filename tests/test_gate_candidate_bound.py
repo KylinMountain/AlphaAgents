@@ -548,7 +548,9 @@ def candidate(monkeypatch) -> str:
     """
     monkeypatch.setitem(SH.PRODUCERS, CANDIDATE, SH.Producer(
         name=CANDIDATE, kind=SH.KIND_CANDIDATE,
-        forecast=lambda date, code, ctx: 0.30))
+        forecast=lambda date, code, ctx: float(
+            ctx.params["confidence_priors"]["high"]),
+        observed_genes=frozenset({"decision.confidence_priors"})))
     return CANDIDATE
 
 
@@ -613,34 +615,54 @@ class TestTheScopeBelongsToTheProducer:
         stored = HG.get_gate_decisions(policy_version_id=frozen)[0]
         assert stored["evidence_scope"] == SH.BASELINE_ONLY_SCOPE
 
-    def test_a_candidate_verdict_is_promotable_grade(self, store, bare,
+    def test_a_candidate_verdict_is_promotable_grade(self, store,
                                                      candidate, monkeypatch):
-        run_id = SH.open_run(policy_version_id=bare, reason="the candidate",
+        incumbent = PR.freeze(
+            sources=_sources("same"), created_by="kylin",
+            reason="incumbent", frozen_at="2026-05-01")
+        PR.install(version_id=incumbent, actor="kylin", reason="first")
+        priors = {
+            **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+            "high": 0.72,
+        }
+        decision = {
+            **scoring.DEFAULT_DECISION_PARAMS,
+            "confidence_priors": priors,
+        }
+        target = PR.freeze(
+            sources=_with_decision("same", decision), parent_id=incumbent,
+            created_by="kylin", reason="candidate", frozen_at=FROZEN_AT)
+        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
                              report_type=REPORT, producer=candidate,
                              opened_at=FROZEN_AT)
         _emit_and_grade(store, run_id, monkeypatch)
-        got = _run(bare)
+        got = _run(target)
         assert got["evidence_scope"] == PR.SCOPE_CANDIDATE
-        stored = HG.get_gate_decisions(policy_version_id=bare)[0]
+        stored = HG.get_gate_decisions(policy_version_id=target)[0]
         assert stored["evidence_scope"] == PR.SCOPE_CANDIDATE
 
 
 class TestTheWholePathIsReachable:
-    """Acceptance B13 — and the boundary of what it proves.
-
-    The market data is synthetic: ``_grade_challenger`` stubs the grading, as
-    every test in this file does. The shape is not. A registered producer
-    emits real rows into ``shadow_predictions``, the gate computes the verdict
-    and its scope, a person approves, and the pointer moves.
-    """
+    """A candidate can move the pointer only after a valid experiment."""
 
     def test_from_a_candidate_run_to_a_moved_pointer(self, store, candidate,
                                                      monkeypatch):
-        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
-                              reason="the incumbent", frozen_at="2026-05-01")
-        target = PR.freeze(sources=_sources("candidate"), created_by="kylin",
-                           reason="the candidate", frozen_at=FROZEN_AT)
+        incumbent = PR.freeze(
+            sources=_sources("same"), created_by="kylin",
+            reason="the incumbent", frozen_at="2026-05-01")
         PR.install(version_id=incumbent, actor="kylin", reason="first policy")
+        priors = {
+            **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+            "high": 0.72,
+        }
+        decision = {
+            **scoring.DEFAULT_DECISION_PARAMS,
+            "confidence_priors": priors,
+        }
+        target_sources = _with_decision("same", decision)
+        target = PR.freeze(
+            sources=target_sources, parent_id=incumbent,
+            created_by="kylin", reason="the candidate", frozen_at=FROZEN_AT)
         assert PR.active()["version_id"] == incumbent
 
         run_id = SH.open_run(policy_version_id=target, reason="the candidate",
@@ -656,32 +678,40 @@ class TestTheWholePathIsReachable:
         assert stored["evidence_scope"] == PR.SCOPE_CANDIDATE
         PR.approve(version_id=target, approved_by="a-person",
                    reason="beat the champion on a paired panel",
-                   gate_decision=stored, sources=_sources("candidate"),
-                   at=ASKED_ON)
+                   gate_decision=stored, sources=target_sources, at=ASKED_ON)
         assert PR.active()["version_id"] == incumbent, "approval moved it"
 
         PR.promote(version_id=target, actor="a-person", reason="approved",
-                   sources=_sources("candidate"), expected_seq=1)
+                   sources=target_sources, expected_seq=1)
         assert PR.active()["version_id"] == target
 
 
 class TestAnAmbiguousGateQuestionIsRefused:
-    """The gate grades one challenger; two open runs is a question, not a run.
+    """The gate refuses two challengers instead of silently picking one."""
 
-    Latent while the baseline was the only producer, and reachable the moment
-    a second one is registered. Resolving it by taking the oldest would be
-    silent, and the verdict would describe a comparison the reader has no
-    reason to think was chosen — D7's shape, one level down. So it is refused.
-    """
-
-    def test_two_open_shadows_of_one_version_are_refused(self, store, bare,
+    def test_two_open_shadows_of_one_version_are_refused(self, store,
                                                          candidate):
-        SH.open_run(policy_version_id=bare, reason="a baseline reference",
+        incumbent = PR.freeze(
+            sources=_sources("same"), created_by="kylin",
+            reason="incumbent", frozen_at="2026-05-01")
+        PR.install(version_id=incumbent, actor="kylin", reason="first")
+        priors = {
+            **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+            "high": 0.72,
+        }
+        target = PR.freeze(
+            sources=_with_decision(
+                "same",
+                {**scoring.DEFAULT_DECISION_PARAMS,
+                 "confidence_priors": priors}),
+            parent_id=incumbent, created_by="kylin",
+            reason="candidate", frozen_at=FROZEN_AT)
+        SH.open_run(policy_version_id=target, reason="a baseline reference",
                     report_type=REPORT, opened_at=FROZEN_AT)
-        SH.open_run(policy_version_id=bare, reason="the candidate",
+        SH.open_run(policy_version_id=target, reason="the candidate",
                     report_type=REPORT, producer=candidate, opened_at=FROZEN_AT)
         with pytest.raises(HG.GateError, match="shadow runs are open"):
-            _run(bare)
+            _run(target)
 
     def test_one_open_shadow_is_answered_not_refused(self, store, bare):
         SH.open_run(policy_version_id=bare, reason="the only one",
@@ -694,59 +724,55 @@ class TestAnAmbiguousGateQuestionIsRefused:
 
 
 def _with_decision(tag: str, block: dict) -> dict:
-    """A configuration whose *decision parameters* are the thing that differs."""
+    """A configuration whose decision parameters are the thing that differs."""
     return {**_sources(tag), "decision": block}
 
 
 class TestTheShippedCandidate:
-    """The first candidate this build has, and the two things it must not be.
+    """The shipped candidate must read the exact gene its contract declares."""
 
-    It exists so that a verdict can be promotable at all. What makes it worth
-    testing is that it reads the version its run is bound to: same day, same
-    codes, same upstream signal, two versions → two forecasts. Without that it
-    would be a second constant, and "promote version N" would still change
-    nothing. What keeps it honest is that it never reads the champion's
-    probability — the number the verdict grades.
-    """
+    def _target(self, *, high=0.72):
+        incumbent = PR.freeze(
+            sources=_sources("same"), created_by="kylin",
+            reason="the incumbent", frozen_at="2026-05-01")
+        PR.install(version_id=incumbent, actor="kylin", reason="first")
+        priors = {
+            **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+            "high": high,
+        }
+        decision = {
+            **scoring.DEFAULT_DECISION_PARAMS,
+            "confidence_priors": priors,
+        }
+        target = PR.freeze(
+            sources=_with_decision("same", decision), parent_id=incumbent,
+            created_by="kylin", reason="candidate", frozen_at=FROZEN_AT)
+        return incumbent, target
 
     def test_it_maps_the_champions_signal_through_its_versions_block(
             self, store):
-        bolder = {**scoring.DEFAULT_DECISION_PARAMS,
-                  "confidence_priors": {"high": 0.72, "medium": 0.60,
-                                        "low": 0.45}}
-        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
-                              reason="the incumbent", frozen_at=FROZEN_AT)
-        target = PR.freeze(sources=_with_decision("candidate", bolder),
-                           created_by="kylin", reason="a bolder mapping",
-                           frozen_at=FROZEN_AT)
-        _champion(store, "2026-06-02", "A", 0.30)      # recorded as "high"
+        incumbent, target = self._target()
+        incumbent_ctx = SH.DecisionContext(
+            policy_version_id=incumbent, report_type=REPORT,
+            params=scoring.decision_params_of(incumbent),
+            signals={"A": "high"})
+        assert SH.remap_confidence(
+            "2026-06-02", "A", incumbent_ctx) == pytest.approx(0.58)
 
-        got = {}
-        for version in (incumbent, target):
-            run_id = SH.open_run(policy_version_id=version, reason="measure it",
-                                 report_type=REPORT,
-                                 producer=SH.CANDIDATE_NAME,
-                                 opened_at=FROZEN_AT)
-            SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
-            got[version] = SH.predictions_for(run_id)[0]["prob"]
-
-        assert got[incumbent] == pytest.approx(0.58)
-        assert got[target] == pytest.approx(0.72), \
-            "the run's own version has to decide the forecast"
+        _champion(store, "2026-06-02", "A", 0.30)
+        run_id = SH.open_run(
+            policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,
+            opened_at=FROZEN_AT)
+        SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
+        assert SH.predictions_for(run_id)[0]["prob"] == pytest.approx(0.72)
 
     def test_it_does_not_read_the_champions_probability(self, store):
-        """The one input it must not take.
-
-        A candidate computed from the champion's probability would be graded
-        against a mapping of itself, and that probability is the number the
-        verdict is about. Nothing here says so in a comment: the champion's
-        ``prob`` is changed and the candidate's forecast must not move.
-        """
-        version = PR.freeze(sources=_sources("v"), created_by="kylin",
-                            reason="the version", frozen_at=FROZEN_AT)
-        run_id = SH.open_run(policy_version_id=version, reason="measure it",
-                             report_type=REPORT, producer=SH.CANDIDATE_NAME,
-                             opened_at=FROZEN_AT)
+        _, target = self._target()
+        run_id = SH.open_run(
+            policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,
+            opened_at=FROZEN_AT)
         _champion(store, "2026-06-02", "A", 0.30)
         SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
         before = SH.predictions_for(run_id)[0]["prob"]
@@ -756,42 +782,28 @@ class TestTheShippedCandidate:
         SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
         after = SH.predictions_for(run_id)[0]["prob"]
 
-        expected = scoring.DEFAULT_DECISION_PARAMS["confidence_priors"]["high"]
-        assert before == pytest.approx(expected)
-        assert after == before == pytest.approx(expected)
+        assert before == pytest.approx(0.72)
+        assert after == before
 
     def test_a_code_with_no_recorded_label_falls_to_a_coin_flip(self, store):
-        """Unknown is 0.5 everywhere else, and it stays in the panel: dropping
-        it would be a coverage decision made silently, and ``coverage()`` is
-        where that belongs."""
-        version = PR.freeze(sources=_sources("v"), created_by="kylin",
-                            reason="the version", frozen_at=FROZEN_AT)
-        run_id = SH.open_run(policy_version_id=version, reason="measure it",
-                             report_type=REPORT, producer=SH.CANDIDATE_NAME,
-                             opened_at=FROZEN_AT)
-        SH.emit_for_date(run_id, "2026-06-02", panel=["NOBODY_FORECAST_THIS"])
+        _, target = self._target()
+        run_id = SH.open_run(
+            policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,
+            opened_at=FROZEN_AT)
+        SH.emit_for_date(run_id, "2026-06-02",
+                         panel=["NOBODY_FORECAST_THIS"])
         rows = SH.predictions_for(run_id)
         assert len(rows) == 1
         assert rows[0]["prob"] == pytest.approx(0.5)
 
     def test_the_shipped_candidate_reaches_a_promotable_verdict(
             self, store, monkeypatch):
-        """The closed loop, on the real producer rather than a temporary one.
-
-        ``TestTheWholePathIsReachable`` does the same walk with a stubbed
-        constant forecast. This is the same path with the producer the build
-        actually ships, which is the difference between "the path exists" and
-        "the path is the one that runs".
-        """
-        incumbent = PR.freeze(sources=_sources("incumbent"), created_by="kylin",
-                              reason="the incumbent", frozen_at="2026-05-01")
-        target = PR.freeze(sources=_sources("target"), created_by="kylin",
-                           reason="the candidate", frozen_at=FROZEN_AT)
-        PR.install(version_id=incumbent, actor="kylin", reason="first policy")
-
-        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
-                             report_type=REPORT,
-                             producer=SH.CANDIDATE_NAME, opened_at=FROZEN_AT)
+        incumbent, target = self._target()
+        run_id = SH.open_run(
+            policy_version_id=target, reason="the candidate",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,
+            opened_at=FROZEN_AT)
         _emit_and_grade(store, run_id, monkeypatch)
 
         got = _run(target)
@@ -799,3 +811,4 @@ class TestTheShippedCandidate:
         assert got["outcome"] == "promote"
         assert got["validation_days"] >= 20
         assert PR.active()["version_id"] == incumbent, "a verdict moves nothing"
+

@@ -446,6 +446,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
             scheduler_task_name = {
                 "morning": "morning_scan", "opening": "opening_reminder",
                 "intraday": "intraday_monitor", "review": "review",
+                "shadow": "shadow_run", "archive": "daily_archive",
                 "night": "night_scan", "weekly": "weekly_report",
             }[task_name]
             try:

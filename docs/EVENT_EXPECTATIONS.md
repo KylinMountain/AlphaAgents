@@ -200,9 +200,48 @@ Policy variants
 
 如果 replay 在公告前能看见 actual，整个 Dream evidence 作废。
 
+## 数据源发现：先探测，不先判定“有没有历史”
+
+这里不把任何 provider 简化成“有历史 / 没历史”。需要区分至少四件事：
+
+1. **历史事件本身**是否存在；
+2. **公告时间**是否足够精确，可以做 point-in-time 截断；
+3. **一致预期是否保存了历史版本（vintage）**，还是只返回今天看到的最新值；
+4. 本地账号/积分/权限是否真的能调到需要的字段与时间跨度。
+
+当前值得优先探测的候选包括：
+
+- **Tushare forecast / forecast_vip**：官方文档明确提供业绩预告历史，并带
+  ann_date / first_ann_date；
+- **Tushare express / fina_indicator / disclosure_date**：可补实际结果、
+  财务指标和披露计划；
+- **Tushare 券商（卖方）盈利预测特色数据**：官方资料称数据从 2010 年开始，
+  这很可能比“从今天开始自己 snapshot”更有价值，但必须在本地验证接口名、
+  字段、报告发布日期、是否保留 revision/vintage，以及账号权限；
+- **AKShare** 的业绩预告、业绩快报、业绩报告、盈利预测相关接口；
+- **已有本地 SQLite / 抓取归档**：优先看是否已经保存公告时间、研报时间或历史
+  consensus，不重复拉一份相同数据。
+
+因此实现里要有一个 **source probe**，输出 capability，而不是把 provider 名称
+硬编码成结论：
+
+```text
+source
+dataset
+available
+history_start
+time_field
+revision_key
+point_in_time_grade
+permission / error
+sample_fields
+```
+
+只有通过 probe 的数据才进入 Event Expectations ingest。
+
 ## 当前立即可做的版本
 
-在完整数据源接入前，T1 Trader 已经有：
+在 provider probe 完成前，T1 Trader 已经有：
 
 - 新闻窗口；
 - `get_stock_context` 的 5/20/60 日位置与资金；
@@ -217,7 +256,8 @@ Policy variants
 
 **新闻标题 → 买卖。**
 
-但必须明确：没有 consensus 数据时，“priced in”只能是假设，不能当事实。
+如果某次决策没有 point-in-time consensus，Trader 必须把“priced in”写成假设；
+但这不等于断言数据源没有历史，是否存在历史版本由 probe 决定。
 
 ## 实现顺序
 

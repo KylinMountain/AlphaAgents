@@ -66,6 +66,34 @@ def _journal(store):
         conn=store)
 
 
+def _journal_sector(store, *, preselected):
+    return OJ.record_decision(
+        run_id="sector-r1", trader_id="t1", day="2026-01-05", phase="open",
+        information_cutoff="2026-01-05 09:00:00",
+        panel=[
+            {"code": "600001", "change_pct": 3.0, "turnover_rate": 5.0,
+             "primary_theme": "AI"},
+            {"code": "600002", "change_pct": 2.0, "turnover_rate": 9.0,
+             "primary_theme": "AI"},
+            {"code": "600003", "change_pct": 1.0, "turnover_rate": 2.0,
+             "primary_theme": "AI"},
+        ],
+        orders=[{"code": "600001", "reason": "planner accepted"}],
+        refusals=[],
+        research={"deep_dive_names": ["600001", "600002"]},
+        parse_error=None,
+        raw="{}",
+        context={
+            "run_theme": "AI",
+            "ranking_day": "2026-01-02",
+            "selection_architecture": "sector_first_v0",
+            "stock_preselection": preselected,
+            "stock_preselection_mode": "llm",
+            "planner_panel": preselected,
+        },
+        conn=store)
+
+
 def test_sweep_waits_for_complete_horizon_and_labels_all_items(store, history):
     _journal(store)
     got = OO.sweep(conn=store, history_conn=history)
@@ -117,3 +145,44 @@ def test_outcome_history_is_append_only(store, history):
     with pytest.raises(sqlite3.DatabaseError):
         store.execute(
             "UPDATE opportunity_outcomes SET code='x' WHERE id=1")
+
+
+
+def test_preselection_skill_is_separate_from_final_order(store, history):
+    _journal_sector(store, preselected=["600001", "600002"])
+    OO.sweep(conn=store, history_conn=history)
+    world = DW.build_opportunity_world(
+        start="2026-01-01", end="2026-01-31",
+        run_id="sector-r1", conn=store)
+    got = DS.preselection_skill(world, horizon=5)
+
+    assert got["available"] is True
+    assert got["preselected"]["n"] == 2
+    assert got["planner_acceptance_rate"] == 0.5
+    assert got["planner_rejected_preselection"]["n"] == 1
+    assert got["preselection_lift_vs_panel_mean"] > 0
+
+
+def test_explicit_empty_preselection_is_abstention_not_missing(store, history):
+    _journal_sector(store, preselected=[])
+    OO.sweep(conn=store, history_conn=history)
+    world = DW.build_opportunity_world(
+        start="2026-01-01", end="2026-01-31",
+        run_id="sector-r1", conn=store)
+    got = DS.preselection_skill(world, horizon=5)
+
+    assert got["available"] is True
+    assert got["abstained_sets"] == 1
+    assert got["missing_context_sets"] == 0
+
+
+def test_legacy_world_reports_preselection_unavailable(store, history):
+    _journal(store)
+    OO.sweep(conn=store, history_conn=history)
+    world = DW.build_opportunity_world(
+        start="2026-01-01", end="2026-01-31", conn=store)
+    got = DS.stock_layer_report(world, horizon=5)
+
+    assert got["preselection_skill"]["available"] is False
+    assert got["final_order_skill"]["selected"]["n"] == 1
+    assert got["promotion_eligible"] is False

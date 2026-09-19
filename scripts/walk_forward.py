@@ -897,7 +897,8 @@ def _book_and_knowledge(ctx, day: str,
 def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
     """The stock decider prompt, frozen once per replay window."""
     from alpha_agents.agents import t1_decider
-    if selection_architecture == "sector_first_v0":
+    if selection_architecture in {
+            "sector_first_v0", "sector_first_no_flow"}:
         return t1_decider.load_prompt(
             PROMPTS_DIR / "t1_decide_sector_first.md")
     return t1_decider.load_prompt()
@@ -1164,6 +1165,10 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
         raise ValueError(f"ranking day {ranking_day} is outside the corpus")
     sessions = ctx.corpus.days[max(0, index - 20):index + 1]
     bars_by_day = {session: ctx.corpus.bars(session) for session in sessions}
+    flow = (
+        None if ctx.selection_architecture == "sector_first_no_flow"
+        else _fund_flow_map(ctx, ranking_day)
+    )
     snapshots = sector_selection.build_sector_snapshots(
         membership=membership,
         decision_at=cutoff,
@@ -1171,7 +1176,7 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
         sessions=sessions,
         bars_by_day=bars_by_day,
         market_codes=set(ctx.corpus.bars(ranking_day)),
-        fund_flow_by_code=_fund_flow_map(ctx, ranking_day),
+        fund_flow_by_code=flow,
         strict_pit=True,
     )
     ranked = sector_selection.rank_sector_snapshots(snapshots)
@@ -1256,6 +1261,25 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
     return panel
 
 
+_FLOW_NEWS_TERMS = (
+    "主力资金", "资金净流入", "资金流向", "净流入", "净买入",
+    "北向资金", "南向资金",
+)
+
+
+def _direction_news(ctx, news: list[dict]) -> list[dict]:
+    """The D arm cannot read structured flow back through direction news."""
+    if ctx.selection_architecture != "sector_first_no_flow":
+        return news
+    out = []
+    for row in news:
+        text = f"{row.get('title') or ''} {row.get('content') or ''}"
+        if any(term in text for term in _FLOW_NEWS_TERMS):
+            continue
+        out.append(row)
+    return out
+
+
 def _sector_first_stage(ctx, day: str, ranking_day: str,
                         market: dict, news: list[dict]) -> tuple[list[dict], object]:
     """Select directions, journal them, then materialize the stock panel."""
@@ -1270,7 +1294,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
         as_of_session=ranking_day,
         sectors=shortlist,
         market=market,
-        news=news,
+        news=_direction_news(ctx, news),
         model=ctx.model,
         loop=ctx.loop,
         tools=[],
@@ -1297,7 +1321,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
             day=day,
             phase="open",
             information_cutoff=cutoff,
-            architecture="sector_first_v0",
+            architecture=ctx.selection_architecture,
             snapshots=cards,
             shortlist=[row["sector_id"] for row in shortlist],
             selected=selected,
@@ -1336,7 +1360,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
             status="watching",
             strength=3,
             daily_score=1,
-            catalyst="sector_first_v0 selected direction",
+            catalyst=f"{ctx.selection_architecture} selected direction",
             notes=f"PIT membership snapshot {membership.snapshot_id}",
         )
     ctx.counters["sector_selected"] += len(selected)
@@ -1358,7 +1382,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ctx.last_sector_context = {}
     shared_budget = None
-    if ctx.selection_architecture == "sector_first_v0":
+    if ctx.selection_architecture in {
+            "sector_first_v0", "sector_first_no_flow"}:
         if phase != "open":
             raise RuntimeError(
                 "sector_first_v0 currently supports the strict 09:00 buy path only")
@@ -2238,7 +2263,8 @@ class Context:
         self.sector_membership_archive = (
             sector_membership.load(membership_path)
             if membership_path is not None else ())
-        if self.selection_architecture == "sector_first_v0":
+        if self.selection_architecture in {
+                "sector_first_v0", "sector_first_no_flow"}:
             if args.decider != "llm":
                 raise SystemExit(
                     "sector_first_v0 requires --decider llm")
@@ -3201,9 +3227,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "llm: the model chooses from an as-of panel.")
     parser.add_argument(
         "--selection-architecture",
-        choices=("dual_rank_v0", "sector_first_v0"),
+        choices=("dual_rank_v0", "sector_first_v0", "sector_first_no_flow"),
         default="dual_rank_v0",
-        help="candidate architecture; sector_first_v0 is opt-in only")
+        help="candidate architecture; sector-first modes are opt-in only")
     parser.add_argument(
         "--sector-membership", type=Path, default=None,
         help="PIT membership archive required by sector_first_v0")

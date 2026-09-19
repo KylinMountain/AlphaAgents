@@ -56,6 +56,10 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
     meta = {
         "run_id": f"run-{arm}",
         "selection_architecture": architecture,
+        "experiment_arm": arm,
+        "experiment_manifest_hash": E.require_valid(_manifest()),
+        "frozen_directions_hash": (
+            "frozen-b-directions" if arm == "C" else None),
         "window": {
             "start": "2026-01-01",
             "end": "2026-03-31",
@@ -163,3 +167,24 @@ def test_incomplete_cluster_file_is_not_treated_as_safe(tmp_path):
     assert got["status"] == "insufficient"
     assert "max_theme_cluster_exposure_pct" in (
         got["arms"]["B"]["risk"]["unverified"])
+
+
+
+def test_mismatched_manifest_hash_is_refused(tmp_path):
+    arms = _arms(tmp_path)
+    path = arms["D"] / "run.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["experiment_manifest_hash"] = "wrong"
+    path.write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(C.SectorCompareError, match="binding mismatch"):
+        C.compare(manifest=_manifest(), arm_dirs=arms)
+
+
+def test_c_without_frozen_direction_hash_is_refused(tmp_path):
+    arms = _arms(tmp_path)
+    path = arms["C"] / "run.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["frozen_directions_hash"] = None
+    path.write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(C.SectorCompareError, match="frozen_directions_hash"):
+        C.compare(manifest=_manifest(), arm_dirs=arms)

@@ -358,6 +358,19 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         for arm in arms
     }
 
+    operational_summary = {
+        arm: {
+            "budget": {
+                "agent_tool_calls": value["agent_tool_calls"],
+                "model_calls_made": value["model_calls_made"],
+            },
+            "decision_counters": value["decider_counters"],
+            "coverage": value["capability_matrix"],
+            "errors": value["errors"],
+        }
+        for arm, value in arms.items()
+    }
+
     reasons = []
     if observed_days < minimum_days:
         reasons.append(
@@ -391,10 +404,10 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
                 "experiment_manifest_hash":
                     value["experiment_manifest_hash"],
                 "portfolio": value["portfolio"],
-                "budget": {
-                    "agent_tool_calls": value["agent_tool_calls"],
-                    "model_calls_made": value["model_calls_made"],
-                },
+                "budget": operational_summary[arm]["budget"],
+                "decision_counters":
+                    operational_summary[arm]["decision_counters"],
+                "coverage": operational_summary[arm]["coverage"],
                 "layers": {
                     "direction": value["layers"]["direction"],
                     "stock": value["layers"]["stock"],
@@ -410,6 +423,7 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
             for arm, value in arms.items()
         },
         "paired_daily": pairings,
+        "operational_summary": operational_summary,
         "evidence_status": {
             "data": data_status,
             "statistics": statistical_status,

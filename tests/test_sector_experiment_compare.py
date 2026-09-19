@@ -86,8 +86,11 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
     if exposure:
         _write_csv(
             root / "theme_exposure.csv",
-            ["max_theme_cluster_exposure_pct"],
-            [{"max_theme_cluster_exposure_pct": 25.0}],
+            ["complete", "max_theme_cluster_exposure_pct"],
+            [{
+                "complete": 1,
+                "max_theme_cluster_exposure_pct": 25.0,
+            }],
         )
     (root / "direction_report.json").write_text(
         json.dumps({"sets": 60}), encoding="utf-8")
@@ -145,3 +148,18 @@ def test_window_must_be_preregistered(tmp_path):
         path.write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(C.SectorCompareError, match="preregistered"):
         C.compare(manifest=_manifest(), arm_dirs=arms)
+
+
+
+def test_incomplete_cluster_file_is_not_treated_as_safe(tmp_path):
+    arms = _arms(tmp_path)
+    path = arms["B"] / "theme_exposure.csv"
+    _write_csv(
+        path,
+        ["complete", "max_theme_cluster_exposure_pct"],
+        [{"complete": 0, "max_theme_cluster_exposure_pct": 5.0}],
+    )
+    got = C.compare(manifest=_manifest(), arm_dirs=arms)
+    assert got["status"] == "insufficient"
+    assert "max_theme_cluster_exposure_pct" in (
+        got["arms"]["B"]["risk"]["unverified"])

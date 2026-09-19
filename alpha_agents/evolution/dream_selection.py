@@ -210,21 +210,10 @@ def _policy_panel(group, *, params: dict, history_conn) -> list[str]:
     if not pool or limit <= 0 or not ranking_day:
         return []
 
-    ordered = selection_policy.rank_candidate_rows(
-        pool, limit=limit, params=params)
-    chosen = []
-    seen = set()
-    for row in ordered:
-        code = str(row["code"])
-        if code in seen:
-            continue
-        seen.add(code)
-        if _adv20(history_conn, code, ranking_day) is None:
-            continue
-        chosen.append(code)
-        if len(chosen) >= limit:
-            break
-    return chosen
+    return selection_policy.materialize_codes(
+        pool, limit=limit, params=params,
+        eligible=lambda code: (
+            (_adv20(history_conn, code, ranking_day) or 0) > 0))
 
 
 def panel_policy_counterfactual(

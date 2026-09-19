@@ -85,14 +85,31 @@ def weighted_merge(change_ranked: list, turnover_ranked: list, *,
 
 def candidate_pool_rows(by_change: list[tuple], by_turnover: list[tuple],
                         *, lane_depth: int) -> list[dict]:
-    """The fixed pre-panel world a ranking variant is allowed to replay."""
-    rows = []
-    seen = set()
+    """The fixed pre-panel world a ranking variant is allowed to replay.
+
+    Persist the two ordinal ranks as well as their values. Equal values must
+    replay in the same order as the live stable sort; reconstructing a tie from
+    values alone can choose a different security and turn a tie-break into an
+    apparent policy effect.
+    """
+    change_rank = {
+        code: rank for rank, (_score, code, _row)
+        in enumerate(by_change[:lane_depth])
+    }
+    turnover_rank = {
+        code: rank for rank, (_score, code, _row)
+        in enumerate(by_turnover[:lane_depth])
+    }
+    raw = {}
     for _score, code, row in [
             *by_change[:lane_depth], *by_turnover[:lane_depth]]:
-        if code in seen:
-            continue
-        seen.add(code)
+        raw.setdefault(code, row)
+
+    rows = []
+    for code in dict.fromkeys([
+            *[x[1] for x in by_change[:lane_depth]],
+            *[x[1] for x in by_turnover[:lane_depth]]]):
+        row = raw[code]
         rows.append({
             "code": code,
             "change_pct": (
@@ -101,6 +118,8 @@ def candidate_pool_rows(by_change: list[tuple], by_turnover: list[tuple],
             "turnover_rate": (
                 float(row.get("turnover_rate"))
                 if row.get("turnover_rate") is not None else None),
+            "change_rank": change_rank.get(code),
+            "turnover_rank": turnover_rank.get(code),
         })
     return rows
 
@@ -118,10 +137,42 @@ def rank_candidate_rows(rows: list[dict], *, limit: int,
         and row.get("change_pct") is not None
         and row.get("turnover_rate") is not None
     ]
-    by_change = sorted(
-        usable, key=lambda row: float(row["change_pct"]), reverse=True)
-    by_turnover = sorted(
-        usable, key=lambda row: float(row["turnover_rate"]), reverse=True)
+    if all(row.get("change_rank") is not None for row in usable):
+        by_change = sorted(usable, key=lambda row: int(row["change_rank"]))
+    else:
+        by_change = sorted(
+            usable, key=lambda row: float(row["change_pct"]), reverse=True)
+    if all(row.get("turnover_rank") is not None for row in usable):
+        by_turnover = sorted(usable, key=lambda row: int(row["turnover_rank"]))
+    else:
+        by_turnover = sorted(
+            usable, key=lambda row: float(row["turnover_rate"]), reverse=True)
     merged = weighted_merge(
         by_change, by_turnover, total=max(limit * 4, limit), params=params)
     return merged
+
+
+def materialize_codes(rows: list[dict], *, limit: int,
+                      eligible, params: dict | None = None) -> list[str]:
+    """Apply the frozen lane mix, dedup and the caller's PIT eligibility.
+
+    eligible(code) is where the market-world check lives (ADV20 today).
+    Keeping it injected lets live, Dream and forward shadow execute the same
+    ranking code against their own read-only price world.
+    """
+    if limit <= 0:
+        return []
+    ordered = rank_candidate_rows(rows, limit=limit, params=params)
+    chosen = []
+    seen = set()
+    for row in ordered:
+        code = str(row["code"])
+        if code in seen:
+            continue
+        seen.add(code)
+        if not eligible(code):
+            continue
+        chosen.append(code)
+        if len(chosen) >= limit:
+            break
+    return chosen

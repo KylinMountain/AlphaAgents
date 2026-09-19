@@ -678,22 +678,23 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     # this exact live path instead of an unrelated theme weight.
     ctx.last_panel_candidate_pool = selection_policy.candidate_pool_rows(
         by_change, by_turnover, lane_depth=limit * 4)
-    pool = selection_policy.weighted_merge(
-        by_change, by_turnover, total=limit * 4)
-    ctx.counters["panel_pool"] += len(pool)
+    chosen_codes = selection_policy.materialize_codes(
+        ctx.last_panel_candidate_pool,
+        limit=limit,
+        params=None,
+        eligible=lambda code: (
+            (ctx.corpus.adv20(code, prev_day) or 0) > 0),
+    )
+    ctx.counters["panel_pool"] += min(
+        limit * 4, len(by_change) + len(by_turnover))
 
+    ranked_by_code = {
+        code: (chg, row) for chg, code, row in ranked
+    }
     panel: list[dict] = []
-    seen = set()
-    for chg, code, row in pool:
-        if code in seen:
-            continue
+    for code in chosen_codes:
+        chg, row = ranked_by_code[code]
         adv = ctx.corpus.adv20(code, prev_day)
-        if adv is None or adv <= 0:
-            # No measurable liquidity is not the same as illiquid, and the
-            # plan's rule is that a security whose numbers cannot be
-            # established is not offered at all.
-            continue
-        seen.add(code)
         board = limit_pool.get(code) or {}
         panel.append({
             "code": code,
@@ -710,8 +711,6 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
             "limit_sector": board.get("sector"),
             "net_amount": (fund_flow.get(code) or {}).get("net_amount"),
         })
-        if len(panel) >= limit:
-            break
     ctx.counters["panel_ranked"] += len(by_change)
     # Names offered from *outside* the top `limit` by change. This is the
     # number that says the mix is real; it read 0 when the pool was

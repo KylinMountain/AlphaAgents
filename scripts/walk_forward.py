@@ -172,6 +172,7 @@ from alpha_agents.data import (  # noqa: E402
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
+from alpha_agents.evolution import replay_capabilities  # noqa: E402
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
 
@@ -2494,6 +2495,8 @@ def write_report(result: dict, out_dir: Path) -> dict:
     model = result["model_calls"]
     model_usage_ok, model_usage_detail = _model_usage(ctx, model)
 
+    capability_matrix = replay_capabilities.build(window, _REPLAY_DIR)
+
     meta = {
         "run_id": ctx.run_id,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -2533,6 +2536,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
         #: makes unavoidable.
         "corpus_changes": result["corpus"]["changes"],
         "errors": result["errors"],
+        "capability_matrix": capability_matrix,
         "limitations": list(_limitations(ctx)),
     }
     (out_dir / "run.json").write_text(
@@ -2552,13 +2556,15 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "date", "kind", "status", "code", "order_id", "position_id",
         "entry_low", "entry_high", "open", "reason"])
 
-    summary = _summary(result, out_dir, model_usage_ok, model_usage_detail)
+    summary = _summary(
+        result, out_dir, model_usage_ok, model_usage_detail,
+        capability_matrix)
     (out_dir / "summary.txt").write_text(summary, encoding="utf-8")
     return {"meta": meta, "summary": summary, "out_dir": out_dir}
 
 
 def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
-             model_usage_detail: str) -> str:
+             model_usage_detail: str, capability_matrix: dict) -> str:
     ctx = result["ctx"]
     window = result["window"]
     equity = result["equity"]
@@ -2632,6 +2638,7 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         lines += [f"  {k:<28} {v:>6}" for k, v in sorted(ctx.counters.items())]
     else:
         lines.append("  （无）")
+    lines += replay_capabilities.summary_lines(capability_matrix)
     lines += _learning_lines(result)
     lines += [
         "",

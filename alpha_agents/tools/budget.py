@@ -25,6 +25,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextvars
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -83,6 +84,7 @@ class ResearchBudget:
     by_name: dict[str, int] = field(default_factory=dict)
     deep_dive_names: set[str] = field(default_factory=set)
     denied: int = 0
+    trace_records: list[dict] = field(default_factory=list, repr=False)
 
     def _category(self, tool_name: str) -> str:
         if tool_name in _MARKET_TOOLS:
@@ -147,6 +149,42 @@ class ResearchBudget:
     def _deny(self, reason: str) -> tuple[bool, str]:
         self.denied += 1
         return False, reason
+
+    def record_tool(self, tool_name: str, args: tuple, kwargs: dict,
+                    result, *, status: str, elapsed_ms: int | None = None) -> None:
+        """Preserve exactly the facts a model actually received from a tool.
+
+        This trace is evidence, not a second source of truth. The payload is
+        the wrapper's returned value (the same value handed back to the Agent),
+        hashed canonically so a downstream research packet can prove it was not
+        rewritten while moving between stages.
+        """
+        name = self._name(tool_name, args, kwargs)
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+        except json.JSONDecodeError:
+            payload = str(result)
+        try:
+            canonical = json.dumps(
+                payload, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError):
+            payload = str(payload)
+            canonical = json.dumps(payload, ensure_ascii=False)
+        self.trace_records.append({
+            "tool": tool_name,
+            "code": name,
+            "status": status,
+            "elapsed_ms": elapsed_ms,
+            "result_hash": hashlib.sha256(
+                canonical.encode("utf-8")).hexdigest(),
+            "payload": payload,
+        })
+
+    def trace(self) -> list[dict]:
+        """JSON-safe copy of actual tool results in call order."""
+        return json.loads(json.dumps(
+            self.trace_records, ensure_ascii=False, allow_nan=False))
 
     def summary(self) -> dict:
         return {
@@ -234,23 +272,41 @@ def with_timeout(fn, timeout: int | None = None):
             allowed, reason = active.claim(fn.__name__, args, kwargs)
             if not allowed:
                 logger.info("Research budget refused %s: %s", fn.__name__, reason)
-                return _budget_refusal(fn.__name__, reason, active)
+                result = _budget_refusal(fn.__name__, reason, active)
+                active.record_tool(
+                    fn.__name__, args, kwargs, result, status="denied")
+                return result
 
         started = time.monotonic()
         future = _POOL.submit(fn, *args, **kwargs)
         try:
-            return future.result(timeout=limit)
+            result = future.result(timeout=limit)
+            if active is not None:
+                active.record_tool(
+                    fn.__name__, args, kwargs, result, status="ok",
+                    elapsed_ms=int((time.monotonic() - started) * 1000))
+            return result
         except concurrent.futures.TimeoutError:
             logger.warning("Tool %s exceeded %ds — reported as unavailable "
                            "so the run continues", fn.__name__, limit)
-            return (f'{{"error": "数据源 {fn.__name__} 超过 {limit}秒未响应，'
-                    f'本次不可用。不要重试这个工具，用你已有的信息继续，'
-                    f'并在报告里说明缺了什么。"}}')
+            result = (f'{{"error": "数据源 {fn.__name__} 超过 {limit}秒未响应，'
+                      f'本次不可用。不要重试这个工具，用你已有的信息继续，'
+                      f'并在报告里说明缺了什么。"}}')
+            if active is not None:
+                active.record_tool(
+                    fn.__name__, args, kwargs, result, status="timeout",
+                    elapsed_ms=int((time.monotonic() - started) * 1000))
+            return result
         except Exception as e:
             elapsed = time.monotonic() - started
             logger.warning("Tool %s failed after %.1fs: %s",
                            fn.__name__, elapsed, e)
-            return (f'{{"error": "数据源 {fn.__name__} 调用失败：'
-                    f'{str(e)[:120]}。不要重试，用已有信息继续。"}}')
+            result = (f'{{"error": "数据源 {fn.__name__} 调用失败：'
+                      f'{str(e)[:120]}。不要重试，用已有信息继续。"}}')
+            if active is not None:
+                active.record_tool(
+                    fn.__name__, args, kwargs, result, status="error",
+                    elapsed_ms=int(elapsed * 1000))
+            return result
 
     return wrapper

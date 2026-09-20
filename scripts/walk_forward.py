@@ -2814,6 +2814,28 @@ def _experiment_runtime_contract(args) -> dict:
     }
 
 
+def _verify_experiment_identity(
+        manifest: dict | None, *, code_ref: str | None,
+        policy_ref: str | None, input_hash: str) -> None:
+    if manifest is None:
+        return
+    frozen = manifest.get("baseline_identity") or {}
+    actual = {
+        "code_ref": code_ref,
+        "policy_ref": policy_ref,
+        "input_hash": input_hash,
+    }
+    mismatches = {
+        key: {"manifest": frozen.get(key), "runtime": value}
+        for key, value in actual.items()
+        if frozen.get(key) != value
+    }
+    if mismatches:
+        raise SystemExit(
+            "formal experiment baseline identity mismatch: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
+
+
 def _verify_experiment_runtime(args, manifest: dict | None) -> None:
     if manifest is None:
         return
@@ -2861,6 +2883,18 @@ class Context:
         self.sector_membership_archive = (
             sector_membership.load(membership_path)
             if membership_path is not None else ())
+        identity_paths = {
+            name: _REPLAY_DIR / name for name in CORPUS_FILES
+        }
+        if membership_path is not None:
+            identity_paths["sector_membership"] = membership_path
+        self.input_identity = world_read_set.file_identity(identity_paths)
+        self.code_ref = (
+            world_read_set.git_code_ref(_PROJECT_ROOT)
+            if getattr(args, "experiment_manifest", None) is not None
+            else None
+        )
+        self.policy_ref = policy_registry.active_ref()
         frozen_path = getattr(args, "frozen_directions", None)
         self.frozen_directions = (
             frozen_direction_archive.load(frozen_path)
@@ -2872,6 +2906,12 @@ class Context:
                 architecture=self.selection_architecture,
                 membership_archive=self.sector_membership_archive,
             )
+        )
+        _verify_experiment_identity(
+            self.experiment_manifest,
+            code_ref=self.code_ref,
+            policy_ref=self.policy_ref,
+            input_hash=self.input_identity["input_hash"],
         )
         _verify_experiment_runtime(args, self.experiment_manifest)
         if self.selection_architecture in {
@@ -2984,6 +3024,8 @@ class Context:
                      if args.decider == "llm" else None)
         self.capacity: dict[str, int] = {}
         self.counters: Counter = Counter()
+        self.last_world_read_set: dict | None = None
+        self.world_read_set_hashes: list[str] = []
 
 
 def _seed_theme(ctx) -> None:

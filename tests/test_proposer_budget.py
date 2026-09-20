@@ -112,6 +112,8 @@ def test_real_proposer_tools_budget_matrix(proposer, tool, monkeypatch,
     got = asyncio.run(scenario())
     assert len(observed) == 1
     assert got["parse_error"] is None
+    assert isinstance(got["model_elapsed_ms"], int)
+    assert got["model_elapsed_ms"] >= 0
     key = ("themes" if proposer is sector_selector else
            "stocks" if proposer is sector_stock_selector else "orders")
     assert len(got[key]) == 1

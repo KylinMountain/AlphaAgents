@@ -16,7 +16,7 @@ from pathlib import Path
 import random
 import statistics
 
-from alpha_agents.evolution import sector_experiment
+from alpha_agents.evolution import performance, sector_experiment
 
 
 class SectorCompareError(ValueError):
@@ -50,28 +50,6 @@ def _float(value) -> float:
     return float(value)
 
 
-def _max_drawdown(values: list[float]) -> float:
-    peak = float("-inf")
-    worst = 0.0
-    for value in values:
-        peak = max(peak, value)
-        if peak > 0:
-            worst = min(worst, value / peak - 1.0)
-    return abs(worst) * 100.0
-
-
-def _daily_returns(equity: list[dict]) -> dict[str, float]:
-    out = {}
-    prior = None
-    for row in equity:
-        value = _float(row.get("equity"))
-        day = str(row.get("date") or "")
-        if prior is not None and prior > 0 and day:
-            out[day] = (value / prior - 1.0) * 100.0
-        prior = value
-    return out
-
-
 def _theme_exposure(run_dir: Path) -> float | None:
     path = run_dir / "theme_exposure.csv"
     if not path.exists():
@@ -99,8 +77,8 @@ def load_arm(run_dir: Path, arm: str) -> dict:
     meta = _read_json(run_dir / "run.json")
     equity = _read_csv(run_dir / "equity.csv")
     fills = _read_csv(run_dir / "fills.csv")
-    if len(equity) < 2:
-        raise SectorCompareError(f"arm {arm} has fewer than two equity rows")
+    if not equity:
+        raise SectorCompareError(f"arm {arm} has no equity rows")
 
     expected = _ARM_ARCHITECTURES[arm]
     actual = str(meta.get("selection_architecture") or "")
@@ -108,21 +86,43 @@ def load_arm(run_dir: Path, arm: str) -> dict:
         raise SectorCompareError(
             f"arm {arm} expected {expected}, got {actual or '<missing>'}")
 
-    values = [_float(row.get("equity")) for row in equity]
-    if not values[0]:
-        raise SectorCompareError(f"arm {arm} starts with zero equity")
-    returns = _daily_returns(equity)
-    traded = sum(abs(_float(row.get("amount"))) for row in fills)
-    average_equity = sum(values) / len(values)
+    initial_account = meta.get("initial_account")
+    if not isinstance(initial_account, dict):
+        raise SectorCompareError(
+            f"arm {arm} is missing the explicit initial_account mark")
+    if initial_account.get("kind") != "initial_mark":
+        raise SectorCompareError(
+            f"arm {arm} initial_account.kind must be 'initial_mark'")
+    try:
+        metrics = performance.equity_metrics(
+            initial_account.get("equity"), equity)
+    except performance.PerformanceError as exc:
+        raise SectorCompareError(
+            f"arm {arm} has invalid equity history: {exc}") from exc
 
-    worst_day = min(returns.values()) if returns else None
+    window = meta.get("window") or {}
+    try:
+        declared_days = int(window.get("trading_days"))
+    except (TypeError, ValueError) as exc:
+        raise SectorCompareError(
+            f"arm {arm} window.trading_days is missing or invalid") from exc
+    if declared_days != metrics["trading_days"]:
+        raise SectorCompareError(
+            f"arm {arm} declares {declared_days} trading days but has "
+            f"{metrics['trading_days']} unique ordered equity days")
+
+    returns = metrics["daily_returns_pct"]
+    traded = sum(abs(_float(row.get("amount"))) for row in fills)
+    average_equity = metrics["average_daily_equity"]
     return {
         "arm": arm,
         "architecture": actual,
         "experiment_arm": meta.get("experiment_arm"),
         "experiment_manifest_hash": meta.get("experiment_manifest_hash"),
         "frozen_directions_hash": meta.get("frozen_directions_hash"),
-        "window": meta.get("window") or {},
+        "window": window,
+        "initial_account": initial_account,
+        "observed_days": metrics["days"],
         "run_id": meta.get("run_id"),
         "errors": meta.get("errors") or [],
         "model_usage_ok": bool(meta.get("model_usage_ok")),
@@ -132,11 +132,12 @@ def load_arm(run_dir: Path, arm: str) -> dict:
         "capability_matrix": meta.get("capability_matrix") or {},
         "daily_returns_pct": returns,
         "portfolio": {
-            "net_return_pct": round(
-                (values[-1] / values[0] - 1.0) * 100.0, 6),
-            "max_drawdown_pct": round(_max_drawdown(values), 6),
-            "worst_day_return_pct": (
-                round(worst_day, 6) if worst_day is not None else None),
+            "initial_equity": round(metrics["initial_equity"], 6),
+            "final_equity": round(metrics["final_equity"], 6),
+            "net_return_pct": round(metrics["net_return_pct"], 6),
+            "max_drawdown_pct": round(metrics["max_drawdown_pct"], 6),
+            "worst_day_return_pct": round(
+                metrics["worst_day_return_pct"], 6),
             "turnover_ratio": (
                 round(traded / average_equity, 6)
                 if average_equity > 0 else None),
@@ -307,6 +308,11 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
             repetitions=int(block["repetitions"]),
             seed=seed + ord(left) + ord(right),
         )
+        result["expected_trading_days"] = int(
+            arms[left]["window"]["trading_days"])
+        result["left_observed_days"] = len(arms[left]["observed_days"])
+        result["right_observed_days"] = len(arms[right]["observed_days"])
+        result["common_trading_days"] = len(aligned)
         floor = float(manifest["minimum_meaningful_improvement_pct"])
         ci = result.get("ci95")
         if result["status"] != "ok" or ci is None:
@@ -337,7 +343,7 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
     }
 
     minimum_days = int(manifest["minimum_days"])
-    observed_days = int(actual_window.get("trading_days") or 0)
+    observed_days = len(next(iter(arms.values()))["observed_days"])
     execution_status = {
         arm: (
             "has_fills"

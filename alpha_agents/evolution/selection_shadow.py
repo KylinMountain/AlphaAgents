@@ -128,7 +128,10 @@ def open_run(*, parent_version_id: int, variant_version_id: int,
     if horizon <= 0 or minimum_sets <= 0 or minimum_behavior_changes <= 0:
         raise SelectionShadowError(
             "horizon, minimum_sets and minimum_behavior_changes must be positive")
-    opened_on = str(opened_on or clock.today())[:10]
+    if opened_on is not None:
+        raise SelectionShadowError(
+            "opened_on is writer-controlled and cannot be supplied by callers")
+    opened_on = str(clock.today())[:10]
     manifest = {
         "schema_version": 1,
         "parent_version_id": parent_version_id,
@@ -228,6 +231,22 @@ def process(*, run_id: int, history_conn,
             "new_rows": 0,
         }
 
+    existing_count = int(target.execute(
+        "SELECT COUNT(*) n FROM selection_shadow_rows WHERE run_id=?",
+        (run_id,)).fetchone()["n"])
+    minimum_sets = int(run["minimum_sets"])
+    if existing_count > minimum_sets:
+        raise SelectionShadowError(
+            "unsealed selection shadow already exceeds its preregistered "
+            "sample floor; refusing to truncate historical evidence")
+    if existing_count == minimum_sets:
+        _seal(run, target)
+        return {
+            "run_id": run_id, "new_rows": 0,
+            "sample_count": minimum_sets, "sealed": True,
+        }
+    remaining = minimum_sets - existing_count
+
     parent_ref = _version_ref(int(run["parent_version_id"]))
     sets = target.execute(
         "SELECT s.* FROM opportunity_sets s "
@@ -240,6 +259,8 @@ def process(*, run_id: int, history_conn,
     written = 0
     with target:
         for set_row in sets:
+            if written >= remaining:
+                break
             context_row = target.execute(
                 "SELECT context_json FROM opportunity_contexts "
                 "WHERE opportunity_set_id=?", (set_row["id"],)).fetchone()
@@ -272,8 +293,11 @@ def process(*, run_id: int, history_conn,
     count = target.execute(
         "SELECT COUNT(*) n FROM selection_shadow_rows WHERE run_id=?",
         (run_id,)).fetchone()["n"]
-    if int(count) >= int(run["minimum_sets"]):
+    if int(count) == int(run["minimum_sets"]):
         _seal(run, target)
+    elif int(count) > int(run["minimum_sets"]):
+        raise SelectionShadowError(
+            "selection shadow exceeded its preregistered sample floor")
 
     return {
         "run_id": run_id,
@@ -286,10 +310,14 @@ def process(*, run_id: int, history_conn,
 def _seal(run: dict, conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         "SELECT result_json FROM selection_shadow_rows "
-        "WHERE run_id=? ORDER BY id LIMIT ?",
-        (run["id"], run["minimum_sets"])).fetchall()
-    if len(rows) < int(run["minimum_sets"]):
+        "WHERE run_id=? ORDER BY id",
+        (run["id"],)).fetchall()
+    minimum_sets = int(run["minimum_sets"])
+    if len(rows) < minimum_sets:
         raise SelectionShadowError("cannot seal before the preregistered floor")
+    if len(rows) > minimum_sets:
+        raise SelectionShadowError(
+            "cannot seal a run that already exceeds its preregistered floor")
 
     results = [json.loads(row["result_json"]) for row in rows]
     deltas = [

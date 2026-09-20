@@ -154,6 +154,57 @@ challenger vs incumbent 的 forward sample。」
   除非先让生产管线把每个交易日的机会集写进 `opportunity_sets`（或把
   `shadow_run` 接上 selection shadow + 一个真实的机会集写入者）。
 
+**2026-09-21：把两条 shadow 路分开看之后，② 对概率 shadow 其实已经解锁。**
+
+之前的诊断把两条路混在一起了。它们的样本源不同，阻断也不同：
+
+| | 概率 shadow（`shadow.py`） | selection shadow（`selection_shadow.py`） |
+|---|---|---|
+| 样本源 | 冠军的 `predictions`（带 prob 的那本） | `opportunity_sets` 表 |
+| 生产写不写 | **写**：`intraday` 59 行、59 行带 prob、38 行已评分、8 天 | **不写**：全仓库唯一写入点是 `scripts/walk_forward.py:2035`；`alpha_agents/pipeline/` 无任何 opportunity 引用；生产库里**这张表不存在** |
+| 位点是否被执行 | `remap_confidence` 执行 `confidence_priors` | `selection_policy.change_share`，但生产实盘按 `score` 排序（`intraday_monitor.py:510`），**从不调用** `selection_policy` |
+| 现在能不能攒样本 | **能**，只要有一个变化落在 `confidence_priors` 的版本 | **不能**，缺一个生产侧的机会集写入者 |
+
+**实测（`/tmp` 副本）**：冻结一个只改 `confidence_priors` 的版本（parent v1），
+`producer_compatibility` 返回 `compatible=True`，`changed_genes` 恰好是
+`confidence_priors.{high,low,medium}`；`open_run` 成功，manifest 里
+`forward_rule="date >= opened_at"`、`minimum_samples=20`。
+
+**关于 `selection_rank.change_share` 的一句更正**：2026-09-20 的补记说它
+「决定候选池里涨幅档与换手档各贡献多少名字，`walk_forward._build_panel` 的
+实盘路径直接读它」——`_build_panel` 是**回放**路径（`scripts/walk_forward.py`），
+不是生产。生产（`main.py run-v2` → `intraday_monitor`）选股走
+`get_sector_best_stocks_fn` + 按 `score` 排序，从不读这个基因。所以
+①A/B 的结论要改成：**位点存在于回放与评估器，生产尚未执行它**——
+这正是 `docs/DREAM_RSI_SELECTION.md` §6 第 1 条（"the live/replay trading path
+actually reads it"）对 selection 基因尚未满足的地方。
+
+**2026-09-21：已开第一条合规的生产 shadow（run #4）。**
+
+- 配置：`policy_version_id=1`（在效版本）、`producer=constant_0.5`（无技能 baseline）、
+  `report_type=intraday`（唯一带 prob、能配对的那本）、`opened_at=2026-09-21`。
+- **为什么是 baseline 而不是挑战者**：`variant._SUPPORTED_DELTAS` 只把
+  `t1_change_rank` 映到 `selection_rank.change_share`，**没有任何路径产出
+  `confidence_priors` 的变体**。而生产唯一能配对的位点执行者是
+  `remap_confidence`（只观察 `confidence_priors`）。所以「证据 → 变体 → 合规
+  挑战者」这条自动链**目前是断的**：能攒样本的位点没有证据产出，有证据的位点
+  生产不执行。baseline 不依赖这条链（它按定义豁免基因契约），是当前唯一能
+  真正开始积累前向样本的配置——它回答「冠军是否胜过无技能」，不是「哪个取值更好」。
+- 隔离已核实：`shadow-1` 前缀、只写 `shadow_*` 两表。开启前后
+  `intents` 117 不变、`virtual_portfolio` 137 不变、`active_policy` 仍是 v1。
+- 15:45 的 `shadow_run` 任务会自动喂它（已在 scheduler 注册）。
+
+**② 仍未达成，但这次是「等时间」而不是「等代码」**：验收要求
+`shadow_predictions` 有已评分行。run #4 开启当天冠军尚无当日选股（0 条），
+需要真实的交易日推进。
+
+**一个仍然存在的结构性阻断（值得单列）**：`paired_count` 要求**冠军那一侧也
+已评分**，而冠军的 `intraday` 行自 **2026-09-10** 起就没有再评分——15:30 的
+`review` 任务负责评分，本地这次重启的调度器还没走到那个时点。实测：21 条待评分
+中只有 6 条窗口已收口。所以在 review 恢复评分之前，即使 run #4 攒满预测，
+`paired` 仍会是 0。**这不是 shadow 的缺陷，是生产评分链的节奏问题**，
+但它决定了 ② 什么时候真的能达成。
+
 ---
 
 ## P2：消除误导（三件，都便宜）
@@ -322,3 +373,4 @@ challenger vs incumbent 的 forward sample。」
 - 2026-09-20：拉取 origin/main（147 提交）并合并。远端与本地平行实现了同一基因契约（远端为 manifest 版 producer_compatibility，语义等价且测试覆盖更广），冲突处以远端为准；本地独有资产保留：--no-concepts 消融、①C 扫描器、两份计划文档。合并后 2850 passed / 双 lint 通过。
 - 2026-09-20：复核七项。①A/B 由远端新位点满足；② 仍未达成（3 runs 全 closed、0 open、10 条预测 0 评分）；⑤⑥⑦ 按原计划仍缓做。
 - 2026-09-20（第二次拉取，118 提交 / RP-01–RP-11）：合并为 `feb5bf2`，2968 passed、harness 222 文件、docs lint 全绿。逐项重查后有三处需要改写结论——**⑥ 已完成**（ADV20 真的接进了成交路径，不再是"已计数未强制"）；**⑦ 的缺口比原描述窄**（已实现盈亏早已含双边滑点，缺的只是建仓当日浮盈少扣买入腿）；**② 的阻断换了一层**（合规 producer/evaluator 已存在且实测可开，但 `opportunity_sets` 在生产里根本不存在，样本进不来）。⑤ 复查仍未做。
+- 2026-09-21：跑 20 天小批量验证（`logs/session-20260920/replay-20d.log`，20 日 0 报错），它暴露了两处真实缺陷，均已修复并推送：**概率 shadow 缺前向门**（`emit_for_date` 不检查日期与 `opened_at`，回填历史能被评分成前向样本；`fc7a03b`）、**容量"已强制"但报告说"尚未强制"**，且 `capacity_oversize` 恒为 False（`732037b`）。同时把 ② 拆成两条路重看：概率 shadow 的样本源生产**在写**，selection shadow 的**不在写**；已开第一条合规生产 run #4（baseline，隔离核实，生产 117 单/137 仓/active v1 全部未变）。

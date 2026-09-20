@@ -448,6 +448,7 @@ def check_pending_orders(
     realtime_prices: dict[str, float],
     today: str,
     trader_id: str | None = None,
+    max_shares_by_code: dict[str, int] | None = None,
 ) -> list[dict]:
     """Check pending orders against realtime prices. Fill if price in entry zone.
 
@@ -634,7 +635,11 @@ def check_pending_orders(
         triggered = in_entry_zone(price, entry_low, entry_high)
 
         if triggered:
-            fill_alert = _fill_order(order, fill_price=price, fill_date=today)
+            fill_alert = _fill_order(
+                order, fill_price=price, fill_date=today,
+                max_shares=(
+                    max_shares_by_code.get(code)
+                    if max_shares_by_code is not None else None))
             if fill_alert:
                 alerts.append(fill_alert)
         elif expire_days is not None and days_pending >= expire_days:
@@ -714,7 +719,9 @@ def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
     return None
 
 
-def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
+def _fill_order(
+        order: dict, fill_price: float, fill_date: str,
+        max_shares: int | None = None) -> dict | None:
     """Convert a pending order to an open position at fill_price.
 
     Every limit below is measured against the order's own trader: its
@@ -788,9 +795,15 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # that trader instead of skipping one order. Found by the walk-forward
         # on 2025-07-08; no room is a refusal, and ``shares == 0`` below is the
         # code that already knows how to say so.
+        capacity_amount = (
+            float("inf")
+            if max_shares is None
+            else max(0, int(max_shares)) * fill_price
+        )
         max_amount = max(0.0, min(
             available, max_per_stock, plan_risk_cap,
-            max(0, max_for_theme), sentiment_room, cluster_cap))
+            max(0, max_for_theme), sentiment_room, cluster_cap,
+            capacity_amount))
 
         # Portfolio drawdown gates *new* risk and never forces an exit.
         # Liquidating at a drawdown level sells the bottom, and in a system
@@ -814,7 +827,8 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             one_lot = fill_price * LOT_SIZE
             ceiling = max(0.0, min(
                 available, capital * max_pos_pct, plan_risk_cap,
-                max(0, max_for_theme), sentiment_room, cluster_cap))
+                max(0, max_for_theme), sentiment_room, cluster_cap,
+                capacity_amount))
             if one_lot <= ceiling:
                 shares = LOT_SIZE
                 logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"

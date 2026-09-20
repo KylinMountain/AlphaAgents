@@ -168,7 +168,7 @@ from alpha_agents.config import DATA_DIR, PROMPTS_DIR  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
     market_rules, order_theme_exposure, portfolio as P, security_eligibility,
-    portfolio_exit, reservations,
+    policy_registry, portfolio_exit, reservations,
     research_packet, sector_membership, sector_panel, sector_selection,
     selection_policy, t1_settlement as S,
 )
@@ -176,7 +176,7 @@ from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
 from alpha_agents.evolution import (  # noqa: E402
-    performance, replay_capabilities, sector_experiment,
+    performance, replay_capabilities, sector_experiment, world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 

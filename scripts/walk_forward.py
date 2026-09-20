@@ -3105,34 +3105,50 @@ class Context:
             if membership_path is not None:
                 identity_paths["sector_membership"] = membership_path
             self.input_identity = world_read_set.file_identity(identity_paths)
+        formal_manifest_requested = (
+            getattr(args, "experiment_manifest", None) is not None
+            or getattr(args, "selection_experiment_manifest", None) is not None
+        )
         self.code_ref = (
             world_read_set.git_code_ref(_PROJECT_ROOT)
-            if getattr(args, "experiment_manifest", None) is not None
-            else None
+            if formal_manifest_requested else None
         )
         self.policy_ref = policy_registry.active_ref()
         frozen_path = getattr(args, "frozen_directions", None)
         self.frozen_directions = (
             frozen_direction_archive.load(frozen_path)
             if frozen_path is not None else None)
-        self.experiment_arm = getattr(args, "experiment_arm", None)
-        self.experiment_manifest, self.experiment_manifest_hash = (
-            _experiment_contract(
-                args,
-                architecture=self.selection_architecture,
-                membership_archive=self.sector_membership_archive,
-            )
+        legacy_arm = getattr(args, "experiment_arm", None)
+        legacy_manifest, legacy_hash = _experiment_contract(
+            args,
+            architecture=self.selection_architecture,
+            membership_archive=self.sector_membership_archive,
         )
+        selection_arm = getattr(args, "selection_experiment_arm", None)
+        selection_manifest, selection_hash = _selection_experiment_contract(
+            args,
+            architecture=self.selection_architecture,
+            membership_archive=self.sector_membership_archive,
+        )
+        self.experiment_arm = legacy_arm or selection_arm
+        self.experiment_family = (
+            selection_experiment.FAMILY
+            if selection_manifest is not None else
+            ("sector_abcd_v0" if legacy_manifest is not None else None)
+        )
+        self.experiment_manifest = legacy_manifest or selection_manifest
+        self.experiment_manifest_hash = legacy_hash or selection_hash
         _verify_experiment_identity(
             self.experiment_manifest,
             code_ref=self.code_ref,
             policy_ref=self.policy_ref,
             input_hash=self.input_identity["input_hash"],
         )
-        _verify_experiment_runtime(args, self.experiment_manifest)
+        _verify_experiment_runtime(args, legacy_manifest)
+        _verify_selection_experiment_runtime(args, selection_manifest)
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
-                "sector_first_no_flow"}:
+                "sector_first_no_flow", "sector_rank_price_v1"}:
             if args.decider != "llm":
                 raise SystemExit(
                     f"{self.selection_architecture} requires --decider llm")

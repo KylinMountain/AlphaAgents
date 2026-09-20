@@ -67,7 +67,7 @@ _SOURCES = {
 
 def _open_at(when: str, **kwargs):
     with patch.object(SH, "_today", return_value=when):
-        return _open_at(FROZEN_AT, **kwargs)
+        return SH.open_run(**kwargs)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -98,8 +98,9 @@ def frozen(store) -> int:
     version = PR.freeze(sources=_SOURCES, created_by="kylin",
                         reason="frozen for the forward window",
                         frozen_at=FROZEN_AT)
-    SH.open_run(policy_version_id=version, reason="measure the baseline",
-                report_type=REPORT,)
+    _open_at(
+        FROZEN_AT, policy_version_id=version,
+        reason="measure the baseline", report_type=REPORT)
     return version
 
 

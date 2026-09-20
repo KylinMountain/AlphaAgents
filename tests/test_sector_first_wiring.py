@@ -100,7 +100,8 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
         "supporting_theme_relation_evidence_ids": [supporting_relation],
     }]
     monkeypatch.setattr(
-        wf, "_sector_first_stage", lambda *a, **k: (panel, None))
+        wf, "_sector_first_stage",
+        lambda *a, **k: _research_stage(ctx, snapshot, panel))
     monkeypatch.setattr(
         wf, "_sector_stock_choice",
         lambda *a, **k: {

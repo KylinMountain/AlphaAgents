@@ -199,6 +199,50 @@ class TestCapacityIsEnforcedAtFill:
         assert [row["type"] for row in alerts] == ["cancelled"]
         assert _status(oid)["status"] == "cancelled"
 
+    def test_a_fill_says_when_liquidity_was_what_limited_it(
+            self, store, traders_dir, theme):
+        """The field has to measure something.
+
+        ``capacity_oversize`` used to ask whether the fill exceeded its own
+        cap. The cap is applied *inside* the sizing ``min``, so the answer was
+        False on every row — a column that read like a measurement and was a
+        constant. What a reader can act on is whether liquidity, rather than
+        the other five limits, is what sized the fill; that is what it reports
+        now, as ``capacity_bound``.
+        """
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            order_date=REPO_DATE, entry_low=9.0, entry_high=11.0,
+            stop_loss=8.5, source="test", reason="capacity",
+            trader_id="slow")
+        assert oid is not None
+
+        # 300 shares against a 1M mandate: liquidity binds long before cash,
+        # the position cap or the risk budget do.
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            max_shares_by_code={"600000": 300})
+        assert [row["type"] for row in alerts] == ["filled"]
+        assert alerts[0]["capacity_bound"] is True
+
+    def test_a_fill_is_not_called_capacity_bound_when_cash_was_the_limit(
+            self, store, traders_dir, theme):
+        """The other branch, so the flag is not a constant in either direction."""
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            order_date=REPO_DATE, entry_low=9.0, entry_high=11.0,
+            stop_loss=8.5, source="test", reason="capacity",
+            trader_id="slow")
+        assert oid is not None
+
+        # A cap far above what the other limits allow: cash and position
+        # sizing decide the fill, so liquidity did not bind.
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            max_shares_by_code={"600000": 10_000_000})
+        assert [row["type"] for row in alerts] == ["filled"]
+        assert alerts[0]["capacity_bound"] is False
+
 
 # ── B. An order with no reservation can be finished ────────────────────
 

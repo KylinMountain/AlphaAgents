@@ -2365,8 +2365,11 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
                 "name": alert.get("name", ""), "shares": alert.get("shares"),
                 "price": alert.get("fill_price"), "amount": alert.get("cost"),
                 "capacity_shares": cap,
-                "capacity_oversize": bool(
-                    cap is not None and (alert.get("shares") or 0) > cap),
+                # Liquidity was the binding constraint on this fill. The old
+                # field asked whether the fill exceeded its own cap, which the
+                # cap makes impossible, so it read False on every row and
+                # measured nothing.
+                "capacity_oversize": bool(alert.get("capacity_bound")),
                 "reason": "open in entry zone"})
         else:
             cancels.append(_cancel_class(alert.get("reason", "")))
@@ -4039,7 +4042,13 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         "— 成交 —",
         f"买入 {len(buys)} 笔 {sum(b['amount'] or 0 for b in buys):,.0f} 元 / "
         f"卖出 {len(sells)} 笔 {sum(s['amount'] or 0 for s in sells):,.0f} 元",
-        f"成交量超 ADV20 参与上限的笔数：{len(oversize)}（**已计数、尚未强制**）",
+        # The parenthetical said "counted, not yet enforced" while the
+        # limitation block below said the opposite: ``check_pending_orders``
+        # takes ``max_shares_by_code`` and ``_fill_order`` caps the size to it,
+        # so the honest reading of a non-zero count here is "would have
+        # exceeded the cap had it not been applied" — not "the cap is off".
+        f"成交量超 ADV20 参与上限的笔数：{len(oversize)}"
+        "（已强制：开仓成交按 ADV20 份额上限截断，见下方限制）",
     ]
     # Who sold, and why. Without this split a reader cannot tell a book that
     # the rules disposed of from one the agent actively managed — and in the

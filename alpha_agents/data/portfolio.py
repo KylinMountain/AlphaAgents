@@ -740,10 +740,18 @@ def _fill_order(
             if max_shares is None
             else max(0, int(max_shares)) * fill_price
         )
-        max_amount = max(0.0, min(
+        # The other five terms, before capacity joins them. Kept apart so the
+        # fill can say whether *capacity* was what limited it:
+        # ``capacity_amount`` is inside the ``min`` below, so ``shares`` can
+        # never exceed it — a "did the fill oversize its cap" test is therefore
+        # always False and measures nothing. "Was liquidity the binding
+        # constraint" is the fact a reader can act on, and it is only
+        # answerable against the terms capacity competed with.
+        other_room = max(0.0, min(
             available, max_per_stock, plan_risk_cap,
-            max(0, max_for_theme), sentiment_room, cluster_cap,
-            capacity_amount))
+            max(0, max_for_theme), sentiment_room, cluster_cap))
+        capacity_bound = capacity_amount < other_room
+        max_amount = max(0.0, min(other_room, capacity_amount))
 
         # Portfolio drawdown gates *new* risk and never forces an exit.
         # Liquidating at a drawdown level sells the bottom, and in a system
@@ -769,6 +777,11 @@ def _fill_order(
                 available, capital * max_pos_pct, plan_risk_cap,
                 max(0, max_for_theme), sentiment_room, cluster_cap,
                 capacity_amount))
+            # The one-lot fallback can also be what the cap refuses, so the
+            # binding flag is re-derived against the ceiling actually used.
+            capacity_bound = capacity_amount < max(0.0, min(
+                available, capital * max_pos_pct, plan_risk_cap,
+                max(0, max_for_theme), sentiment_room, cluster_cap))
             if one_lot <= ceiling:
                 shares = LOT_SIZE
                 logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"
@@ -900,6 +913,8 @@ def _fill_order(
         "fill_price": fill_price,
         "cost": cost,
         "stop_loss": order.get("stop_loss"),
+        # Liquidity, not the other five limits, is what sized this fill.
+        "capacity_bound": bool(capacity_bound),
     }
 
 

@@ -103,6 +103,35 @@ file-size 违规。`shadow.emit_for_date` 调用 `experiment_manifest.assert_for
 **验证**：`pytest tests/ -q` → **2976 passed, 18 skipped**；
 `lint_harness` 222 文件通过；`lint_docs` 通过。
 
+## 验证跑出的第二处缺陷：容量"已强制"了，报告仍说"尚未强制"
+
+20 天回放跑完后，summary 里同时出现两句互相矛盾的话：
+
+- 「成交量超 ADV20 参与上限的笔数：0（**已计数、尚未强制**）」
+- 「capacity is measured from pre-decision ADV20 and enforced as a hard
+  share cap on open-time fills」
+
+代码事实：`_settle_entries` 传 `max_shares_by_code=ctx.capacity`，
+`_fill_order` 把 `capacity_amount` 并进 `max_amount` 的 `min()`——所以
+**已强制**是对的，summary 那句是上一轮改限制条文时漏改的。
+
+**更深的一层**：`capacity_oversize` 用
+`shares > cap` 判定，而 `shares` 正是被 `cap` 截断出来的——**它恒为 False**，
+是一列读起来像测量、实际是常数的东西。实测：20 天 17 笔成交，全部 False。
+
+改成回答一个可行动的问题：**这次成交是不是被流动性卡住的**。
+
+- `_fill_order` 把其余五个限额（可用资金、单票上限、计划风险、主题额度、
+  簇额度）先算成 `other_room`，再与 `capacity_amount` 取小；
+  `capacity_bound = capacity_amount < other_room` 随成交返回。
+- 一手兜底路径同样重新推导（那里的上限不同）。
+- `walk_forward` 把它写进 `capacity_oversize` 列。
+- summary 那句改为「已强制」，并指向限制条文。
+
+测试：`test_a_fill_says_when_liquidity_was_what_limited_it`（True）与
+`test_a_fill_is_not_called_capacity_bound_when_cash_was_the_limit`（False）
+**两个方向都钉住**，所以它不可能再退化成常数。
+
 ## 决策记录
 
 - 2026-09-20：由 20 天小批量验证暴露，不是读代码读出来的。该验证同时暴露了

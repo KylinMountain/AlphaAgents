@@ -176,7 +176,8 @@ from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
 from alpha_agents.evolution import (  # noqa: E402
-    performance, replay_capabilities, sector_experiment, world_read_set,
+    performance, replay_capabilities, sector_experiment, selection_experiment,
+    world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
@@ -4060,7 +4061,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-architecture",
         choices=(
             "dual_rank_v0", "sector_first_v0",
-            "sector_first_simple_selector", "sector_first_no_flow"),
+            "sector_first_simple_selector", "sector_first_no_flow",
+            "dual_rank_price_v1", "sector_rank_price_v1"),
         default="dual_rank_v0",
         help="candidate architecture; sector-first modes are opt-in only")
     parser.add_argument(
@@ -4075,6 +4077,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--experiment-arm", choices=("A", "B", "C", "D"), default=None,
         help="arm bound to --experiment-manifest")
+    parser.add_argument(
+        "--selection-experiment-manifest", type=Path, default=None,
+        help="frozen nf_discovery_v1 manifest; separate from legacy A/B/C/D")
+    parser.add_argument(
+        "--selection-experiment-arm", choices=("CONTROL", "SECTOR"),
+        default=None,
+        help="arm bound to --selection-experiment-manifest")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,

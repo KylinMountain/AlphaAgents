@@ -3292,10 +3292,9 @@ class Context:
                 raise SystemExit(
                     "--frozen-directions is only valid for "
                     "sector_first_simple_selector")
-            if getattr(args, "close_buys", False):
-                raise SystemExit(
-                    f"{self.selection_architecture} does not support "
-                    "--close-buys; its reproducible buy path is 09:00 only")
+            _validate_close_buy_support(
+                self.selection_architecture,
+                bool(getattr(args, "close_buys", False)))
         self.participation = args.participation
         self.stop_pct = args.stop_pct
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])
@@ -3430,6 +3429,26 @@ def _decider_note(ctx) -> str:
         return (f"（模型读 as-of 面板选股，最多 {ctx.picks} 单；"
                 f"面板 {ctx.panel_size} 只，新闻窗口截至当日 09:00）")
     return "（**占位用途，不代表任何策略**）"
+
+
+_CLOSE_BUY_UNSUPPORTED = frozenset({
+    "sector_first_v0", "sector_first_simple_selector",
+    "sector_first_no_flow", "sector_rank_price_v1",
+})
+
+
+def _validate_close_buy_support(architecture: str, enabled: bool) -> None:
+    if enabled and architecture in _CLOSE_BUY_UNSUPPORTED:
+        raise SystemExit(
+            f"{architecture} does not support --close-buys; "
+            "its reproducible buy path is 09:00 only")
+
+
+def _close_buy_enabled(ctx) -> bool:
+    return (
+        getattr(ctx, "decider", None) == "llm"
+        and bool(getattr(ctx, "close_buys", False))
+    )
 
 
 def _run_decider(ctx, day: str, prev_day: str,
@@ -3573,7 +3592,7 @@ def _run_window(ctx, args) -> dict:
             # decisions on the buy side. Runs after the close exits so a
             # position sold at the close frees its capital for one bought at
             # the same close.
-            if ctx.decider == "llm" and ctx.close_buys:
+            if _close_buy_enabled(ctx):
                 try:
                     with replay_as_of(f"{day} 14:55"):
                         close_orders = _run_decider(ctx, day, prev_day,

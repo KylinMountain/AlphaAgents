@@ -360,26 +360,15 @@ def _create_pending_order_impl(
         capital = trader_capital(trader_id)
         reservation_amount = (
             capital * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE))
-        theme_cap = capital * MAX_THEME_PCT
-        breach = risk_reservations.first_theme_cap_breach(
-            conn, trader_id=trader_id, themes=related_themes,
-            reservation_amount=reservation_amount, theme_cap=theme_cap)
-        if breach is not None:
-            risk_theme, committed = breach
-            terms = {
-                "entry_low": entry_low, "entry_high": entry_high,
-                "stop_loss": stop_loss, "target_price": target_price,
-                "source": source, "reason": reason,
-            }
-            attribution.record_refusal(
-                conn, trader_id=trader_id, code=code,
-                order_date=order_date,
-                refused_by=f"theme_risk_cap:{risk_theme}",
-                theme=theme, thesis_id=thesis_id,
-                prediction_id=prediction_id, **terms)
-            logger.info(
-                "Rejected order %s: %s committed %.2f + %.2f > %.2f",
-                code, risk_theme, committed, reservation_amount, theme_cap)
+        terms = {"entry_low": entry_low, "entry_high": entry_high,
+                 "stop_loss": stop_loss, "target_price": target_price,
+                 "source": source, "reason": reason}
+        if risk_reservations.refuse_if_theme_cap_breached(
+                conn, trader_id=trader_id, code=code, order_date=order_date,
+                primary_theme=theme, themes=related_themes,
+                reservation_amount=reservation_amount,
+                theme_cap=capital * MAX_THEME_PCT, thesis_id=thesis_id,
+                prediction_id=prediction_id, terms=terms):
             return None
 
         # The same admission bar check_pending_orders applies, applied at
@@ -390,9 +379,6 @@ def _create_pending_order_impl(
         # counterfactual has to see. Built from the same terms as the
         # placement below, because "what it would have ordered" and "what it
         # refused to order" are the same intent with a different action.
-        terms = {"entry_low": entry_low, "entry_high": entry_high,
-                 "stop_loss": stop_loss, "target_price": target_price,
-                 "source": source, "reason": reason}
         weak = theme_admits(theme)
         if weak:
             attribution.record_refusal(

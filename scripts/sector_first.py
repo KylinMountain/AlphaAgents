@@ -43,6 +43,7 @@ from alpha_agents.data import frozen_direction_archive  # noqa: E402
 from alpha_agents.data import sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
+from alpha_agents.evolution import world_contract  # noqa: E402
 
 
 def _audit(args) -> int:
@@ -89,6 +90,46 @@ def _register_capabilities(args) -> int:
         "registered_capabilities": str(path),
         "capabilities_hash": sealed["content_hash"],
         "formal_errors": sector_source_probe.formal_errors(sealed),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _review_capabilities(args) -> int:
+    report = json.loads(args.capabilities.read_text(encoding="utf-8"))
+    path = sector_source_probe.register_review(
+        report, args.out, reviewer=args.reviewer, evidence=args.evidence)
+    review = json.loads(path.read_text(encoding="utf-8"))
+    print(json.dumps({
+        "registered_review": str(path),
+        "review_hash": review["review_hash"],
+        "report_hash": review["report_hash"],
+        "reviewed_at": review["reviewed_at"],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _register_world(args) -> int:
+    if os.environ.get("ALPHAAGENTS_CODE_REF_OVERRIDE"):
+        raise sector_experiment.SectorExperimentError(
+            "formal world registration refuses ALPHAAGENTS_CODE_REF_OVERRIDE")
+    report = json.loads(args.capabilities.read_text(encoding="utf-8"))
+    review = json.loads(args.capability_review.read_text(encoding="utf-8"))
+    contract = world_contract.build(
+        repo_root=REPO,
+        corpus_dir=args.corpus,
+        membership_path=args.sector_membership,
+        capabilities=report,
+        capability_review=review,
+    )
+    path = world_contract.register(contract, args.out, capabilities=report)
+    print(json.dumps({
+        "registered_world": str(path),
+        "world_hash": contract["world_hash"],
+        "baseline_identity": {
+            "code_ref": contract["code_ref"],
+            "policy_ref": contract["policy_ref"],
+            "input_hash": contract["input_hash"],
+        },
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -145,6 +186,41 @@ def _registered_capabilities(path: Path, manifest: dict) -> tuple[dict, str]:
     return report, digest
 
 
+def _registered_review(path: Path, report: dict) -> tuple[dict, str]:
+    review = json.loads(path.read_text(encoding="utf-8"))
+    digest = sector_source_probe.require_review(
+        review, report_hash_value=report["content_hash"])
+    if path.name != f"{digest}.json" or path.parent.name != "capability_reviews":
+        raise sector_experiment.SectorExperimentError(
+            "run-matrix requires the content-addressed capability review "
+            "produced by sector_first.py review-capabilities")
+    return review, digest
+
+
+def _registered_world(path: Path, *, manifest: dict, corpus: Path,
+                      membership: Path, capabilities: dict,
+                      capability_review: dict) -> tuple[dict, str]:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    digest = world_contract.require_formal(contract, capabilities)
+    if path.name != f"{digest}.json" or path.parent.name != "worlds":
+        raise sector_experiment.SectorExperimentError(
+            "run-matrix requires the content-addressed world produced by "
+            "sector_first.py register-world")
+    try:
+        world_contract.bind_manifest(contract, manifest)
+        world_contract.verify_runtime(
+            contract,
+            repo_root=REPO,
+            corpus_dir=corpus,
+            membership_path=membership,
+            capabilities=capabilities,
+            capability_review=capability_review,
+        )
+    except world_contract.WorldContractError as exc:
+        raise sector_experiment.SectorExperimentError(str(exc)) from exc
+    return contract, digest
+
+
 def _window_session_count(corpus: Path, start: str, end: str) -> int:
     db = corpus / "market_history.db"
     if not db.exists():
@@ -168,7 +244,8 @@ def _window_session_count(corpus: Path, start: str, end: str) -> int:
 
 
 def _walk_command(*, manifest: dict, manifest_path: Path,
-                  membership_path: Path, target: Path, out: Path,
+                  membership_path: Path, world_path: Path,
+                  target: Path, out: Path,
                   start: str, days: int, arm: str, run_id: str,
                   frozen_directions: Path | None = None) -> list[str]:
     architecture = _ARM_ARCHITECTURES[arm]
@@ -184,6 +261,7 @@ def _walk_command(*, manifest: dict, manifest_path: Path,
         "--sector-membership", str(membership_path),
         "--experiment-manifest", str(manifest_path),
         "--experiment-arm", arm,
+        "--world-contract", str(world_path),
         "--run-id", run_id,
         "--out", str(out),
         "--trader", str(decision["trader"]),
@@ -227,8 +305,18 @@ def _run_child(cmd: list[str], *, env: dict[str, str]) -> None:
 
 def _run_matrix(args) -> int:
     manifest, digest = _registered_manifest(args.manifest)
-    _capabilities, capabilities_digest = _registered_capabilities(
+    capabilities, capabilities_digest = _registered_capabilities(
         args.capabilities, manifest)
+    capability_review, capability_review_digest = _registered_review(
+        args.capability_review, capabilities)
+    _world, world_digest = _registered_world(
+        args.world,
+        manifest=manifest,
+        corpus=args.corpus,
+        membership=args.sector_membership,
+        capabilities=capabilities,
+        capability_review=capability_review,
+    )
     windows = manifest["validation_windows"]
     if not 0 <= args.window_index < len(windows):
         raise sector_experiment.SectorExperimentError(
@@ -277,6 +365,7 @@ def _run_matrix(args) -> int:
             manifest=manifest,
             manifest_path=args.manifest,
             membership_path=args.sector_membership,
+            world_path=args.world,
             target=target,
             out=arms_root / arm,
             start=start,
@@ -292,6 +381,10 @@ def _run_matrix(args) -> int:
         "manifest": str(args.manifest),
         "capabilities_hash": capabilities_digest,
         "capabilities": str(args.capabilities),
+        "capability_review_hash": capability_review_digest,
+        "capability_review": str(args.capability_review),
+        "world_hash": world_digest,
+        "world": str(args.world),
         "membership": str(args.sector_membership),
         "window_index": args.window_index,
         "window": {"start": start, "end": end, "trading_days": days},
@@ -377,6 +470,19 @@ def main(argv: list[str] | None = None) -> int:
     register_caps.add_argument("--capabilities", type=Path, required=True)
     register_caps.add_argument("--out", type=Path, required=True)
 
+    review = sub.add_parser("review-capabilities")
+    review.add_argument("--capabilities", type=Path, required=True)
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--evidence", required=True)
+    review.add_argument("--out", type=Path, required=True)
+
+    world = sub.add_parser("register-world")
+    world.add_argument("--capabilities", type=Path, required=True)
+    world.add_argument("--capability-review", type=Path, required=True)
+    world.add_argument("--sector-membership", type=Path, required=True)
+    world.add_argument("--corpus", type=Path, required=True)
+    world.add_argument("--out", type=Path, required=True)
+
     register = sub.add_parser("register")
     register.add_argument("--manifest", type=Path, required=True)
     register.add_argument("--out", type=Path, required=True)
@@ -388,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
     matrix = sub.add_parser("run-matrix")
     matrix.add_argument("--manifest", type=Path, required=True)
     matrix.add_argument("--capabilities", type=Path, required=True)
+    matrix.add_argument("--capability-review", type=Path, required=True)
+    matrix.add_argument("--world", type=Path, required=True)
     matrix.add_argument("--sector-membership", type=Path, required=True)
     matrix.add_argument("--corpus", type=Path, default=DATA_DIR)
     matrix.add_argument("--window-index", type=int, required=True)
@@ -408,6 +516,10 @@ def main(argv: list[str] | None = None) -> int:
         return _audit(args)
     if args.cmd == "register-capabilities":
         return _register_capabilities(args)
+    if args.cmd == "review-capabilities":
+        return _review_capabilities(args)
+    if args.cmd == "register-world":
+        return _register_world(args)
     if args.cmd == "register":
         return _register(args)
     if args.cmd == "freeze-directions":

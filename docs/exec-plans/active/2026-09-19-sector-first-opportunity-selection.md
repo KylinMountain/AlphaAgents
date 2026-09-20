@@ -1,5 +1,14 @@
 # 板块优先的选股架构：先选方向，再选交易，而不是继续优化双榜
 
+> **2026-09-20 验证前复审：REWORK。** 本文保留原设计及此前实施记录；下文旧状态和勾选项
+> 不能据此推断当前已具备正式验证资格。预算调用、初始净值、证据传递、对照信息集与报告
+> 编排仍有阻断问题，并非只缺资金流数据。固定基线证据见
+> [整体流程合伙人审查](../../reviews/2026-09-20-sector-first-partner-review.md)，
+> 当前开工顺序和验收以 [整改实施计划](2026-09-20-sector-first-review-remediation.md) 为准。
+> 从 RP-00 / RP-01 开始；不改 active policy，正式策略证据仍为 n=0。
+
+以下状态为本轮复审前的实施记录，保留供追溯，不作为当前放行结论：
+
 状态：active（S0–S4 验证基础设施已基本就绪；正式四臂被 fund-flow strict-PIT capability 门控，策略结果仍为 n=0；Sector-First 专属 S5 尚未实现；默认仍为 `dual_rank_v0`）
 创建：2026-09-19
 代码核对基线：初始 `main@72ce91a96e8ab0ee499dae0d6e71deef36e67ddd`；本次最终校准至 `main@88329e8e91ba2ddcb83bdddb2f16d2a2b5e566ea`

@@ -2211,7 +2211,9 @@ def _cancel_class(reason: str) -> str:
 
 def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
     price_map, counts, events = _classify(ctx, day, pending)
-    alerts = P.check_pending_orders(price_map, today=day, trader_id=ctx.trader)
+    alerts = P.check_pending_orders(
+        price_map, today=day, trader_id=ctx.trader,
+        capacity_shares_by_code=dict(ctx.capacity))
     fills, cancels = [], []
     for alert in alerts:
         if alert.get("type") == "filled":

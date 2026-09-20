@@ -169,8 +169,8 @@ from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
     market_rules, order_theme_exposure, portfolio as P,
     portfolio_exit, reservations,
-    sector_membership, sector_panel, sector_selection, selection_policy,
-    t1_settlement as S,
+    research_packet, sector_membership, sector_panel, sector_selection,
+    selection_policy, t1_settlement as S,
 )
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
@@ -1285,6 +1285,12 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
                 membership, sector_id=theme, code=code)
             for theme in item["supporting_themes"]
         ]
+        eligible_themes = [
+            item["primary_theme"], *item["supporting_themes"]]
+        relation_map = {
+            item["primary_theme"]: primary_relation,
+            **dict(zip(item["supporting_themes"], supporting_relations)),
+        }
         panel.append({
             "code": code,
             "name": ctx.corpus.instruments[code]["name"],
@@ -1295,6 +1301,8 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
             "concepts": concepts.get(code, []),
             "primary_theme": item["primary_theme"],
             "supporting_themes": item["supporting_themes"],
+            "eligible_themes": eligible_themes,
+            "theme_relation_evidence_ids": relation_map,
             "membership_snapshot_id": membership.snapshot_id,
             "membership_hash": membership.content_hash,
             "primary_theme_relation_evidence_id": primary_relation,
@@ -1386,7 +1394,10 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
         selected = [
             row["sector_id"] for row in verdict.get("themes") or []
         ]
-        research = {"themes": selected} if selected else None
+        research = {
+            "themes": list(verdict.get("themes") or []),
+            "selected_ids": selected,
+        } if selected else None
 
     refusals = [
         {
@@ -1422,6 +1433,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
         "membership_hash": membership.content_hash,
         "shortlist": shortlist_ids,
         "selected_themes": selected,
+        "direction_research": list(verdict.get("themes") or []),
         "snapshot_hashes": {
             row["sector_id"]: row.get("snapshot_hash")
             for row in cards
@@ -1487,7 +1499,8 @@ def _sector_stock_choice(ctx, *, day: str, prev_day: str,
 
 def _sector_trade_plan(ctx, *, day: str, prev_day: str,
                        panel: list[dict], news: list[dict],
-                       market: dict, book: str, knowledge: str) -> dict:
+                       market: dict, book: str, knowledge: str,
+                       research_packet_payload: dict) -> dict:
     """Shared B/C/D order planner. It cannot research or widen the stock set."""
     from alpha_agents.agents import t1_decider
 
@@ -1513,6 +1526,7 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
         tools=[],
         max_turns=ctx.max_turns,
         research_budget=None,
+        research_packet=research_packet_payload,
     )
 
 def _validate_sector_order_relations(
@@ -1664,31 +1678,125 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "raw": stock_choice.get("raw") or "",
                 "parse_error": f"stock_selector: {choice_error}",
                 "research_budget": stock_choice.get("research_budget"),
+                "research_trace": stock_choice.get("research_trace") or [],
             }
             planner_panel = []
         else:
-            by_code = {row["code"]: row for row in panel}
-            chosen_codes = [
-                row["code"] for row in stock_choice.get("stocks") or []
-            ]
-            planner_panel = [
-                by_code[code] for code in chosen_codes if code in by_code
-            ]
-            verdict = _sector_trade_plan(
-                ctx,
-                day=day,
-                prev_day=prev_day,
-                panel=planner_panel,
-                news=news,
-                market=market,
-                book=book,
-                knowledge=knowledge,
-            )
-            verdict["research_budget"] = stock_choice.get("research_budget")
-            verdict["refused"] = (
-                list(stock_choice.get("refused") or [])
-                + list(verdict.get("refused") or [])
-            )
+            cutoff = f"{day} 09:00:00"
+            try:
+                planner_panel = research_packet.apply_stock_choices(
+                    panel, stock_choice.get("stocks") or [])
+            except research_packet.ResearchPacketError as exc:
+                # A selector chose a theme whose frozen membership relation
+                # cannot be proven. That is a structured decision refusal,
+                # not an unreadable model reply or infrastructure failure.
+                code = str(
+                    ((stock_choice.get("stocks") or [{}])[0]).get("code")
+                    or "")
+                packet = None
+                planner_panel = []
+                verdict = {
+                    "orders": [],
+                    "refused": (
+                        list(stock_choice.get("refused") or [])
+                        + [{
+                            "code": code,
+                            "why": "theme_unresolved",
+                            "detail": str(exc)[:500],
+                            "stage": "research_packet_validation",
+                        }]
+                    ),
+                    "raw": stock_choice.get("raw") or "",
+                    "parse_error": None,
+                    "research_budget": stock_choice.get("research_budget"),
+                    "research_trace": stock_choice.get("research_trace") or [],
+                }
+            else:
+                from alpha_agents.data import policy_registry
+                try:
+                    packet = research_packet.build(
+                        day=day,
+                        cutoff=cutoff,
+                        architecture=ctx.selection_architecture,
+                        policy_ref=policy_registry.active_ref(),
+                        membership_snapshot_id=str(
+                            ctx.last_sector_context.get(
+                                "membership_snapshot_id") or ""),
+                        membership_hash=str(
+                            ctx.last_sector_context.get(
+                                "membership_hash") or ""),
+                        directions=list(
+                            ctx.last_sector_context.get(
+                                "direction_research") or []),
+                        selected_panel=planner_panel,
+                        stock_choices=list(stock_choice.get("stocks") or []),
+                        research_trace=list(
+                            stock_choice.get("research_trace") or []),
+                        budget=stock_choice.get("research_budget"),
+                        event_snapshot_refs=_event_snapshot_refs(
+                            planner_panel, cutoff),
+                    )
+                    research_packet.require_valid(
+                        packet,
+                        cutoff=cutoff,
+                        membership_snapshot_id=str(
+                            ctx.last_sector_context.get(
+                                "membership_snapshot_id") or ""),
+                        membership_hash=str(
+                            ctx.last_sector_context.get(
+                                "membership_hash") or ""),
+                    )
+                except research_packet.ResearchPacketError as exc:
+                    packet = None
+                    planner_panel = []
+                    verdict = {
+                        "orders": [],
+                        "refused": list(stock_choice.get("refused") or []),
+                        "raw": stock_choice.get("raw") or "",
+                        "parse_error": f"research_packet: {exc}",
+                        "research_budget": stock_choice.get("research_budget"),
+                        "research_trace":
+                            stock_choice.get("research_trace") or [],
+                    }
+                else:
+                    hard_refusals = research_packet.deterministic_refusals(
+                        packet)
+                    blocked = {
+                        row["code"]
+                        for row in hard_refusals if row.get("code")
+                    }
+                    planner_allowed = [
+                        row for row in planner_panel
+                        if row.get("code") not in blocked
+                    ]
+                    if planner_allowed:
+                        verdict = _sector_trade_plan(
+                            ctx,
+                            day=day,
+                            prev_day=prev_day,
+                            panel=planner_allowed,
+                            news=news,
+                            market=market,
+                            book=book,
+                            knowledge=knowledge,
+                            research_packet_payload=packet,
+                        )
+                    else:
+                        verdict = {
+                            "orders": [], "refused": [], "raw": "",
+                            "parse_error": None, "research_budget": None,
+                            "research_trace": [],
+                        }
+                    verdict["research_packet"] = packet
+                    verdict["research_budget"] = stock_choice.get(
+                        "research_budget")
+                    verdict["research_trace"] = stock_choice.get(
+                        "research_trace") or []
+                    verdict["refused"] = (
+                        list(stock_choice.get("refused") or [])
+                        + hard_refusals
+                        + list(verdict.get("refused") or [])
+                    )
     else:
         verdict = t1_decider.propose_sync(
             day=day,
@@ -1711,7 +1819,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     if sector_mode and not verdict.get("parse_error"):
         valid_orders, relation_refusals = _validate_sector_order_relations(
-            ctx, panel, verdict.get("orders") or [])
+            ctx, planner_panel, verdict.get("orders") or [])
         verdict["orders"] = valid_orders
         if relation_refusals:
             verdict["refused"] = (
@@ -1734,7 +1842,14 @@ def _decide_llm(ctx, day: str, prev_day: str,
             panel=panel,
             orders=verdict.get("orders") or [],
             refusals=verdict.get("refused") or [],
-            research=verdict.get("research_budget"),
+            research={
+                **(verdict.get("research_budget") or {}),
+                "packet_hash": (
+                    (verdict.get("research_packet") or {}).get("packet_hash")),
+            } if (
+                verdict.get("research_budget")
+                or verdict.get("research_packet")
+            ) else None,
             parse_error=verdict.get("parse_error"),
             raw=verdict.get("raw") or "",
             context={
@@ -1761,6 +1876,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     row["code"] for row in planner_panel
                 ] if sector_mode else None,
                 "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
+                "research_packet": verdict.get("research_packet"),
+                "research_trace": verdict.get("research_trace") or [],
             })
     except Exception as exc:                          # noqa: BLE001
         ctx.counters["opportunity_journal_errors"] += 1
@@ -1788,7 +1905,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     day, refusal.get("code") or "", why,
                     refusal.get("detail") or "")
 
-    by_code = {row["code"]: row for row in panel}
+    execution_panel = planner_panel if sector_mode else panel
+    by_code = {row["code"]: row for row in execution_panel}
     placed = []
     for order in verdict["orders"]:
         row = by_code[order["code"]]
@@ -1848,6 +1966,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "primary_theme_relation_evidence_id"),
             "supporting_theme_relation_evidence_ids": row.get(
                 "supporting_theme_relation_evidence_ids") or [],
+            "research_packet_hash": (
+                (verdict.get("research_packet") or {}).get("packet_hash")),
             "reason": order["reason"],
         })
     return placed

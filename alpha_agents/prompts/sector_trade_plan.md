@@ -27,6 +27,13 @@
 
 {panel}
 
+## 上游冻结研究包
+
+下面 JSON 是方向选择、个股比较、实际工具返回与关系证据的原始交接。
+只能使用其中已经存在的事实；不得把 unknown 补成已知，也不得声称重新查过。
+
+{research_packet}
+
 ## 新闻
 
 窗口：{news_window}，截止 {news_cutoff}

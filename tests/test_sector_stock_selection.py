@@ -116,3 +116,37 @@ def test_llm_stock_parser_never_creates_trade_terms():
         "counterevidence": "extended",
     }]
     assert "entry_low" not in got["stocks"][0]
+
+
+def test_llm_stock_parser_requires_primary_theme_from_frozen_relations():
+    got = S.parse(
+        '{"stocks":[{"code":"600001","primary_theme":"算力",'
+        '"reason":"best","counterevidence":"extended"}]}',
+        {"600001"}, picks=1,
+        offered_themes={"600001": ["AI", "算力"]},
+    )
+    assert got["parse_error"] is None
+    assert got["stocks"][0]["primary_theme"] == "算力"
+
+    missing = S.parse(
+        '{"stocks":[{"code":"600001","reason":"best"}]}',
+        {"600001"}, picks=1,
+        offered_themes={"600001": ["AI", "算力"]},
+    )
+    assert missing["stocks"] == []
+    assert missing["refused"][0]["why"] == "missing_primary_theme"
+
+    outside = S.parse(
+        '{"stocks":[{"code":"600001","primary_theme":"机器人","reason":"best"}]}',
+        {"600001"}, picks=1,
+        offered_themes={"600001": ["AI", "算力"]},
+    )
+    assert outside["stocks"] == []
+    assert outside["refused"][0]["why"] == "invalid_primary_theme"
+
+
+def test_simple_selector_carries_deterministic_primary_theme():
+    panel = [{"code": "600001", "primary_theme": "AI"}]
+    got = S.simple(panel, picks=1)
+    assert got["stocks"][0]["primary_theme"] == "AI"
+    assert got["research_trace"] == []

@@ -74,3 +74,40 @@ class TestResearchBudget:
         with B.use_research_budget(b):
             assert B.current_research_budget() is b
         assert B.current_research_budget() is None
+
+
+    def test_trace_preserves_exact_tool_result_given_to_agent(self):
+        @B.with_timeout
+        def get_stock_context(code: str):
+            return json.dumps({
+                "available": True,
+                "code": code,
+                "atr_pct": 3.2,
+                "structure": "above_ma20",
+            }, ensure_ascii=False)
+
+        b = B.ResearchBudget()
+        with B.use_research_budget(b):
+            raw = get_stock_context("600001")
+
+        payload = json.loads(raw)
+        trace = b.trace()
+        assert payload["atr_pct"] == 3.2
+        assert len(trace) == 1
+        assert trace[0]["tool"] == "get_stock_context"
+        assert trace[0]["code"] == "600001"
+        assert trace[0]["status"] == "ok"
+        assert trace[0]["payload"] == payload
+        assert len(trace[0]["result_hash"]) == 64
+
+    def test_denied_tool_is_traced_as_denied_not_as_a_fact(self):
+        @B.with_timeout
+        def get_market_regime():
+            raise AssertionError("must never execute")
+
+        b = B.ResearchBudget(max_market_calls=0)
+        with B.use_research_budget(b):
+            raw = get_market_regime()
+
+        assert json.loads(raw)["error"] == "research_budget_exhausted"
+        assert b.trace()[0]["status"] == "denied"

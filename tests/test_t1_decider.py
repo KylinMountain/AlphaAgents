@@ -18,6 +18,7 @@ import asyncio
 import pytest
 
 from alpha_agents.agents import t1_decider as D
+from alpha_agents.config import PROMPTS_DIR
 
 PANEL = [
     {"code": "600001", "name": "甲", "close": 10.0, "change_pct": 3.0,
@@ -148,6 +149,31 @@ class TestThePromptCannotShipAHole:
         assert "工信部加快推进算力建设" in message
         assert "财联社" in message
         assert "没有读到任何快讯" not in message
+
+    def test_sector_trade_plan_receives_frozen_research_packet(self):
+        packet = {
+            "version": 1,
+            "packet_hash": "abc",
+            "stocks": [{
+                "code": "600001",
+                "selector_reason": "相对更强",
+                "counterevidence": "位置偏高",
+                "tool_facts": [{
+                    "tool": "get_stock_context",
+                    "payload": {"atr_pct": 3.2, "structure": "above_ma20"},
+                }],
+            }],
+        }
+        template = (PROMPTS_DIR / "sector_trade_plan.md").read_text(
+            encoding="utf-8")
+        message = D.build_message(
+            day="2025-07-01", prev_day="2025-06-30", panel=PANEL, news=[],
+            book="", knowledge="", trader_note="", picks=1,
+            template=template, research_packet=packet)
+
+        assert '"selector_reason": "相对更强"' in message
+        assert '"atr_pct": 3.2' in message
+        assert "上游冻结研究包" in message
 
     def test_a_key_the_renderer_does_not_supply_names_itself(self):
         """``str.format`` raises ``KeyError`` before any post-hoc check can

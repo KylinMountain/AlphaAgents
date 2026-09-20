@@ -1436,6 +1436,14 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
         },
         "frozen_direction_source_run": verdict.get("frozen_from_run"),
         "frozen_direction_archive_hash": verdict.get("frozen_archive_hash"),
+        "direction_trace": {
+            "status": (
+                "unreadable" if verdict.get("parse_error")
+                else ("selected" if selected else "empty")
+            ),
+            "model_elapsed_ms": verdict.get("model_elapsed_ms"),
+            "refused": len(verdict.get("refused") or []),
+        },
     }
 
     if verdict.get("parse_error"):
@@ -1527,81 +1535,30 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
 
 def _validate_sector_order_relations(
         ctx, panel: list[dict], orders: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Re-prove every Sector-First order's PIT theme relation before intent.
-
-    The panel carries content-addressed relation evidence, but an executable
-    intent is the last boundary where a missing/tampered relation can still be
-    stopped without creating a trade. Never fall back to the run-level theme:
-    that would turn missing provenance into apparently valid model behaviour.
-    """
+    """Re-prove every Sector-First order through the shared relation gate."""
     by_code = {str(row.get("code") or ""): row for row in panel}
     accepted: list[dict] = []
     refused: list[dict] = []
-
     for order in orders:
         code = str(order.get("code") or "").strip()
         row = by_code.get(code)
-        problems: list[str] = []
         if row is None:
-            problems.append("outside_panel")
+            detail = "outside_panel"
         else:
-            snapshot_id = str(
-                row.get("membership_snapshot_id") or "").strip()
-            membership_hash = str(row.get("membership_hash") or "").strip()
-            primary = str(row.get("primary_theme") or "").strip()
-            if not snapshot_id:
-                problems.append("missing_membership_snapshot_id")
-            if not membership_hash:
-                problems.append("missing_membership_hash")
-            if not primary:
-                problems.append("missing_primary_theme")
-
-            if not problems:
-                try:
-                    snapshot = sector_membership.by_id(
-                        ctx.sector_membership_archive,
-                        snapshot_id,
-                        expected_hash=membership_hash,
-                    )
-                    expected_primary = sector_membership.relation_evidence_id(
-                        snapshot, sector_id=primary, code=code)
-                    if row.get(
-                            "primary_theme_relation_evidence_id"
-                    ) != expected_primary:
-                        problems.append("primary_relation_evidence_mismatch")
-
-                    supporting = [
-                        str(value).strip()
-                        for value in (row.get("supporting_themes") or [])
-                        if str(value).strip()
-                    ]
-                    supporting_refs = list(
-                        row.get("supporting_theme_relation_evidence_ids") or [])
-                    if len(supporting_refs) != len(supporting):
-                        problems.append("supporting_relation_count_mismatch")
-                    else:
-                        expected_supporting = [
-                            sector_membership.relation_evidence_id(
-                                snapshot, sector_id=theme, code=code)
-                            for theme in supporting
-                        ]
-                        if supporting_refs != expected_supporting:
-                            problems.append(
-                                "supporting_relation_evidence_mismatch")
-                except Exception as exc:              # noqa: BLE001
-                    problems.append(
-                        f"relation_validation:{type(exc).__name__}:{exc}")
-
-        if problems:
-            refused.append({
-                "code": code,
-                "why": "theme_unresolved",
-                "detail": "; ".join(problems)[:500],
-                "stage": "relation_validation",
-            })
-            continue
-        accepted.append(order)
-
+            try:
+                research_packet.validate_relation_row(
+                    ctx.sector_membership_archive, row)
+            except research_packet.ResearchPacketError as exc:
+                detail = str(exc)
+            else:
+                accepted.append(order)
+                continue
+        refused.append({
+            "code": code,
+            "why": "theme_unresolved",
+            "detail": detail[:500],
+            "stage": "relation_validation",
+        })
     return accepted, refused
 
 
@@ -1675,6 +1632,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "parse_error": f"stock_selector: {choice_error}",
                 "research_budget": stock_choice.get("research_budget"),
                 "research_trace": stock_choice.get("research_trace") or [],
+                "model_elapsed_ms": stock_choice.get("model_elapsed_ms"),
             }
             planner_panel = []
         else:
@@ -1781,7 +1739,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         verdict = {
                             "orders": [], "refused": [], "raw": "",
                             "parse_error": None, "research_budget": None,
-                            "research_trace": [],
+                            "research_trace": [], "model_elapsed_ms": None,
                         }
                     verdict["research_packet"] = packet
                     verdict["research_budget"] = stock_choice.get(
@@ -1874,6 +1832,32 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
+                "decision_trace": {
+                    "direction": (
+                        getattr(ctx, "last_sector_context", {}).get(
+                            "direction_trace")
+                        if sector_mode else None
+                    ),
+                    "stock": ({
+                        "status": (
+                            "unreadable" if (stock_choice or {}).get("parse_error")
+                            else ("selected" if (stock_choice or {}).get("stocks")
+                                  else "empty")
+                        ),
+                        "model_elapsed_ms": (
+                            (stock_choice or {}).get("model_elapsed_ms")),
+                        "refused": len(
+                            (stock_choice or {}).get("refused") or []),
+                    } if sector_mode else None),
+                    "planner": {
+                        "status": (
+                            "unreadable" if verdict.get("parse_error")
+                            else ("ordered" if verdict.get("orders") else "empty")
+                        ),
+                        "model_elapsed_ms": verdict.get("model_elapsed_ms"),
+                        "refused": len(verdict.get("refused") or []),
+                    },
+                },
             })
     except Exception as exc:                          # noqa: BLE001
         ctx.counters["opportunity_journal_errors"] += 1

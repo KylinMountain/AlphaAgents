@@ -35,7 +35,7 @@ from alpha_agents.agents.morning import run_morning_analysis
 # cross_validate agent replaced by code-driven 5-dimension check (v2.3)
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
-from alpha_agents.data import clock
+from alpha_agents.data import clock, research_packet
 from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone, parse_stop_loss
 from alpha_agents.data.thesis import from_recommendation
 from alpha_agents.data.trader import load_traders
@@ -602,7 +602,35 @@ def _save_position_calls(report: str, today: str,
     return len(calls)
 
 
-def _save_recommendations_list(recs: list[dict], trader=None) -> None:
+def _morning_relation_status(
+        recommendation: dict, *, relation_archive=None,
+        strict_relations: bool = False) -> str:
+    """Use the same frozen relation validator as the T1 path.
+
+    Legacy live morning recommendations predate PIT relation provenance and are
+    explicitly marked as such. Once a recommendation claims frozen provenance,
+    or a formal caller requests strict relations, missing/mismatched evidence
+    is an error rather than a silent fallback.
+    """
+    relation_keys = (
+        "membership_snapshot_id", "membership_hash",
+        "primary_theme", "primary_theme_relation_evidence_id",
+        "supporting_theme_relation_evidence_ids",
+    )
+    claimed = any(recommendation.get(key) not in (None, "", [])
+                  for key in relation_keys)
+    if not strict_relations and not claimed:
+        return "legacy_unverified"
+    if relation_archive is None:
+        raise research_packet.ResearchPacketError(
+            "strict morning relation validation needs a frozen archive")
+    research_packet.validate_relation_row(relation_archive, recommendation)
+    return "verified"
+
+
+def _save_recommendations_list(
+        recs: list[dict], trader=None, *, relation_archive=None,
+        strict_relations: bool = False) -> None:
     """Save pre-validated recommendations as predictions, fetching entry prices.
 
     ``trader`` owns the resulting predictions, theses and orders, and
@@ -650,6 +678,14 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
         if not re.match(r"^\d{6}$", code):
             continue
         try:
+            relation_status = _morning_relation_status(
+                r, relation_archive=relation_archive,
+                strict_relations=strict_relations)
+        except research_packet.ResearchPacketError as exc:
+            logger.warning(
+                "Morning relation refused %s: %s", code, exc)
+            continue
+        try:
             pred_id = save_prediction(
                 date=today,
                 report_type="morning",
@@ -683,6 +719,7 @@ def _save_recommendations_list(recs: list[dict], trader=None) -> None:
                         "confidence": r.get("confidence", ""),
                         "rec_type": "morning",
                         "trader": trader.id,
+                        "relation_status": relation_status,
                     },
                     _decision_ctx,
                 ),

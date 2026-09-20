@@ -3,6 +3,9 @@
 import pytest
 
 from alpha_agents.data import research_packet as R
+from alpha_agents.data import sector_membership as SM
+from alpha_agents.data import sector_selection as SS
+from alpha_agents.pipeline.tasks import morning_scan as M
 
 
 def _panel():
@@ -138,3 +141,47 @@ def test_explicit_tool_invalidation_is_deterministic_refusal():
         "detail": "公告已确认核心订单取消",
         "evidence_hash": "block-hash",
     }]
+
+
+def test_morning_and_t1_share_the_same_frozen_relation_gate():
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",), "算力": ("600001",)},
+        point_in_time=True,
+    )
+    row = {
+        "code": "600001",
+        "primary_theme": "AI",
+        "supporting_themes": ["算力"],
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "primary_theme_relation_evidence_id": SM.relation_evidence_id(
+            snapshot, sector_id="AI", code="600001"),
+        "supporting_theme_relation_evidence_ids": [
+            SM.relation_evidence_id(
+                snapshot, sector_id="算力", code="600001")],
+    }
+    archive = (snapshot,)
+
+    assert R.validate_relation_row(archive, row) == "AI"
+    assert M._morning_relation_status(
+        row, relation_archive=archive, strict_relations=True) == "verified"
+
+    tampered = dict(row, membership_hash="tampered")
+    with pytest.raises(R.ResearchPacketError, match="hash mismatch"):
+        R.validate_relation_row(archive, tampered)
+    with pytest.raises(R.ResearchPacketError, match="hash mismatch"):
+        M._morning_relation_status(
+            tampered, relation_archive=archive, strict_relations=True)
+
+
+def test_legacy_morning_relation_is_explicitly_unverified():
+    assert M._morning_relation_status(
+        {"code": "600001", "theme": "AI"}) == "legacy_unverified"
+    with pytest.raises(
+            R.ResearchPacketError, match="needs a frozen archive"):
+        M._morning_relation_status(
+            {"code": "600001", "theme": "AI"}, strict_relations=True)

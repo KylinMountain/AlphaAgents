@@ -1580,9 +1580,10 @@ def _decision_world_read_set(
     )
 
     membership_ref = None
-    if ctx.sector_membership_archive:
+    membership_archive = getattr(ctx, "sector_membership_archive", ())
+    if membership_archive:
         membership = sector_membership.as_of(
-            ctx.sector_membership_archive, cutoff)
+            membership_archive, cutoff)
         membership_ref = {
             "snapshot_id": membership.snapshot_id,
             "content_hash": membership.content_hash,
@@ -1886,8 +1887,11 @@ def _decide_llm(ctx, day: str, prev_day: str,
     ctx.last_world_read_set = _decision_world_read_set(
         ctx, day=day, ranking_day=ranking_day, phase=phase,
         panel=(planner_panel if sector_mode else panel), news=news)
-    ctx.world_read_set_hashes.append(
-        ctx.last_world_read_set["read_set_hash"])
+    world_hashes = getattr(ctx, "world_read_set_hashes", None)
+    if world_hashes is None:
+        world_hashes = []
+        ctx.world_read_set_hashes = world_hashes
+    world_hashes.append(ctx.last_world_read_set["read_set_hash"])
 
     try:
         from alpha_agents.data import opportunity_journal as OJ

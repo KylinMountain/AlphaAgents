@@ -197,7 +197,8 @@ def _args(**over) -> argparse.Namespace:
                 theme="WALK-TEST", stop_pct=8.0, participation=0.10,
                 run_id="acceptance", out=None, keep_going=False,
                 decider="placeholder", panel_size=40, news_limit=60,
-                model_timeout=120.0, pace_seconds=0.0, agent_exits=False)
+                model_timeout=120.0, pace_seconds=0.0, agent_exits=False,
+                close_buys=False)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1194,6 +1195,28 @@ class TestTheHardStopIsOutsideTheAgentsReach:
         """It doubles the run's model calls, so it is a choice the operator
         made rather than a surprise on the bill."""
         assert _args().agent_exits is False
+
+    @pytest.mark.parametrize(
+        "decider,agent_exits,close_buys,expected",
+        [
+            ("placeholder", False, False, False),
+            ("llm", False, False, False),
+            ("llm", True, False, False),
+            ("llm", False, True, True),
+            ("llm", True, True, True),
+        ],
+    )
+    def test_agent_exits_never_imply_close_buys(
+            self, decider, agent_exits, close_buys, expected):
+        ctx = type("Ctx", (), {
+            "decider": decider,
+            "agent_exits": agent_exits,
+            "close_buys": close_buys,
+        })()
+        assert walk_forward._close_buy_enabled(ctx) is expected
+
+    def test_close_buy_flag_defaults_to_off(self):
+        assert _args().close_buys is False
 
 
 class TestTheAgentsOwnExitsReachTheReport:

@@ -1,6 +1,6 @@
 # Sector-First 审查整改实施计划：先修闭环，再验证策略
 
-状态：active / ready-to-start（实施计划已编写；下列工程任务尚未完成）  
+状态：active（RP-01 / RP-02 已完成并合入；下一工程包为 RP-03）  
 创建：2026-09-20（Asia/Taipei）  
 基线：`eab3f1ec7b9af0d1fd9b2fa8117cf5ba514a2060`  
 审查依据：[整体流程合伙人审查](../../reviews/2026-09-20-sector-first-partner-review.md)  
@@ -326,13 +326,13 @@ uv run python scripts/lint_policy.py
 
 ## 9. 实施记录（开工后追加）
 
-当前只完成文档与证据归档准备；**RP-00–RP-11 均未在本次文档提交中完成**。下面字段由后续工程 PR 按实际结果填写，不填写推测的测试数或预期收益。
+文档归档后已开始实施。RP-01 / RP-02 均按独立 PR 合入并通过全量 CI；策略证据仍为 n=0，不能把工程修复解释为策略改善。下面只记录已经发生的工程事实。
 
 | 任务 | 状态 | 负责人 | 修复 commit/PR | 真实回归与验收证据 | 剩余阻断 |
 | --- | --- | --- | --- | --- | --- |
 | RP-00 | TODO | 待领取 | — | — | 全量基线执行 |
-| RP-01 | TODO | 主执行工程师（首任务） | — | — | RP-00 |
-| RP-02 | TODO | 待领取 | — | — | RP-00 |
+| RP-01 | DONE | 主执行工程师 | `#15` / `851ba0a5` | proposer tools/budget 四组合、异常恢复、共享预算与真实 `ToolContext`；最终 Harness / build 全绿 | 无 |
+| RP-02 | DONE | 主执行工程师 | `#16` / `91db093e` | `initial_account` + 唯一绩效函数；100→95→100=0% 收益/5% 回撤；重复/乱序/非有限数据与异步日历 fail closed；最终 `2832 passed, 20 skipped`，build / invariants / CodeQL / security 全绿 | 旧结果目录无 `initial_account` 时显式拒绝，需重新生成 |
 | RP-03 | TODO | 待领取 | — | — | RP-01 |
 | RP-04 | TODO | 待领取 | — | — | RP-00 |
 | RP-05 | TODO | 待领取 | — | — | RP-02、RP-04、接口冻结 |

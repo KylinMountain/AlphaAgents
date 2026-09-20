@@ -175,7 +175,9 @@ from alpha_agents.data import (  # noqa: E402
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
-from alpha_agents.evolution import replay_capabilities, sector_experiment  # noqa: E402
+from alpha_agents.evolution import (  # noqa: E402
+    performance, replay_capabilities, sector_experiment,
+)
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
 
@@ -2584,6 +2586,42 @@ def _value(ctx, day: str) -> dict:
     }
 
 
+def _initial_account(ctx, first_session: str) -> dict:
+    """Freeze the account before the first decision, fee or fill.
+
+    The mark lives in run.json instead of equity.csv so it anchors the first
+    daily return and drawdown without pretending to be another trading day.
+    """
+    previous = ctx.corpus.previous(first_session)
+    positions = P.get_open_positions(ctx.trader)
+    if previous is None:
+        if positions:
+            raise RuntimeError(
+                "cannot value pre-existing positions without a prior session")
+        total = P.get_total_capital(ctx.trader)
+        mark = {
+            "cash": P.get_available_capital(ctx.trader)
+            + reservations.unconsumed_total(P._get_conn(), ctx.trader),
+            "invested": P.get_invested_capital(ctx.trader),
+            "market_value": 0.0,
+            "realized": round(total - P.trader_capital(ctx.trader), 2),
+            "unrealized": 0.0,
+            "equity": round(total, 2),
+            "open_positions": 0,
+            "pending_orders": len(P.get_pending_orders(ctx.trader)),
+            "valued_at_a_stale_price": "",
+        }
+    else:
+        mark = _value(ctx, previous)
+
+    return {
+        "kind": "initial_mark",
+        "as_of": previous,
+        "next_session": first_session,
+        **{key: value for key, value in mark.items() if key != "date"},
+    }
+
+
 # ── the run ─────────────────────────────────────────────────────────────────
 
 
@@ -2948,6 +2986,9 @@ def _run_window(ctx, args) -> dict:
 
     window = ctx.corpus.window(args.start, args.days)
     _verify_experiment_window(ctx, window)
+    if not window:
+        raise RuntimeError("walk-forward window is empty")
+    initial_account = _initial_account(ctx, window[0])
     journal_before = _journal_records(_REPLAY_DIR)
     #: Tool calls are read from the journal's own records rather than counted
     #: in memory, for the same reason the exit legs are read back from
@@ -3122,7 +3163,8 @@ def _run_window(ctx, args) -> dict:
     corpus_after = _corpus_fingerprint(_REPLAY_DIR)
 
     return {
-        "ctx": ctx, "window": window, "equity": equity_rows, "fills": fill_rows,
+        "ctx": ctx, "window": window, "initial_account": initial_account,
+        "equity": equity_rows, "fills": fill_rows,
         "settlement": settle_rows, "events": event_rows,
         "theme_exposure": theme_exposure_rows,
         "by_status": by_status, "cancels": cancels, "errors": errors,
@@ -3314,6 +3356,12 @@ def write_report(result: dict, out_dir: Path) -> dict:
     model = result["model_calls"]
     model_usage_ok, model_usage_detail = _model_usage(ctx, model)
 
+    # Validate the whole equity history before writing even the first artifact.
+    # A half-written report directory is worse than a hard failure: a later
+    # comparator could mistake stale files from the same path for this run.
+    performance.equity_metrics(
+        result["initial_account"]["equity"], result["equity"])
+
     capability_matrix = replay_capabilities.build(window, _REPLAY_DIR)
 
     meta = {
@@ -3334,6 +3382,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "entry_zone": list(ctx.entry_zone),
         "window": {"start": window[0], "end": window[-1],
                    "trading_days": len(window)},
+        "initial_account": result["initial_account"],
         "replay_dir": str(_REPLAY_DIR),
         "corpus_dir": _corpus_root(),
         "llm_mode": model["mode"],
@@ -3401,10 +3450,12 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
     fills = result["fills"]
     by_status = result["by_status"]
     first, last = equity[0], equity[-1]
+    metrics = performance.equity_metrics(
+        result["initial_account"]["equity"], equity)
     buys = [f for f in fills if f["side"] == "buy"]
     sells = [f for f in fills if f["side"] == "sell"]
     oversize = [f for f in fills if f["capacity_oversize"]]
-    start_capital = P.trader_capital(ctx.trader)
+    start_capital = metrics["initial_equity"]
 
     lines = [
         "M1 — 最小可跑的 T+1 走前回放",
@@ -3418,8 +3469,8 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         "",
         "— 净值 —",
         f"期末 equity   {last['equity']:,.2f}",
-        f"区间收益      {(last['equity'] / start_capital - 1) * 100:+.3f}%",
-        f"区间最大回撤  {_max_drawdown([r['equity'] for r in equity]) * 100:.3f}%",
+        f"区间收益      {metrics['net_return_pct']:+.3f}%",
+        f"区间最大回撤  {metrics['max_drawdown_pct']:.3f}%",
         f"已实现 / 浮盈 {first['realized']:,.0f} → {last['realized']:,.0f} real / "
         f"{last['unrealized']:,.0f} unreal",
         f"期末持仓/挂单 {last['open_positions']} / {last['pending_orders']}",
@@ -3684,15 +3735,6 @@ def _exit_attribution(result: dict) -> list[str]:
     kinds = Counter(_kind(f.get("reason")) for f in sells)
     out.append("（" + "、".join(f"{k} {v}" for k, v in kinds.most_common()) + "）")
     return out
-
-
-def _max_drawdown(values: list[float]) -> float:
-    peak, worst = float("-inf"), 0.0
-    for value in values:
-        peak = max(peak, value)
-        if peak > 0:
-            worst = min(worst, value / peak - 1)
-    return abs(worst)
 
 
 def _top_reasons(counter: Counter, limit: int = 3) -> str:

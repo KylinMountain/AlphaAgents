@@ -1678,6 +1678,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "raw": stock_choice.get("raw") or "",
                 "parse_error": f"stock_selector: {choice_error}",
                 "research_budget": stock_choice.get("research_budget"),
+                "research_trace": stock_choice.get("research_trace") or [],
             }
             planner_panel = []
         else:
@@ -1785,7 +1786,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     if sector_mode and not verdict.get("parse_error"):
         valid_orders, relation_refusals = _validate_sector_order_relations(
-            ctx, panel, verdict.get("orders") or [])
+            ctx, planner_panel, verdict.get("orders") or [])
         verdict["orders"] = valid_orders
         if relation_refusals:
             verdict["refused"] = (
@@ -1871,7 +1872,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     day, refusal.get("code") or "", why,
                     refusal.get("detail") or "")
 
-    by_code = {row["code"]: row for row in panel}
+    execution_panel = planner_panel if sector_mode else panel
+    by_code = {row["code"]: row for row in execution_panel}
     placed = []
     for order in verdict["orders"]:
         row = by_code[order["code"]]

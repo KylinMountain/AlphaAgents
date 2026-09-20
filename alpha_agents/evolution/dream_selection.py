@@ -357,8 +357,15 @@ def panel_policy_counterfactual(
     """Replay the actual T1 panel-construction gene on the same candidate pools.
 
     This evaluates panel quality, not the LLM's final stock choice. It is the
-    missing causal bridge for t1_change_rank: the live panel, the Dream replay
-    and the policy variant all execute selection_rank.change_share.
+    missing causal bridge for t1_change_rank: the replay panel, the Dream
+    replay and the policy variant all execute selection_rank.change_share.
+
+    **Not the live path.** Production selects through
+    ``get_sector_best_stocks_fn`` and sorts by ``score``
+    (``intraday_monitor.py``); it never calls ``selection_policy``, and its
+    predictions carry no ``selection_architecture``. So "live" was wrong here
+    until 2026-09-21, and a reader must not take this evaluator's existence
+    as evidence that the gene is wired into trading.
     """
     changed = dream_agent.changed_genes(
         parent_version_id, variant_version_id)

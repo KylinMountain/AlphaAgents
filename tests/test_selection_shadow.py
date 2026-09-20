@@ -224,3 +224,49 @@ def test_seal_refuses_legacy_overfilled_unsealed_run(store, monkeypatch):
     with pytest.raises(
             SS.SelectionShadowError, match="already exceeds"):
         SS.process(run_id=run, history_conn=_history(), conn=store)
+
+
+class TestADeploymentWithNoJournalSaysSo:
+    """The sample source is absent in production, and that is diagnosable.
+
+    ``opportunity_sets`` is written only by the replay runner. Without this,
+    ``process`` on a production deployment raised
+    ``OperationalError: no such table: opportunity_sets`` — which reads as a
+    broken query, when the truth is that the experiment has no sample source
+    and can never accumulate one. The two need different responses.
+    """
+
+    def test_the_source_is_reported_absent(self, store):
+        assert SS.sample_source_present(store) is False
+
+    def test_process_refuses_with_a_diagnosis_not_a_sqlite_error(self, store):
+        parent, variant = _versions(store)
+        run = SS.open_run(
+            parent_version_id=parent, variant_version_id=variant,
+            minimum_sets=1, conn=store)
+        with pytest.raises(SS.SelectionShadowError) as caught:
+            SS.process(run_id=run, history_conn=_history(), conn=store)
+        message = str(caught.value)
+        assert "opportunity_sets" in message
+        assert "never accumulate" in message
+
+    def test_the_summary_carries_the_precondition(self, store):
+        """A run stuck at 0 must say why, not leave it to be inferred."""
+        parent, variant = _versions(store)
+        run = SS.open_run(
+            parent_version_id=parent, variant_version_id=variant,
+            minimum_sets=1, conn=store)
+        summary = SS.summary(run, store)
+        assert summary["sample_source_present"] is False
+        assert summary["sample_source"] is None
+
+    def test_the_source_is_reported_present_when_it_exists(self, store):
+        OJ.init_schema(store)
+        assert SS.sample_source_present(store) is True
+        parent, variant = _versions(store)
+        run = SS.open_run(
+            parent_version_id=parent, variant_version_id=variant,
+            minimum_sets=1, conn=store)
+        summary = SS.summary(run, store)
+        assert summary["sample_source_present"] is True
+        assert summary["sample_source"] == "opportunity_sets"

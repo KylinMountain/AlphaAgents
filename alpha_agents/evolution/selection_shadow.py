@@ -5,6 +5,13 @@ therefore watches future Opportunity Journal sets produced under the parent
 policy and replays parent/challenger selection_rank on the exact same
 candidate pool.
 
+**Where those sets come from, stated because it decides whether this module
+can run at all:** the Opportunity Journal is written only by the replay runner
+(``scripts/walk_forward.py``). No production module writes it, so in the
+production deployment there is no sample source and a run opened there stays at
+zero forever. :func:`sample_source_present` answers this, ``process`` refuses
+with a diagnosis rather than a sqlite error, and ``summary`` reports it.
+
 It does not promote. Once the preregistered number of fully matured sets has
 been reached, a seal freezes the sample and its summary. A later promotion gate
 may cite that seal, but this module itself has no pointer-moving API.
@@ -214,6 +221,43 @@ def _set_world(set_row, items, context) -> OpportunityDreamWorld:
         world_hash=_hash(payload))
 
 
+def sample_source_present(conn: sqlite3.Connection | None = None) -> bool:
+    """Whether this deployment has an Opportunity Journal at all.
+
+    The journal is written by the replay runner (``scripts/walk_forward.py``)
+    and by nothing in ``alpha_agents/pipeline/``. So in the production
+    deployment the table does not exist, and every selection shadow run there
+    is structurally unable to accumulate a sample — not slowly, never.
+
+    Reported rather than assumed so a run can say so itself. A progress meter
+    that reads 0/20 forever, with no statement of why, is how an experiment
+    that cannot start gets mistaken for one that is merely young.
+    """
+    target = conn if conn is not None else memory_store._get_conn()
+    row = target.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='opportunity_sets'").fetchone()
+    return row is not None
+
+
+def _require_sample_source(conn: sqlite3.Connection) -> None:
+    """Refuse to process with a diagnosis, not with a sqlite error.
+
+    Without this, ``process`` on a deployment with no journal raises
+    ``OperationalError: no such table: opportunity_sets`` — which reads as a
+    broken query rather than as the experiment having no sample source. The
+    two need different responses, so they must not share an exception type.
+    """
+    if not sample_source_present(conn):
+        raise SelectionShadowError(
+            "No opportunity_sets table in this deployment, so this selection "
+            "shadow run can never accumulate a sample. The Opportunity "
+            "Journal is written only by the replay runner "
+            "(scripts/walk_forward.py); no production module produces it, so "
+            "a forward selection shadow requires the dual-rank panel to be "
+            "wired into the live selection path first.")
+
+
 def process(*, run_id: int, history_conn,
             conn: sqlite3.Connection | None = None) -> dict:
     """Score newly matured future sets, then seal at the sample floor."""
@@ -247,6 +291,10 @@ def process(*, run_id: int, history_conn,
     remaining = minimum_sets - existing_count
 
     parent_ref = _version_ref(int(run["parent_version_id"]))
+    # Checked here, at the point of use, and not earlier: the invariants
+    # above are about this run's own ledger and must be reported whether or
+    # not the environment has a journal. This one is about the environment.
+    _require_sample_source(target)
     sets = target.execute(
         "SELECT s.* FROM opportunity_sets s "
         "LEFT JOIN selection_shadow_rows r "
@@ -360,10 +408,15 @@ def summary(run_id: int, conn: sqlite3.Connection | None = None) -> dict:
     rows = conn.execute(
         "SELECT result_json FROM selection_shadow_rows "
         "WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    present = sample_source_present(conn)
     return {
         "run": run,
         "sample_count": len(rows),
         "remaining": max(0, int(run["minimum_sets"]) - len(rows)),
+        # A run whose source is absent is not "young", it is unable to start.
+        # Stated here so the number is never read without its precondition.
+        "sample_source_present": present,
+        "sample_source": ("opportunity_sets" if present else None),
         "seal": ({
             **sealed,
             "summary": json.loads(sealed["summary_json"]),

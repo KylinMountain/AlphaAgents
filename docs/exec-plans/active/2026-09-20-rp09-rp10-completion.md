@@ -25,6 +25,9 @@ human-approval and compare-and-swap promotion boundary.
   genes. Unknown genes fail closed; parent-prefix matching is forbidden.
 - Sector-First has a dedicated forward manifest and evaluator bound to the
   frozen candidate, protocol, code, data/world and evaluator identities.
+- The evaluator derives return, drawdown, tail loss, concentration and
+  behavior change from aligned raw paths. Caller-supplied summary metrics,
+  future-dated samples and conflicting replays cannot enter the seal.
 - A positive return delta cannot pass when preregistered drawdown, tail-loss or
   concentration limits are breached.
 - A promotion-grade verdict requires a complete, successful CI artifact bound
@@ -43,6 +46,8 @@ human-approval and compare-and-swap promotion boundary.
   separate schemas and APIs.
 - Keep strategy evidence at `n=0` until real future samples arrive; synthetic
   tests prove mechanics only.
+- Freeze the required CI check names in the manifest and require the exact
+  successful set; a generic or partial success list is not promotion evidence.
 
 ## Verification
 

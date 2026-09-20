@@ -43,6 +43,8 @@ from alpha_agents.data import frozen_direction_archive  # noqa: E402
 from alpha_agents.data import policy_registry, sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
+from alpha_agents.evolution import selection_experiment  # noqa: E402
+from alpha_agents.evolution import selection_experiment_compare  # noqa: E402
 from alpha_agents.evolution import world_read_set  # noqa: E402
 
 
@@ -111,6 +113,17 @@ def _register(args) -> int:
     return 0
 
 
+def _register_selection(args) -> int:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    path = selection_experiment.register(manifest, args.out)
+    print(json.dumps({
+        "registered_manifest": str(path),
+        "manifest_hash": selection_experiment.require_valid(manifest),
+        "family": selection_experiment.FAMILY,
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _register_capabilities(args) -> int:
     report = json.loads(args.capabilities.read_text(encoding="utf-8"))
     path = sector_source_probe.register(report, args.out)
@@ -141,6 +154,73 @@ _ARM_ARCHITECTURES = {
     "C": "sector_first_simple_selector",
     "D": "sector_first_no_flow",
 }
+
+
+_SELECTION_ARCHITECTURES = {
+    "CONTROL": "dual_rank_price_v1",
+    "SECTOR": "sector_rank_price_v1",
+}
+
+
+def _registered_selection_manifest(path: Path) -> tuple[dict, str]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    digest = selection_experiment.require_valid(manifest)
+    if (
+            path.name != f"{digest}.json"
+            or path.parent.name != "selection-manifests"):
+        raise selection_experiment.SelectionExperimentError(
+            "selection matrix requires the content-addressed manifest "
+            "produced by sector_first.py register-selection")
+    return manifest, digest
+
+
+def _selection_capability_errors(report: dict) -> list[str]:
+    """Capabilities actually consumed by nf_discovery_v1.
+
+    Fund flow and free-form event/news vintages are intentionally excluded:
+    this protocol forbids reading them, so their absence cannot invalidate it.
+    """
+    caps = report.get("capabilities") or {}
+    errors = []
+    price = caps.get("daily_price") or {}
+    if price.get("status") != "available":
+        errors.append("daily_price capability is not available")
+
+    security = caps.get("security_status") or {}
+    if security.get("status") != "available":
+        errors.append("security_status capability is not available")
+    if security.get("point_in_time_grade") != "A":
+        errors.append(
+            "security_status point_in_time_grade must be A")
+    if security.get("strict_replay_eligible") is not True:
+        errors.append(
+            "security_status must be strict_replay_eligible")
+    verification = security.get("verification") or {}
+    for field in ("verified_by", "verified_at", "evidence"):
+        if not str(verification.get(field) or "").strip():
+            errors.append(
+                f"security_status grade A requires verification.{field}")
+    return errors
+
+
+def _registered_selection_capabilities(
+        path: Path, manifest: dict) -> tuple[dict, str]:
+    report = json.loads(path.read_text(encoding="utf-8"))
+    digest = sector_source_probe.report_hash(report)
+    if report.get("content_hash") != digest:
+        raise selection_experiment.SelectionExperimentError(
+            "capability report content hash does not match its payload")
+    if path.name != f"{digest}.json" or path.parent.name != "capabilities":
+        raise selection_experiment.SelectionExperimentError(
+            "selection matrix requires a content-addressed capability report")
+    if manifest.get("capabilities_hash") != digest:
+        raise selection_experiment.SelectionExperimentError(
+            "selection manifest capabilities_hash mismatch")
+    errors = _selection_capability_errors(report)
+    if errors:
+        raise selection_experiment.SelectionExperimentError(
+            "nf_discovery_v1 capability gate failed: " + "; ".join(errors))
+    return report, digest
 
 
 def _registered_manifest(path: Path) -> tuple[dict, str]:
@@ -243,6 +323,46 @@ def _walk_command(*, manifest: dict, manifest_path: Path,
     elif frozen_directions is not None:
         raise sector_experiment.SectorExperimentError(
             "only C may receive --frozen-directions")
+    return cmd
+
+
+def _selection_walk_command(
+        *, manifest: dict, manifest_path: Path, membership_path: Path,
+        target: Path, out: Path, start: str, days: int,
+        arm: str, run_id: str) -> list[str]:
+    architecture = _SELECTION_ARCHITECTURES[arm]
+    decision = manifest["decision_config"]
+    exit_policy = manifest["exit_policy"]
+    cmd = [
+        sys.executable, str(REPO / "scripts" / "walk_forward.py"),
+        "--target", str(target),
+        "--start", start,
+        "--days", str(days),
+        "--decider", "llm",
+        "--selection-architecture", architecture,
+        "--sector-membership", str(membership_path),
+        "--selection-experiment-manifest", str(manifest_path),
+        "--selection-experiment-arm", arm,
+        "--run-id", run_id,
+        "--out", str(out),
+        "--trader", str(decision["trader"]),
+        "--theme", str(decision["run_theme"]),
+        "--picks", str(decision["picks_per_day"]),
+        "--panel-size", str(decision["panel_size"]),
+        "--participation", str(decision["participation"]),
+        "--news-limit", "0",
+        "--model-timeout", str(decision["model_timeout_seconds"]),
+        "--pace-seconds", str(decision["pace_seconds"]),
+        "--no-trader-tools",
+    ]
+    if not exit_policy["mechanical_stop"]:
+        cmd.append("--no-stop-loss")
+    if not exit_policy["mechanical_target"]:
+        cmd.append("--no-take-profit")
+    if exit_policy["agent_exits"]:
+        cmd.append("--agent-exits")
+    if exit_policy.get("close_buys"):
+        cmd.append("--close-buys")
     return cmd
 
 
@@ -397,6 +517,111 @@ def _run_matrix(args) -> int:
         raise
 
 
+def _run_selection_matrix(args) -> int:
+    manifest, digest = _registered_selection_manifest(args.manifest)
+    _caps, capabilities_digest = _registered_selection_capabilities(
+        args.capabilities, manifest)
+    measured_identity, actual_code = _verify_matrix_identity(
+        manifest, args.corpus, args.sector_membership)
+
+    root = args.out
+    record_path = root / "selection_matrix_run.json"
+    if record_path.exists():
+        raise selection_experiment.SelectionExperimentError(
+            f"{record_path} already exists; use a new output directory")
+    root.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    env["ALPHAAGENTS_LLM_MODE"] = "record"
+    completed = []
+    status = {
+        "family": selection_experiment.FAMILY,
+        "manifest_hash": digest,
+        "manifest": str(args.manifest),
+        "capabilities_hash": capabilities_digest,
+        "capabilities": str(args.capabilities),
+        "membership": str(args.sector_membership),
+        "input_identity": measured_identity,
+        "code_ref": actual_code,
+        "completed": completed,
+        "status": "running",
+    }
+    write_json(record_path, status)
+
+    try:
+        for index, window in enumerate(manifest["validation_windows"]):
+            start = str(window["start"])[:10]
+            end = str(window["end"])[:10]
+            days = _window_session_count(args.corpus, start, end)
+            expected = int(manifest["expected_days_per_window"])
+            if days != expected:
+                raise selection_experiment.SelectionExperimentError(
+                    f"window {index} resolved to {days} sessions; "
+                    f"expected exactly {expected}")
+            window_root = root / "windows" / str(index)
+            for arm in ("CONTROL", "SECTOR"):
+                target = root / "state" / str(index) / arm
+                _run_child([
+                    sys.executable, str(REPO / "scripts" / "walk_bootstrap.py"),
+                    "--target", str(target), "--corpus", str(args.corpus),
+                ], env=env)
+                run_id = (
+                    f"{args.run_prefix or 'nf'}-{digest[:10]}-"
+                    f"w{index}-{arm}")
+                _run_child(_selection_walk_command(
+                    manifest=manifest,
+                    manifest_path=args.manifest,
+                    membership_path=args.sector_membership,
+                    target=target,
+                    out=window_root / arm,
+                    start=start,
+                    days=days,
+                    arm=arm,
+                    run_id=run_id,
+                ), env=env)
+                completed.append({"window": index, "arm": arm})
+                write_json(record_path, status)
+
+        report = selection_experiment_compare.compare_artifact_windows(
+            manifest=manifest,
+            window_dirs=[
+                root / "windows" / str(index)
+                for index in range(4)
+            ],
+            seed=int(args.seed),
+        )
+        write_json(root / "comparison.json", report)
+        status["comparison"] = str(root / "comparison.json")
+        status["status"] = (
+            "ready_for_review"
+            if report["status"] == "ok"
+            else report["status"]
+        )
+        status["historical_only"] = True
+        status["promotion_allowed"] = False
+        write_json(record_path, status)
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 0 if report["status"] == "ok" else 3
+    except Exception:
+        status["status"] = "technical_invalid"
+        write_json(record_path, status)
+        raise
+
+
+def _compare_selection(args) -> int:
+    manifest, _digest = _registered_selection_manifest(args.manifest)
+    report = selection_experiment_compare.compare_artifact_windows(
+        manifest=manifest,
+        window_dirs=[
+            args.windows_dir / str(index) for index in range(4)
+        ],
+        seed=int(args.seed),
+    )
+    write_json(args.out / "comparison.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["status"] == "ok" else 3
+
+
 def _compare(args) -> int:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     arm_dirs = {
@@ -441,9 +666,23 @@ def main(argv: list[str] | None = None) -> int:
     register.add_argument("--manifest", type=Path, required=True)
     register.add_argument("--out", type=Path, required=True)
 
+    register_selection = sub.add_parser("register-selection")
+    register_selection.add_argument("--manifest", type=Path, required=True)
+    register_selection.add_argument("--out", type=Path, required=True)
+
     freeze = sub.add_parser("freeze-directions")
     freeze.add_argument("--run-id", required=True)
     freeze.add_argument("--out-file", type=Path, required=True)
+
+    selection_matrix = sub.add_parser("run-selection-matrix")
+    selection_matrix.add_argument("--manifest", type=Path, required=True)
+    selection_matrix.add_argument("--capabilities", type=Path, required=True)
+    selection_matrix.add_argument(
+        "--sector-membership", type=Path, required=True)
+    selection_matrix.add_argument("--corpus", type=Path, default=DATA_DIR)
+    selection_matrix.add_argument("--run-prefix", default=None)
+    selection_matrix.add_argument("--seed", type=int, default=1)
+    selection_matrix.add_argument("--out", type=Path, required=True)
 
     matrix = sub.add_parser("run-matrix")
     matrix.add_argument("--manifest", type=Path, required=True)
@@ -453,6 +692,12 @@ def main(argv: list[str] | None = None) -> int:
     matrix.add_argument("--window-index", type=int, required=True)
     matrix.add_argument("--run-prefix", default=None)
     matrix.add_argument("--out", type=Path, required=True)
+
+    compare_selection = sub.add_parser("compare-selection")
+    compare_selection.add_argument("--manifest", type=Path, required=True)
+    compare_selection.add_argument("--windows-dir", type=Path, required=True)
+    compare_selection.add_argument("--seed", type=int, default=1)
+    compare_selection.add_argument("--out", type=Path, required=True)
 
     compare = sub.add_parser("compare")
     compare.add_argument("--manifest", type=Path, required=True)
@@ -470,10 +715,16 @@ def main(argv: list[str] | None = None) -> int:
         return _register_capabilities(args)
     if args.cmd == "register":
         return _register(args)
+    if args.cmd == "register-selection":
+        return _register_selection(args)
     if args.cmd == "freeze-directions":
         return _freeze_directions(args)
+    if args.cmd == "run-selection-matrix":
+        return _run_selection_matrix(args)
     if args.cmd == "run-matrix":
         return _run_matrix(args)
+    if args.cmd == "compare-selection":
+        return _compare_selection(args)
     if args.cmd == "compare":
         return _compare(args)
     return _verify(args)

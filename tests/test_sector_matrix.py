@@ -169,6 +169,16 @@ def _formal_capabilities():
                     "evidence": "archived provider vintages verified",
                 },
             },
+            "security_status": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "fixture-reviewer",
+                    "verified_at": "2026-09-20T09:00:00+08:00",
+                    "evidence": "historical status vintages verified",
+                },
+            },
         },
     })
 
@@ -215,3 +225,51 @@ def test_run_matrix_refuses_capability_report_bound_to_another_manifest(tmp_path
     with pytest.raises(
             E.SectorExperimentError, match="capabilities_hash does not match"):
         SF._registered_capabilities(path, manifest)
+
+
+def test_matrix_identity_binds_code_and_input_bytes(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name, payload in (
+        ("market_history.db", b"history"),
+        ("market_snapshots.db", b"snapshots"),
+        ("stocks.db", b"stocks"),
+    ):
+        (corpus / name).write_bytes(payload)
+    membership = tmp_path / "membership.json"
+    membership.write_text('{"snapshots":[]}', encoding="utf-8")
+
+    measured = SF._source_identity(corpus, membership)
+    manifest = _manifest()
+    manifest["baseline_identity"]["code_ref"] = "a" * 40
+    manifest["baseline_identity"]["input_hash"] = measured["input_hash"]
+    monkeypatch.setattr(SF, "_git_code_ref", lambda: "a" * 40)
+
+    got, code_ref = SF._verify_matrix_identity(
+        manifest, corpus, membership)
+    assert got == measured
+    assert code_ref == "a" * 40
+
+    membership.write_text('{"snapshots":[{"changed":true}]}', encoding="utf-8")
+    with pytest.raises(
+            E.SectorExperimentError, match="input_hash"):
+        SF._verify_matrix_identity(manifest, corpus, membership)
+
+
+def test_matrix_identity_refuses_code_drift(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    for name in ("market_history.db", "market_snapshots.db", "stocks.db"):
+        (corpus / name).write_bytes(name.encode())
+    membership = tmp_path / "membership.json"
+    membership.write_text("{}", encoding="utf-8")
+    measured = SF._source_identity(corpus, membership)
+
+    manifest = _manifest()
+    manifest["baseline_identity"]["code_ref"] = "a" * 40
+    manifest["baseline_identity"]["input_hash"] = measured["input_hash"]
+    monkeypatch.setattr(SF, "_git_code_ref", lambda: "b" * 40)
+
+    with pytest.raises(
+            E.SectorExperimentError, match="code_ref"):
+        SF._verify_matrix_identity(manifest, corpus, membership)

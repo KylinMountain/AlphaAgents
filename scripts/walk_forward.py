@@ -168,7 +168,7 @@ from alpha_agents.config import DATA_DIR, PROMPTS_DIR  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
     market_rules, order_theme_exposure, portfolio as P, security_eligibility,
-    portfolio_exit, reservations,
+    policy_registry, portfolio_exit, reservations,
     research_packet, sector_membership, sector_panel, sector_selection,
     selection_policy, t1_settlement as S,
 )
@@ -176,7 +176,7 @@ from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
 from alpha_agents.evolution import (  # noqa: E402
-    performance, replay_capabilities, sector_experiment,
+    performance, replay_capabilities, sector_experiment, world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
@@ -1562,6 +1562,110 @@ def _validate_sector_order_relations(
     return accepted, refused
 
 
+def _decision_world_read_set(
+        ctx, *, day: str, ranking_day: str, phase: str,
+        panel: list[dict], news: list[dict]) -> dict:
+    """Freeze the actual source identities consumed by one buy decision."""
+    cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
+
+    input_identity = getattr(
+        ctx, "input_identity", {"input_hash": "unbound"})
+    price_ref = world_read_set.fact_ref(
+        {
+            "source": "market_history.db:daily_kline",
+            "session": ranking_day,
+            "input_hash": input_identity["input_hash"],
+        },
+        available_at=f"{ranking_day} 15:00:00",
+    )
+
+    membership_ref = None
+    membership_archive = getattr(ctx, "sector_membership_archive", ())
+    if membership_archive:
+        membership = sector_membership.as_of(
+            membership_archive, cutoff)
+        membership_ref = {
+            "snapshot_id": membership.snapshot_id,
+            "content_hash": membership.content_hash,
+            "available_at": membership.available_at,
+        }
+
+    # The local stocks table stores today's ST/suspension flags. Keep the
+    # consumed status fact in the read set, but grade it C rather than letting
+    # a historical replay silently claim it knew the historical status.
+    security_ref = world_read_set.fact_ref(
+        {
+            "source": "stocks.db:stocks",
+            "input_hash": input_identity["input_hash"],
+            "codes": sorted(
+                str(row.get("code") or "")
+                for row in panel if row.get("code")),
+        },
+        point_in_time_grade="C",
+        strict_replay_eligible=False,
+    )
+
+    flow_rows = [
+        {"code": row.get("code"), "net_amount": row.get("net_amount")}
+        for row in panel if row.get("net_amount") is not None
+    ]
+    fund_refs = []
+    if flow_rows:
+        fund_refs.append(world_read_set.fact_ref(
+            {
+                "source": "stock_fund_flow_daily",
+                "session": ranking_day,
+                "rows": flow_rows,
+            },
+            available_at=f"{ranking_day} 15:00:00",
+            point_in_time_grade="B",
+            strict_replay_eligible=False,
+        ))
+
+    event_refs = [
+        {
+            **dict(ref),
+            "point_in_time_grade": "A",
+            "strict_replay_eligible": True,
+        }
+        for ref in _event_snapshot_refs(panel, cutoff)
+    ]
+
+    extra_refs = []
+    if news:
+        extra_refs.append(world_read_set.fact_ref(
+            {
+                "source": "decision_news_window",
+                "rows": [
+                    {
+                        "time": row.get("time"),
+                        "source": row.get("source"),
+                        "title": row.get("title"),
+                    }
+                    for row in news
+                ],
+            },
+            point_in_time_grade="U",
+            strict_replay_eligible=False,
+        ))
+
+    read_set = world_read_set.build(
+        cutoff=cutoff,
+        ranking_session=ranking_day,
+        source_identity_hash=input_identity["input_hash"],
+        code_ref=getattr(ctx, "code_ref", None) or "unbound",
+        policy_ref=getattr(ctx, "policy_ref", None) or "unbound",
+        membership=membership_ref,
+        security_status=security_ref,
+        price_refs=[price_ref],
+        event_refs=event_refs,
+        fund_flow_refs=fund_refs,
+        extra_refs=extra_refs,
+    )
+    world_read_set.require_valid(read_set, strict=False)
+    return read_set
+
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """Model-backed buy decision through the declared selection architecture."""
@@ -1780,6 +1884,15 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 list(verdict.get("refused") or []) + relation_refusals
             )
 
+    ctx.last_world_read_set = _decision_world_read_set(
+        ctx, day=day, ranking_day=ranking_day, phase=phase,
+        panel=(planner_panel if sector_mode else panel), news=news)
+    world_hashes = getattr(ctx, "world_read_set_hashes", None)
+    if world_hashes is None:
+        world_hashes = []
+        ctx.world_read_set_hashes = world_hashes
+    world_hashes.append(ctx.last_world_read_set["read_set_hash"])
+
     try:
         from alpha_agents.data import opportunity_journal as OJ
         cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
@@ -1832,6 +1945,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
+                "world_read_set": ctx.last_world_read_set,
                 "decision_trace": {
                     "direction": (
                         getattr(ctx, "last_sector_context", {}).get(
@@ -2814,6 +2928,28 @@ def _experiment_runtime_contract(args) -> dict:
     }
 
 
+def _verify_experiment_identity(
+        manifest: dict | None, *, code_ref: str | None,
+        policy_ref: str | None, input_hash: str) -> None:
+    if manifest is None:
+        return
+    frozen = manifest.get("baseline_identity") or {}
+    actual = {
+        "code_ref": code_ref,
+        "policy_ref": policy_ref,
+        "input_hash": input_hash,
+    }
+    mismatches = {
+        key: {"manifest": frozen.get(key), "runtime": value}
+        for key, value in actual.items()
+        if frozen.get(key) != value
+    }
+    if mismatches:
+        raise SystemExit(
+            "formal experiment baseline identity mismatch: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
+
+
 def _verify_experiment_runtime(args, manifest: dict | None) -> None:
     if manifest is None:
         return
@@ -2861,6 +2997,27 @@ class Context:
         self.sector_membership_archive = (
             sector_membership.load(membership_path)
             if membership_path is not None else ())
+        if _REPLAY_DIR is None:
+            # Context is also constructed directly by unit tests. A real run
+            # refuses an unbound replay directory before reaching here; keep
+            # direct non-formal construction explicit rather than inventing
+            # paths from the process cwd.
+            self.input_identity = {
+                "files": {}, "input_hash": "unbound",
+            }
+        else:
+            identity_paths = {
+                name: _REPLAY_DIR / name for name in CORPUS_FILES
+            }
+            if membership_path is not None:
+                identity_paths["sector_membership"] = membership_path
+            self.input_identity = world_read_set.file_identity(identity_paths)
+        self.code_ref = (
+            world_read_set.git_code_ref(_PROJECT_ROOT)
+            if getattr(args, "experiment_manifest", None) is not None
+            else None
+        )
+        self.policy_ref = policy_registry.active_ref()
         frozen_path = getattr(args, "frozen_directions", None)
         self.frozen_directions = (
             frozen_direction_archive.load(frozen_path)
@@ -2872,6 +3029,12 @@ class Context:
                 architecture=self.selection_architecture,
                 membership_archive=self.sector_membership_archive,
             )
+        )
+        _verify_experiment_identity(
+            self.experiment_manifest,
+            code_ref=self.code_ref,
+            policy_ref=self.policy_ref,
+            input_hash=self.input_identity["input_hash"],
         )
         _verify_experiment_runtime(args, self.experiment_manifest)
         if self.selection_architecture in {
@@ -2984,6 +3147,8 @@ class Context:
                      if args.decider == "llm" else None)
         self.capacity: dict[str, int] = {}
         self.counters: Counter = Counter()
+        self.last_world_read_set: dict | None = None
+        self.world_read_set_hashes: list[str] = []
 
 
 def _seed_theme(ctx) -> None:
@@ -3473,6 +3638,10 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "selection_architecture": ctx.selection_architecture,
         "experiment_arm": ctx.experiment_arm,
         "experiment_manifest_hash": ctx.experiment_manifest_hash,
+        "code_ref": ctx.code_ref,
+        "policy_ref": ctx.policy_ref,
+        "input_identity": ctx.input_identity,
+        "world_read_set_hashes": list(ctx.world_read_set_hashes),
         "frozen_directions_hash": (
             (ctx.frozen_directions or {}).get("archive_hash")
             if hasattr(ctx, "frozen_directions") else None),

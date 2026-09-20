@@ -82,6 +82,12 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
         "selection_architecture": architecture,
         "experiment_arm": arm,
         "experiment_manifest_hash": E.require_valid(_manifest()),
+        "code_ref": _manifest()["baseline_identity"]["code_ref"],
+        "policy_ref": _manifest()["baseline_identity"]["policy_ref"],
+        "input_identity": {
+            "input_hash": _manifest()["baseline_identity"]["input_hash"],
+        },
+        "world_read_set_hashes": [f"world-{arm}"],
         "frozen_directions_hash": (
             "frozen-b-directions" if arm == "C" else None),
         "window": {
@@ -452,4 +458,27 @@ def test_compare_refuses_silent_intersection_of_different_calendars(tmp_path):
 
     with pytest.raises(
             C.SectorCompareError, match="observed trading-day calendar"):
+        C.compare(manifest=_manifest(), arm_dirs=arms)
+
+
+def test_compare_refuses_run_identity_drift(tmp_path):
+    arms = _arms(tmp_path)
+    meta_path = arms["B"] / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["input_identity"]["input_hash"] = "changed"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(C.SectorCompareError, match="input_hash mismatch"):
+        C.compare(manifest=_manifest(), arm_dirs=arms)
+
+
+def test_compare_requires_per_decision_world_read_sets(tmp_path):
+    arms = _arms(tmp_path)
+    meta_path = arms["B"] / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["world_read_set_hashes"] = []
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(
+            C.SectorCompareError, match="missing world_read_set_hashes"):
         C.compare(manifest=_manifest(), arm_dirs=arms)

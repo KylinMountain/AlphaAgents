@@ -66,7 +66,8 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
     return text
 
 
-def parse(text: str, offered: set[str], *, picks: int) -> dict:
+def parse(text: str, offered: set[str], *, picks: int,
+          offered_themes: dict[str, list[str]] | None = None) -> dict:
     body = json_body(text)
     if not body:
         return {"stocks": [], "refused": [], "parse_error": "empty reply"}
@@ -100,13 +101,34 @@ def parse(text: str, offered: set[str], *, picks: int) -> dict:
             refused.append({
                 "code": code, "why": "too_many", "detail": f"max={picks}"})
             continue
+        primary_theme = str(raw.get("primary_theme") or "").strip()
+        if offered_themes is not None:
+            eligible = [
+                str(value).strip()
+                for value in (offered_themes.get(code) or [])
+                if str(value).strip()
+            ]
+            if not primary_theme:
+                refused.append({
+                    "code": code, "why": "missing_primary_theme", "detail": ""})
+                continue
+            if primary_theme not in eligible:
+                refused.append({
+                    "code": code,
+                    "why": "invalid_primary_theme",
+                    "detail": f"{primary_theme!r} not in {eligible}",
+                })
+                continue
         seen.add(code)
-        selected.append({
+        row = {
             "code": code,
             "reason": str(raw.get("reason") or "").strip()[:500],
             "counterevidence": str(
                 raw.get("counterevidence") or "").strip()[:400],
-        })
+        }
+        if primary_theme:
+            row["primary_theme"] = primary_theme
+        selected.append(row)
     return {"stocks": selected, "refused": refused, "parse_error": None}
 
 
@@ -150,12 +172,23 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
             "stocks": [], "refused": [], "raw": "",
             "parse_error": f"MaxTurnsExceeded after {turns} turns ({exc})",
             "research_budget": budget.summary() if budget else None,
+            "research_trace": budget.trace() if budget else [],
         }
 
     raw = result.final_output or ""
-    parsed = parse(raw, {str(row["code"]) for row in panel}, picks=picks)
+    offered_themes = {
+        str(row["code"]): list(
+            row.get("eligible_themes")
+            or [row.get("primary_theme"), *(row.get("supporting_themes") or [])]
+        )
+        for row in panel
+    }
+    parsed = parse(
+        raw, {str(row["code"]) for row in panel}, picks=picks,
+        offered_themes=offered_themes)
     parsed["raw"] = raw
     parsed["research_budget"] = budget.summary() if budget else None
+    parsed["research_trace"] = budget.trace() if budget else []
     return parsed
 
 
@@ -169,7 +202,12 @@ def propose_sync(*, loop: asyncio.AbstractEventLoop | None = None,
 def simple(panel: list[dict], *, picks: int) -> dict:
     """Preregistered C-arm selector: take the first panel rows as frozen."""
     chosen = [
-        {"code": str(row["code"]), "reason": "transparent_panel_order"}
+        {
+            "code": str(row["code"]),
+            "reason": "transparent_panel_order",
+            "counterevidence": "",
+            "primary_theme": str(row.get("primary_theme") or ""),
+        }
         for row in panel[:max(0, int(picks))]
     ]
     return {
@@ -178,4 +216,5 @@ def simple(panel: list[dict], *, picks: int) -> dict:
         "raw": "",
         "parse_error": None,
         "research_budget": None,
+        "research_trace": [],
     }

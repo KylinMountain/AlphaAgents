@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+from alpha_agents.data import sector_membership
+
 
 VERSION = 1
 
@@ -71,6 +73,59 @@ def _relation_map(row: dict) -> dict[str, str]:
         if str(theme).strip() and str(ref).strip():
             out[str(theme)] = str(ref)
     return out
+
+
+def validate_relation_row(archive, row: dict) -> str:
+    """Re-prove one stock/theme relation against the frozen PIT archive.
+
+    Every caller (morning, T1, replay) uses this function instead of copying
+    membership/hash/evidence checks. It returns the primary theme on success
+    and raises :class:`ResearchPacketError` on any missing or mismatched
+    provenance.
+    """
+    code = str(row.get("code") or "").strip()
+    snapshot_id = str(row.get("membership_snapshot_id") or "").strip()
+    membership_hash = str(row.get("membership_hash") or "").strip()
+    primary = str(row.get("primary_theme") or "").strip()
+    if not code:
+        raise ResearchPacketError("relation row is missing code")
+    if not snapshot_id:
+        raise ResearchPacketError(f"{code} is missing membership_snapshot_id")
+    if not membership_hash:
+        raise ResearchPacketError(f"{code} is missing membership_hash")
+    if not primary:
+        raise ResearchPacketError(f"{code} is missing primary_theme")
+
+    try:
+        snapshot = sector_membership.by_id(
+            archive, snapshot_id, expected_hash=membership_hash)
+        expected_primary = sector_membership.relation_evidence_id(
+            snapshot, sector_id=primary, code=code)
+    except Exception as exc:
+        raise ResearchPacketError(str(exc)) from exc
+
+    if str(row.get("primary_theme_relation_evidence_id") or "") != expected_primary:
+        raise ResearchPacketError(
+            f"{code} primary relation evidence mismatch")
+
+    supporting = [
+        str(value).strip()
+        for value in (row.get("supporting_themes") or [])
+        if str(value).strip()
+    ]
+    refs = list(row.get("supporting_theme_relation_evidence_ids") or [])
+    if len(refs) != len(supporting):
+        raise ResearchPacketError(
+            f"{code} supporting relation evidence count mismatch")
+    expected = [
+        sector_membership.relation_evidence_id(
+            snapshot, sector_id=theme, code=code)
+        for theme in supporting
+    ]
+    if refs != expected:
+        raise ResearchPacketError(
+            f"{code} supporting relation evidence mismatch")
+    return primary
 
 
 def apply_stock_choices(panel: list[dict], choices: list[dict]) -> list[dict]:

@@ -435,6 +435,7 @@ def check_pending_orders(
     realtime_prices: dict[str, float],
     today: str,
     trader_id: str | None = None,
+    capacity_shares_by_code: dict[str, int] | None = None,
 ) -> list[dict]:
     """Check pending orders against realtime prices. Fill if price in entry zone.
 
@@ -621,7 +622,12 @@ def check_pending_orders(
         triggered = in_entry_zone(price, entry_low, entry_high)
 
         if triggered:
-            fill_alert = _fill_order(order, fill_price=price, fill_date=today)
+            fill_alert = _fill_order(
+                order, fill_price=price, fill_date=today,
+                max_shares=(
+                    (capacity_shares_by_code or {}).get(code)
+                    if capacity_shares_by_code is not None else None
+                ))
             if fill_alert:
                 alerts.append(fill_alert)
         elif expire_days is not None and days_pending >= expire_days:
@@ -701,7 +707,9 @@ def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
     return None
 
 
-def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
+def _fill_order(
+        order: dict, fill_price: float, fill_date: str,
+        max_shares: int | None = None) -> dict | None:
     """Convert a pending order to an open position at fill_price.
 
     Every limit below is measured against the order's own trader: its
@@ -813,6 +821,24 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
                 "name": name,
                 "reason": f"资金不足",
             }
+
+        if max_shares is not None:
+            if type(max_shares) is not int or max_shares < 0:
+                raise ValueError(
+                    f"max_shares must be a non-negative int or None, got "
+                    f"{max_shares!r}")
+            capacity_lots = (max_shares // LOT_SIZE) * LOT_SIZE
+            shares = min(shares, capacity_lots)
+            if shares <= 0:
+                _cancel_order_unlocked(
+                    order["id"],
+                    f"流动性容量不足(上限{max_shares}股, 最小一手{LOT_SIZE}股)")
+                return {
+                    "type": "cancelled",
+                    "code": code,
+                    "name": name,
+                    "reason": "流动性容量不足",
+                }
 
         cost = shares * fill_price
 

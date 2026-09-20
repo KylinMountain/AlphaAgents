@@ -1568,11 +1568,13 @@ def _decision_world_read_set(
     """Freeze the actual source identities consumed by one buy decision."""
     cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
 
+    input_identity = getattr(
+        ctx, "input_identity", {"input_hash": "unbound"})
     price_ref = world_read_set.fact_ref(
         {
             "source": "market_history.db:daily_kline",
             "session": ranking_day,
-            "input_hash": ctx.input_identity["input_hash"],
+            "input_hash": input_identity["input_hash"],
         },
         available_at=f"{ranking_day} 15:00:00",
     )
@@ -1593,7 +1595,7 @@ def _decision_world_read_set(
     security_ref = world_read_set.fact_ref(
         {
             "source": "stocks.db:stocks",
-            "input_hash": ctx.input_identity["input_hash"],
+            "input_hash": input_identity["input_hash"],
             "codes": sorted(
                 str(row.get("code") or "")
                 for row in panel if row.get("code")),
@@ -1649,9 +1651,9 @@ def _decision_world_read_set(
     read_set = world_read_set.build(
         cutoff=cutoff,
         ranking_session=ranking_day,
-        source_identity_hash=ctx.input_identity["input_hash"],
-        code_ref=ctx.code_ref or "unbound",
-        policy_ref=ctx.policy_ref or "unbound",
+        source_identity_hash=input_identity["input_hash"],
+        code_ref=getattr(ctx, "code_ref", None) or "unbound",
+        policy_ref=getattr(ctx, "policy_ref", None) or "unbound",
         membership=membership_ref,
         security_status=security_ref,
         price_refs=[price_ref],
@@ -2991,12 +2993,21 @@ class Context:
         self.sector_membership_archive = (
             sector_membership.load(membership_path)
             if membership_path is not None else ())
-        identity_paths = {
-            name: _REPLAY_DIR / name for name in CORPUS_FILES
-        }
-        if membership_path is not None:
-            identity_paths["sector_membership"] = membership_path
-        self.input_identity = world_read_set.file_identity(identity_paths)
+        if _REPLAY_DIR is None:
+            # Context is also constructed directly by unit tests. A real run
+            # refuses an unbound replay directory before reaching here; keep
+            # direct non-formal construction explicit rather than inventing
+            # paths from the process cwd.
+            self.input_identity = {
+                "files": {}, "input_hash": "unbound",
+            }
+        else:
+            identity_paths = {
+                name: _REPLAY_DIR / name for name in CORPUS_FILES
+            }
+            if membership_path is not None:
+                identity_paths["sector_membership"] = membership_path
+            self.input_identity = world_read_set.file_identity(identity_paths)
         self.code_ref = (
             world_read_set.git_code_ref(_PROJECT_ROOT)
             if getattr(args, "experiment_manifest", None) is not None

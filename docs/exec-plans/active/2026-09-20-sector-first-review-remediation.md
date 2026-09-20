@@ -341,5 +341,5 @@ uv run python scripts/lint_policy.py
 | RP-07 | DONE | 主执行工程师 | `#23` / `#30` | 原子现金/主题风险占用，主/辅主题在下单前进入同一风险门 | 阈值有效性仍需前向数据，不影响工程闭环 |
 | RP-08 | DONE | 主执行工程师 | `#24` / `#25` / `#30` / `#31` | 上交所规则版本化、exit/close-buy 解耦、ADV20 在真实 fill 与一手兜底路径硬约束 | 无 |
 | RP-09 | DONE | 主执行工程师 | `#31` / `9c5c4e8f`（整合原 `#26`） | 独立 append-only forward observation store；可信 UTC 注册、修订链、失败分类、observation-only 隔离 | 无 |
-| RP-10 | BLOCKED | 工程 Leader | `#31` / `9c5c4e8f`（整合原 `#28`） | exact leaf-gene registry；严格未来注册；exact-N/并发/重试封存；Sector-First 专属 manifest/evaluator；risk veto；CI artifact 绑定；单 verdict；人工批准/CAS 沿用既有边界 | 工程实现已合入；必须等待同一预注册 manifest 下真实未来 n≥50，当前策略证据 n=0 |
+| RP-10 | BLOCKED | 工程 Leader | `#31` / `9c5c4e8f`（整合原 `#28`）；`#33` / `0b436607` | exact leaf-gene registry；严格未来注册与到期校验；exact-N/并发/重试封存；Sector-First 专属 manifest/evaluator 从绑定的原始路径重算指标；risk veto；精确 CI 清单绑定；冲突重放拒绝；单 verdict；人工批准/CAS 沿用既有边界 | 工程实现已合入；必须等待同一预注册 manifest 下真实未来 n≥50，当前策略证据 n=0 |
 | RP-11 | TODO | 待单独批准 | — | — | G2、独立预注册 |

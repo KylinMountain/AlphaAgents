@@ -1,6 +1,6 @@
 # RP-09 / RP-10 completion: immutable forward evidence and controlled promotion
 
-Status: BLOCKED — engineering merged in `#31` / `9c5c4e8f`; real forward
+Status: BLOCKED — engineering merged in `#31` and `#33`; real forward
 `n >= 50` remains a time/data gate
 Owner: engineering leader  
 Base: `main@da179d98`
@@ -51,7 +51,7 @@ human-approval and compare-and-swap promotion boundary.
 
 ## Verification
 
-- `uv run pytest tests/ -q`: `2948 passed, 20 skipped`, including the
+- `uv run pytest tests/ -q`: `2950 passed, 20 skipped`, including the
   concurrent duplicate-delivery regression.
 - `uv run python scripts/lint_harness.py`: pass, 222 files, 13 grandfathered
   findings.
@@ -64,6 +64,8 @@ No active policy pointer moved. Strategy evidence remains `n=0`; the code is
 merged, while RP-10's final evidence state remains blocked until 50 real
 future samples mature under one preregistered manifest.
 
-Merged by [PR #31](https://github.com/KylinMountain/AlphaAgents/pull/31).
+Merged by [PR #31](https://github.com/KylinMountain/AlphaAgents/pull/31), with
+the evaluator trust boundary hardened by
+[PR #33](https://github.com/KylinMountain/AlphaAgents/pull/33).
 The implementation PRs it superseded (`#26`, `#28`, `#29`) are closed with an
 explicit pointer to the integrated commit.

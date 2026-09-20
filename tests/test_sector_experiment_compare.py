@@ -3,6 +3,7 @@
 import csv
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,6 +89,12 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
             "end": "2026-03-31",
             "trading_days": 60,
         },
+        "initial_account": {
+            "kind": "initial_mark",
+            "as_of": "2025-12-31",
+            "next_session": "2026-01-01",
+            "equity": 100000.0,
+        },
         "errors": [],
         "model_usage_ok": True,
         "agent_tool_calls": 100,
@@ -105,10 +112,11 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
         json.dumps(meta), encoding="utf-8")
 
     equity = []
-    for i in range(61):
+    start = date(2026, 1, 1)
+    for i in range(60):
         equity.append({
-            "date": f"2026-01-{(i % 28) + 1:02d}-{i:02d}",
-            "equity": 100000 + slope * i * 1000,
+            "date": (start + timedelta(days=i)).isoformat(),
+            "equity": 100000 + slope * (i + 1) * 1000,
         })
     _write_csv(root / "equity.csv", ["date", "equity"], equity)
     _write_csv(
@@ -150,6 +158,10 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
     assert got["status"] == "ready_for_human_review"
     assert got["promotion_eligible"] is False
     assert got["paired_daily"]["B_minus_A"]["n_days"] == 60
+    assert got["paired_daily"]["B_minus_A"]["expected_trading_days"] == 60
+    assert got["paired_daily"]["B_minus_A"]["left_observed_days"] == 60
+    assert got["paired_daily"]["B_minus_A"]["right_observed_days"] == 60
+    assert got["paired_daily"]["B_minus_A"]["common_trading_days"] == 60
     assert got["arms"]["B"]["risk"]["passed"] is True
     assert got["arms"]["B"]["layers"]["direction"]["sets"] == 60
     assert got["arms"]["B"]["layers"]["stock"]["sets"] == 60
@@ -357,3 +369,74 @@ def test_runtime_contract_names_full_virtual_cost_model():
     assert cost["stamp_duty_sell_rate"] > 0
     assert cost["transfer_fee_rate"] > 0
     assert cost["slippage_rate"] > 0
+
+
+def test_load_arm_anchors_return_and_drawdown_to_initial_mark(tmp_path):
+    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    meta_path = root / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["window"]["trading_days"] = 2
+    meta["initial_account"]["equity"] = 100.0
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    _write_csv(
+        root / "equity.csv",
+        ["date", "equity"],
+        [
+            {"date": "2026-01-05", "equity": 95.0},
+            {"date": "2026-01-06", "equity": 100.0},
+        ],
+    )
+
+    got = C.load_arm(root, "A")
+    assert got["portfolio"]["net_return_pct"] == 0.0
+    assert got["portfolio"]["max_drawdown_pct"] == 5.0
+    assert got["daily_returns_pct"]["2026-01-05"] == -5.0
+    assert got["daily_returns_pct"]["2026-01-06"] == pytest.approx(
+        5.263157894736842)
+
+
+def test_load_arm_refuses_legacy_run_without_initial_mark(tmp_path):
+    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    meta_path = root / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    del meta["initial_account"]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(C.SectorCompareError, match="initial_account"):
+        C.load_arm(root, "A")
+
+
+def test_load_arm_refuses_duplicate_days_even_when_declared_count_matches(tmp_path):
+    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    meta_path = root / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["window"]["trading_days"] = 2
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    _write_csv(
+        root / "equity.csv",
+        ["date", "equity"],
+        [
+            {"date": "2026-01-05", "equity": 100000.0},
+            {"date": "2026-01-05", "equity": 100001.0},
+        ],
+    )
+
+    with pytest.raises(C.SectorCompareError, match="duplicate"):
+        C.load_arm(root, "A")
+
+
+def test_load_arm_accepts_one_real_trading_day(tmp_path):
+    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    meta_path = root / "run.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["window"]["trading_days"] = 1
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    _write_csv(
+        root / "equity.csv",
+        ["date", "equity"],
+        [{"date": "2026-01-05", "equity": 99000.0}],
+    )
+
+    got = C.load_arm(root, "A")
+    assert got["portfolio"]["net_return_pct"] == -1.0
+    assert got["portfolio"]["max_drawdown_pct"] == 1.0

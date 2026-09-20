@@ -176,7 +176,8 @@ from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
 from alpha_agents.evolution import (  # noqa: E402
-    performance, replay_capabilities, sector_experiment, world_read_set,
+    performance, replay_capabilities, sector_experiment, selection_experiment,
+    world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 
@@ -681,9 +682,11 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     costs a history read per code and most of the pool is never shown.
     """
     bars_prev = ctx.corpus.bars(prev_day)
-    concepts = _concepts_map(ctx)
-    limit_pool = _limit_pool_map(ctx, day)
-    fund_flow = _fund_flow_map(ctx, prev_day)
+    minimal_no_flow = getattr(ctx, "selection_architecture", "") == (
+        "dual_rank_price_v1")
+    concepts = {} if minimal_no_flow else _concepts_map(ctx)
+    limit_pool = {} if minimal_no_flow else _limit_pool_map(ctx, day)
+    fund_flow = {} if minimal_no_flow else _fund_flow_map(ctx, prev_day)
     ranked = []
     for code in ctx.corpus.instruments:
         reason = _eligibility(ctx, code, day, prev_day)
@@ -855,8 +858,9 @@ def _news_window(day: str, prev_day: str, limit: int,
         return []
 
 
-def _book_and_knowledge(ctx, day: str,
-                        phase: str = "open") -> tuple[str, str]:
+def _book_and_knowledge(
+        ctx, day: str, phase: str = "open", *,
+        include_learning: bool = True) -> tuple[str, str]:
     """What the agent holds, and what it has learned, as of the replay day.
 
     Read through the same functions the live morning scan uses, so a replay
@@ -899,12 +903,14 @@ def _book_and_knowledge(ctx, day: str,
     except Exception as exc:                          # noqa: BLE001
         logger.warning("portfolio context unavailable: %s", exc)
         book = ""
+    if not include_learning:
+        return book, ""
     parts = []
     for fn in (feedback.inject_sentiment, feedback.inject_principles,
                feedback.inject_playbooks):
         try:
             parts.append(fn())
-        except Exception as exc:                      # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001
             logger.warning("%s unavailable: %s", fn.__name__, exc)
     parts.append(_knowledge_block(ctx, day))
     return book, "\n\n".join(p for p in parts if p)
@@ -1183,7 +1189,8 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
     sessions = ctx.corpus.days[max(0, index - 20):index + 1]
     bars_by_day = {session: ctx.corpus.bars(session) for session in sessions}
     flow = (
-        None if ctx.selection_architecture == "sector_first_no_flow"
+        None if ctx.selection_architecture in {
+            "sector_first_no_flow", "sector_rank_price_v1"}
         else _fund_flow_map(ctx, ranking_day)
     )
     snapshots = sector_selection.build_sector_snapshots(
@@ -1213,23 +1220,32 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
                         selected: list[str], limit: int) -> list[dict]:
     """Build stocks only after directions have been selected."""
     bars = ctx.corpus.bars(ranking_day)
-    limit_pool = _limit_pool_map(ctx, day)
-    fund_flow = _fund_flow_map(ctx, ranking_day)
-    concepts = sector_membership.concepts_by_code(membership)
+    minimal_no_flow = getattr(ctx, "selection_architecture", "") == (
+        "sector_rank_price_v1")
+    limit_pool = {} if minimal_no_flow else _limit_pool_map(ctx, day)
+    fund_flow = {} if minimal_no_flow else _fund_flow_map(ctx, ranking_day)
+    concepts = (
+        {} if minimal_no_flow
+        else sector_membership.concepts_by_code(membership)
+    )
     index = ctx.corpus.index.get(ranking_day)
     if index is None:
         raise ValueError(f"ranking day {ranking_day} is outside the corpus")
-    loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
-    loo_bars = {session: ctx.corpus.bars(session) for session in loo_sessions}
-    leave_one_out = sector_selection.candidate_leave_one_out_5d(
-        membership=membership,
-        decision_at=f"{day} 09:00:00",
-        as_of_session=ranking_day,
-        sessions=loo_sessions,
-        bars_by_day=loo_bars,
-        market_codes=set(ctx.corpus.bars(ranking_day)),
-        strict_pit=True,
-    )
+    if minimal_no_flow:
+        leave_one_out = {}
+    else:
+        loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
+        loo_bars = {
+            session: ctx.corpus.bars(session) for session in loo_sessions}
+        leave_one_out = sector_selection.candidate_leave_one_out_5d(
+            membership=membership,
+            decision_at=f"{day} 09:00:00",
+            as_of_session=ranking_day,
+            sessions=loo_sessions,
+            bars_by_day=loo_bars,
+            market_codes=set(ctx.corpus.bars(ranking_day)),
+            strict_pit=True,
+        )
 
     candidate_codes = set()
     for sector in selected:
@@ -1337,6 +1353,82 @@ def _direction_news(ctx, news: list[dict]) -> list[dict]:
             continue
         out.append(row)
     return out
+
+
+_MINIMAL_PLANNER_FIELDS = (
+    "code", "name", "close", "change_pct", "adv20", "turnover_rate",
+)
+
+
+def _minimal_planner_panel(
+        panel: list[dict], *, limit: int) -> list[dict]:
+    """Closed planner view shared by CONTROL and SECTOR.
+
+    Theme names, peer metrics, concepts, limit-sector labels and fund flow are
+    deliberately absent. The SECTOR arm may use PIT themes to *discover* the
+    candidates, but the shared planner cannot receive extra explanatory data.
+    """
+    if limit <= 0:
+        return []
+    return [
+        {key: row.get(key) for key in _MINIMAL_PLANNER_FIELDS}
+        for row in panel[:limit]
+    ]
+
+
+def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
+    """Transparent top-3 price/breadth directions, no model and no flow."""
+    from alpha_agents.data import theme_opportunity_journal as TOJ
+
+    membership, cards, shortlist = _sector_cards(ctx, day, ranking_day)
+    selected = [
+        row["sector_id"] for row in shortlist[:3]
+        if row.get("sector_id")
+    ]
+    cutoff = f"{day} 09:00:00"
+    try:
+        TOJ.record(
+            run_id=str(ctx.run_id),
+            trader_id=ctx.trader,
+            day=day,
+            phase="open",
+            information_cutoff=cutoff,
+            architecture=ctx.selection_architecture,
+            snapshots=cards,
+            shortlist=[row["sector_id"] for row in shortlist],
+            selected=selected,
+            research={
+                "method": "transparent_price_breadth_top3",
+                "selected_ids": selected,
+            },
+            refusals=[],
+            parse_error=None,
+        )
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["theme_opportunity_journal_errors"] += 1
+        logger.warning("%s: minimal theme journal failed: %s", day, exc)
+
+    ctx.last_sector_context = {
+        "membership_snapshot_id": membership.snapshot_id,
+        "membership_hash": membership.content_hash,
+        "shortlist": [row["sector_id"] for row in shortlist],
+        "selected_themes": selected,
+        "direction_research": [],
+        "snapshot_hashes": {
+            row["sector_id"]: row.get("snapshot_hash")
+            for row in cards
+        },
+        "direction_trace": {
+            "status": "selected" if selected else "empty",
+            "method": "transparent_price_breadth_top3",
+            "model_elapsed_ms": 0,
+            "refused": 0,
+        },
+    }
+    if not selected:
+        return []
+    return _build_sector_panel(
+        ctx, day, ranking_day, membership, selected, ctx.panel_size)
 
 
 def _sector_first_stage(ctx, day: str, ranking_day: str,
@@ -1622,7 +1714,10 @@ def _decision_world_read_set(
             strict_replay_eligible=False,
         ))
 
-    event_refs = [
+    minimal_mode = getattr(ctx, "selection_architecture", "") in {
+        "dual_rank_price_v1", "sector_rank_price_v1",
+    }
+    event_refs = [] if minimal_mode else [
         {
             **dict(ref),
             "point_in_time_grade": "A",
@@ -1673,7 +1768,16 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ranking_day = day if phase == "close" else prev_day
     market = _market_state(ctx, prev_day)
-    news = _news_window(day, prev_day, ctx.news_limit, phase)
+    minimal_mode = ctx.selection_architecture in {
+        "dual_rank_price_v1", "sector_rank_price_v1",
+    }
+    if minimal_mode and phase != "open":
+        raise RuntimeError(
+            "nf_discovery_v1 supports the reproducible 09:00 buy path only")
+    news = (
+        [] if minimal_mode
+        else _news_window(day, prev_day, ctx.news_limit, phase)
+    )
     if market:
         ctx.counters["market_state_days"] += 1
 
@@ -1683,7 +1787,14 @@ def _decide_llm(ctx, day: str, prev_day: str,
         "sector_first_v0", "sector_first_simple_selector",
         "sector_first_no_flow",
     }
-    if sector_mode:
+    if minimal_mode:
+        if ctx.selection_architecture == "sector_rank_price_v1":
+            discovered = _price_sector_stage(ctx, day, ranking_day)
+        else:
+            discovered = _build_panel(
+                ctx, day, ranking_day, ctx.panel_size)
+        panel = _minimal_planner_panel(discovered, limit=ctx.picks)
+    elif sector_mode:
         if phase != "open":
             raise RuntimeError(
                 f"{ctx.selection_architecture} currently supports the strict "
@@ -1711,7 +1822,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
         logger.info("%s: empty panel, nothing to decide", day)
         return []
 
-    book, knowledge = _book_and_knowledge(ctx, day, phase)
+    book, knowledge = _book_and_knowledge(
+        ctx, day, phase, include_learning=not minimal_mode)
     stock_choice = None
     planner_panel = panel
 
@@ -1870,9 +1982,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
             model=ctx.model,
             loop=ctx.loop,
             phase=phase,
-            tools=_trader_tools(ctx),
-            max_turns=ctx.max_turns,
-            research_budget=shared_budget,
+            tools=[] if minimal_mode else _trader_tools(ctx),
+            max_turns=1 if minimal_mode else ctx.max_turns,
+            research_budget=None if minimal_mode else shared_budget,
         )
 
     if sector_mode and not verdict.get("parse_error"):
@@ -1930,7 +2042,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "selection_rank": (
                     selection_policy.in_force_params()
                     if ctx.selection_architecture == "dual_rank_v0"
-                    else None),
+                    else ({
+                        "method": "whole_market_change_turnover_v1"
+                    } if ctx.selection_architecture == "dual_rank_price_v1"
+                    else None)),
                 "sector_first": getattr(
                     ctx, "last_sector_context", {}),
                 "stock_preselection": stock_preselection,
@@ -1942,7 +2057,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "planner_panel": [
                     row["code"] for row in planner_panel
                 ] if sector_mode else None,
-                "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
+                "event_snapshot_refs": (
+                    [] if minimal_mode
+                    else _event_snapshot_refs(panel, cutoff)
+                ),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
                 "world_read_set": ctx.last_world_read_set,
@@ -2876,6 +2994,46 @@ def _experiment_contract(args, *, architecture: str,
     return manifest, digest
 
 
+_SELECTION_EXPERIMENT_ARMS = frozenset({"CONTROL", "SECTOR"})
+
+
+def _selection_experiment_contract(
+        args, *, architecture: str,
+        membership_archive) -> tuple[dict | None, str | None]:
+    path = getattr(args, "selection_experiment_manifest", None)
+    arm = getattr(args, "selection_experiment_arm", None)
+    if (path is None) != (arm is None):
+        raise SystemExit(
+            "--selection-experiment-manifest and "
+            "--selection-experiment-arm must be supplied together")
+    if path is None:
+        return None, None
+    if getattr(args, "experiment_manifest", None) is not None:
+        raise SystemExit(
+            "legacy A/B/C/D and nf_discovery_v1 manifests are mutually exclusive")
+    if arm not in _SELECTION_EXPERIMENT_ARMS:
+        raise SystemExit(f"unknown selection experiment arm {arm!r}")
+
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        digest = selection_experiment.require_valid(manifest)
+    except selection_experiment.SelectionExperimentError as exc:
+        raise SystemExit(str(exc)) from exc
+    expected = manifest["arms"][arm]["architecture"]
+    if architecture != expected:
+        raise SystemExit(
+            f"selection experiment arm {arm} requires {expected}, "
+            f"got {architecture}")
+    if args.decider != "llm":
+        raise SystemExit(
+            "nf_discovery_v1 uses one shared LLM planner; --decider must be llm")
+    if not membership_archive:
+        raise SystemExit(
+            "nf_discovery_v1 requires the same --sector-membership archive "
+            "for both arms, even when CONTROL does not use it for discovery")
+    return manifest, digest
+
+
 def _experiment_runtime_contract(args) -> dict:
     """Behavioral runtime facts a formal A/B/C/D run must freeze.
 
@@ -2926,6 +3084,59 @@ def _experiment_runtime_contract(args) -> dict:
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
     }
+
+
+def _selection_experiment_runtime_contract(args) -> dict:
+    """Effective runtime facts for the minimal no-flow experiment."""
+    from alpha_agents.data import portfolio, portfolio_exit
+    from alpha_agents.model_factory import model_identity
+
+    return {
+        "decision_config": {
+            "trader": str(args.trader),
+            "picks_per_day": int(args.picks),
+            "panel_size": int(args.panel_size),
+            "participation": float(args.participation),
+            "max_turns_per_decision": 1,
+            "model_timeout_seconds": float(args.model_timeout),
+            "pace_seconds": float(args.pace_seconds),
+            "news_limit": 0,
+            "trader_tools_enabled": False,
+            "direction_limit": 3,
+            "learning_input": "frozen",
+            "run_theme": str(args.theme),
+        },
+        "model": model_identity(),
+        "cost_model": {
+            "name": "virtual_a_share_v1",
+            "commission_rate": portfolio_exit.COMMISSION_RATE,
+            "min_commission_rmb": portfolio_exit.MIN_COMMISSION,
+            "stamp_duty_sell_rate": portfolio_exit.STAMP_DUTY_SELL_RATE,
+            "transfer_fee_rate": portfolio_exit.TRANSFER_FEE_RATE,
+            "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
+        },
+        "exit_policy": {
+            "mechanical_stop": bool(args.mechanical_stop),
+            "mechanical_target": bool(args.mechanical_target),
+            "agent_exits": bool(args.agent_exits),
+            "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
+        },
+    }
+
+
+def _verify_selection_experiment_runtime(args, manifest: dict | None) -> None:
+    if manifest is None:
+        return
+    actual = _selection_experiment_runtime_contract(args)
+    mismatches = {}
+    for field, observed in actual.items():
+        frozen = manifest.get(field)
+        if frozen != observed:
+            mismatches[field] = {"manifest": frozen, "runtime": observed}
+    if mismatches:
+        raise SystemExit(
+            "nf_discovery_v1 runtime does not match its manifest: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
 
 
 def _verify_experiment_identity(
@@ -2982,6 +3193,13 @@ def _verify_experiment_window(ctx, window: list[str]) -> None:
         raise SystemExit(
             f"run window {actual['start']}..{actual['end']} is not one of "
             "the preregistered validation windows")
+    if getattr(ctx, "experiment_family", None) == selection_experiment.FAMILY:
+        expected = int(
+            ctx.experiment_manifest.get("expected_days_per_window") or 0)
+        if len(window) != expected:
+            raise SystemExit(
+                f"nf_discovery_v1 window has {len(window)} trading days; "
+                f"expected exactly {expected}")
 
 
 class Context:
@@ -3012,34 +3230,50 @@ class Context:
             if membership_path is not None:
                 identity_paths["sector_membership"] = membership_path
             self.input_identity = world_read_set.file_identity(identity_paths)
+        formal_manifest_requested = (
+            getattr(args, "experiment_manifest", None) is not None
+            or getattr(args, "selection_experiment_manifest", None) is not None
+        )
         self.code_ref = (
             world_read_set.git_code_ref(_PROJECT_ROOT)
-            if getattr(args, "experiment_manifest", None) is not None
-            else None
+            if formal_manifest_requested else None
         )
         self.policy_ref = policy_registry.active_ref()
         frozen_path = getattr(args, "frozen_directions", None)
         self.frozen_directions = (
             frozen_direction_archive.load(frozen_path)
             if frozen_path is not None else None)
-        self.experiment_arm = getattr(args, "experiment_arm", None)
-        self.experiment_manifest, self.experiment_manifest_hash = (
-            _experiment_contract(
-                args,
-                architecture=self.selection_architecture,
-                membership_archive=self.sector_membership_archive,
-            )
+        legacy_arm = getattr(args, "experiment_arm", None)
+        legacy_manifest, legacy_hash = _experiment_contract(
+            args,
+            architecture=self.selection_architecture,
+            membership_archive=self.sector_membership_archive,
         )
+        selection_arm = getattr(args, "selection_experiment_arm", None)
+        selection_manifest, selection_hash = _selection_experiment_contract(
+            args,
+            architecture=self.selection_architecture,
+            membership_archive=self.sector_membership_archive,
+        )
+        self.experiment_arm = legacy_arm or selection_arm
+        self.experiment_family = (
+            selection_experiment.FAMILY
+            if selection_manifest is not None else
+            ("sector_abcd_v0" if legacy_manifest is not None else None)
+        )
+        self.experiment_manifest = legacy_manifest or selection_manifest
+        self.experiment_manifest_hash = legacy_hash or selection_hash
         _verify_experiment_identity(
             self.experiment_manifest,
             code_ref=self.code_ref,
             policy_ref=self.policy_ref,
             input_hash=self.input_identity["input_hash"],
         )
-        _verify_experiment_runtime(args, self.experiment_manifest)
+        _verify_experiment_runtime(args, legacy_manifest)
+        _verify_selection_experiment_runtime(args, selection_manifest)
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
-                "sector_first_no_flow"}:
+                "sector_first_no_flow", "sector_rank_price_v1"}:
             if args.decider != "llm":
                 raise SystemExit(
                     f"{self.selection_architecture} requires --decider llm")
@@ -4060,7 +4294,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-architecture",
         choices=(
             "dual_rank_v0", "sector_first_v0",
-            "sector_first_simple_selector", "sector_first_no_flow"),
+            "sector_first_simple_selector", "sector_first_no_flow",
+            "dual_rank_price_v1", "sector_rank_price_v1"),
         default="dual_rank_v0",
         help="candidate architecture; sector-first modes are opt-in only")
     parser.add_argument(
@@ -4075,6 +4310,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--experiment-arm", choices=("A", "B", "C", "D"), default=None,
         help="arm bound to --experiment-manifest")
+    parser.add_argument(
+        "--selection-experiment-manifest", type=Path, default=None,
+        help="frozen nf_discovery_v1 manifest; separate from legacy A/B/C/D")
+    parser.add_argument(
+        "--selection-experiment-arm", choices=("CONTROL", "SECTOR"),
+        default=None,
+        help="arm bound to --selection-experiment-manifest")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,

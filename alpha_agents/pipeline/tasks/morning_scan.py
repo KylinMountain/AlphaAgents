@@ -617,7 +617,7 @@ def _morning_relation_status(
         "primary_theme", "primary_theme_relation_evidence_id",
         "supporting_theme_relation_evidence_ids",
     )
-    claimed = any(recommendation.get(key) not in {None, "", []}
+    claimed = any(recommendation.get(key) not in (None, "", [])
                   for key in relation_keys)
     if not strict_relations and not claimed:
         return "legacy_unverified"

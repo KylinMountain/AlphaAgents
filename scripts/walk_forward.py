@@ -1341,6 +1341,79 @@ def _direction_news(ctx, news: list[dict]) -> list[dict]:
     return out
 
 
+_MINIMAL_PLANNER_FIELDS = (
+    "code", "name", "close", "change_pct", "adv20", "turnover_rate",
+)
+
+
+def _minimal_planner_panel(panel: list[dict]) -> list[dict]:
+    """Closed planner view shared by CONTROL and SECTOR.
+
+    Theme names, peer metrics, concepts, limit-sector labels and fund flow are
+    deliberately absent. The SECTOR arm may use PIT themes to *discover* the
+    candidates, but the shared planner cannot receive extra explanatory data.
+    """
+    return [
+        {key: row.get(key) for key in _MINIMAL_PLANNER_FIELDS}
+        for row in panel
+    ]
+
+
+def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
+    """Transparent top-3 price/breadth directions, no model and no flow."""
+    from alpha_agents.data import theme_opportunity_journal as TOJ
+
+    membership, cards, shortlist = _sector_cards(ctx, day, ranking_day)
+    selected = [
+        row["sector_id"] for row in shortlist[:3]
+        if row.get("sector_id")
+    ]
+    cutoff = f"{day} 09:00:00"
+    try:
+        TOJ.record(
+            run_id=str(ctx.run_id),
+            trader_id=ctx.trader,
+            day=day,
+            phase="open",
+            information_cutoff=cutoff,
+            architecture=ctx.selection_architecture,
+            snapshots=cards,
+            shortlist=[row["sector_id"] for row in shortlist],
+            selected=selected,
+            research={
+                "method": "transparent_price_breadth_top3",
+                "selected_ids": selected,
+            },
+            refusals=[],
+            parse_error=None,
+        )
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["theme_opportunity_journal_errors"] += 1
+        logger.warning("%s: minimal theme journal failed: %s", day, exc)
+
+    ctx.last_sector_context = {
+        "membership_snapshot_id": membership.snapshot_id,
+        "membership_hash": membership.content_hash,
+        "shortlist": [row["sector_id"] for row in shortlist],
+        "selected_themes": selected,
+        "direction_research": [],
+        "snapshot_hashes": {
+            row["sector_id"]: row.get("snapshot_hash")
+            for row in cards
+        },
+        "direction_trace": {
+            "status": "selected" if selected else "empty",
+            "method": "transparent_price_breadth_top3",
+            "model_elapsed_ms": 0,
+            "refused": 0,
+        },
+    }
+    if not selected:
+        return []
+    return _build_sector_panel(
+        ctx, day, ranking_day, membership, selected, ctx.panel_size)
+
+
 def _sector_first_stage(ctx, day: str, ranking_day: str,
                         market: dict, news: list[dict]) -> tuple[list[dict], object]:
     """Resolve directions, journal them, then materialize the stock panel."""

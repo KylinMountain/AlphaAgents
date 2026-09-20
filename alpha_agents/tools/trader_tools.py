@@ -1014,12 +1014,57 @@ def get_my_state() -> str:
     return get_my_state_fn()
 
 
+def _without_keys(raw: str, *keys: str) -> str:
+    """Remove ablated fields from an otherwise identical tool result."""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return raw
+    if isinstance(payload, dict):
+        for key in keys:
+            payload.pop(key, None)
+    return _json(payload)
+
+
+@function_tool
+@with_timeout
+def get_theme_state_no_flow(theme: str, as_of: str = "") -> str:
+    """Theme state without any sector-flow fields.
+
+    Used only by preregistered no-flow experiments. The underlying snapshot and
+    time guards are identical to get_theme_state; only the ablated field is
+    removed before the model can see it.
+    """
+    return _without_keys(get_theme_state_fn(theme, as_of), "sector_flow")
+
+
+@function_tool
+@with_timeout
+def get_stock_context_no_flow(code: str, as_of: str = "") -> str:
+    """Stock context without any fund-flow series."""
+    return _without_keys(get_stock_context_fn(code, as_of), "fund_flow")
+
+
 #: 接进 T1 Trader 的七个问题型工具。**不是** registry 里那 30 个——
 #: 工具越多，模型越容易按名字的形状挑，而不是按它需要知道什么挑。
 TRADER_TOOLS = [
     get_market_regime,
     get_theme_state,
     get_stock_context,
+    get_intraday_shape,
+    get_event_context,
+    get_stock_memory,
+    get_my_state,
+]
+
+
+# Closed whitelist for an experiment that preregisters fund-flow as absent.
+# Do not derive this by removing names at runtime: explicit membership makes a
+# newly added flow-bearing tool unavailable until someone reviews it.
+NO_FLOW_TRADER_TOOLS = [
+    get_market_regime,
+    get_theme_state_no_flow,
+    get_stock_context_no_flow,
     get_intraday_shape,
     get_event_context,
     get_stock_memory,

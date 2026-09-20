@@ -154,6 +154,37 @@ class TestReleaseTransitionsOnce:
             R.release_reservation(conn, 1, reason="nothing held")
 
 
+class TestReservationKinds:
+    def test_theme_risk_hold_does_not_reduce_cash(self, conn):
+        _seed_order(conn)
+        R.reserve_for_order(
+            conn, order_id=1, trader_id="t", code="600000",
+            amount=1000.0, kind=R.CASH_RESERVE)
+        R.reserve_for_order(
+            conn, order_id=1, trader_id="t", code="600000",
+            amount=5000.0, kind=R.theme_risk_kind("AI"))
+        assert R.unconsumed_total(conn, "t") == 1000.0
+        assert R.held_total(
+            conn, "t", kind=R.theme_risk_kind("AI")) == 5000.0
+
+    def test_terminal_release_clears_all_held_kinds(self, conn):
+        _seed_order(conn)
+        for kind in (
+                R.CASH_RESERVE,
+                R.theme_risk_kind("AI"),
+                R.theme_risk_kind("算力")):
+            R.reserve_for_order(
+                conn, order_id=1, trader_id="t", code="600000",
+                amount=1000.0, kind=kind)
+        released = R.release_all_held_for_order(
+            conn, 1, "cancelled")
+        assert len(released) == 3
+        states = conn.execute(
+            "SELECT kind,state FROM reservations WHERE order_id=1 "
+            "ORDER BY kind").fetchall()
+        assert {row["state"] for row in states} == {R.RELEASED}
+
+
 class TestUnconsumedTotal:
     def test_held_counts_its_full_amount(self, conn):
         _seed_order(conn, order_id=1)
@@ -265,6 +296,90 @@ SLOW = "id: slow\nname: 回调派\ncapital: 500000\n"
 
 def _conn():
     return memory_store._get_conn()
+
+
+class TestPlanRiskSizing:
+    def test_existing_hard_stop_budget_is_the_floor_for_risk_distance(self):
+        capital = 500_000.0
+        near = P._plan_risk_amount_cap(
+            10.0, 9.5, capital, 0.10)
+        at_hard = P._plan_risk_amount_cap(
+            10.0, 9.2, capital, 0.10)
+        assert near == at_hard == 50_000.0
+
+    def test_wider_declared_stop_shrinks_notional(self):
+        capital = 500_000.0
+        got = P._plan_risk_amount_cap(
+            10.0, 8.0, capital, 0.10)
+        assert got == 20_000.0
+        assert got < capital * 0.10
+
+    def test_risk_cap_can_refuse_even_one_lot(self):
+        # 100-share lot costs 20k, but this tiny capital/risk budget cannot
+        # support it. The one-lot fallback must not override the risk gate.
+        got = P._plan_risk_amount_cap(
+            200.0, 160.0, 10_000.0, 0.10)
+        assert got == 0.0
+
+
+class TestAtomicThemeRisk:
+    def test_second_order_cannot_double_spend_shared_theme_headroom(
+            self, store, traders_dir, theme, monkeypatch):
+        _write_trader(traders_dir, "slow", SLOW)
+        # Existing approved constants define each backstop at ~10% of capital.
+        # Tighten only the fixture's theme cap so one fits and two do not.
+        monkeypatch.setattr(P, "MAX_THEME_PCT", 0.15)
+        first = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            risk_themes=["shared"], order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+            source="morning", reason="A", trader_id="slow")
+        second = P.create_pending_order(
+            code="000001", name="B", theme="t",
+            risk_themes=["shared"], order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+            source="morning", reason="B", trader_id="slow")
+
+        assert first is not None
+        assert second is None
+        kind = R.theme_risk_kind("shared")
+        assert R.held_total(_conn(), "slow", kind=kind) > 0
+        assert _conn().execute(
+            "SELECT COUNT(*) FROM virtual_portfolio "
+            "WHERE trader_id='slow' AND status='pending'").fetchone()[0] == 1
+
+    def test_fill_releases_theme_holds_but_consumes_cash(
+            self, store, traders_dir, theme):
+        _write_trader(traders_dir, "slow", SLOW)
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            risk_themes=["shared"], order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+            source="morning", reason="A", trader_id="slow")
+        P._fill_order(
+            P.get_pending_orders("slow")[0],
+            fill_price=10.0, fill_date="2026-01-05")
+        rows = _conn().execute(
+            "SELECT kind,state FROM reservations WHERE order_id=?",
+            (oid,)).fetchall()
+        state = {row["kind"]: row["state"] for row in rows}
+        assert state[R.CASH_RESERVE] == R.CONSUMED
+        assert state[R.theme_risk_kind("t")] == R.RELEASED
+        assert state[R.theme_risk_kind("shared")] == R.RELEASED
+
+    def test_cancel_releases_cash_and_theme_holds(
+            self, store, traders_dir, theme):
+        _write_trader(traders_dir, "slow", SLOW)
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            risk_themes=["shared"], order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+            source="morning", reason="A", trader_id="slow")
+        P._cancel_order(oid, "cancel")
+        rows = _conn().execute(
+            "SELECT state FROM reservations WHERE order_id=?",
+            (oid,)).fetchall()
+        assert {row["state"] for row in rows} == {R.RELEASED}
 
 
 class TestReservationsFollowTheOrderLifecycle:

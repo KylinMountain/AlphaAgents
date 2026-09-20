@@ -255,13 +255,9 @@ def _run_child(cmd: list[str], *, env: dict[str, str]) -> None:
             + " ".join(cmd))
 
 
-def _run_matrix(args) -> int:
-    manifest, digest = _registered_manifest(args.manifest)
-    _capabilities, capabilities_digest = _registered_capabilities(
-        args.capabilities, manifest)
-
-    measured_identity = _source_identity(
-        args.corpus, args.sector_membership)
+def _verify_matrix_identity(
+        manifest: dict, corpus: Path, membership: Path) -> tuple[dict, str]:
+    measured_identity = _source_identity(corpus, membership)
     frozen_identity = manifest["baseline_identity"]
     identity_errors = {}
     actual_code = _git_code_ref()
@@ -279,6 +275,16 @@ def _run_matrix(args) -> int:
         raise sector_experiment.SectorExperimentError(
             "formal experiment identity mismatch: "
             + json.dumps(identity_errors, ensure_ascii=False, sort_keys=True))
+    return measured_identity, actual_code
+
+
+def _run_matrix(args) -> int:
+    manifest, digest = _registered_manifest(args.manifest)
+    _capabilities, capabilities_digest = _registered_capabilities(
+        args.capabilities, manifest)
+
+    measured_identity, actual_code = _verify_matrix_identity(
+        manifest, args.corpus, args.sector_membership)
     windows = manifest["validation_windows"]
     if not 0 <= args.window_index < len(windows):
         raise sector_experiment.SectorExperimentError(

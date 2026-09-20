@@ -1,7 +1,7 @@
 # RP-09 / RP-10 completion: immutable forward evidence and controlled promotion
 
-Status: IN_REVIEW — engineering acceptance complete; real forward `n >= 50`
-remains a time/data gate  
+Status: BLOCKED — engineering merged in `#31` / `9c5c4e8f`; real forward
+`n >= 50` remains a time/data gate
 Owner: engineering leader  
 Base: `main@da179d98`
 
@@ -56,5 +56,9 @@ human-approval and compare-and-swap promotion boundary.
   out-of-order, concurrent delivery, risk veto and CI binding.
 
 No active policy pointer moved. Strategy evidence remains `n=0`; the code is
-mergeable, while RP-10's final evidence state remains blocked until 50 real
+merged, while RP-10's final evidence state remains blocked until 50 real
 future samples mature under one preregistered manifest.
+
+Merged by [PR #31](https://github.com/KylinMountain/AlphaAgents/pull/31).
+The implementation PRs it superseded (`#26`, `#28`, `#29`) are closed with an
+explicit pointer to the integrated commit.

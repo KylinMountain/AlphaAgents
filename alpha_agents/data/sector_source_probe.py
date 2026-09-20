@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from alpha_agents.config import DATA_DIR
@@ -43,6 +44,73 @@ def with_content_hash(report: dict) -> dict:
     payload = {key: value for key, value in report.items()
                if key != "content_hash"}
     return {**payload, "content_hash": report_hash(payload)}
+
+
+def review_hash(review: dict) -> str:
+    payload = {key: value for key, value in review.items()
+               if key != "review_hash"}
+    return hashlib.sha256(_dump(payload).encode("utf-8")).hexdigest()
+
+
+def register_review(report: dict, root: Path, *,
+                    reviewer: str, evidence: str) -> Path:
+    """Record a human review act separately from the editable source report."""
+    digest = report_hash(report)
+    if report.get("content_hash") != digest:
+        raise CapabilityError("capability report hash mismatch")
+    errors = formal_errors(report)
+    if errors:
+        raise CapabilityError(
+            "capability report is not formal-grade: " + "; ".join(errors))
+    reviewer = str(reviewer or "").strip()
+    evidence = str(evidence or "").strip()
+    if not reviewer:
+        raise CapabilityError("reviewer is required")
+    if not evidence:
+        raise CapabilityError("review evidence is required")
+    review = {
+        "schema_version": 1,
+        "report_hash": digest,
+        "reviewer": reviewer,
+        "evidence": evidence,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "action": "human_capability_review",
+    }
+    review["review_hash"] = review_hash(review)
+    directory = Path(root) / "capability_reviews"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{review['review_hash']}.json"
+    text = _dump(review) + "\n"
+    try:
+        with target.open("x", encoding="utf-8") as fh:
+            fh.write(text)
+    except FileExistsError:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing != review:
+            raise CapabilityError(f"capability review collision at {target}")
+    return target
+
+
+def require_review(review: dict, *, report_hash_value: str) -> str:
+    if not isinstance(review, dict):
+        raise CapabilityError("capability review must be an object")
+    stored = str(review.get("review_hash") or "")
+    computed = review_hash(review)
+    if not stored or stored != computed:
+        raise CapabilityError("capability review hash mismatch")
+    if review.get("schema_version") != 1:
+        raise CapabilityError("unsupported capability review schema")
+    if review.get("action") != "human_capability_review":
+        raise CapabilityError("capability review action is invalid")
+    if review.get("report_hash") != report_hash_value:
+        raise CapabilityError("capability review is for another report")
+    if not str(review.get("reviewer") or "").strip():
+        raise CapabilityError("capability review has no reviewer")
+    if not str(review.get("evidence") or "").strip():
+        raise CapabilityError("capability review has no evidence")
+    if not str(review.get("reviewed_at") or "").strip():
+        raise CapabilityError("capability review has no trusted review time")
+    return stored
 
 
 def register(report: dict, root: Path) -> Path:
@@ -226,6 +294,51 @@ def _fund_flow_capability(data_dir: Path) -> dict:
     }
 
 
+def _security_status_capability(data_dir: Path) -> dict:
+    """Report whether historical listing/name/ST/suspension can be replayed."""
+    path = data_dir / "stocks.db"
+    table = "security_status_history"
+    if not path.exists():
+        return {
+            "status": "missing_file",
+            "point_in_time_grade": "U",
+            "strict_replay_eligible": False,
+        }
+    if table not in _tables(path):
+        return {
+            "status": "missing_table",
+            "dataset": table,
+            "point_in_time_grade": "C",
+            "strict_replay_eligible": False,
+            "note": (
+                "stocks.db contains current security state only; current "
+                "listing/name/ST/suspension cannot stand in for history"),
+        }
+    columns = set(_columns(path, table))
+    required = {
+        "code", "effective_at", "captured_at", "name",
+        "is_st", "is_suspended", "listed",
+    }
+    missing = sorted(required - columns)
+    if missing:
+        return {
+            "status": "ungraded",
+            "dataset": table,
+            "columns": sorted(columns),
+            "missing_columns": missing,
+            "point_in_time_grade": "U",
+            "strict_replay_eligible": False,
+        }
+    return {
+        **_coverage(path, table, ("captured_at",)),
+        "dataset": table,
+        "point_in_time_grade": "A",
+        "strict_replay_eligible": True,
+        "required_semantics": (
+            "effective_at <= decision_at and captured_at <= decision_at"),
+    }
+
+
 def probe_all(data_dir: Path = DATA_DIR) -> dict:
     return {
         "membership_sources": probe_membership_sources(data_dir),
@@ -236,6 +349,7 @@ def probe_all(data_dir: Path = DATA_DIR) -> dict:
             data_dir / "market_snapshots.db",
             "event_expectation_snapshots",
             ("captured_at",)),
+        "security_status_history": _security_status_capability(data_dir),
         "semantics": {
             "A": "verified historical vintages/effective membership",
             "B": "historical observations but revision semantics incomplete",

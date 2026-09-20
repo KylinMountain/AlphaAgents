@@ -25,6 +25,7 @@ def _manifest():
             "trader_tools_enabled": False,
             "direction_limit": 3,
             "learning_input": "frozen",
+            "run_theme": "WALK-TEST",
         },
         "model": {"name": "model-x", "temperature": 0},
         "cost_model": {"name": "virtual_a_share_v1"},

@@ -318,6 +318,16 @@ actually reads it"）对 selection 基因尚未满足的地方。
 **什么时候做**：当比较两臂的**收益差**（而不是行为差）时——
 那时 5bps 会在配对样本里累积，必须建模。**与 ② 同期做。**
 
+**2026-09-21：已完成。** 触发条件已满足——`sector_experiment_compare.py:105`
+与 `selection_experiment_compare.py:202` 都通过 `performance.equity_metrics`
+读 `equity.csv` 的**日收益**来比较两臂，滑点会在配对样本里累积。
+
+修复中发现**原诊断仍偏窄**：只改 `invested` 不够。`walk_forward._value` 的
+equity 是 `total + unrealized`，而 `total` 已含滑点、`unrealized` 又按原始价把
+它加回来，两者**恰好抵消**——所以只改 `invested` 时 equity 仍是 1,000,000
+而不是 999,985。实测数据与完整推导见
+`docs/exec-plans/active/2026-09-21-buy-side-slippage-in-equity.md`。
+
 ---
 
 ## 顺序（建议）

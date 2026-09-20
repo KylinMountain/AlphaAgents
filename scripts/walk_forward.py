@@ -2915,7 +2915,18 @@ def _settle_exits(ctx, day: str) -> dict:
 
 
 def _value(ctx, day: str) -> dict:
-    """Mark the book at ``day``'s close, carrying a suspended name at its last price."""
+    """Mark the book at ``day``'s close, carrying a suspended name at its last price.
+
+    Equity is ``cash + market_value``, **not** ``total + unrealized``. The
+    two agree only while ``invested`` is the raw notional; once it carries
+    the buy-side slippage the fill actually took, ``total`` (which is
+    ``available + invested + reservations``) holds the charge and a raw
+    unrealized holds the mirror-image credit, so the two cancel and the
+    position looks free again. Measured on a 30,000 notional fill at a flat
+    price: ``total + unrealized`` reported 1,000,000 where the account had
+    999,985. The cash-and-market-value form cannot cancel, because it never
+    subtracts a cost basis it has already charged.
+    """
     positions = P.get_open_positions(ctx.trader)
     bars_today = ctx.corpus.bars(day)
     market_value = unrealized = 0.0
@@ -2930,17 +2941,22 @@ def _value(ctx, day: str) -> dict:
             price = float(hist[-1]["close"]) if hist else (pos.get("open_price") or 0)
             stale.append(pos["code"])
         market_value += price * shares
-        unrealized += (price - (pos.get("open_price") or 0)) * shares
+        # Cost basis, not the raw fill price: what the position cost is what
+        # the account paid, and unrealized P&L has to be measured from that
+        # or it credits back the slippage the fill already charged.
+        unrealized += price * shares - P.position_cost_basis(
+            pos.get("open_price") or 0, shares)
     total = P.get_total_capital(ctx.trader)
+    cash = P.get_available_capital(ctx.trader) + reservations.unconsumed_total(
+        P._get_conn(), ctx.trader)
     return {
         "date": day,
-        "cash": P.get_available_capital(ctx.trader) + reservations.unconsumed_total(
-            P._get_conn(), ctx.trader),
+        "cash": cash,
         "invested": P.get_invested_capital(ctx.trader),
         "market_value": round(market_value, 2),
         "realized": round(total - P.trader_capital(ctx.trader), 2),
         "unrealized": round(unrealized, 2),
-        "equity": round(total + unrealized, 2),
+        "equity": round(cash + market_value, 2),
         "open_positions": len(positions),
         "pending_orders": len(P.get_pending_orders(ctx.trader)),
         "valued_at_a_stale_price": ",".join(sorted(stale)),

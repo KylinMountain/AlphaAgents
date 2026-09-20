@@ -156,6 +156,10 @@ def record_equity_mark(date: str, price_map: dict[str, float] | None = None,
             unpriced.append(pos["code"])
         market_value += price * (pos.get("shares") or 0)
 
+    # ``cash`` already has the position's cost basis (buy-side slippage
+    # included) subtracted by ``get_available_capital``, so equity is cash
+    # plus the mark. Adding a separately-computed unrealized here would
+    # credit that slippage straight back.
     cash = get_available_capital(trader_id)
     equity = round(cash + market_value, 2)
     mark = {

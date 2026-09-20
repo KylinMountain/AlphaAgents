@@ -264,11 +264,39 @@ def get_total_capital(trader_id: str = DEFAULT_TRADER) -> float:
             + trade_ledger.realized_total(_get_conn(), trader_id))
 
 
+def position_cost_basis(open_price: float, shares: int) -> float:
+    """What a position actually cost to open, buy-side slippage included.
+
+    ``open_price`` is the *fill price* and stays that: ``reconciliation``
+    checks ``consumed_amount`` against ``shares × open_price × (1 + slip)``
+    and settlement stores the raw price, so folding the slippage into the
+    stored price would make both of them charge it a second time.
+
+    But the cash identity has to count it. Until 2026-09-21 the buy leg was
+    **recorded and never charged**: a fill consumed a reservation of
+    ``shares × price × (1 + slip)`` (reconciliation agreed with that number)
+    while ``get_available_capital`` subtracted ``shares × price``, and
+    ``unconsumed_total`` reads a consumed row as 0. Measured on a 30,000
+    notional fill, 15.00 of cash vanished from the identity — so every day
+    the position was open, equity was overstated by exactly one buy-side
+    slippage leg. The round trip was right once it closed (the close path
+    puts slippage in ``cost_basis``); the daily marks the arm comparisons
+    read were not.
+    """
+    return float(open_price) * int(shares) * (1 + SLIPPAGE_RATE)
+
+
 def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
-    """Open cost exposure, independent of realized gains or losses."""
+    """Open cost exposure, independent of realized gains or losses.
+
+    Includes the buy-side slippage leg, through :func:`position_cost_basis`,
+    because that is the cash the fill actually took. It has to be the same
+    basis ``get_available_capital`` subtracts or the identity that function
+    documents stops holding — see ``position_cost_basis``.
+    """
     row = _get_conn().execute(
-        "SELECT COALESCE(SUM(open_price * shares), 0) FROM virtual_portfolio "
-        "WHERE status='open' AND trader_id=?", (trader_id,),
+        "SELECT COALESCE(SUM(open_price * shares * ?), 0) FROM virtual_portfolio "
+        "WHERE status='open' AND trader_id=?", (1 + SLIPPAGE_RATE, trader_id),
     ).fetchone()
     return float(row[0])
 

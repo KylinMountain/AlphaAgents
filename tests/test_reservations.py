@@ -444,12 +444,13 @@ class TestReservationsFollowTheOrderLifecycle:
         # What remains bound is the position's own cost, no more: the
         # available figure answers "cash minus the filled position minus
         # still-pending backstops", not "cash minus a phantom 100k per
-        # order that already filled". ``invested`` reads
-        # ``open_price * shares`` without the slippage leg, so the
-        # expected remainder uses that basis.
+        # order that already filled". ``invested`` reads the position's
+        # cost basis, which includes the buy-side slippage leg — the same
+        # number ``consumed_amount`` above records, so the identity holds
+        # instead of the slippage falling between the two.
         invested = position["shares"] * position["open_price"]
         assert P.get_available_capital("slow") == pytest.approx(
-            trader_capital("slow") - invested)
+            trader_capital("slow") - invested * (1 + SLIPPAGE_RATE))
 
     def test_cancelling_a_pending_order_returns_the_full_backstop(
             self, store, traders_dir, theme):

@@ -94,3 +94,62 @@ class TestTheDocumentedIdentityHolds:
                    + portfolio.get_invested_capital(trader)
                    + reservations.unconsumed_total(conn, trader))
         assert rebuilt == pytest.approx(total)
+
+
+class TestTheBuySideSlippageIsCharged:
+    """The fill's buy-side slippage leaves the account, from the first day.
+
+    The defect these pin. A fill consumed a reservation of
+    ``shares × price × (1 + slip)`` and ``reconciliation`` checked
+    ``consumed_amount`` against exactly that — but ``get_available_capital``
+    subtracted ``shares × price``, and a consumed reservation counts 0. So the
+    charge was audited and never taken: on a 30,000 notional fill, 15.00 of
+    cash vanished from the documented identity, and every daily mark while the
+    position was open was overstated by one slippage leg. The round trip was
+    right once it closed, which is why only the daily marks — the numbers the
+    arm comparisons read — were wrong.
+    """
+
+    def test_invested_capital_is_the_cost_basis_not_the_notional(self):
+        from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE
+        conn = memory_store._get_conn()
+        trader = portfolio.DEFAULT_TRADER
+        portfolio.open_position(
+            code="600004", name="B", theme="t", open_date="2026-09-16",
+            open_price=10.0, source="morning", reason="t", shares=1000)
+
+        notional = 1000 * 10.0
+        assert portfolio.get_invested_capital(trader) == pytest.approx(
+            notional * (1 + SLIPPAGE_RATE)), (
+            "the buy-side slippage the fill charged must be inside the "
+            "cost exposure, or it is charged nowhere")
+        # And the identity the docstring promises still holds with it in.
+        rebuilt = (portfolio.get_available_capital(trader)
+                   + portfolio.get_invested_capital(trader)
+                   + reservations.unconsumed_total(conn, trader))
+        assert rebuilt == pytest.approx(
+            portfolio.get_total_capital(trader))
+
+    def test_position_cost_basis_is_the_single_definition(self):
+        """One function, so invested and unrealized cannot disagree."""
+        from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE
+        basis = portfolio.position_cost_basis(10.0, 1000)
+        assert basis == pytest.approx(1000 * 10.0 * (1 + SLIPPAGE_RATE))
+
+    def test_a_flat_position_is_worth_less_than_it_started(self):
+        """At an unchanged price the account is down exactly the round-trip
+        frictions — the buy leg cannot be free.
+
+        Before the fix, cash + market value at the entry price equalled the
+        starting capital exactly, which said opening a position cost nothing.
+        """
+        trader = portfolio.DEFAULT_TRADER
+        before = portfolio.get_total_capital(trader)
+        portfolio.open_position(
+            code="600005", name="C", theme="t", open_date="2026-09-16",
+            open_price=10.0, source="morning", reason="t", shares=1000)
+        cash = portfolio.get_available_capital(trader)
+        market_value = 1000 * 10.0        # marked at the entry price
+        assert cash + market_value < before, (
+            "a position marked at its entry price must not be worth the "
+            "capital that opened it — the buy leg is not free")

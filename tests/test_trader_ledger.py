@@ -22,6 +22,7 @@ import sqlite3
 import pytest
 
 from alpha_agents.data import settlement, trade_ledger
+from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE
 from alpha_agents.data.memory_store import _SCHEMA
 from alpha_agents.data.portfolio import (
     close_position, get_available_capital, get_total_capital, open_position,
@@ -300,7 +301,12 @@ def test_legacy_partial_profit_survives_new_exits(conn):
     pos = _open(conn, shares=300)
     conn.execute("UPDATE virtual_portfolio SET return_amount=500 WHERE id=?", (pos,))
     conn.commit()
-    assert _cash(conn) == pytest.approx(trader_capital() - 30000 + 500)
+    # ``_open`` fills at 100.00; the cash it took is the cost basis, which
+    # includes the buy-side slippage leg. This used to assert the raw
+    # notional, which is how the 15bp charge went missing from every open
+    # position's daily mark.
+    assert _cash(conn) == pytest.approx(
+        trader_capital() - 30000 * (1 + SLIPPAGE_RATE) + 500)
     assert close_position(pos, close_price=110, close_reason="trim", shares=100)
     assert close_position(pos, close_price=105, close_reason="close")
     row = conn.execute("SELECT * FROM virtual_portfolio WHERE id=?", (pos,)).fetchone()

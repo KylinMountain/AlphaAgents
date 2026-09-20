@@ -50,6 +50,12 @@
 **验收**：单步反事实在**至少一个**窗口上给出 `changed=True`，
 且该翻转可复算（同输入同输出）。
 
+**2026-09-20 补记：A/B 的前提已被远端实现回答——新的位点已存在。**
+
+拉取 origin/main（147 个提交）后，`selection_rank.change_share` 成了一个**真正可执行、可变异**的基因：它决定候选池里涨幅档与换手档各贡献多少名字（`data/selection_policy.py`），`walk_forward._build_panel` 的实盘路径直接读它（`scripts/walk_forward.py:736`），`evolution/variant.py` 把 `t1_change_rank` 证据映射到它的 ±0.10，`evolution/selection_shadow.py` 为它提供前向影子证据。**A（加大步长）与 B（加维度）因此都不再是空缺**：位点不止一个，且证据→干预→评估器现在指向同一个行为（旧版把这条证据错映射到 `theme_gate.w_rel`，改的是准入而不是被批评的排序）。
+
+**仍需 ② 的是**：这个新位点的前向配对样本还没有——它和 ①C 的翻转一样，证明的是「位点能起作用」，不是「哪个取值更好」。
+
 **2026-09-18 晚：C 做了，验收通过，而且结论改写了"惰性"的表述。**
 
 `scripts/threshold_window_counterfactual.py`（+
@@ -220,11 +226,11 @@ challenger vs incumbent 的 forward sample。」
                               run #2/#3 因因果无效被关闭（0 配对样本）。
                               见 2026-09-18-shadow-gene-contract.md
   ✓ ④ concept 前视的消融    ← 2026-09-19 完成：15/17 日订单改变，消融臂中位 -7.99% vs +0.98%
+  ✅ ①A/B 扩展变异维度       ← 2026-09-20：远端已给出 selection_rank.change_share 位点 + 变体映射 + 前向影子证据
   ◦ ② 重开合规 shadow      ← 基因契约生效后 run #2/#3 已关；需绑定覆盖
                               changed genes 的 producer 再开（与 ④ 并行）
 
 第三批（依赖前两批的结论）
-  ①A/B 扩展变异维度          ← 有了 C 的证据才谈调参/加维
   ⑤ knowledge hash 落盘      ← 有真实决策可追时才有价值
   ⑦ 滑点建模                 ← 比较收益差时才需要
   ⑥ 容量强制                 ← 规模触发时才需要
@@ -251,3 +257,6 @@ challenger vs incumbent 的 forward sample。」
   等 ② 的前向样本。
 - 2026-09-19：基因契约插队（commit f61ca8d）——shadow 证据因因果无效的积累中止，run #2/#3 关闭（0 配对样本）。② 的验收回到未达成，重开前先决定由谁执行 theme_gate 位点。
 - 2026-09-19：④ 量化完成——概念列删掉后 88% 交易日订单改变、消融臂中位数 -7.99%（保留臂 +0.98%）：列承载真实板块判断，保留现状，警示即边界，等 dated 源再修。
+
+- 2026-09-20：拉取 origin/main（147 提交）并合并。远端与本地平行实现了同一基因契约（远端为 manifest 版 producer_compatibility，语义等价且测试覆盖更广），冲突处以远端为准；本地独有资产保留：--no-concepts 消融、①C 扫描器、两份计划文档。合并后 2850 passed / 双 lint 通过。
+- 2026-09-20：复核七项。①A/B 由远端新位点满足；② 仍未达成（3 runs 全 closed、0 open、10 条预测 0 评分）；⑤⑥⑦ 按原计划仍缓做。

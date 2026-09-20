@@ -104,7 +104,7 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     monkeypatch.setattr(
         wf, "_sector_stock_choice",
         lambda *a, **k: {
-            "stocks": [{"code": "600001", "reason": "pick"}],
+            "stocks": [{"code": "600001", "primary_theme": "AI", "reason": "pick"}],
             "refused": [], "parse_error": None, "research_budget": None,
         })
     monkeypatch.setattr(
@@ -237,7 +237,8 @@ def test_sector_trade_plan_is_toolless(monkeypatch):
     wf._sector_trade_plan(
         ctx, day="2026-01-30", prev_day="2026-01-29",
         panel=[{"code": "600001"}], news=[], market={},
-        book="", knowledge="")
+        book="", knowledge="", research_packet_payload={
+            "version": 1, "packet_hash": "fixture"})
     assert captured["tools"] == []
     assert captured["research_budget"] is None
 

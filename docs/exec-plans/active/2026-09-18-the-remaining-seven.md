@@ -131,6 +131,29 @@ challenger vs incumbent 的 forward sample。」
 - 原因见 [2026-09-18-shadow-gene-contract.md](2026-09-18-shadow-gene-contract.md)：producer remap_confidence 只执行 confidence_priors，而 version #2/#3 的变化在 theme_gate——配对样本即使填满也是零差异。
 - 重新满足验收的前提：一个真正执行目标位点的 producer，或一个其变化落在 confidence_priors 里的候选版本。选哪条路是下一个决策。
 
+**2026-09-20：合规路径已存在，但生产侧仍无样本——验收仍未达成，阻断点换了一层。**
+
+拉取 origin/main（118 提交，RP-01–RP-11）后重查。生产库状态未变：
+`shadow_runs` 3 条全 closed、**0 条 open**；`shadow_predictions` 10 条、**0 条已评分**。
+
+- **合规的 producer/evaluator 现在有了**：`evolution/selection_shadow.py` 对
+  `gene_registry.SELECTION_RANK_GENES` 做**逐叶精确覆盖**（`assert_exact_coverage`，
+  禁止父前缀匹配），`selection_gate.py` 接封存后的 gate。
+- **已实测可开**：在 data/ 的临时副本上，用 learning candidate #4
+  （`t1_change_rank/up`）对 parent v2 / v3 构建变体，`changed_genes` 恰好是
+  `[decision.selection_rank.change_share]`，`open_run` 成功返回 run id。
+  这与 2026-09-19 那次不同——那次 v2/v3 的变化在 `theme_gate`，producer 只执行
+  `confidence_priors`，配对样本必然零差异。
+- **但样本进不来**：`selection_shadow.process` 的样本源是 `opportunity_sets`
+  表（`day > opened_on` 且 `policy_ref` 等于 parent）。全仓库唯一写这张表的地方是
+  `scripts/walk_forward.py:2035` 的 `OJ.record_decision`；`alpha_agents/pipeline/`
+  里没有任何 opportunity 引用，`main.py` 的 15:45 `shadow_run` 任务也不碰
+  `selection_shadow`。生产库里 `opportunity_sets` 表**根本不存在**。
+- **结论**：② 的阻断从「没有合规的位点执行者」变成「合规的执行者没有生产样本源」。
+  开一个 selection shadow run 现在能成功，但它会永远停在 `sample_count=0`，
+  除非先让生产管线把每个交易日的机会集写进 `opportunity_sets`（或把
+  `shadow_run` 接上 selection shadow + 一个真实的机会集写入者）。
+
 ---
 
 ## P2：消除误导（三件，都便宜）
@@ -180,35 +203,69 @@ challenger vs incumbent 的 forward sample。」
 **成本**：小（一列 + 写入点）。**但价值依赖 ②**：没有真实 shadow/promotion
 时，没有多少决策值得追这条链。**所以排在 ② 之后。**
 
+**2026-09-20 复查：仍未做。** 全仓库（`alpha_agents/`、`scripts/`）没有
+`rendered_knowledge_hash` 或任何等价物。远端新增的
+`evolution/forward_observation.py` 把 `policy_ref` / `world_read_set_hash` /
+`research_packet_hash` / `request_hash` 都落到了 `forward_decisions`，
+**唯独没有"渲染出来的知识文本"的 hash**——它记录的是"读了哪个世界/哪个请求"，
+不是"读到了哪段经验"。所以 ⑤ 的缺口没有被远端顺手补上。
+另注：生产库 `knowledge_snapshots` 是 **0 行**，即当前生产路径下
+本就没有已批准的知识快照在流转，这进一步说明 ⑤ 排在 ② 之后是对的。
+
 ---
 
-## P3：对齐设计（两件，明确不做或缓做）
+## P3：对齐设计（两件；2026-09-20 复查后：⑥ 已完成，⑦ 缩小）
 
 ### ⑥ 容量强制
 
-**现状**：`capacity_shares` 已测量、已计数、已报告，**未参与下单**
+**现状（2026-09-20 更新）**：**已强制**。远端 RP-08 把 ADV20 容量接进了
+真实成交路径：`portfolio.check_pending_orders` 现在接受 `max_shares_by_code`
+（`alpha_agents/data/portfolio.py:455`），`_fill_order(..., max_shares=...)` 把它
+并进 `max_amount` 的 `capacity_amount` 项（同文件 ~751），一手兜底路径也走同一个
+上限（~771）。`scripts/walk_forward.py` 在 `_settle` 里传 `ctx.capacity`
+（~2358），`LIMITATIONS` 的措辞已从「reported, but not yet enforced」改成
+「enforced as a hard share cap on open-time fills」（~257）。
+测试：`tests/test_pending_orders_finishable.py::TestCapacityIsEnforcedAtFill`
+（成交被截到 300 股 / 容量不足一手则撤单）。
+
+**因此本项从「缓做」变为「已完成」**，触发条件（规模上升）已被远端主动提前满足。
+注意仍有一条独立路径：14:55 synthetic-close 买入不带上限，报告里单列
+（`capacity_oversize` 记 False），限制条文也明说了这一点。
+
+**原记录（2026-09-18，保留以说明当时的判断）**：`capacity_shares` 已测量、已计数、已报告，**未参与下单**
 （`_fill_order` 从资金算，不接容量参数）。
 
-**为什么缓做**：这是**模拟器的真实性问题**，不是学习问题。当前资金
-100 万、单笔 ~2.9 万，容量在这个规模下**几乎不会触发**——先做它
-不会改变任何现有结论，只会让报告上的
-「已计数、尚未强制」变成「已强制」。
-
-**什么时候做**：当账户规模或单笔占比上升到会触发的量级，
-或者当有人要基于"这个策略能不能装下更多钱"下结论时。
+**当时的缓做理由（2026-09-18）**：这是**模拟器的真实性问题**，不是学习问题。
+当前资金 100 万、单笔 ~2.9 万，容量在这个规模下**几乎不会触发**——先做它
+不会改变任何现有结论，只会让报告上的「已计数、尚未强制」变成「已强制」。
+远端在 RP-08 里没有等这个触发条件，直接做了——结论正确，
+但当时的判断（"现在做不改变任何结论"）本身没有被推翻，
+只是它不再是排期的依据。
 
 ### ⑦ close replay 滑点
 
-**现状**：`walk_forward` 无 `SLIPPAGE`；成本模型在
-`_estimate_net_close_result` 里（`portfolio_exit`）用于**已实现盈亏**，
-但回放的成交价不含滑点。
+**现状（2026-09-20 实测修正）**：原记录说"回放的成交价不含滑点"，
+**这个说法对了一半，需要分开看**：
 
-**为什么缓做**：影响量级是**每边 5bps**（`SLIPPAGE_RATE = 0.0005`），
-对 20 天、几万元的窗口影响在**个位数元**。它不会改变任何
+- **已实现盈亏：滑点已在里面。** `portfolio_exit.close_position`
+  （`walk_forward.py:2896` 调用的就是它）走 `_estimate_net_close_result`，
+  对买入腿加 `(1 + 0.0005)`、卖出腿减 `(1 − 0.0005)`。
+  实测：10.00 买、10.00 卖、1000 股，`realized_total = -25.2`，
+  其中纯双边滑点 **-10.0**，其余 -15.2 是佣金/过户费/印花税。
+- **未实现与记录价：滑点不在里面。** `virtual_portfolio.open_price`
+  记的是原始成交价（无滑点），`_value` 的浮盈按
+  `(close − open_price) × shares` 算，所以建仓当日的净值不含买入腿滑点，
+  要等平仓才通过 realized 体现。
+
+**因此真正的缺口是**：建仓当日 equity 少扣一次买入滑点（每笔约 `金额 × 5bps`），
+而整个持仓周期的总收益在平仓后是对的。这比原描述窄得多。
+
+**为什么仍不紧急**：影响量级是**每边 5bps**，对 20 天、几万元的窗口
+影响在**个位数元**，且只在持仓未平的当日净值上；它不会改变任何
 "agent 会不会卖"这类结论。
 
 **什么时候做**：当比较两臂的**收益差**（而不是行为差）时——
-那时 5bps 会在配对样本里累积，必须建模。**与 ①B/② 同期做。**
+那时 5bps 会在配对样本里累积，必须建模。**与 ② 同期做。**
 
 ---
 
@@ -227,13 +284,17 @@ challenger vs incumbent 的 forward sample。」
                               见 2026-09-18-shadow-gene-contract.md
   ✓ ④ concept 前视的消融    ← 2026-09-19 完成：15/17 日订单改变，消融臂中位 -7.99% vs +0.98%
   ✅ ①A/B 扩展变异维度       ← 2026-09-20：远端已给出 selection_rank.change_share 位点 + 变体映射 + 前向影子证据
-  ◦ ② 重开合规 shadow      ← 基因契约生效后 run #2/#3 已关；需绑定覆盖
-                              changed genes 的 producer 再开（与 ④ 并行）
+  ✅ ⑥ 容量强制              ← 2026-09-20：远端 RP-08 把 ADV20 接进真实成交
+                              路径（max_shares_by_code → _fill_order），
+                              限制条文已改为 enforced；本项从"缓做"变"已完成"
+  ◦ ② 重开合规 shadow      ← 2026-09-20：合规 producer/evaluator 已存在且
+                              实测可开，但生产库无 opportunity_sets 表、
+                              管线也不写——样本源缺失，开了也是 0
 
 第三批（依赖前两批的结论）
-  ⑤ knowledge hash 落盘      ← 有真实决策可追时才有价值
-  ⑦ 滑点建模                 ← 比较收益差时才需要
-  ⑥ 容量强制                 ← 规模触发时才需要
+  ⑤ knowledge hash 落盘      ← 有真实决策可追时才有价值（复查仍未做）
+  ⑦ 滑点建模                 ← 已实现盈亏已含滑点；缺的只是建仓当日
+                              浮盈少扣一次买入腿（比较收益差时才需要）
 ```
 
 **一句话**：先把 **shadow 开起来**（唯一零样本的证据），
@@ -260,3 +321,4 @@ challenger vs incumbent 的 forward sample。」
 
 - 2026-09-20：拉取 origin/main（147 提交）并合并。远端与本地平行实现了同一基因契约（远端为 manifest 版 producer_compatibility，语义等价且测试覆盖更广），冲突处以远端为准；本地独有资产保留：--no-concepts 消融、①C 扫描器、两份计划文档。合并后 2850 passed / 双 lint 通过。
 - 2026-09-20：复核七项。①A/B 由远端新位点满足；② 仍未达成（3 runs 全 closed、0 open、10 条预测 0 评分）；⑤⑥⑦ 按原计划仍缓做。
+- 2026-09-20（第二次拉取，118 提交 / RP-01–RP-11）：合并为 `feb5bf2`，2968 passed、harness 222 文件、docs lint 全绿。逐项重查后有三处需要改写结论——**⑥ 已完成**（ADV20 真的接进了成交路径，不再是"已计数未强制"）；**⑦ 的缺口比原描述窄**（已实现盈亏早已含双边滑点，缺的只是建仓当日浮盈少扣买入腿）；**② 的阻断换了一层**（合规 producer/evaluator 已存在且实测可开，但 `opportunity_sets` 在生产里根本不存在，样本进不来）。⑤ 复查仍未做。

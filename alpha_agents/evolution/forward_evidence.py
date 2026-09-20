@@ -191,7 +191,9 @@ class ForwardEvidenceStore:
             _dump(safe_payload) if safe_payload is not None else None)
         payload_hash = (
             hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-            if payload_json is not None else None)
+            if payload_json is not None else "")
+        error_class = str(error_class or "")
+        error_message = str(error_message or "")
 
         values = (
             str(source), str(source_key), source_published_at,
@@ -212,8 +214,8 @@ class ForwardEvidenceStore:
         row = self.conn.execute(
             "SELECT * FROM forward_source_versions "
             "WHERE source=? AND source_key=? "
-            "AND payload_hash IS ? AND result_state=? "
-            "AND error_class IS ? AND error_message IS ? "
+            "AND payload_hash=? AND result_state=? "
+            "AND error_class=? AND error_message=? "
             "ORDER BY id LIMIT 1",
             (str(source), str(source_key), payload_hash, state,
              error_class, error_message),
@@ -253,7 +255,9 @@ class ForwardEvidenceStore:
             _dump(safe_result) if safe_result is not None else None)
         result_hash = (
             hashlib.sha256(result_json.encode("utf-8")).hexdigest()
-            if result_json is not None else None)
+            if result_json is not None else "")
+        error_class = str(error_class or "")
+        error_message = str(error_message or "")
 
         values = (
             str(decision_key), _utc_now(), opened_on,

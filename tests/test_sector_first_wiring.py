@@ -514,7 +514,7 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
     monkeypatch.setattr(policy_registry, "active_ref", lambda: "policy-v1")
     captured = {}
 
-    def planner(**kwargs):
+    def planner(_ctx, **kwargs):
         captured["packet"] = kwargs["research_packet_payload"]
         return {
             "orders": [], "refused": [], "parse_error": None,

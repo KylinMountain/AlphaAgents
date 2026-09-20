@@ -254,8 +254,9 @@ LIMITATIONS = (
     "ST status comes from stocks.db, which holds the current name rather than "
     "the name as of the replayed date; codes absent from the previous "
     "session's bars are excluded, but a later ST marking is not knowable",
-    "capacity is measured (ADV20 at the decision) and reported, but not yet "
-    "enforced: ``_fill_order`` sizes from capital and takes no capacity input",
+    "capacity is measured from pre-decision ADV20 and enforced as a hard "
+    "share cap on open-time fills; close-time synthetic buys remain a separate "
+    "execution path and are reported separately",
     "no theses and no predictions: exits are stop/target only",
     "the learning step **records** observations, it does not promote them: "
     "every candidate stays in the ``observation`` state because n is far below "
@@ -2333,7 +2334,9 @@ def _cancel_class(reason: str) -> str:
 
 def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
     price_map, counts, events = _classify(ctx, day, pending)
-    alerts = P.check_pending_orders(price_map, today=day, trader_id=ctx.trader)
+    alerts = P.check_pending_orders(
+        price_map, today=day, trader_id=ctx.trader,
+        max_shares_by_code=ctx.capacity)
     fills, cancels = [], []
     for alert in alerts:
         if alert.get("type") == "filled":

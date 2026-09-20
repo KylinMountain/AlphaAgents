@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from unittest.mock import patch
 
 import pytest
 
@@ -47,10 +48,11 @@ def _seed_sealed_run(store, deltas, *, changed=None, minimum_sets=20):
     variant = PR.freeze(
         sources=_sources(0.8), parent_id=parent, created_by="test",
         reason="challenger", frozen_at="2026-01-02")
-    run_id = S.open_run(
-        parent_version_id=parent, variant_version_id=variant,
-        opened_on="2026-01-03", minimum_sets=minimum_sets,
-        minimum_behavior_changes=5, minimum_mean_delta=0.0, conn=store)
+    with patch.object(S.clock, "today", return_value="2026-01-03"):
+        run_id = S.open_run(
+            parent_version_id=parent, variant_version_id=variant,
+            minimum_sets=minimum_sets, minimum_behavior_changes=5,
+            minimum_mean_delta=0.0, conn=store)
     S.init_schema(store)
     changed = len(deltas) if changed is None else changed
     for i, delta in enumerate(deltas):

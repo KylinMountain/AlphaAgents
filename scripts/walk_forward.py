@@ -3104,6 +3104,7 @@ def _selection_experiment_runtime_contract(args) -> dict:
             "trader_tools_enabled": False,
             "direction_limit": 3,
             "learning_input": "frozen",
+            "run_theme": str(args.theme),
         },
         "model": model_identity(),
         "cost_model": {

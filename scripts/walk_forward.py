@@ -3081,6 +3081,7 @@ def _experiment_runtime_contract(args) -> dict:
             "mechanical_stop": bool(args.mechanical_stop),
             "mechanical_target": bool(args.mechanical_target),
             "agent_exits": bool(args.agent_exits),
+            "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
     }
@@ -3119,6 +3120,7 @@ def _selection_experiment_runtime_contract(args) -> dict:
             "mechanical_stop": bool(args.mechanical_stop),
             "mechanical_target": bool(args.mechanical_target),
             "agent_exits": bool(args.agent_exits),
+            "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
     }
@@ -3290,10 +3292,10 @@ class Context:
                 raise SystemExit(
                     "--frozen-directions is only valid for "
                     "sector_first_simple_selector")
-            if getattr(args, "agent_exits", False):
+            if getattr(args, "close_buys", False):
                 raise SystemExit(
-                    f"{self.selection_architecture} close-buy path is not "
-                    "wired yet; run without --agent-exits")
+                    f"{self.selection_architecture} does not support "
+                    "--close-buys; its reproducible buy path is 09:00 only")
         self.participation = args.participation
         self.stop_pct = args.stop_pct
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])
@@ -3303,6 +3305,10 @@ class Context:
         #: it doubles the run's model calls, and that should be a choice
         #: the operator made rather than a surprise on the bill.
         self.agent_exits = getattr(args, "agent_exits", False)
+        #: Whether the buy-side gets an additional synthetic close decision.
+        #: Independent from sell-side agent exits: enabling one must not
+        #: silently add the other decision point.
+        self.close_buys = getattr(args, "close_buys", False)
         #: Whether the mechanical **stop** is enforced. Off means nothing
         #: closes a position for being down: the agent has to decide.
         #:
@@ -3567,7 +3573,7 @@ def _run_window(ctx, args) -> dict:
             # decisions on the buy side. Runs after the close exits so a
             # position sold at the close frees its capital for one bought at
             # the same close.
-            if ctx.decider == "llm" and ctx.agent_exits:
+            if ctx.decider == "llm" and ctx.close_buys:
                 try:
                     with replay_as_of(f"{day} 14:55"):
                         close_orders = _run_decider(ctx, day, prev_day,
@@ -4327,7 +4333,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="关闭机械止盈（实验用）")
     parser.add_argument(
         "--agent-exits", action="store_true",
-        help="让 agent 决定卖出（每天多一次模型调用；机械硬止损始终先跑）")
+        help="让 agent 决定卖出；只影响卖出，不再隐式增加收盘买入")
+    parser.add_argument(
+        "--close-buys", action="store_true",
+        help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")
     parser.add_argument(
         "--no-trader-tools", dest="trader_tools",
         action="store_false", default=True,

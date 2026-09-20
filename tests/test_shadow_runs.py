@@ -30,12 +30,13 @@ The tests are in eight groups:
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
 from alpha_agents.data import memory_store, policy_registry as PR
 from alpha_agents.data import scoring
-from alpha_agents.evolution import holdout_gate
+from alpha_agents.evolution import experiment_manifest, holdout_gate
 from alpha_agents.evolution import shadow as SH
 
 
@@ -101,6 +102,40 @@ def _open(version: int, **over) -> int:
                   report_type="intraday_signal")
     kwargs.update(over)
     return SH.open_run(**kwargs)
+
+
+def _open_at(version: int, when: str, **over) -> int:
+    """Open a run dated ``when``, the way an operator opening it that day did.
+
+    Needed since ``emit_for_date`` refuses a date earlier than the run's own
+    ``opened_at``: a test that grades a January forecast has to have opened
+    the experiment before January, not today.
+    """
+    with patch.object(SH, "_today", return_value=when):
+        return _open(version, **over)
+
+
+def _legacy_emit(run_id: int, date: str, code: str, *, prob: float = 0.6,
+                 horizon_days: int = 5) -> None:
+    """Write a shadow forecast directly, bypassing the forward guard.
+
+    Production carries rows of exactly this shape — written before
+    ``emit_for_date`` refused a date earlier than ``opened_at``. A test about
+    what a *reader* (coverage, the gate) does with such a row has to build it,
+    because the writer will no longer produce one.
+    """
+    conn = memory_store._get_conn()
+    SH.init_schema(conn)
+    run = SH.get_run(run_id)
+    deadline = (datetime.strptime(date, "%Y-%m-%d")
+                + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+    with conn:
+        conn.execute(
+            "INSERT INTO shadow_predictions (run_id, policy_version_id, date, "
+            "code, prob, horizon_days, deadline) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id, date, code) DO UPDATE SET prob = excluded.prob",
+            (run_id, run["policy_version_id"], date, code, prob,
+             horizon_days, deadline))
 
 
 def _dump(conn) -> dict:
@@ -310,7 +345,7 @@ class TestAClosedRunStopsProducing:
 class TestGrading:
     def test_a_matured_forecast_is_graded(self, store, version, monkeypatch):
         monkeypatch.setattr(scoring, "score_prediction", _fake_score(0.25))
-        run = _open(version)
+        run = _open_at(version, "2026-01-04")
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         result = SH.score_due(as_of="2026-06-01")
         assert result["graded"] == 1
@@ -321,7 +356,7 @@ class TestGrading:
     def test_an_unmatured_forecast_is_left_alone(self, store, version,
                                                  monkeypatch):
         monkeypatch.setattr(scoring, "score_prediction", _fake_score())
-        run = _open(version)
+        run = _open_at(version, "2026-01-04")
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         result = SH.score_due(as_of="2026-01-06")
         assert result["graded"] == 0
@@ -333,7 +368,7 @@ class TestGrading:
         # evidence out of a data gap.
         monkeypatch.setattr(scoring, "score_prediction",
                             lambda *a, **k: None)
-        run = _open(version)
+        run = _open_at(version, "2026-01-04")
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         result = SH.score_due(as_of="2026-06-01")
         assert result == {"graded": 0, "unscorable": 1, "deferred": 0,
@@ -352,7 +387,7 @@ class TestGrading:
                             lambda entry_date, horizon=5: False)
         monkeypatch.setattr(scoring, "score_prediction",
                             lambda *a, **k: pytest.fail("not ripe, not graded"))
-        run = _open(version)
+        run = _open_at(version, "2026-01-04")
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         result = SH.score_due(as_of="2026-06-01")
         assert result == {"graded": 0, "unscorable": 0, "deferred": 1,
@@ -363,14 +398,14 @@ class TestGrading:
 
     def test_grading_can_be_scoped_to_one_run(self, store, version, monkeypatch):
         monkeypatch.setattr(scoring, "score_prediction", _fake_score())
-        first = _open(version)
+        first = _open_at(version, "2026-01-04")
         SH.emit_for_date(first, "2026-01-05", panel=["600000"], horizon_days=5)
         PR_second = PR.freeze(
             sources={"prompts": {}, "model": {}, "retrieval": {}, "rules": {},
                      "knowledge": {"snapshot_id": None},
                      "decision": dict(scoring.DEFAULT_DECISION_PARAMS)},
             created_by="kylin", reason="second")
-        second = _open(PR_second)
+        second = _open_at(PR_second, "2026-01-04")
         SH.emit_for_date(second, "2026-01-05", panel=["000001"], horizon_days=5)
         SH.score_due(as_of="2026-06-01", run_id=first)
         assert len(SH.scored_for(first)) == 1
@@ -384,11 +419,103 @@ class TestGrading:
             return _fake_score()(code, entry_date, prob, horizon)
 
         monkeypatch.setattr(scoring, "score_prediction", counting)
-        run = _open(version)
+        run = _open_at(version, "2026-01-04")
         SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
         SH.score_due(as_of="2026-06-01")
         SH.score_due(as_of="2026-06-02")
         assert calls == ["600000"]
+
+
+# ── 5b. The forward guard ──────────────────────────────────────────────
+
+
+class TestAForecastCannotPredateItsExperiment:
+    """The argument ``open_run``'s guard does not cover.
+
+    Registration time is writer-controlled, so a caller cannot backdate a run.
+    That says nothing about the ``date`` handed to ``emit_for_date``, and
+    before this guard a run opened today accepted a session from three weeks
+    ago whose outcome was already known — then ``score_due`` graded it. The
+    row was indistinguishable from a real forward sample, so "the experiment
+    accumulated forward evidence" could be satisfied by reading history.
+    """
+
+    def test_a_session_before_the_run_opened_is_refused(self, store, version):
+        run = _open(version)                      # opened today
+        opened = SH.get_run(run)["opened_at"]
+        before = (datetime.strptime(opened, "%Y-%m-%d")
+                  - timedelta(days=14)).strftime("%Y-%m-%d")
+        with pytest.raises(SH.ShadowError) as exc:
+            SH.emit_for_date(run, before, panel=["600000"])
+        message = str(exc.value)
+        assert before in message and opened in message
+        assert experiment_manifest.FORWARD_RULE in message
+
+    def test_a_refused_backfill_writes_no_row(self, store, version):
+        run = _open(version)
+        opened = SH.get_run(run)["opened_at"]
+        before = (datetime.strptime(opened, "%Y-%m-%d")
+                  - timedelta(days=14)).strftime("%Y-%m-%d")
+        with pytest.raises(SH.ShadowError):
+            SH.emit_for_date(run, before, panel=["600000"])
+        assert SH.predictions_for(run) == []
+
+    def test_a_refused_backfill_is_not_graded_either(self, store, version,
+                                                     monkeypatch):
+        """The second half of the hole: no row, so nothing to score.
+
+        The guard has to stop the *write*, because a row that reached the table
+        would be graded normally and the acceptance criterion ("scored rows
+        exist") would be met by history.
+        """
+        monkeypatch.setattr(scoring, "score_prediction", _fake_score())
+        run = _open(version)
+        opened = SH.get_run(run)["opened_at"]
+        before = (datetime.strptime(opened, "%Y-%m-%d")
+                  - timedelta(days=14)).strftime("%Y-%m-%d")
+        with pytest.raises(SH.ShadowError):
+            SH.emit_for_date(run, before, panel=["600000"])
+        assert SH.score_due(as_of=_today())["graded"] == 0
+
+    def test_the_day_the_run_opened_is_allowed(self, store, version,
+                                               monkeypatch):
+        """The production path, and the reason the rule is not a strict ``>``.
+
+        The 15:45 task emits for the day it runs, and a run opened that morning
+        has ``opened_at`` equal to it. A strict ``>`` would refuse every
+        same-day emission and no experiment could ever collect a sample.
+        """
+        monkeypatch.setattr(scoring, "score_prediction", _fake_score())
+        run = _open(version)
+        opened = SH.get_run(run)["opened_at"]
+        _champion(store, opened, "600000")
+        ids = SH.emit_for_date(run, opened, panel=["600000"], horizon_days=5)
+        assert len(ids) == 1
+
+    def test_a_session_after_the_run_opened_is_allowed(self, store, version,
+                                                       monkeypatch):
+        """The positive case, so the guard cannot be satisfied by always raising."""
+        monkeypatch.setattr(scoring, "score_prediction", _fake_score())
+        run = _open_at(version, "2026-01-04")
+        _champion(store, "2026-01-05", "600000")
+        ids = SH.emit_for_date(run, "2026-01-05", panel=["600000"],
+                               horizon_days=5)
+        assert len(ids) == 1
+        assert SH.score_due(as_of="2026-06-01")["graded"] == 1
+
+    def test_the_rule_is_recorded_in_the_manifest(self, store, version):
+        """A frozen question, not a convention the operator is trusted to keep."""
+        run = _open(version)
+        assert SH.manifest_for_run(run)["forward_rule"] == (
+            experiment_manifest.FORWARD_RULE)
+
+    def test_a_run_with_no_opened_at_is_refused(self, store, version):
+        """Unknown direction in time is refused, not assumed forward."""
+        run = _open(version)
+        with pytest.raises(experiment_manifest.ManifestError,
+                           match="no opened_at"):
+            experiment_manifest.assert_forward(
+                {"id": run, "opened_at": None}, _today())
 
 
 # ── 6. Isolation ───────────────────────────────────────────────────────
@@ -496,8 +623,10 @@ class TestCoverage:
         store.execute("UPDATE predictions SET scored_at = '2026-02-01', "
                       "brier = 0.3 WHERE date = '2026-01-05'")
         store.commit()
+        # A legacy row: written before the forward guard existed, which is the
+        # only shape in which a pre-freeze pair can still be in the table.
         run = _open(version)
-        SH.emit_for_date(run, "2026-01-05", panel=["600000"], horizon_days=5)
+        _legacy_emit(run, "2026-01-05", "600000")
         SH.score_due(as_of="2026-06-01")
         row = SH.coverage(run)["runs"][0]
         assert row["scored"] == 1

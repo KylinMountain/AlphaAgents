@@ -358,7 +358,6 @@ def assert_producer_compatible(policy_version_id: int,
     return result
 
 
-
 def prob_coverage(report_type: str, *, days: int = 30,
                   conn: sqlite3.Connection | None = None) -> dict:
     """Whether a report type's book can be paired at all, measured.
@@ -490,8 +489,6 @@ def _rename_legacy_producer_column(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(shadow_runs)")}
     if "baseline" in columns and "producer" not in columns:
         conn.execute("ALTER TABLE shadow_runs RENAME COLUMN baseline TO producer")
-
-
 
 
 def manifest_for_run(run_id: int) -> dict | None:
@@ -641,7 +638,7 @@ def open_run(*, policy_version_id: int, reason: str,
         observed_genes=sorted(p.observed_genes),
         minimum_samples=holdout_gate.MIN_VALIDATION_SAMPLES,
         brier_tolerance=holdout_gate.BRIER_TOLERANCE,
-        opened_at=when)
+        opened_at=when, forward_rule=experiment_manifest.FORWARD_RULE)
     # Refuse a book that can never be paired, before writing the run row.
     # Checked here rather than in the CLI so both doors — the scheduled task
     # and ``scripts/policy.py`` — get the same answer.
@@ -850,6 +847,10 @@ def emit_for_date(run_id: int, date: str, *,
     run = get_run(run_id)
     if run is None:
         raise ShadowError(f"No shadow run #{run_id} to emit for.")
+    try:
+        experiment_manifest.assert_forward(run, date)
+    except experiment_manifest.ManifestError as exc:
+        raise ShadowError(str(exc)) from exc  # this module's error type
     if run["status"] != "open":
         raise ShadowError(
             f"Shadow run #{run_id} is closed; a closed experiment must not "

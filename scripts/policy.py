@@ -288,7 +288,7 @@ def _cmd_shadow_open(args) -> int:
 
     run_id = shadow.open_run(policy_version_id=args.version, reason=args.reason,
                              report_type=args.report_type,
-                             producer=args.producer, opened_at=args.at)
+                             producer=args.producer)
     run = shadow.get_run(run_id)
     print(f"  shadow run #{run_id} opened: policy version #{run['policy_version_id']} "
           f"via producer {run['producer']!r} on {run['report_type']!r}, "
@@ -716,8 +716,10 @@ def main(argv: list[str] | None = None) -> int:
                                   "refuses one that cannot.")
     shadow_open.add_argument("--reason", required=True,
                              help="why, in one sentence.")
-    shadow_open.add_argument("--at", default=None, metavar="YYYY-MM-DD",
-                             help="the date to record (default: the kernel clock).")
+    # No --at. Registration time is writer-controlled (``open_run`` refuses a
+    # caller-supplied ``opened_at``), so a flag that advertises one could only
+    # ever raise — it was dead, and a dead flag is worse than an absent one:
+    # it reads as a supported way to start an experiment in the past.
     shadow_open.add_argument("--dry-run", action="store_true",
                              help="print what would happen, then stop.")
     shadow_open.set_defaults(func=_cmd_shadow_open)

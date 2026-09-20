@@ -19,6 +19,57 @@ METRIC = "brier"
 STOPPING_RULE = "one_verdict_at_or_after_minimum_paired_samples"
 HORIZON_RULE = "champion_declared_per_code"
 
+#: The forward rule every candidate-grade experiment obeys: a forecast may not
+#: be written for a session that closed before the run existed. It lives in the
+#: manifest because it is part of the frozen question, not a convention the
+#: operator is trusted to keep. ``selection_shadow`` states its own copy
+#: (``"opportunity_set.day > opened_on"``) because its run row records a date
+#: and not an intra-day instant, so same-day ordering is unknown there.
+FORWARD_RULE = "date >= opened_at"
+
+
+def assert_forward(run: dict, date: str) -> None:
+    """Refuse a forecast for a session that closed before the run existed.
+
+    ``shadow.open_run`` already refuses a caller-supplied ``opened_at`` —
+    registration time is writer-controlled — but that guard only protects the
+    *run row*. It says nothing about the ``date`` handed to ``emit_for_date``,
+    so a run opened today would accept a session from three weeks ago and
+    ``score_due`` would grade it: the outcome was already known when the
+    experiment started, and the row is indistinguishable from a real forward
+    sample. That is §11 ("validation is forward") defeated through the one
+    argument the guard did not cover.
+
+    Measured before this existed, on a copy of the book: a run opened
+    2026-09-21 accepted 2026-09-08 and produced five *scored* samples the same
+    day.
+
+    **Same-day emission is allowed**, and that is the production path rather
+    than a concession: the 15:45 task emits for the day it runs, and a run
+    opened that morning has ``opened_at`` equal to it. The question is "could
+    the outcome already be known", not "is the date strictly later" — a
+    3-session horizon emitted today matures three sessions from now.
+
+    Refuses rather than skips: a silent skip makes "this session produced no
+    sample" and "this session was rejected as a backfill" the same reading, and
+    the caller is usually a backfill that needs to be told.
+    """
+    opened_at = str(run.get("opened_at") or "")[:10]
+    if not opened_at:
+        raise ManifestError(
+            f"Shadow run #{run.get('id')} has no opened_at, so nothing can say "
+            "whether a forecast for it would be forward. Refusing rather than "
+            "recording a sample whose direction in time is unknown.")
+    day = str(date)[:10]
+    if day < opened_at:
+        raise ManifestError(
+            f"Shadow run #{run['id']} opened {opened_at} cannot emit for {day}: "
+            "the session closed before the experiment existed, so its outcome "
+            "was already known and the row would be a backfill wearing the "
+            "same shape as a forward sample. Forward rule: "
+            f"{FORWARD_RULE}.")
+
+
 _TABLE = """
 CREATE TABLE IF NOT EXISTS shadow_manifests (
     id INTEGER PRIMARY KEY,
@@ -72,7 +123,7 @@ def build(*, policy_version_id: int, reference_version_id: int | None,
           producer: str, producer_kind: str, report_type: str,
           changed_genes: list[str], observed_genes: list[str],
           minimum_samples: int, brier_tolerance: float,
-          opened_at: str) -> dict:
+          opened_at: str, forward_rule: str = "date >= opened_at") -> dict:
     return {
         "schema_version": 1,
         "policy_version_id": policy_version_id,
@@ -88,6 +139,10 @@ def build(*, policy_version_id: int, reference_version_id: int | None,
         "brier_tolerance": float(brier_tolerance),
         "stopping_rule": STOPPING_RULE,
         "horizon_rule": HORIZON_RULE,
+        # The forward rule is part of the frozen question, not a caller's
+        # convention: it is what makes "these samples are forward" checkable
+        # after the fact rather than a claim about how the run was operated.
+        "forward_rule": forward_rule,
         "opened_at": opened_at,
     }
 

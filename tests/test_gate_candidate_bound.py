@@ -71,6 +71,30 @@ def _open_at(when: str, **kwargs):
         return SH.open_run(**kwargs)
 
 
+def _legacy_emit(run_id: int, date: str, code: str, *,
+                 horizon_days: int = 5) -> None:
+    """Write a shadow forecast directly, bypassing the forward guard.
+
+    These scenarios are about what a *reader* does with a row dated at or
+    before the freeze — the gate must not count it. Production holds rows of
+    exactly this shape, written before ``emit_for_date`` refused a date
+    earlier than the run's ``opened_at``; the writer will no longer make one,
+    so a test that needs one has to build it.
+    """
+    conn = memory_store._get_conn()
+    SH.init_schema(conn)
+    run = SH.get_run(run_id)
+    deadline = (datetime.strptime(date, "%Y-%m-%d")
+                + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+    with conn:
+        conn.execute(
+            "INSERT INTO shadow_predictions (run_id, policy_version_id, date, "
+            "code, prob, horizon_days, deadline) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id, date, code) DO UPDATE SET prob = excluded.prob",
+            (run_id, run["policy_version_id"], date, code, 0.6,
+             horizon_days, deadline))
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 
@@ -262,7 +286,7 @@ class TestTheWindowIsForward:
             _champion(store, day, "A", 0.40)
         run_id = SH.runs()[0]["id"]
         for day in ("2026-05-20", "2026-05-28", FROZEN_AT):
-            SH.emit_for_date(run_id, day, panel=["A"])
+            _legacy_emit(run_id, day, "A")
         _grade_challenger(monkeypatch, 0.05, as_of="2026-06-10")
         SH.score_due(as_of="2026-06-10")
 
@@ -386,7 +410,7 @@ class TestValidationDaysIsReal:
             _champion(store, day, "A", 0.30)
         run_id = SH.runs()[0]["id"]
         for day in ("2026-05-20", "2026-05-21"):
-            SH.emit_for_date(run_id, day, panel=["A"])
+            _legacy_emit(run_id, day, "A")
         _grade_challenger(monkeypatch, 0.10)
         SH.score_due(as_of=ASKED_ON)
 
@@ -640,8 +664,12 @@ class TestTheScopeBelongsToTheProducer:
         target = PR.freeze(
             sources=_with_decision("same", decision), parent_id=incumbent,
             created_by="kylin", reason="candidate", frozen_at=FROZEN_AT)
-        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
-                             report_type=REPORT, producer=candidate,)
+        # Opened on the freeze day, the way the experiment was actually
+        # started: the forecasts below are dated after it, and the forward
+        # guard refuses a run opened later than the sessions it measures.
+        run_id = _open_at(FROZEN_AT, policy_version_id=target,
+                          reason="the candidate",
+                          report_type=REPORT, producer=candidate,)
         _emit_and_grade(store, run_id, monkeypatch)
         got = _run(target)
         assert got["evidence_scope"] == PR.SCOPE_CANDIDATE

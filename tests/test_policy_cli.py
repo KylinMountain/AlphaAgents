@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -333,10 +334,18 @@ class TestTheExperimentIsDrivable:
         # exercise the CLI's mechanics on the `morning` book, so they say so
         # rather than inherit a default that is a judgement about which book
         # is worth measuring.
-        return cli.main(["shadow-open", "--version", str(version),
-                         "--producer", "remap_confidence",
-                         "--report-type", "morning",
-                         "--reason", "measure the candidate", *extra])
+        #
+        # Opened as of FROZEN_AT rather than "now", because the scenarios below
+        # emit forecasts for DAY (2026-06-02). Registration time is
+        # writer-controlled — a caller cannot backdate a run — so the only way
+        # to have a run that predates the sessions it measures is to be that
+        # day when it is opened. This is the same stub `_open_at` in
+        # test_gate_candidate_bound uses, and for the same reason.
+        with patch.object(shadow, "_today", return_value=self.FROZEN_AT):
+            return cli.main(["shadow-open", "--version", str(version),
+                             "--producer", "remap_confidence",
+                             "--report-type", "morning",
+                             "--reason", "measure the candidate", *extra])
 
     def test_opening_a_run_names_what_it_measures(self, cli, store, capsys):
         version = self._seed(cli, store, capsys)
@@ -346,6 +355,29 @@ class TestTheExperimentIsDrivable:
         assert f"policy version #{version}" in out
         assert "remap_confidence" in out
         assert shadow.runs()[0]["producer"] == "remap_confidence"
+
+    def test_shadow_open_has_no_way_to_backdate_a_run(self, cli, store,
+                                                      capsys):
+        """A flag that could only ever raise is worse than no flag.
+
+        ``shadow-open`` used to advertise ``--at`` and pass it to
+        ``open_run(opened_at=...)``, which refuses every caller-supplied value:
+        registration time is writer-controlled so that a run cannot be dated
+        into the past. The flag therefore had no reachable success, and it read
+        as a supported way to start an experiment in the past. The refusal is
+        pinned here so a future caller does not re-add it as a convenience.
+        """
+        version = self._seed(cli, store, capsys)
+        capsys.readouterr()
+        # argparse rejects the unknown argument and exits, which is the
+        # strongest form of "this is not a supported input".
+        with pytest.raises(SystemExit):
+            cli.main(["shadow-open", "--version", str(version),
+                      "--producer", "remap_confidence",
+                      "--report-type", "morning",
+                      "--reason", "backdate me",
+                      "--at", "2026-06-01"])
+        assert shadow.runs() == []
 
     def test_opening_a_run_on_the_incumbent_warns(self, cli, store, capsys):
         """The trap, as a warning: a shadow of the version in force applies the

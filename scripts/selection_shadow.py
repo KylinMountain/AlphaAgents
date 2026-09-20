@@ -42,7 +42,6 @@ def main(argv: list[str] | None = None) -> int:
     op = sub.add_parser("open")
     op.add_argument("--parent", type=int, required=True)
     op.add_argument("--variant", type=int, required=True)
-    op.add_argument("--opened-on", default=None)
     op.add_argument("--horizon", type=int, default=5)
     op.add_argument("--minimum-sets", type=int, default=20)
     op.add_argument(
@@ -66,7 +65,6 @@ def main(argv: list[str] | None = None) -> int:
         run_id = S.open_run(
             parent_version_id=args.parent,
             variant_version_id=args.variant,
-            opened_on=args.opened_on,
             horizon=args.horizon,
             minimum_sets=args.minimum_sets,
             minimum_behavior_changes=args.minimum_behavior_changes,

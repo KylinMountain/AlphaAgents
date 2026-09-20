@@ -79,7 +79,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from alpha_agents.data import memory_store, policy_registry, scoring
-from alpha_agents.evolution import experiment_manifest, holdout_gate
+from alpha_agents.evolution import experiment_manifest, gene_registry, holdout_gate
 
 #: The baseline's forecast. 0.5 is the permanently-uncertain forecaster, whose
 #: Brier is 0.25 — the line the champion has to beat.
@@ -142,8 +142,7 @@ class Producer:
     name: str
     kind: str
     forecast: Callable[[str, str, DecisionContext], float]
-    # Policy genes this producer actually executes while producing the number
-    # the gate grades. A parent path covers all of its leaf genes.
+    # Exact leaf genes this producer executes while producing the graded value.
     observed_genes: frozenset[str] = frozenset()
 
 
@@ -204,7 +203,7 @@ PRODUCERS: dict[str, Producer] = {
         forecast=remap_confidence,
         # dims_passed is None in remap_confidence, so confidence_to_prob takes
         # only this branch. dim_base/dim_step/theme_gate cannot affect it.
-        observed_genes=frozenset({"decision.confidence_priors"})),
+        observed_genes=gene_registry.CONFIDENCE_PRIOR_GENES),
 }
 
 
@@ -326,21 +325,19 @@ def producer_compatibility(policy_version_id: int,
                 "shadow would compare a policy with itself."),
         }
 
-    def observed(gene: str) -> bool:
-        return any(
-            gene == scope or gene.startswith(scope + ".")
-            for scope in producer.observed_genes
-        )
-
-    uncovered = [gene for gene in changed if not observed(gene)]
-    if uncovered:
+    try:
+        gene_registry.assert_exact_coverage(
+            changed, producer.observed_genes,
+            actor=f"producer {producer_name!r}")
+    except gene_registry.GeneRegistryError as exc:
         return {
             "compatible": False, "reference_version_id": reference_id,
-            "changed_genes": changed, "uncovered_genes": uncovered,
+            "changed_genes": changed,
+            "uncovered_genes": [gene for gene in changed
+                                if gene not in producer.observed_genes],
             "reason": (
                 f"producer {producer_name!r} cannot evaluate policy version "
-                f"#{policy_version_id}: changed gene(s) "
-                f"{', '.join(uncovered)} are outside its observed genes "
+                f"#{policy_version_id}: {exc}. Exact observed genes are "
                 f"{sorted(producer.observed_genes)}. A verdict would grade a "
                 "policy change the producer never executed."),
         }
@@ -622,7 +619,14 @@ def open_run(*, policy_version_id: int, reason: str,
             "the name decides the verdict's evidence scope, and a scope nobody "
             f"emitted is a promise with nothing behind it. Registered: "
             f"{sorted(PRODUCERS)}.")
-    when = _text(opened_at, "opened_at") if opened_at else _today()
+    # Preserve the old keyword boundary for callers passing its default, but
+    # reject every attempt to control the registration time.
+    if opened_at is not None:
+        raise ShadowError(
+            "opened_at is writer-controlled and cannot be supplied by callers")
+    # Registration time is writer-controlled. A caller cannot backfill a
+    # historical start date and later present already-known rows as forward.
+    when = _today()
     if policy_registry.get_version(policy_version_id) is None:
         raise ShadowError(
             f"No policy version #{policy_version_id} to shadow: a run that "

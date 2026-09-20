@@ -11,7 +11,7 @@ import statistics
 
 from alpha_agents.config import DATA_DIR
 from alpha_agents.data import opportunity_outcomes, scoring, selection_policy
-from alpha_agents.evolution import dream_agent
+from alpha_agents.evolution import dream_agent, gene_registry
 from alpha_agents.evolution.dream_world import OpportunityDreamWorld
 
 EVIDENCE_SCOPE = "historical_dream_only"
@@ -362,14 +362,9 @@ def panel_policy_counterfactual(
     """
     changed = dream_agent.changed_genes(
         parent_version_id, variant_version_id)
-    unsupported = [
-        gene for gene in changed
-        if not gene.startswith("decision.selection_rank.")
-    ]
-    if unsupported:
-        raise ValueError(
-            "selection evaluator cannot observe changed gene(s): " +
-            ", ".join(unsupported))
+    gene_registry.assert_exact_coverage(
+        changed, gene_registry.SELECTION_RANK_GENES,
+        actor="selection evaluator")
 
     own = history_conn is None
     history = history_conn or _history_conn()

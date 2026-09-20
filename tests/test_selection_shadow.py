@@ -48,13 +48,13 @@ def _history():
         "2025-12-17", "2025-12-18", "2025-12-19", "2025-12-22",
         "2025-12-23", "2025-12-24", "2025-12-25", "2025-12-26",
         "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
-        "2026-01-09", "2026-01-12",
+        "2026-01-09", "2026-01-12", "2026-01-13", "2026-01-14",
     ]
     paths = {
-        "600001": [10, 10.1, 10.2, 10.3, 10.4, 10.5],
-        "600002": [10, 10.5, 11.0, 11.5, 12.0, 12.5],
-        "600003": [10, 9.8, 9.6, 9.4, 9.2, 9.0],
-        "600004": [10, 10.4, 10.8, 11.2, 11.6, 12.0],
+        "600001": [10, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7],
+        "600002": [10, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5],
+        "600003": [10, 9.8, 9.6, 9.4, 9.2, 9.0, 8.8, 8.6],
+        "600004": [10, 10.4, 10.8, 11.2, 11.6, 12.0, 12.4, 12.8],
     }
     for code, values in paths.items():
         for day in dates[:20]:
@@ -109,11 +109,12 @@ def _set(store, day="2026-01-05"):
         conn=store)
 
 
-def test_run_scores_only_forward_parent_sets_and_seals(store):
+def test_run_scores_only_forward_parent_sets_and_seals(store, monkeypatch):
     parent, variant = _versions(store)
+    monkeypatch.setattr(SS.clock, "today", lambda: "2026-01-04")
     run = SS.open_run(
         parent_version_id=parent, variant_version_id=variant,
-        opened_on="2026-01-04", minimum_sets=1, conn=store)
+        minimum_sets=1, conn=store)
     _set(store)
     history = _history()
 
@@ -125,11 +126,12 @@ def test_run_scores_only_forward_parent_sets_and_seals(store):
     assert summary["seal"]["summary"]["sample_count"] == 1
 
 
-def test_sealed_run_never_grows(store):
+def test_sealed_run_never_grows(store, monkeypatch):
     parent, variant = _versions(store)
+    monkeypatch.setattr(SS.clock, "today", lambda: "2026-01-04")
     run = SS.open_run(
         parent_version_id=parent, variant_version_id=variant,
-        opened_on="2026-01-04", minimum_sets=1, conn=store)
+        minimum_sets=1, conn=store)
     _set(store)
     history = _history()
     SS.process(run_id=run, history_conn=history, conn=store)
@@ -156,3 +158,69 @@ def test_unrelated_gene_is_refused(store):
         SS.open_run(
             parent_version_id=parent, variant_version_id=variant,
             conn=store)
+
+
+def test_open_run_refuses_caller_supplied_backdated_start(store):
+    parent, variant = _versions(store)
+    with pytest.raises(
+            SS.SelectionShadowError, match="writer-controlled"):
+        SS.open_run(
+            parent_version_id=parent,
+            variant_version_id=variant,
+            opened_on="2020-01-01",
+            conn=store)
+
+
+def test_process_stops_exactly_at_preregistered_sample_floor(
+        store, monkeypatch):
+    parent, variant = _versions(store)
+    monkeypatch.setattr(SS.clock, "today", lambda: "2026-01-04")
+    run = SS.open_run(
+        parent_version_id=parent, variant_version_id=variant,
+        minimum_sets=2, conn=store)
+
+    # Three eligible future sets arrive before the next process() call.
+    for day in ("2026-01-05", "2026-01-06", "2026-01-07"):
+        _set(store, day=day)
+    history = _history()
+
+    got = SS.process(run_id=run, history_conn=history, conn=store)
+    assert got["sealed"] is True
+    assert got["sample_count"] == 2
+    assert got["new_rows"] == 2
+    assert store.execute(
+        "SELECT COUNT(*) FROM selection_shadow_rows WHERE run_id=?",
+        (run,)).fetchone()[0] == 2
+
+    # The third matured set remains outside this sealed experiment.
+    total_sets = store.execute(
+        "SELECT COUNT(*) FROM opportunity_sets WHERE day>'2026-01-04'"
+    ).fetchone()[0]
+    assert total_sets == 3
+    assert SS.summary(run, store)["sample_count"] == 2
+
+
+def test_seal_refuses_legacy_overfilled_unsealed_run(store, monkeypatch):
+    parent, variant = _versions(store)
+    monkeypatch.setattr(SS.clock, "today", lambda: "2026-01-04")
+    run = SS.open_run(
+        parent_version_id=parent, variant_version_id=variant,
+        minimum_sets=1, conn=store)
+    # Simulate a pre-fix database already contaminated past its floor.
+    SS.init_schema(store)
+    for index in (1, 2):
+        payload = {
+            "variant_minus_parent_mean": 0.1,
+            "behavior_changed_sets": 1,
+        }
+        store.execute(
+            "INSERT INTO selection_shadow_rows "
+            "(run_id,opportunity_set_id,day,result_json,result_hash,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (run, 10_000 + index, f"2026-01-0{4 + index}",
+             SS._dump(payload), SS._hash(payload), "2026-01-10"))
+    store.commit()
+
+    with pytest.raises(
+            SS.SelectionShadowError, match="already exceeds"):
+        SS.process(run_id=run, history_conn=_history(), conn=store)

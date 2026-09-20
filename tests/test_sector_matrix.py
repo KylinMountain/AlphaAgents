@@ -169,6 +169,16 @@ def _formal_capabilities():
                     "evidence": "archived provider vintages verified",
                 },
             },
+            "security_status": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "fixture-reviewer",
+                    "verified_at": "2026-09-20T09:00:00+08:00",
+                    "evidence": "historical status vintages verified",
+                },
+            },
         },
     })
 

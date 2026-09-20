@@ -440,3 +440,15 @@ def test_load_arm_accepts_one_real_trading_day(tmp_path):
     got = C.load_arm(root, "A")
     assert got["portfolio"]["net_return_pct"] == -1.0
     assert got["portfolio"]["max_drawdown_pct"] == 1.0
+
+
+def test_compare_refuses_silent_intersection_of_different_calendars(tmp_path):
+    arms = _arms(tmp_path)
+    path = arms["B"] / "equity.csv"
+    rows = list(csv.DictReader(path.open("r", encoding="utf-8", newline="")))
+    rows[-1]["date"] = "2026-03-15"
+    _write_csv(path, ["date", "equity"], rows)
+
+    with pytest.raises(
+            C.SectorCompareError, match="observed trading-day calendar"):
+        C.compare(manifest=_manifest(), arm_dirs=arms)

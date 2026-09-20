@@ -89,6 +89,25 @@ def formal_errors(report: dict) -> list[str]:
         errors.append("fund_flow grade A requires verification.verified_at")
     if not str(verification.get("evidence") or "").strip():
         errors.append("fund_flow grade A requires verification.evidence")
+
+    security = (report.get("capabilities") or {}).get("security_status") or {}
+    if security.get("status") != "available":
+        errors.append("security_status capability is not available")
+    if security.get("point_in_time_grade") != "A":
+        errors.append(
+            "security_status point_in_time_grade must be A for formal replay")
+    if security.get("strict_replay_eligible") is not True:
+        errors.append("security_status must be strict_replay_eligible")
+    security_verification = security.get("verification") or {}
+    if not str(security_verification.get("verified_by") or "").strip():
+        errors.append(
+            "security_status grade A requires verification.verified_by")
+    if not str(security_verification.get("verified_at") or "").strip():
+        errors.append(
+            "security_status grade A requires verification.verified_at")
+    if not str(security_verification.get("evidence") or "").strip():
+        errors.append(
+            "security_status grade A requires verification.evidence")
     return errors
 
 
@@ -226,12 +245,52 @@ def _fund_flow_capability(data_dir: Path) -> dict:
     }
 
 
+def _security_status_capability(data_dir: Path) -> dict:
+    result = _coverage(
+        data_dir / "stocks.db",
+        "stocks",
+        ("effective_at", "available_at", "captured_at", "date"))
+    columns = set(result.get("columns") or [])
+    status_columns = {"is_st", "is_suspended"}
+    if not status_columns.issubset(columns):
+        return {
+            **result,
+            "status": (
+                result.get("status")
+                if result.get("status") not in {"available", "ungraded"}
+                else "missing_status_columns"
+            ),
+            "point_in_time_grade": "U",
+            "strict_replay_eligible": False,
+            "verification": None,
+            "note": "historical ST/suspension status is not available",
+        }
+
+    # The current stocks table has no verified effective/vintage semantics.
+    # A time-looking field would still start at U until semantics are audited.
+    has_time = result.get("status") == "available"
+    return {
+        **result,
+        "status": "available",
+        "point_in_time_grade": "U" if has_time else "C",
+        "strict_replay_eligible": False,
+        "verification": None,
+        "note": (
+            "time-like field exists but status semantics are unverified"
+            if has_time else
+            "stocks.is_st/is_suspended are current snapshot fields; "
+            "they cannot prove historical status"
+        ),
+    }
+
+
 def probe_all(data_dir: Path = DATA_DIR) -> dict:
     return {
         "membership_sources": probe_membership_sources(data_dir),
         "daily_price": _coverage(
             data_dir / "market_history.db", "daily_kline", ("date",)),
         "fund_flow": _fund_flow_capability(data_dir),
+        "security_status": _security_status_capability(data_dir),
         "event_expectations": _coverage(
             data_dir / "market_snapshots.db",
             "event_expectation_snapshots",

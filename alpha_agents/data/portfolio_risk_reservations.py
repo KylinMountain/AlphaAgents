@@ -1,0 +1,113 @@
+"""Pre-trade risk reservations layered on the existing reservation ledger.
+
+This module owns only the arithmetic and accounting for risk reservations.
+The portfolio module still owns order creation/fills; reservations still own
+the reservation state machine. Keeping those responsibilities separate avoids
+turning portfolio.py into a second risk engine.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+from alpha_agents.data import order_theme_exposure, reservations
+from alpha_agents.data.theme_gate import resolve_theme
+
+
+def related_themes(primary_theme: str,
+                   supporting_themes: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """Canonical primary + supporting labels, deduplicated in stable order."""
+    primary = str(primary_theme or "").strip()
+    if not primary:
+        raise ValueError("primary theme is required")
+    out = [primary]
+    for raw in supporting_themes:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        canonical = resolve_theme(value) or value
+        if canonical not in out:
+            out.append(canonical)
+    return out
+
+
+def committed_theme_exposure(conn: sqlite3.Connection, *,
+                             theme: str, trader_id: str) -> float:
+    """Open cost plus pending risk holds for one correlated theme.
+
+    New multi-theme positions use the append-only sidecar. Legacy rows without
+    a sidecar fall back to virtual_portfolio.theme so old positions continue to
+    count exactly once.
+    """
+    order_theme_exposure.init_schema(conn)
+    sidecar = conn.execute(
+        "SELECT COALESCE(SUM(v.open_price * v.shares),0) AS amount "
+        "FROM virtual_portfolio v JOIN order_theme_exposures e "
+        "ON e.order_id=v.id "
+        "WHERE v.trader_id=? AND v.status='open' AND e.theme=?",
+        (trader_id, theme),
+    ).fetchone()
+    legacy = conn.execute(
+        "SELECT COALESCE(SUM(v.open_price * v.shares),0) AS amount "
+        "FROM virtual_portfolio v "
+        "WHERE v.trader_id=? AND v.status='open' AND v.theme=? "
+        "AND NOT EXISTS (SELECT 1 FROM order_theme_exposures e "
+        "                WHERE e.order_id=v.id)",
+        (trader_id, theme),
+    ).fetchone()
+    held = reservations.held_total(
+        conn, trader_id, kind=reservations.theme_risk_kind(theme))
+    return (
+        float(sidecar["amount"] or 0.0)
+        + float(legacy["amount"] or 0.0)
+        + held
+    )
+
+
+def first_theme_cap_breach(conn: sqlite3.Connection, *,
+                           trader_id: str, themes: list[str],
+                           reservation_amount: float,
+                           theme_cap: float) -> tuple[str, float] | None:
+    """First theme whose committed + requested amount exceeds the cap."""
+    for theme in themes:
+        committed = committed_theme_exposure(
+            conn, theme=theme, trader_id=trader_id)
+        if committed + reservation_amount > theme_cap + 1e-9:
+            return theme, committed
+    return None
+
+
+def reserve_theme_risk(conn: sqlite3.Connection, *, order_id: int,
+                       trader_id: str, code: str, themes: list[str],
+                       amount: float) -> None:
+    """Reserve the same worst-case notional against every related theme."""
+    for theme in themes:
+        reservations.reserve_for_order(
+            conn, order_id=order_id, trader_id=trader_id, code=code,
+            amount=amount, kind=reservations.theme_risk_kind(theme),
+            reason=f"pending theme-risk backstop:{theme}")
+
+
+def plan_risk_amount_cap(fill_price: float, stop_loss: float | None,
+                         capital: float, max_position_pct: float, *,
+                         hard_stop_pct: float, lot_size: int) -> float:
+    """Maximum notional consistent with the existing hard-risk budget.
+
+    This is a sizing bound, not a promise that a stop can execute there. Risk
+    distance is at least the hard-stop percentage; a wider declared stop
+    shrinks size further. Gap/limit-blocked loss remains a separate stress
+    scenario and may exceed this planned amount.
+    """
+    if fill_price <= 0 or capital <= 0 or max_position_pct <= 0:
+        return 0.0
+    hard_distance = fill_price * hard_stop_pct / 100.0
+    declared_distance = 0.0
+    if isinstance(stop_loss, (int, float)) and 0 < stop_loss < fill_price:
+        declared_distance = fill_price - float(stop_loss)
+    risk_per_share = max(hard_distance, declared_distance)
+    if risk_per_share <= 0:
+        return 0.0
+    risk_budget = capital * max_position_pct * hard_stop_pct / 100.0
+    shares = int(risk_budget // risk_per_share)
+    shares = shares // lot_size * lot_size
+    return max(0.0, shares * fill_price)

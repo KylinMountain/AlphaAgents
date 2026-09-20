@@ -141,6 +141,30 @@ def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
         return float("inf")
 
 
+def _plan_risk_amount_cap(fill_price: float, stop_loss: float | None,
+                          capital: float, max_position_pct: float) -> float:
+    """Maximum notional consistent with the existing hard-risk budget.
+
+    This is a sizing bound, not a promise that a stop can execute there.
+    Risk distance is at least HARD_STOP_PCT of entry; a wider declared stop
+    shrinks size further. Gap/limit-blocked loss remains a separate stress
+    scenario and may exceed this planned amount.
+    """
+    if fill_price <= 0 or capital <= 0 or max_position_pct <= 0:
+        return 0.0
+    hard_distance = fill_price * HARD_STOP_PCT / 100.0
+    declared_distance = 0.0
+    if isinstance(stop_loss, (int, float)) and 0 < stop_loss < fill_price:
+        declared_distance = fill_price - float(stop_loss)
+    risk_per_share = max(hard_distance, declared_distance)
+    if risk_per_share <= 0:
+        return 0.0
+    risk_budget = capital * max_position_pct * HARD_STOP_PCT / 100.0
+    shares = int(risk_budget // risk_per_share)
+    shares = shares // LOT_SIZE * LOT_SIZE
+    return max(0.0, shares * fill_price)
+
+
 def _drawdown_blocks_new_risk(trader_id: str = DEFAULT_TRADER) -> bool:
     """True only when this trader is measurably deep in a drawdown.
 
@@ -832,6 +856,8 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
                                   MAX_POSITION_PCT)
         max_per_stock = min(capital * _wanted_pct(code, trader_id),
                             capital * max_pos_pct)
+        plan_risk_cap = _plan_risk_amount_cap(
+            fill_price, order.get("stop_loss"), capital, max_pos_pct)
         max_for_theme = (capital * MAX_THEME_PCT
                          - get_theme_exposure(theme, trader_id))
         # Themes that share most of their constituents are one bet. The
@@ -848,9 +874,9 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # that trader instead of skipping one order. Found by the walk-forward
         # on 2025-07-08; no room is a refusal, and ``shares == 0`` below is the
         # code that already knows how to say so.
-        max_amount = max(0.0, min(available, max_per_stock,
-                                   max(0, max_for_theme), sentiment_room,
-                                   cluster_cap))
+        max_amount = max(0.0, min(
+            available, max_per_stock, plan_risk_cap,
+            max(0, max_for_theme), sentiment_room, cluster_cap))
 
         # Portfolio drawdown gates *new* risk and never forces an exit.
         # Liquidating at a drawdown level sells the bottom, and in a system
@@ -872,9 +898,9 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             # the book, which is a selection bias in the learning data
             # with nothing to do with the agent's judgement.
             one_lot = fill_price * LOT_SIZE
-            ceiling = max(0.0, min(available, capital * max_pos_pct,
-                                   max(0, max_for_theme), sentiment_room,
-                                   cluster_cap))
+            ceiling = max(0.0, min(
+                available, capital * max_pos_pct, plan_risk_cap,
+                max(0, max_for_theme), sentiment_room, cluster_cap))
             if one_lot <= ceiling:
                 shares = LOT_SIZE
                 logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"

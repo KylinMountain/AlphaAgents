@@ -647,3 +647,77 @@ def test_hard_research_invalidation_never_reaches_planner(monkeypatch):
         if row.get("why") == "research_invalidation")
     assert refusal["code"] == "600001"
     assert refusal["detail"] == "核心订单取消已确认"
+
+
+def test_sector_order_passes_supporting_themes_into_atomic_risk_gate(
+        monkeypatch):
+    from alpha_agents.data import policy_registry
+
+    ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m-risk",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",), "算力": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    rel_ai = SM.relation_evidence_id(
+        snapshot, sector_id="AI", code="600001")
+    rel_compute = SM.relation_evidence_id(
+        snapshot, sector_id="算力", code="600001")
+    panel = [{
+        "code": "600001", "name": "甲", "adv20": 100000,
+        "close": 10.0, "change_pct": 2.0, "turnover_rate": 3.0,
+        "primary_theme": "AI", "supporting_themes": ["算力"],
+        "eligible_themes": ["AI", "算力"],
+        "theme_relation_evidence_ids": {
+            "AI": rel_ai, "算力": rel_compute},
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "primary_theme_relation_evidence_id": rel_ai,
+        "supporting_theme_relation_evidence_ids": [rel_compute],
+    }]
+    monkeypatch.setattr(
+        wf, "_sector_first_stage",
+        lambda *a, **k: _research_stage(ctx, snapshot, panel))
+    monkeypatch.setattr(
+        wf, "_sector_stock_choice",
+        lambda *a, **k: {
+            "stocks": [{
+                "code": "600001", "primary_theme": "AI",
+                "reason": "候选", "counterevidence": "",
+            }],
+            "refused": [], "parse_error": None,
+            "research_budget": {"used": 0, "deep_dive_names": []},
+            "research_trace": [], "model_elapsed_ms": 1,
+        })
+    monkeypatch.setattr(policy_registry, "active_ref", lambda: "policy-v1")
+    monkeypatch.setattr(
+        wf, "_sector_trade_plan",
+        lambda *a, **k: {
+            "orders": [{
+                "code": "600001", "entry_low": 9.8, "entry_high": 10.1,
+                "stop_loss": 9.0, "target_price": 11.0, "reason": "test",
+            }],
+            "refused": [], "parse_error": None, "raw": "{}",
+            "research_budget": None, "research_trace": [],
+            "model_elapsed_ms": 1,
+        })
+    _wire_common(monkeypatch)
+
+    captured = {}
+    monkeypatch.setattr(
+        wf, "create_pending_order",
+        lambda **kwargs: captured.update(kwargs) or 123)
+    monkeypatch.setattr(
+        OJ, "record_decision", lambda **kwargs: 1)
+    monkeypatch.setattr(
+        wf.order_theme_exposure, "record", lambda **kwargs: 1)
+
+    placed = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
+
+    assert placed[0]["order_id"] == 123
+    assert captured["theme"] == "AI"
+    assert captured["risk_themes"] == ["算力"]

@@ -1748,7 +1748,16 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ranking_day = day if phase == "close" else prev_day
     market = _market_state(ctx, prev_day)
-    news = _news_window(day, prev_day, ctx.news_limit, phase)
+    minimal_mode = ctx.selection_architecture in {
+        "dual_rank_price_v1", "sector_rank_price_v1",
+    }
+    if minimal_mode and phase != "open":
+        raise RuntimeError(
+            "nf_discovery_v1 supports the reproducible 09:00 buy path only")
+    news = (
+        [] if minimal_mode
+        else _news_window(day, prev_day, ctx.news_limit, phase)
+    )
     if market:
         ctx.counters["market_state_days"] += 1
 
@@ -1758,7 +1767,14 @@ def _decide_llm(ctx, day: str, prev_day: str,
         "sector_first_v0", "sector_first_simple_selector",
         "sector_first_no_flow",
     }
-    if sector_mode:
+    if minimal_mode:
+        if ctx.selection_architecture == "sector_rank_price_v1":
+            discovered = _price_sector_stage(ctx, day, ranking_day)
+        else:
+            discovered = _build_panel(
+                ctx, day, ranking_day, ctx.panel_size)
+        panel = _minimal_planner_panel(discovered)
+    elif sector_mode:
         if phase != "open":
             raise RuntimeError(
                 f"{ctx.selection_architecture} currently supports the strict "
@@ -1787,6 +1803,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
         return []
 
     book, knowledge = _book_and_knowledge(ctx, day, phase)
+    if minimal_mode:
+        knowledge = ""
     stock_choice = None
     planner_panel = panel
 
@@ -1945,9 +1963,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
             model=ctx.model,
             loop=ctx.loop,
             phase=phase,
-            tools=_trader_tools(ctx),
-            max_turns=ctx.max_turns,
-            research_budget=shared_budget,
+            tools=[] if minimal_mode else _trader_tools(ctx),
+            max_turns=1 if minimal_mode else ctx.max_turns,
+            research_budget=None if minimal_mode else shared_budget,
         )
 
     if sector_mode and not verdict.get("parse_error"):
@@ -2005,7 +2023,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "selection_rank": (
                     selection_policy.in_force_params()
                     if ctx.selection_architecture == "dual_rank_v0"
-                    else None),
+                    else ({
+                        "method": "whole_market_change_turnover_v1"
+                    } if ctx.selection_architecture == "dual_rank_price_v1"
+                    else None)),
                 "sector_first": getattr(
                     ctx, "last_sector_context", {}),
                 "stock_preselection": stock_preselection,
@@ -2017,7 +2038,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "planner_panel": [
                     row["code"] for row in planner_panel
                 ] if sector_mode else None,
-                "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
+                "event_snapshot_refs": (
+                    [] if minimal_mode
+                    else _event_snapshot_refs(panel, cutoff)
+                ),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
                 "world_read_set": ctx.last_world_read_set,

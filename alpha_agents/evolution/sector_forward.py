@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 
@@ -110,16 +111,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
             f"ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END")
 
 
-def _nonempty_hash(value: str, field: str) -> str:
+def _nonempty_hash(value: str, field: str, *, lengths=(64,)) -> str:
     text = str(value or "").strip()
-    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text.lower()):
-        raise SectorForwardError(f"{field} must be a sha256 hex digest")
+    if (len(text) not in lengths
+            or any(ch not in "0123456789abcdef" for ch in text.lower())):
+        sizes = " or ".join(str(length) for length in lengths)
+        raise SectorForwardError(f"{field} must be a {sizes}-character hex digest")
     return text.lower()
 
 
 def open_run(*, parent_version_id: int, candidate_version_id: int,
              sample_ids: list[str], protocol_hash: str, code_hash: str,
              data_hash: str, evaluator_hash: str,
+             required_ci_checks: list[str],
              maximum_drawdown_pct: float, maximum_tail_loss_pct: float,
              maximum_concentration_pct: float,
              minimum_mean_delta_pp: float = 0.0,
@@ -165,6 +169,10 @@ def open_run(*, parent_version_id: int, candidate_version_id: int,
         raise SectorForwardError("risk limits cannot be negative")
     if minimum_behavior_changes <= 0:
         raise SectorForwardError("minimum_behavior_changes must be positive")
+    ci_checks = [str(name).strip() for name in required_ci_checks]
+    if (not ci_checks or any(not name for name in ci_checks)
+            or len(set(ci_checks)) != len(ci_checks)):
+        raise SectorForwardError("required_ci_checks must be unique nonempty names")
 
     manifest = {
         "schema_version": 1,
@@ -181,9 +189,10 @@ def open_run(*, parent_version_id: int, candidate_version_id: int,
         "evaluator_version": EVALUATOR_VERSION,
         "evaluator_genes": sorted(gene_registry.SELECTION_RANK_GENES),
         "protocol_hash": _nonempty_hash(protocol_hash, "protocol_hash"),
-        "code_hash": _nonempty_hash(code_hash, "code_hash"),
+        "code_hash": _nonempty_hash(code_hash, "code_hash", lengths=(40, 64)),
         "data_hash": _nonempty_hash(data_hash, "data_hash"),
         "evaluator_hash": _nonempty_hash(evaluator_hash, "evaluator_hash"),
+        "required_ci_checks": ci_checks,
         "risk_limits": limits,
         "minimum_mean_delta_pp": float(minimum_mean_delta_pp),
         "minimum_behavior_changes": int(minimum_behavior_changes),
@@ -240,24 +249,45 @@ def ingest(*, run_id: int, samples: list[dict],
             if allowed[sample_id] >= floor:
                 continue
             decision_at = str(sample.get("decision_at") or "")
+            try:
+                decided = datetime.fromisoformat(decision_at)
+                observed = datetime.fromisoformat(_utc_now())
+            except ValueError as exc:
+                raise SectorForwardError(
+                    "decision_at must be an ISO-8601 timestamp") from exc
+            if decided.tzinfo is None:
+                raise SectorForwardError("decision_at must include a timezone")
+            if decision_at[:10] != sample_id[:10]:
+                raise SectorForwardError(
+                    "decision_at must belong to the preregistered sample day")
             if decision_at <= str(run["registered_at"]):
                 raise SectorForwardError("candidate-forward samples cannot be backfilled")
+            if decided > observed:
+                raise SectorForwardError(
+                    "future samples cannot be ingested before decision_at")
             if sample.get("evidence_scope") != EVIDENCE_SCOPE:
                 raise SectorForwardError(
                     "historical or observation-only evidence cannot enter this run")
-            result = {
-                "return_delta_pp": float(sample["return_delta_pp"]),
-                "maximum_drawdown_pct": float(sample["maximum_drawdown_pct"]),
-                "tail_loss_pct": float(sample["tail_loss_pct"]),
-                "maximum_concentration_pct": float(sample["maximum_concentration_pct"]),
-                "behavior_changed": bool(sample["behavior_changed"]),
-            }
+            _assert_sample_identity(sample, run, manifest)
+            result = _evaluate_sample(sample)
+            result_json = _dump(result)
+            result_hash = _hash(result)
+            existing = target.execute(
+                "SELECT decision_at,result_hash FROM sector_forward_rows "
+                "WHERE run_id=? AND sample_id=?", (run_id, sample_id)
+            ).fetchone()
+            if existing is not None:
+                if (existing["decision_at"] != decision_at
+                        or existing["result_hash"] != result_hash):
+                    raise SectorForwardError(
+                        "conflicting replay for an accepted forward sample")
+                continue
             target.execute(
                 "INSERT OR IGNORE INTO sector_forward_rows "
                 "(run_id,sample_id,ordinal,decision_at,result_json,result_hash,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (run_id, sample_id, allowed[sample_id], decision_at,
-                 _dump(result), _hash(result), _utc_now()))
+                 result_json, result_hash, _utc_now()))
 
         rows = target.execute(
             "SELECT * FROM sector_forward_rows WHERE run_id=? ORDER BY ordinal",
@@ -306,6 +336,74 @@ def _seal(conn, run_id: int, manifest: dict, rows) -> None:
          _hash(summary), _utc_now()))
 
 
+def _finite_series(sample: dict, field: str, *, positive=False) -> list[float]:
+    raw = sample.get(field)
+    if not isinstance(raw, list) or not raw:
+        raise SectorForwardError(f"{field} must be a nonempty list")
+    try:
+        values = [float(value) for value in raw]
+    except (TypeError, ValueError) as exc:
+        raise SectorForwardError(f"{field} must contain numbers") from exc
+    if any(not math.isfinite(value) for value in values):
+        raise SectorForwardError(f"{field} contains a non-finite value")
+    if positive and any(value <= 0 for value in values):
+        raise SectorForwardError(f"{field} must contain positive values")
+    return values
+
+
+def _assert_sample_identity(sample: dict, run: dict, manifest: dict) -> None:
+    expected = {
+        "manifest_hash": run["manifest_hash"],
+        "candidate_hash": manifest["candidate_hash"],
+        "protocol_hash": manifest["protocol_hash"],
+        "code_hash": manifest["code_hash"],
+        "data_hash": manifest["data_hash"],
+        "evaluator_hash": manifest["evaluator_hash"],
+    }
+    mismatched = [field for field, value in expected.items()
+                  if sample.get(field) != value]
+    if mismatched:
+        raise SectorForwardError(
+            "sample identity does not match the frozen manifest: "
+            + ", ".join(mismatched))
+
+
+def _evaluate_sample(sample: dict) -> dict:
+    """Compute the registered portfolio metrics from immutable raw paths."""
+    parent = _finite_series(sample, "parent_equity", positive=True)
+    candidate = _finite_series(sample, "candidate_equity", positive=True)
+    concentrations = _finite_series(sample, "candidate_concentration_pct")
+    if len(parent) < 2 or len(candidate) < 2:
+        raise SectorForwardError("equity paths need an initial and final mark")
+    if len(parent) != len(candidate) or len(concentrations) != len(candidate):
+        raise SectorForwardError(
+            "parent, candidate and concentration paths must align")
+    if any(value < 0 or value > 100 for value in concentrations):
+        raise SectorForwardError("candidate concentration must be within 0..100")
+    parent_return = (parent[-1] / parent[0] - 1.0) * 100.0
+    candidate_return = (candidate[-1] / candidate[0] - 1.0) * 100.0
+    peak = candidate[0]
+    drawdowns = []
+    daily_returns = []
+    for previous, current in zip(candidate, candidate[1:]):
+        peak = max(peak, current)
+        drawdowns.append((peak - current) / peak * 100.0)
+        daily_returns.append((current / previous - 1.0) * 100.0)
+    parent_decision = _nonempty_hash(
+        sample.get("parent_decision_hash"), "parent_decision_hash")
+    candidate_decision = _nonempty_hash(
+        sample.get("candidate_decision_hash"), "candidate_decision_hash")
+    return {
+        "return_delta_pp": round(candidate_return - parent_return, 8),
+        "maximum_drawdown_pct": round(max(drawdowns, default=0.0), 8),
+        "tail_loss_pct": round(max(0.0, -min(daily_returns, default=0.0)), 8),
+        "maximum_concentration_pct": round(max(concentrations), 8),
+        "behavior_changed": parent_decision != candidate_decision,
+        "parent_decision_hash": parent_decision,
+        "candidate_decision_hash": candidate_decision,
+    }
+
+
 def record_ci(*, run_id: int, commit_hash: str, checks: list[dict],
               manifest_hash: str, candidate_hash: str,
               conn: sqlite3.Connection | None = None) -> int:
@@ -319,10 +417,15 @@ def record_ci(*, run_id: int, commit_hash: str, checks: list[dict],
         raise SectorForwardError("CI artifact is bound to another candidate")
     if commit_hash != manifest["code_hash"]:
         raise SectorForwardError("CI artifact is bound to another code revision")
-    if not checks or any(item.get("conclusion") != "success" for item in checks):
+    names = [str(item.get("name") or "").strip() for item in checks]
+    required = list(manifest["required_ci_checks"])
+    if (sorted(names) != sorted(required)
+            or len(set(names)) != len(names)
+            or any(item.get("conclusion") != "success" for item in checks)):
         raise SectorForwardError("every preregistered CI check must succeed")
     artifact = {
-        "commit_hash": _nonempty_hash(commit_hash, "commit_hash"),
+        "commit_hash": _nonempty_hash(
+            commit_hash, "commit_hash", lengths=(40, 64)),
         "manifest_hash": manifest_hash,
         "candidate_hash": candidate_hash,
         "checks": checks,

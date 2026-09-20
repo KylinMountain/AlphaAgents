@@ -61,9 +61,10 @@ def _open(store, **overrides):
         "candidate_version_id": candidate,
         "sample_ids": _ids(),
         "protocol_hash": "1" * 64,
-        "code_hash": "2" * 64,
+        "code_hash": "2" * 40,
         "data_hash": "3" * 64,
         "evaluator_hash": "4" * 64,
+        "required_ci_checks": ["tests", "policy"],
         "maximum_drawdown_pct": 12.0,
         "maximum_tail_loss_pct": 8.0,
         "maximum_concentration_pct": 30.0,
@@ -71,7 +72,9 @@ def _open(store, **overrides):
         "conn": store,
     }
     args.update(overrides)
-    return SF.open_run(**args), candidate
+    run = SF.open_run(**args)
+    SF._utc_now = lambda: "2027-01-01T00:00:00.000000+00:00"
+    return run, candidate
 
 
 def _sample(sample_id, **overrides):
@@ -79,14 +82,29 @@ def _sample(sample_id, **overrides):
         "sample_id": sample_id,
         "decision_at": f"{sample_id[:10]}T01:00:00+00:00",
         "evidence_scope": PR.SCOPE_CANDIDATE,
-        "return_delta_pp": 0.2,
-        "maximum_drawdown_pct": 5.0,
-        "tail_loss_pct": 3.0,
-        "maximum_concentration_pct": 20.0,
-        "behavior_changed": True,
+        "manifest_hash": overrides.pop("manifest_hash", None),
+        "candidate_hash": overrides.pop("candidate_hash", None),
+        "protocol_hash": "1" * 64,
+        "code_hash": "2" * 40,
+        "data_hash": "3" * 64,
+        "evaluator_hash": "4" * 64,
+        "parent_equity": [100.0, 100.0],
+        "candidate_equity": [100.0, 100.2],
+        "candidate_concentration_pct": [20.0, 20.0],
+        "parent_decision_hash": "6" * 64,
+        "candidate_decision_hash": "7" * 64,
     }
     result.update(overrides)
     return result
+
+
+def _bound_samples(store, run, candidate, ids):
+    manifest_hash = store.execute(
+        "SELECT manifest_hash FROM sector_forward_runs WHERE id=?", (run,)
+    ).fetchone()["manifest_hash"]
+    candidate_hash = PR.get_version(candidate)["content_hash"]
+    return [_sample(sample_id, manifest_hash=manifest_hash,
+                    candidate_hash=candidate_hash) for sample_id in ids]
 
 
 def _ci(store, run, candidate):
@@ -94,7 +112,7 @@ def _ci(store, run, candidate):
         "SELECT manifest_hash FROM sector_forward_runs WHERE id=?", (run,)
     ).fetchone()
     SF.record_ci(
-        run_id=run, commit_hash="2" * 64,
+        run_id=run, commit_hash="2" * 40,
         checks=[{"name": "tests", "conclusion": "success"},
                 {"name": "policy", "conclusion": "success"}],
         manifest_hash=row["manifest_hash"],
@@ -102,13 +120,13 @@ def _ci(store, run, candidate):
 
 
 def test_49_plus_10_seals_exactly_the_preregistered_50(store):
-    run, _candidate = _open(store)
+    run, candidate = _open(store)
     ids = _ids()
-    first = [_sample(sample_id) for sample_id in ids[:49]]
+    first = _bound_samples(store, run, candidate, ids[:49])
     assert SF.ingest(run_id=run, samples=first, conn=store)["sealed"] is False
 
     got = SF.ingest(
-        run_id=run, samples=[_sample(sample_id) for sample_id in ids[49:59]],
+        run_id=run, samples=_bound_samples(store, run, candidate, ids[49:59]),
         conn=store)
     assert got["sealed"] is True
     assert got["sample_count"] == 50
@@ -120,10 +138,10 @@ def test_49_plus_10_seals_exactly_the_preregistered_50(store):
 
 
 def test_duplicate_and_out_of_order_delivery_has_stable_seal(store):
-    run, _candidate = _open(store)
+    run, candidate = _open(store)
     ids = _ids()[:50]
-    batch = [_sample(sample_id) for sample_id in reversed(ids)]
-    batch += [_sample(ids[0]), _sample(ids[1])]
+    batch = _bound_samples(store, run, candidate, list(reversed(ids)))
+    batch += _bound_samples(store, run, candidate, ids[:2])
     SF.ingest(run_id=run, samples=batch, conn=store)
     before = store.execute(
         "SELECT summary_hash FROM sector_forward_seals WHERE run_id=?", (run,)
@@ -136,7 +154,7 @@ def test_duplicate_and_out_of_order_delivery_has_stable_seal(store):
 
 
 def test_concurrent_duplicate_batches_preserve_the_same_exact_seal(store):
-    run, _candidate = _open(store)
+    run, candidate = _open(store)
     ids = _ids()[:50]
     database = store.execute("PRAGMA database_list").fetchone()[2]
 
@@ -148,7 +166,7 @@ def test_concurrent_duplicate_batches_preserve_the_same_exact_seal(store):
         finally:
             conn.close()
 
-    forward = [_sample(sample_id) for sample_id in ids]
+    forward = _bound_samples(store, run, candidate, ids)
     reverse = list(reversed(forward))
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(deliver, (forward, reverse)))
@@ -164,15 +182,16 @@ def test_concurrent_duplicate_batches_preserve_the_same_exact_seal(store):
 
 
 def test_observation_only_and_unplanned_samples_fail_closed(store):
-    run, _candidate = _open(store)
+    run, candidate = _open(store)
+    sample = _bound_samples(store, run, candidate, [_ids()[0]])[0]
+    sample["evidence_scope"] = "observation_only"
     with pytest.raises(SF.SectorForwardError, match="observation-only"):
-        SF.ingest(
-            run_id=run,
-            samples=[_sample(_ids()[0], evidence_scope="observation_only")],
-            conn=store)
+        SF.ingest(run_id=run, samples=[sample], conn=store)
     with pytest.raises(SF.SectorForwardError, match="not preregistered"):
         SF.ingest(
-            run_id=run, samples=[_sample("2030-01-01/surprise")], conn=store)
+            run_id=run,
+            samples=_bound_samples(
+                store, run, candidate, ["2030-01-01/surprise"]), conn=store)
 
 
 def test_ci_is_hash_bound_and_all_checks_must_pass(store):
@@ -182,13 +201,35 @@ def test_ci_is_hash_bound_and_all_checks_must_pass(store):
     ).fetchone()
     with pytest.raises(SF.SectorForwardError, match="every preregistered"):
         SF.record_ci(
-            run_id=run, commit_hash="2" * 64,
+            run_id=run, commit_hash="2" * 40,
             checks=[{"name": "tests", "conclusion": "failure"}],
             manifest_hash=row["manifest_hash"],
             candidate_hash=PR.get_version(candidate)["content_hash"], conn=store)
+
+
+def test_samples_are_identity_bound_and_cannot_arrive_from_the_future(store):
+    run, candidate = _open(store)
+    sample = _bound_samples(store, run, candidate, [_ids()[0]])[0]
+    sample["candidate_hash"] = "f" * 64
+    with pytest.raises(SF.SectorForwardError, match="frozen manifest"):
+        SF.ingest(run_id=run, samples=[sample], conn=store)
+
+    sample = _bound_samples(store, run, candidate, [_ids()[0]])[0]
+    SF._utc_now = lambda: "2026-09-20T12:00:00.000000+00:00"
+    with pytest.raises(SF.SectorForwardError, match="before decision_at"):
+        SF.ingest(run_id=run, samples=[sample], conn=store)
+
+
+def test_conflicting_replay_fails_closed(store):
+    run, candidate = _open(store)
+    sample = _bound_samples(store, run, candidate, [_ids()[0]])[0]
+    SF.ingest(run_id=run, samples=[sample], conn=store)
+    changed = dict(sample, candidate_equity=[100.0, 101.0])
+    with pytest.raises(SF.SectorForwardError, match="conflicting replay"):
+        SF.ingest(run_id=run, samples=[changed], conn=store)
     with pytest.raises(SF.SectorForwardError, match="another manifest"):
         SF.record_ci(
-            run_id=run, commit_hash="2" * 64,
+            run_id=run, commit_hash="2" * 40,
             checks=[{"name": "tests", "conclusion": "success"}],
             manifest_hash="0" * 64,
             candidate_hash=PR.get_version(candidate)["content_hash"], conn=store)
@@ -196,8 +237,10 @@ def test_ci_is_hash_bound_and_all_checks_must_pass(store):
 
 def test_positive_return_is_rejected_by_drawdown_veto(store):
     run, candidate = _open(store)
-    samples = [_sample(sample_id) for sample_id in _ids()[:50]]
-    samples[7]["maximum_drawdown_pct"] = 12.1
+    samples = _bound_samples(store, run, candidate, _ids()[:50])
+    samples[7]["parent_equity"] = [100.0, 100.0, 100.0]
+    samples[7]["candidate_equity"] = [100.0, 87.9, 101.0]
+    samples[7]["candidate_concentration_pct"] = [20.0, 20.0, 20.0]
     SF.ingest(run_id=run, samples=samples, conn=store)
     _ci(store, run, candidate)
     result = SF.evaluate(run, store)
@@ -209,7 +252,8 @@ def test_positive_return_is_rejected_by_drawdown_veto(store):
 def test_complete_safe_forward_evidence_gets_one_persisted_verdict(store):
     run, candidate = _open(store)
     SF.ingest(
-        run_id=run, samples=[_sample(sample_id) for sample_id in _ids()[:50]],
+        run_id=run,
+        samples=_bound_samples(store, run, candidate, _ids()[:50]),
         conn=store)
     _ci(store, run, candidate)
     verdict = SF.run_gate(run, store)

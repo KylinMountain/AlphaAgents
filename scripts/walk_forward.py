@@ -1686,84 +1686,117 @@ def _decide_llm(ctx, day: str, prev_day: str,
             try:
                 planner_panel = research_packet.apply_stock_choices(
                     panel, stock_choice.get("stocks") or [])
-                from alpha_agents.data import policy_registry
-                packet = research_packet.build(
-                    day=day,
-                    cutoff=cutoff,
-                    architecture=ctx.selection_architecture,
-                    policy_ref=policy_registry.active_ref(),
-                    membership_snapshot_id=str(
-                        ctx.last_sector_context.get(
-                            "membership_snapshot_id") or ""),
-                    membership_hash=str(
-                        ctx.last_sector_context.get("membership_hash") or ""),
-                    directions=list(
-                        ctx.last_sector_context.get(
-                            "direction_research") or []),
-                    selected_panel=planner_panel,
-                    stock_choices=list(stock_choice.get("stocks") or []),
-                    research_trace=list(
-                        stock_choice.get("research_trace") or []),
-                    budget=stock_choice.get("research_budget"),
-                    event_snapshot_refs=_event_snapshot_refs(
-                        planner_panel, cutoff),
-                )
-                research_packet.require_valid(
-                    packet,
-                    cutoff=cutoff,
-                    membership_snapshot_id=str(
-                        ctx.last_sector_context.get(
-                            "membership_snapshot_id") or ""),
-                    membership_hash=str(
-                        ctx.last_sector_context.get("membership_hash") or ""),
-                )
             except research_packet.ResearchPacketError as exc:
+                # A selector chose a theme whose frozen membership relation
+                # cannot be proven. That is a structured decision refusal,
+                # not an unreadable model reply or infrastructure failure.
+                code = str(
+                    ((stock_choice.get("stocks") or [{}])[0]).get("code")
+                    or "")
                 packet = None
                 planner_panel = []
                 verdict = {
                     "orders": [],
-                    "refused": [],
-                    "raw": "",
-                    "parse_error": f"research_packet: {exc}",
+                    "refused": (
+                        list(stock_choice.get("refused") or [])
+                        + [{
+                            "code": code,
+                            "why": "theme_unresolved",
+                            "detail": str(exc)[:500],
+                            "stage": "research_packet_validation",
+                        }]
+                    ),
+                    "raw": stock_choice.get("raw") or "",
+                    "parse_error": None,
                     "research_budget": stock_choice.get("research_budget"),
                     "research_trace": stock_choice.get("research_trace") or [],
                 }
             else:
-                hard_refusals = research_packet.deterministic_refusals(packet)
-                blocked = {
-                    row["code"] for row in hard_refusals if row.get("code")}
-                planner_allowed = [
-                    row for row in planner_panel
-                    if row.get("code") not in blocked
-                ]
-                if planner_allowed:
-                    verdict = _sector_trade_plan(
-                        ctx,
+                from alpha_agents.data import policy_registry
+                try:
+                    packet = research_packet.build(
                         day=day,
-                        prev_day=prev_day,
-                        panel=planner_allowed,
-                        news=news,
-                        market=market,
-                        book=book,
-                        knowledge=knowledge,
-                        research_packet_payload=packet,
+                        cutoff=cutoff,
+                        architecture=ctx.selection_architecture,
+                        policy_ref=policy_registry.active_ref(),
+                        membership_snapshot_id=str(
+                            ctx.last_sector_context.get(
+                                "membership_snapshot_id") or ""),
+                        membership_hash=str(
+                            ctx.last_sector_context.get(
+                                "membership_hash") or ""),
+                        directions=list(
+                            ctx.last_sector_context.get(
+                                "direction_research") or []),
+                        selected_panel=planner_panel,
+                        stock_choices=list(stock_choice.get("stocks") or []),
+                        research_trace=list(
+                            stock_choice.get("research_trace") or []),
+                        budget=stock_choice.get("research_budget"),
+                        event_snapshot_refs=_event_snapshot_refs(
+                            planner_panel, cutoff),
                     )
-                else:
+                    research_packet.require_valid(
+                        packet,
+                        cutoff=cutoff,
+                        membership_snapshot_id=str(
+                            ctx.last_sector_context.get(
+                                "membership_snapshot_id") or ""),
+                        membership_hash=str(
+                            ctx.last_sector_context.get(
+                                "membership_hash") or ""),
+                    )
+                except research_packet.ResearchPacketError as exc:
+                    packet = None
+                    planner_panel = []
                     verdict = {
-                        "orders": [], "refused": [], "raw": "",
-                        "parse_error": None, "research_budget": None,
-                        "research_trace": [],
+                        "orders": [],
+                        "refused": list(stock_choice.get("refused") or []),
+                        "raw": stock_choice.get("raw") or "",
+                        "parse_error": f"research_packet: {exc}",
+                        "research_budget": stock_choice.get("research_budget"),
+                        "research_trace":
+                            stock_choice.get("research_trace") or [],
                     }
-                verdict["research_packet"] = packet
-                verdict["research_budget"] = stock_choice.get(
-                    "research_budget")
-                verdict["research_trace"] = stock_choice.get(
-                    "research_trace") or []
-                verdict["refused"] = (
-                    list(stock_choice.get("refused") or [])
-                    + hard_refusals
-                    + list(verdict.get("refused") or [])
-                )
+                else:
+                    hard_refusals = research_packet.deterministic_refusals(
+                        packet)
+                    blocked = {
+                        row["code"]
+                        for row in hard_refusals if row.get("code")
+                    }
+                    planner_allowed = [
+                        row for row in planner_panel
+                        if row.get("code") not in blocked
+                    ]
+                    if planner_allowed:
+                        verdict = _sector_trade_plan(
+                            ctx,
+                            day=day,
+                            prev_day=prev_day,
+                            panel=planner_allowed,
+                            news=news,
+                            market=market,
+                            book=book,
+                            knowledge=knowledge,
+                            research_packet_payload=packet,
+                        )
+                    else:
+                        verdict = {
+                            "orders": [], "refused": [], "raw": "",
+                            "parse_error": None, "research_budget": None,
+                            "research_trace": [],
+                        }
+                    verdict["research_packet"] = packet
+                    verdict["research_budget"] = stock_choice.get(
+                        "research_budget")
+                    verdict["research_trace"] = stock_choice.get(
+                        "research_trace") or []
+                    verdict["refused"] = (
+                        list(stock_choice.get("refused") or [])
+                        + hard_refusals
+                        + list(verdict.get("refused") or [])
+                    )
     else:
         verdict = t1_decider.propose_sync(
             day=day,

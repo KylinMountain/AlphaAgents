@@ -131,6 +131,7 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     assert got[0]["theme"] == "算力"
     assert got[0]["supporting_themes"] == ["AI"]
     assert captured["theme"] == "算力"
+    assert captured["risk_themes"] == ["AI"]
     assert captured["theme"] != ctx.theme
     assert got[0]["membership_snapshot_id"] == "m1"
     assert got[0]["membership_hash"] == snapshot.content_hash
@@ -160,6 +161,7 @@ def test_dual_rank_default_keeps_run_theme(monkeypatch):
     got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
     assert got[0]["theme"] == "RUN-THEME"
     assert captured["theme"] == "RUN-THEME"
+    assert captured["risk_themes"] == []
 
 
 def test_cli_default_does_not_change_incumbent_architecture():

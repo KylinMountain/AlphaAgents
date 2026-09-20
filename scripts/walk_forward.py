@@ -2143,6 +2143,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
             source="walk_forward",
             reason=f"{t1_decider.DECIDER_NAME}: {order['reason']}",
             trader_id=ctx.trader,
+            risk_themes=(
+                list(row.get("supporting_themes") or [])
+                if sector_mode else []
+            ),
         )
         if order_id is None:
             ctx.counters["intent_refused"] += 1

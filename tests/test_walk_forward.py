@@ -57,6 +57,7 @@ from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.data import learning_candidates as LC  # noqa: E402
 from alpha_agents.data import market_history as mh  # noqa: E402
 from alpha_agents.data import t1_settlement as S  # noqa: E402
+from alpha_agents.evolution import performance as PERF  # noqa: E402
 
 #: The live book. Read by plain file open, never through SQLite: the conftest
 #: forbids a connection into ``data/``, and hashing needs no connection.
@@ -1285,3 +1286,34 @@ class TestTheAgentsOwnExitsReachTheReport:
             assert f["shares"], f"no quantity on {f}"
             assert f["amount"], f"no amount on {f}"
             assert f["amount"] == f["shares"] * f["price"]
+
+
+class TestInitialAccountPerformanceMark:
+    def test_report_keeps_initial_mark_outside_trading_days(self, tmp_path):
+        replay, _ = _prepare(tmp_path, *_normal())
+        result = _run(replay, days=2)
+
+        initial = result["initial_account"]
+        assert initial["kind"] == "initial_mark"
+        assert initial["as_of"] == _PREV
+        assert initial["next_session"] == _START
+        assert len(result["equity"]) == 2
+
+        metrics = PERF.equity_metrics(initial["equity"], result["equity"])
+        report = walk_forward.write_report(result, tmp_path / "rp02-report")
+        meta = json.loads(
+            (tmp_path / "rp02-report" / "run.json").read_text(encoding="utf-8")
+        )
+
+        assert report["meta"]["initial_account"] == initial
+        assert meta["initial_account"] == initial
+        assert meta["window"]["trading_days"] == 2
+        assert metrics["trading_days"] == 2
+        assert (
+            f"区间收益      {metrics['net_return_pct']:+.3f}%"
+            in report["summary"]
+        )
+        assert (
+            f"区间最大回撤  {metrics['max_drawdown_pct']:.3f}%"
+            in report["summary"]
+        )

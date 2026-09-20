@@ -43,7 +43,7 @@ DECISION_KEYS = frozenset({
     "trader", "picks_per_day", "panel_size", "participation",
     "max_turns_per_decision", "model_timeout_seconds", "pace_seconds",
     "news_limit", "trader_tools_enabled", "direction_limit",
-    "learning_input",
+    "learning_input", "run_theme",
 })
 
 RISK_KEYS = (

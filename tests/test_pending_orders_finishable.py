@@ -137,6 +137,45 @@ def _seed_pending(*, order_id=None, code="600000", name="A", theme="t",
     return oid
 
 
+class TestLiquidityCapacityIsExecution:
+    def test_capacity_truncates_actual_fill_shares(
+            self, store, traders_dir, theme):
+        oid = _seed_pending(held=True)
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            capacity_shares_by_code={"600000": 200})
+        assert [row["type"] for row in alerts] == ["filled"]
+        row = _db().execute(
+            "SELECT status,shares FROM virtual_portfolio WHERE id=?",
+            (oid,)).fetchone()
+        assert row["status"] == "open"
+        assert row["shares"] == 200
+
+    def test_capacity_below_one_lot_refuses_fill(
+            self, store, traders_dir, theme):
+        oid = _seed_pending(held=True)
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            capacity_shares_by_code={"600000": 50})
+        assert alerts == [{
+            "type": "cancelled",
+            "code": "600000",
+            "name": "A",
+            "reason": "流动性容量不足",
+        }]
+        row = _status(oid)
+        assert row["status"] == "cancelled"
+        assert "流动性容量不足" in row["close_reason"]
+
+    def test_capacity_argument_refuses_invalid_share_limit(
+            self, store, traders_dir, theme):
+        _seed_pending(held=True)
+        with pytest.raises(ValueError, match="max_shares"):
+            P.check_pending_orders(
+                {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+                capacity_shares_by_code={"600000": -1})
+
+
 def _seed_cancelled(close_reason, *, code="600000", trader_id="slow",
                     order_date=None):
     conn = _db()

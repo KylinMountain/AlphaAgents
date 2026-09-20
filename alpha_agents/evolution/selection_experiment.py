@@ -211,6 +211,36 @@ def validate(manifest: dict) -> list[str]:
     return errors
 
 
+def capability_errors(report: dict) -> list[str]:
+    """Closed data requirements for the source-closed no-flow protocol.
+
+    Fund flow, free news and event text are intentionally absent: requiring
+    them would make an ablated source a hidden prerequisite.
+    """
+    errors: list[str] = []
+    capabilities = report.get("capabilities") or {}
+
+    price = capabilities.get("daily_price") or {}
+    if price.get("status") != "available":
+        errors.append("daily_price capability must be available")
+
+    security = capabilities.get("security_status") or {}
+    if security.get("status") != "available":
+        errors.append("security_status capability must be available")
+    if security.get("point_in_time_grade") != "A":
+        errors.append(
+            "security_status point_in_time_grade must be A")
+    if security.get("strict_replay_eligible") is not True:
+        errors.append(
+            "security_status must be strict_replay_eligible")
+    verification = security.get("verification") or {}
+    for field in ("verified_by", "verified_at", "evidence"):
+        if not str(verification.get(field) or "").strip():
+            errors.append(
+                f"security_status grade A requires verification.{field}")
+    return errors
+
+
 def require_valid(manifest: dict) -> str:
     errors = validate(manifest)
     if errors:

@@ -40,23 +40,53 @@ sys.path.insert(0, str(REPO))
 from alpha_agents.report_io import write_json  # noqa: E402
 from alpha_agents.config import DATA_DIR  # noqa: E402
 from alpha_agents.data import frozen_direction_archive  # noqa: E402
-from alpha_agents.data import sector_source_probe  # noqa: E402
+from alpha_agents.data import policy_registry, sector_source_probe  # noqa: E402
 from alpha_agents.evolution import sector_experiment  # noqa: E402
 from alpha_agents.evolution import sector_experiment_compare  # noqa: E402
+from alpha_agents.evolution import world_read_set  # noqa: E402
+
+
+def _git_code_ref() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO, check=False, capture_output=True, text=True)
+    ref = completed.stdout.strip()
+    if completed.returncode != 0 or len(ref) != 40:
+        raise sector_experiment.SectorExperimentError(
+            "formal experiment needs a measurable git code ref")
+    return ref
+
+
+def _source_identity(corpus: Path, membership: Path) -> dict:
+    if not membership.exists():
+        raise FileNotFoundError(membership)
+    return world_read_set.file_identity({
+        "market_history.db": corpus / "market_history.db",
+        "market_snapshots.db": corpus / "market_snapshots.db",
+        "stocks.db": corpus / "stocks.db",
+        "sector_membership": membership,
+    })
 
 
 def _audit(args) -> int:
-    capabilities = sector_source_probe.probe_all(DATA_DIR)
+    capabilities = sector_source_probe.probe_all(args.corpus)
+    identity = _source_identity(args.corpus, args.sector_membership)
     report = sector_source_probe.with_content_hash({
         "as_of": args.as_of,
-        "data_dir": str(DATA_DIR),
+        "data_dir": str(args.corpus),
         "capabilities": capabilities,
+        "input_identity": identity,
     })
 
     out = args.out
     write_json(out / "capabilities.json", report)
     manifest = sector_experiment.template(
         capabilities_hash=report["content_hash"])
+    manifest["baseline_identity"] = {
+        "code_ref": _git_code_ref(),
+        "policy_ref": policy_registry.active_ref(),
+        "input_hash": identity["input_hash"],
+    }
     write_json(out / "experiment_manifest.json", manifest)
 
     print(json.dumps({
@@ -229,6 +259,26 @@ def _run_matrix(args) -> int:
     manifest, digest = _registered_manifest(args.manifest)
     _capabilities, capabilities_digest = _registered_capabilities(
         args.capabilities, manifest)
+
+    measured_identity = _source_identity(
+        args.corpus, args.sector_membership)
+    frozen_identity = manifest["baseline_identity"]
+    identity_errors = {}
+    actual_code = _git_code_ref()
+    if frozen_identity.get("code_ref") != actual_code:
+        identity_errors["code_ref"] = {
+            "manifest": frozen_identity.get("code_ref"),
+            "runtime": actual_code,
+        }
+    if frozen_identity.get("input_hash") != measured_identity["input_hash"]:
+        identity_errors["input_hash"] = {
+            "manifest": frozen_identity.get("input_hash"),
+            "runtime": measured_identity["input_hash"],
+        }
+    if identity_errors:
+        raise sector_experiment.SectorExperimentError(
+            "formal experiment identity mismatch: "
+            + json.dumps(identity_errors, ensure_ascii=False, sort_keys=True))
     windows = manifest["validation_windows"]
     if not 0 <= args.window_index < len(windows):
         raise sector_experiment.SectorExperimentError(
@@ -293,6 +343,8 @@ def _run_matrix(args) -> int:
         "capabilities_hash": capabilities_digest,
         "capabilities": str(args.capabilities),
         "membership": str(args.sector_membership),
+        "input_identity": measured_identity,
+        "code_ref": actual_code,
         "window_index": args.window_index,
         "window": {"start": start, "end": end, "trading_days": days},
         "completed_arms": completed_arms,
@@ -371,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
 
     audit = sub.add_parser("audit")
     audit.add_argument("--as-of", required=True)
+    audit.add_argument("--corpus", type=Path, default=DATA_DIR)
+    audit.add_argument("--sector-membership", type=Path, required=True)
     audit.add_argument("--out", type=Path, required=True)
 
     register_caps = sub.add_parser("register-capabilities")

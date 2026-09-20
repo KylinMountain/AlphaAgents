@@ -164,7 +164,7 @@ _RUN_AS_SCRIPT = Path(sys.argv[0]).resolve() == Path(__file__).resolve()
 _REPLAY_DIR = _bind_to(_choose_data_dir(sys.argv[1:])) if _RUN_AS_SCRIPT else None
 
 from alpha_agents import llm_journal  # noqa: E402
-from alpha_agents.config import DATA_DIR, PROMPTS_DIR, TRADABLE_PREFIXES  # noqa: E402
+from alpha_agents.config import DATA_DIR, PROMPTS_DIR  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
     market_rules, order_theme_exposure, portfolio as P, security_eligibility,

@@ -198,12 +198,34 @@ actually reads it"）对 selection 基因尚未满足的地方。
 `shadow_predictions` 有已评分行。run #4 开启当天冠军尚无当日选股（0 条），
 需要真实的交易日推进。
 
-**一个仍然存在的结构性阻断（值得单列）**：`paired_count` 要求**冠军那一侧也
-已评分**，而冠军的 `intraday` 行自 **2026-09-10** 起就没有再评分——15:30 的
-`review` 任务负责评分，本地这次重启的调度器还没走到那个时点。实测：21 条待评分
-中只有 6 条窗口已收口。所以在 review 恢复评分之前，即使 run #4 攒满预测，
-`paired` 仍会是 0。**这不是 shadow 的缺陷，是生产评分链的节奏问题**，
-但它决定了 ② 什么时候真的能达成。
+**那个结构性阻断已解除。** `paired_count` 要求**冠军那一侧也评分**，而冠军的
+`intraday` 行自 **2026-09-10** 起就没再评分——15:30 的 `review` 任务负责评分，
+调度器还没走到那个时点。跑一次该评分步骤后实测：
+
+```
+修复前：champion scored 38/59，run #4 paired = 0
+修复后：champion scored 44/59，run #4 paired = 5 / 20（5 个评分日）
+```
+
+**所以 ② 现在只差真实交易日推进**，不再缺代码。
+
+### ② 的 selection 那一半：不能照字面补，已改为诊断
+
+目标里写「补上缺失的样本源」。**尽调后确认不能照字面做**，三条实测：
+
+1. 生产**没有** `opportunity_sets` 表（唯一写入点是 `walk_forward.py:2035`）；
+2. 生产**不跑** `dual_rank_v0`——带 `selection_architecture` 的生产预测行 = 0，
+   回放是 `dual_rank_v0`；生产选股按 `score` 排序，零引用 `selection_policy`；
+3. 生产候选行**缺字段**：`get_sector_best_stocks_fn` 返回的行 `turnover_rate`
+   与 `change_pct` 全为 `None`，喂进 `candidate_pool_rows` 得 5 行、**可用 0 行**。
+
+造一个写入者只会产出**结构上不可评分**的集合（`sample_count` 永远 0，
+而表里有行、日志说「已写入」）——正是这个仓库最反对的假修复。
+**基因本身是可观测的**（0.5→0.6 在 15 个名字的池上都能改变选中集合），
+缺的是生产侧那条池子。所以改为：`process()` 无日志时抛
+`SelectionShadowError`（原来是 `OperationalError: no such table`）、
+`summary()` 报告 `sample_source_present`、并改掉两处声称「live 路径执行该基因」
+的不实 docstring。详见 `docs/exec-plans/active/2026-09-21-selection-shadow-sample-source.md`。
 
 ---
 

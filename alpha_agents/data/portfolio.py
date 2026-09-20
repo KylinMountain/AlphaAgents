@@ -270,14 +270,9 @@ def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
 
 
 def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
-    """Market value one trader has in a theme."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT open_price, shares FROM virtual_portfolio "
-        "WHERE status = 'open' AND theme = ? AND trader_id = ?",
-        (theme, trader_id),
-    ).fetchall()
-    return sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
+    """Compatibility read; risk accounting is owned by the risk module."""
+    return risk_reservations.primary_theme_exposure(
+        _get_conn(), theme=theme, trader_id=trader_id)
 
 
 # ── Pending Orders (挂单) ───────────────────────────────────

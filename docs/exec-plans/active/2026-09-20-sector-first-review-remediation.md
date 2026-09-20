@@ -1,7 +1,7 @@
 # Sector-First 审查整改实施计划：先修闭环，再验证策略
 
-状态：active（RP-01–RP-08 已合入；RP-09/RP-10 工程实现待整合合入；
-真实前向证据仍为 n=0）
+状态：active（RP-01–RP-09 工程实现已合入；RP-10 工程门控已合入，
+等待真实前向 n≥50；当前策略证据仍为 n=0）
 创建：2026-09-20（Asia/Taipei）  
 基线：`eab3f1ec7b9af0d1fd9b2fa8117cf5ba514a2060`  
 审查依据：[整体流程合伙人审查](../../reviews/2026-09-20-sector-first-partner-review.md)  
@@ -331,7 +331,7 @@ uv run python scripts/lint_policy.py
 
 | 任务 | 状态 | 负责人 | 修复 commit/PR | 真实回归与验收证据 | 剩余阻断 |
 | --- | --- | --- | --- | --- | --- |
-| RP-00 | DONE | 工程 Leader | 本轮整合分支 | 当前 main 基线与整合分支均执行全量；代理环境污染单列，清除代理后 `2948 passed, 20 skipped` | 无 |
+| RP-00 | DONE | 工程 Leader | `#31` / `9c5c4e8f` | 当前 main 基线与整合分支均执行全量；代理环境污染单列，清除代理后 `2948 passed, 20 skipped` | 无 |
 | RP-01 | DONE | 主执行工程师 | `#15` / `851ba0a5` | proposer tools/budget 四组合、异常恢复、共享预算与真实 `ToolContext`；最终 Harness / build 全绿 | 无 |
 | RP-02 | DONE | 主执行工程师 | `#16` / `91db093e` | `initial_account` + 唯一绩效函数；100→95→100=0% 收益/5% 回撤；重复/乱序/非有限数据与异步日历 fail closed；最终 `2832 passed, 20 skipped`，build / invariants / CodeQL / security 全绿 | 旧结果目录无 `initial_account` 时显式拒绝，需重新生成 |
 | RP-03 | DONE | 主执行工程师 | `#18` / `#19` / `#20` | research packet、确定性拒绝、共享关系/资格验证、统一 trace 已进入真实路径 | 无 |
@@ -339,7 +339,7 @@ uv run python scripts/lint_policy.py
 | RP-05 | DONE | 主执行工程师 | `#22` | 独立 `nf_discovery_v1`；全链 no-flow、4×30 日、共同 planner/执行与冻结统计契约 | 真实策略结果 n=0 |
 | RP-06 | DONE | 主执行工程师 | `#27` | register/run/compare selection matrix；空目录产物身份复核、120 唯一日 synthetic E2E | 真实策略结果 n=0 |
 | RP-07 | DONE | 主执行工程师 | `#23` / `#30` | 原子现金/主题风险占用，主/辅主题在下单前进入同一风险门 | 阈值有效性仍需前向数据，不影响工程闭环 |
-| RP-08 | IN_REVIEW | 主执行工程师 | `#24` / `#25` + 本轮整合 | 上交所规则版本化、exit/close-buy 解耦、ADV20 在真实 fill 与一手兜底路径硬约束 | 待整合 PR 合入即 DONE |
-| RP-09 | IN_REVIEW | 主执行工程师 | `#26` 内容并入本轮整合 | 独立 append-only forward observation store；可信 UTC 注册、修订链、失败分类、observation-only 隔离 | 待整合 PR 合入即 DONE |
-| RP-10 | BLOCKED | 工程 Leader | `#28` 内容 + 本轮整合 | exact leaf-gene registry；严格未来注册；exact-N/并发/重试封存；Sector-First 专属 manifest/evaluator；risk veto；CI artifact 绑定；单 verdict；人工批准/CAS 沿用既有边界 | 工程实现可合入；必须等待同一预注册 manifest 下真实未来 n≥50，当前策略证据 n=0 |
+| RP-08 | DONE | 主执行工程师 | `#24` / `#25` / `#30` / `#31` | 上交所规则版本化、exit/close-buy 解耦、ADV20 在真实 fill 与一手兜底路径硬约束 | 无 |
+| RP-09 | DONE | 主执行工程师 | `#31` / `9c5c4e8f`（整合原 `#26`） | 独立 append-only forward observation store；可信 UTC 注册、修订链、失败分类、observation-only 隔离 | 无 |
+| RP-10 | BLOCKED | 工程 Leader | `#31` / `9c5c4e8f`（整合原 `#28`） | exact leaf-gene registry；严格未来注册；exact-N/并发/重试封存；Sector-First 专属 manifest/evaluator；risk veto；CI artifact 绑定；单 verdict；人工批准/CAS 沿用既有边界 | 工程实现已合入；必须等待同一预注册 manifest 下真实未来 n≥50，当前策略证据 n=0 |
 | RP-11 | TODO | 待单独批准 | — | — | G2、独立预注册 |

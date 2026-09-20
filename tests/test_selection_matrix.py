@@ -181,10 +181,11 @@ def test_compare_artifact_windows_recomputes_four_reset_accounts(tmp_path):
     manifest = _manifest()
     windows = []
     starts = [0, 40, 80, 120]
-    for index, offset in enumerate(starts):
-        days = _days(offset)
-        manifest["validation_windows"][index] = {
-            "start": days[0], "end": days[-1]}
+    all_days = [_days(offset) for offset in starts]
+    manifest["validation_windows"] = [
+        {"start": days[0], "end": days[-1]} for days in all_days
+    ]
+    for index, days in enumerate(all_days):
         root = tmp_path / str(index)
         _write_run(
             root / "CONTROL", manifest=manifest, arm="CONTROL",
@@ -208,10 +209,11 @@ def test_compare_artifact_windows_recomputes_four_reset_accounts(tmp_path):
 def test_compare_artifact_windows_rejects_identity_drift(tmp_path):
     manifest = _manifest()
     roots = []
-    for index, offset in enumerate([0, 40, 80, 120]):
-        days = _days(offset)
-        manifest["validation_windows"][index] = {
-            "start": days[0], "end": days[-1]}
+    all_days = [_days(offset) for offset in [0, 40, 80, 120]]
+    manifest["validation_windows"] = [
+        {"start": days[0], "end": days[-1]} for days in all_days
+    ]
+    for index, days in enumerate(all_days):
         root = tmp_path / str(index)
         for arm in ("CONTROL", "SECTOR"):
             _write_run(

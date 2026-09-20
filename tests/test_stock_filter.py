@@ -47,3 +47,18 @@ def test_filter_reports_removed(populated_db):
     result = filter_stocks_fn(["000001", "000002", "000003", "000004"], populated_db)
     parsed = json.loads(result)
     assert len(parsed["removed"]) == 3
+
+
+def test_filter_reports_unknown_requested_code(populated_db):
+    parsed = json.loads(filter_stocks_fn(
+        ["000001", "000099"], populated_db))
+    removed = {row["code"]: row for row in parsed["removed"]}
+    assert removed["000099"]["eligibility_reason"] == "unknown_instrument"
+    assert "证券信息不存在" in removed["000099"]["reasons"]
+
+
+def test_filter_uses_shared_board_reason(populated_db):
+    parsed = json.loads(filter_stocks_fn(["688001"], populated_db))
+    assert parsed["stocks"] == []
+    assert parsed["removed"][0]["eligibility_reason"] == "board"
+    assert parsed["removed"][0]["reasons"] == ["非可交易板块"]

@@ -164,10 +164,10 @@ _RUN_AS_SCRIPT = Path(sys.argv[0]).resolve() == Path(__file__).resolve()
 _REPLAY_DIR = _bind_to(_choose_data_dir(sys.argv[1:])) if _RUN_AS_SCRIPT else None
 
 from alpha_agents import llm_journal  # noqa: E402
-from alpha_agents.config import DATA_DIR, PROMPTS_DIR, TRADABLE_PREFIXES  # noqa: E402
+from alpha_agents.config import DATA_DIR, PROMPTS_DIR  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
-    market_rules, order_theme_exposure, portfolio as P,
+    market_rules, order_theme_exposure, portfolio as P, security_eligibility,
     portfolio_exit, reservations,
     research_packet, sector_membership, sector_panel, sector_selection,
     selection_policy, t1_settlement as S,
@@ -580,20 +580,16 @@ def _eligibility(ctx, code: str, day: str, prev_day: str) -> str | None:
     Returns the reason as a value rather than a bare boolean so a refusal
     can be counted.
     """
-    if not code.startswith(TRADABLE_PREFIXES):
-        return "board"
-    if not ctx.corpus.is_listed(code, day):
-        return "not_listed"
     meta = ctx.corpus.instruments.get(code)
-    if meta is None:
-        return "unknown_instrument"
-    if meta["is_st"]:
-        return "st"
-    if meta["is_suspended"]:
-        return "suspended"
-    if code not in ctx.corpus.bars(prev_day):
-        return "no_prior_bar"
-    return None
+    return security_eligibility.reason(
+        security_eligibility.SecurityFacts(
+            code=code,
+            listed=ctx.corpus.is_listed(code, day),
+            known=meta is not None,
+            is_st=bool(meta and meta["is_st"]),
+            is_suspended=bool(meta and meta["is_suspended"]),
+            has_prior_bar=code in ctx.corpus.bars(prev_day),
+        ))
 
 
 # ── the model-backed decider ────────────────────────────────────────────────

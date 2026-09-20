@@ -58,6 +58,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from agents import Agent, Runner
@@ -499,6 +500,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model,
                   tools=list(tools) if tools else [])
+    started = time.monotonic()
     try:
         if budget is None:
             result = await Runner.run(agent, message, max_turns=max_turns)
@@ -525,12 +527,14 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                                  f"({exc})"}
         parsed["research_budget"] = budget.summary() if budget else None
         parsed["research_trace"] = budget.trace() if budget else []
+        parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return parsed
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})
     parsed["raw"] = raw
     parsed["research_budget"] = budget.summary() if budget else None
     parsed["research_trace"] = budget.trace() if budget else []
+    parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
     logger.info("%s: decider proposed %d, refused %d, parse_error=%s",
                 day, len(parsed["orders"]), len(parsed["refused"]),
                 parsed["parse_error"])

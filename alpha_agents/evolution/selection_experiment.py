@@ -78,6 +78,7 @@ def template(*, capabilities_hash: str) -> dict:
         "exit_policy": None,
         "training_window": {"start": None, "end": None},
         "validation_windows": [],
+        "expected_days_per_window": 30,
         "minimum_total_days": 120,
         "primary_metric": PRIMARY_METRIC,
         "primary_metric_unit": PRIMARY_METRIC_UNIT,
@@ -148,6 +149,10 @@ def validate(manifest: dict) -> list[str]:
             if last_end is not None and start <= last_end:
                 errors.append("validation windows must be non-overlapping")
             last_end = end
+
+    expected_per_window = manifest.get("expected_days_per_window")
+    if expected_per_window != 30:
+        errors.append("expected_days_per_window must be 30")
 
     minimum_days = manifest.get("minimum_total_days")
     if not isinstance(minimum_days, int) or isinstance(minimum_days, bool) or (

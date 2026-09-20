@@ -67,6 +67,28 @@ def test_pending_order_counts_held_reservation(store):
     assert got["complete"] is True
 
 
+def test_pending_exposure_uses_cash_hold_not_risk_hold(store):
+    order_id = _order(
+        store, code="600005", theme="AI", status="pending")
+    store.executemany(
+        "INSERT INTO reservations "
+        "(order_id,trader_id,code,kind,amount,state) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (order_id, "t", "600005", "cash_reserve", 20000.0, "held"),
+            (order_id, "t", "600005", "theme_risk:AI", 90000.0, "held"),
+        ],
+    )
+    E.record(
+        order_id=order_id, primary_theme="AI",
+        supporting_themes=[], source="sector_first_v0", conn=store)
+
+    got = E.snapshot(
+        trader_id="t", price_map={}, equity=100000.0, conn=store)
+    assert got["theme_exposure_pct"] == {"AI": 20.0}
+    assert got["complete"] is True
+
+
 def test_missing_mark_is_unverified_not_zero(store):
     order_id = _order(
         store, code="600003", theme="AI", status="open", shares=1000)

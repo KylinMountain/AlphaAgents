@@ -244,6 +244,7 @@ class TestUnconsumedTotal:
 from unittest.mock import patch  # noqa: E402
 
 from alpha_agents.data import portfolio as P  # noqa: E402
+from alpha_agents.data import portfolio_risk_reservations as PRR  # noqa: E402
 from alpha_agents.data import reservations as R  # noqa: E402
 from alpha_agents.data import trader as TR  # noqa: E402
 from alpha_agents.data import trade_ledger  # noqa: E402
@@ -301,24 +302,28 @@ def _conn():
 class TestPlanRiskSizing:
     def test_existing_hard_stop_budget_is_the_floor_for_risk_distance(self):
         capital = 500_000.0
-        near = P._plan_risk_amount_cap(
-            10.0, 9.5, capital, 0.10)
-        at_hard = P._plan_risk_amount_cap(
-            10.0, 9.2, capital, 0.10)
+        near = PRR.plan_risk_amount_cap(
+            10.0, 9.5, capital, 0.10,
+            hard_stop_pct=P.HARD_STOP_PCT, lot_size=100)
+        at_hard = PRR.plan_risk_amount_cap(
+            10.0, 9.2, capital, 0.10,
+            hard_stop_pct=P.HARD_STOP_PCT, lot_size=100)
         assert near == at_hard == 50_000.0
 
     def test_wider_declared_stop_shrinks_notional(self):
         capital = 500_000.0
-        got = P._plan_risk_amount_cap(
-            10.0, 8.0, capital, 0.10)
+        got = PRR.plan_risk_amount_cap(
+            10.0, 8.0, capital, 0.10,
+            hard_stop_pct=P.HARD_STOP_PCT, lot_size=100)
         assert got == 20_000.0
         assert got < capital * 0.10
 
     def test_risk_cap_can_refuse_even_one_lot(self):
         # 100-share lot costs 20k, but this tiny capital/risk budget cannot
         # support it. The one-lot fallback must not override the risk gate.
-        got = P._plan_risk_amount_cap(
-            200.0, 160.0, 10_000.0, 0.10)
+        got = PRR.plan_risk_amount_cap(
+            200.0, 160.0, 10_000.0, 0.10,
+            hard_stop_pct=P.HARD_STOP_PCT, lot_size=100)
         assert got == 0.0
 
 

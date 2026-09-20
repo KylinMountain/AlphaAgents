@@ -2388,6 +2388,14 @@ def _fill_replay_peak_fields(ctx, positions: list[dict], day: str,
         pos["holding_days"] = holding
 
 
+def _close_buy_enabled(ctx) -> bool:
+    """Close buys are an explicit experiment switch, never implied by exits."""
+    return bool(
+        getattr(ctx, "decider", None) == "llm"
+        and getattr(ctx, "close_buys", False)
+    )
+
+
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
     """Ask the agent what to do with the positions the rules left open.
 
@@ -3335,7 +3343,7 @@ def _run_window(ctx, args) -> dict:
             # decisions on the buy side. Runs after the close exits so a
             # position sold at the close frees its capital for one bought at
             # the same close.
-            if ctx.decider == "llm" and ctx.close_buys:
+            if _close_buy_enabled(ctx):
                 try:
                     with replay_as_of(f"{day} 14:55"):
                         close_orders = _run_decider(ctx, day, prev_day,

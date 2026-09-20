@@ -1697,7 +1697,10 @@ def _decision_world_read_set(
             strict_replay_eligible=False,
         ))
 
-    event_refs = [
+    minimal_mode = getattr(ctx, "selection_architecture", "") in {
+        "dual_rank_price_v1", "sector_rank_price_v1",
+    }
+    event_refs = [] if minimal_mode else [
         {
             **dict(ref),
             "point_in_time_grade": "A",

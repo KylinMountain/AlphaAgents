@@ -34,6 +34,18 @@ def related_themes(primary_theme: str,
     return out
 
 
+def primary_theme_exposure(conn: sqlite3.Connection, *,
+                           theme: str, trader_id: str) -> float:
+    rows = conn.execute(
+        "SELECT open_price, shares FROM virtual_portfolio "
+        "WHERE status='open' AND theme=? AND trader_id=?",
+        (theme, trader_id),
+    ).fetchall()
+    return sum(
+        (row["open_price"] or 0) * (row["shares"] or 0)
+        for row in rows)
+
+
 def committed_theme_exposure(conn: sqlite3.Connection, *,
                              theme: str, trader_id: str) -> float:
     """Open cost plus pending risk holds for one correlated theme.

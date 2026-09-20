@@ -16,6 +16,7 @@ import pytest
 
 from alpha_agents.data.market_rules import (
     CHINEXT_LIMIT, LOT_SIZE, MAIN_BOARD_LIMIT, RISK_WARNED_LIMIT,
+    SSE_RISK_WARNING_REFORM_DATE,
     market_rules, normalise_code, normalise_date,
 )
 
@@ -54,9 +55,22 @@ class TestMainBoard:
             assert market_rules(code, day, name="平安银行").price_limit_pct \
                 == MAIN_BOARD_LIMIT
 
-    def test_risk_warned_names_are_five_percent(self):
-        rule = market_rules("600000", REFORM_DAY, name="*ST某公司")
-        assert rule.price_limit_pct == RISK_WARNED_LIMIT
+    def test_shanghai_risk_warned_changes_on_2026_07_06(self):
+        before = market_rules(
+            "600000", "2026-07-03", name="*ST某公司")
+        effective = market_rules(
+            "600000", SSE_RISK_WARNING_REFORM_DATE, name="*ST某公司")
+        after = market_rules(
+            "600000", "2026-07-07", name="*ST某公司")
+        assert before.price_limit_pct == RISK_WARNED_LIMIT
+        assert effective.price_limit_pct == MAIN_BOARD_LIMIT
+        assert after.price_limit_pct == MAIN_BOARD_LIMIT
+
+    def test_shenzhen_risk_warned_is_not_changed_by_shanghai_rule(self):
+        for code in ("000001", "002415", "003816"):
+            assert market_rules(
+                code, "2026-07-07", name="*ST某某").price_limit_pct \
+                == RISK_WARNED_LIMIT
 
     def test_a_star_prefix_counts_as_risk_warned(self):
         assert market_rules("000001", REFORM_DAY, name="*ST某某").price_limit_pct \

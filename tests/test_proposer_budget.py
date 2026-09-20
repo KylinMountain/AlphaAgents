@@ -19,10 +19,12 @@ from alpha_agents.tools import budget as B
 
 _MODULES = (sector_selector, sector_stock_selector, t1_decider)
 _PANEL = [{"code": "600001", "name": "fixture", "close": 10.0,
-           "change_pct": 2.0, "adv20": 100000}]
+           "change_pct": 2.0, "adv20": 100000,
+           "primary_theme": "AI", "supporting_themes": []}]
 _REPLY = json.dumps({
     "themes": [{"sector_id": "AI", "thesis": "fixture", "invalidations": []}],
-    "stocks": [{"code": "600001", "reason": "fixture"}],
+    "stocks": [{"code": "600001", "primary_theme": "AI",
+                "reason": "fixture"}],
     "orders": [{"code": "600001", "entry_low": 9.8, "entry_high": 10.2,
                 "stop_loss": 9.0, "target_price": 12.0, "reason": "fixture"}],
 })
@@ -110,6 +112,8 @@ def test_real_proposer_tools_budget_matrix(proposer, tool, monkeypatch,
     got = asyncio.run(scenario())
     assert len(observed) == 1
     assert got["parse_error"] is None
+    assert isinstance(got["model_elapsed_ms"], int)
+    assert got["model_elapsed_ms"] >= 0
     key = ("themes" if proposer is sector_selector else
            "stocks" if proposer is sector_stock_selector else "orders")
     assert len(got[key]) == 1

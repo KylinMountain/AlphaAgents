@@ -158,6 +158,48 @@ def _thesis(code="600000", *, horizon_days=5, conditions=(), trader_id="slow"):
                              conditions=list(conditions)))
 
 
+# ── A. ADV capacity is an execution constraint, not a report field ─────
+
+
+class TestCapacityIsEnforcedAtFill:
+    def test_fill_is_capped_to_predecision_adv_capacity(
+            self, store, traders_dir, theme):
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            order_date=REPO_DATE, entry_low=9.0, entry_high=11.0,
+            stop_loss=8.5, source="test", reason="capacity",
+            trader_id="slow")
+        assert oid is not None
+
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            max_shares_by_code={"600000": 300})
+
+        assert [row["type"] for row in alerts] == ["filled"]
+        assert alerts[0]["shares"] == 300
+        row = _db().execute(
+            "SELECT shares,status FROM virtual_portfolio WHERE id=?",
+            (oid,)).fetchone()
+        assert row["status"] == "open"
+        assert row["shares"] == 300
+
+    def test_capacity_below_one_lot_refuses_the_fill(
+            self, store, traders_dir, theme):
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t",
+            order_date=REPO_DATE, entry_low=9.0, entry_high=11.0,
+            stop_loss=8.5, source="test", reason="capacity",
+            trader_id="slow")
+        assert oid is not None
+
+        alerts = P.check_pending_orders(
+            {"600000": 10.0}, today=REPO_DATE, trader_id="slow",
+            max_shares_by_code={"600000": 50})
+
+        assert [row["type"] for row in alerts] == ["cancelled"]
+        assert _status(oid)["status"] == "cancelled"
+
+
 # ── B. An order with no reservation can be finished ────────────────────
 
 

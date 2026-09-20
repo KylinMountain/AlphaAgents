@@ -11,7 +11,7 @@ evidence by itself.
 from __future__ import annotations
 
 from alpha_agents.data import memory_store, policy_registry, scoring
-from alpha_agents.evolution import dream_agent
+from alpha_agents.evolution import dream_agent, gene_registry
 from alpha_agents.evolution.dream_world import OpportunityDreamWorld
 
 EVIDENCE_SCOPE = "historical_dream_only"
@@ -87,14 +87,12 @@ def compare(*, world: OpportunityDreamWorld, parent_version_id: int,
     """Compare one theme-gate variant on intents selected in a fixed world."""
     changed = dream_agent.changed_genes(
         parent_version_id, variant_version_id)
-    unsupported = [
-        gene for gene in changed
-        if not gene.startswith("decision.theme_gate.")
-    ]
-    if unsupported:
-        raise ThemeDreamError(
-            "theme evaluator cannot observe changed gene(s): " +
-            ", ".join(unsupported))
+    try:
+        gene_registry.assert_exact_coverage(
+            changed, gene_registry.THEME_GATE_GENES,
+            actor="theme evaluator")
+    except gene_registry.GeneRegistryError as exc:
+        raise ThemeDreamError(str(exc)) from exc
 
     parent_ref = _version_ref(parent_version_id)
     conn = conn if conn is not None else memory_store._get_conn()

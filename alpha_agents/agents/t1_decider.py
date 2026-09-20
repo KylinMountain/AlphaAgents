@@ -58,6 +58,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from agents import Agent, Runner
@@ -390,7 +391,8 @@ _SESSIONS = {
 def build_message(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str, knowledge: str,
                   trader_note: str, picks: int, template: str,
-                  market: dict | None = None, phase: str = "open") -> str:
+                  market: dict | None = None, phase: str = "open",
+                  research_packet: dict | None = None) -> str:
     """Fill the prompt. Every placeholder must be consumed.
 
     The ``{VOCAB}`` lesson from ``agents/morning.py`` applies: a template
@@ -416,7 +418,12 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
               **moment,
               "book": book or "（空仓）",
               "knowledge": knowledge or "（还没有任何经验在生效）",
-              "trader_note": trader_note or "", "picks": picks}
+              "trader_note": trader_note or "", "picks": picks,
+              "research_packet": (
+                  json.dumps(
+                      research_packet, ensure_ascii=False, sort_keys=True,
+                      indent=2)
+                  if research_packet else "（无共享研究包）")}
     try:
         text = template.format(**fields)
     except (KeyError, IndexError) as exc:
@@ -442,7 +449,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   model=None, template: str | None = None,
                   max_turns: int | None = None, market: dict | None = None,
                   phase: str = "open", tools: list | None = None,
-                  research_budget=None) -> dict:
+                  research_budget=None, research_packet: dict | None = None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -480,7 +487,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,
         template=template if template is not None else load_prompt(),
-        market=market, phase=phase)
+        market=market, phase=phase, research_packet=research_packet)
 
     # A tool-less stage may still carry the shared decision budget.
     from alpha_agents.tools.budget import ResearchBudget, use_research_budget
@@ -493,6 +500,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model,
                   tools=list(tools) if tools else [])
+    started = time.monotonic()
     try:
         if budget is None:
             result = await Runner.run(agent, message, max_turns=max_turns)
@@ -518,11 +526,15 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   "parse_error": f"MaxTurnsExceeded after {max_turns} turns "
                                  f"({exc})"}
         parsed["research_budget"] = budget.summary() if budget else None
+        parsed["research_trace"] = budget.trace() if budget else []
+        parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return parsed
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})
     parsed["raw"] = raw
     parsed["research_budget"] = budget.summary() if budget else None
+    parsed["research_trace"] = budget.trace() if budget else []
+    parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
     logger.info("%s: decider proposed %d, refused %d, parse_error=%s",
                 day, len(parsed["orders"]), len(parsed["refused"]),
                 parsed["parse_error"])

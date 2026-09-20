@@ -17,7 +17,12 @@ from alpha_agents.data import (
     attribution, clock, episodes, order_state, reservations, settlement,
     thesis, trade_ledger,
 )
+from alpha_agents.data import portfolio_risk_reservations as risk_reservations
 from alpha_agents.data.memory_store import _get_conn, _write_lock, get_theme_by_name
+from alpha_agents.data.portfolio_entry import (
+    order_conviction as _order_conviction,
+    thesis_already_broken as _thesis_already_broken,
+)
 # Whether a theme may carry an order is its own question, and it now has its
 # own module: the two-bar hysteresis that replaced the single `strength >= 4`
 # veto did not fit under this file's line ceiling. `resolve_theme` comes from
@@ -269,14 +274,9 @@ def get_invested_capital(trader_id: str = DEFAULT_TRADER) -> float:
 
 
 def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
-    """Market value one trader has in a theme."""
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT open_price, shares FROM virtual_portfolio "
-        "WHERE status = 'open' AND theme = ? AND trader_id = ?",
-        (theme, trader_id),
-    ).fetchall()
-    return sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
+    """Compatibility read; risk accounting is owned by the risk module."""
+    return risk_reservations.primary_theme_exposure(
+        _get_conn(), theme=theme, trader_id=trader_id)
 
 
 # ── Pending Orders (挂单) ───────────────────────────────────
@@ -297,6 +297,7 @@ def _create_pending_order_impl(
     trader_id: str = DEFAULT_TRADER,
     prediction_id: int | None = None,
     thesis_id: int | None = None,
+    risk_themes: list[str] | None = None,
 ) -> int | None:
     """Create a pending order (挂单). Triggered when price enters entry zone.
 
@@ -350,6 +351,24 @@ def _create_pending_order_impl(
                 code, name, theme)
             return None
         theme = resolved
+        related_themes = risk_reservations.related_themes(
+            theme, risk_themes or [])
+
+        # The check and reservations run under _write_lock, so two concurrent
+        # individually-legal orders cannot both spend the last theme headroom.
+        capital = trader_capital(trader_id)
+        reservation_amount = (
+            capital * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE))
+        terms = {"entry_low": entry_low, "entry_high": entry_high,
+                 "stop_loss": stop_loss, "target_price": target_price,
+                 "source": source, "reason": reason}
+        if risk_reservations.refuse_if_theme_cap_breached(
+                conn, trader_id=trader_id, code=code, order_date=order_date,
+                primary_theme=theme, themes=related_themes,
+                reservation_amount=reservation_amount,
+                theme_cap=capital * MAX_THEME_PCT, thesis_id=thesis_id,
+                prediction_id=prediction_id, terms=terms):
+            return None
 
         # The same admission bar check_pending_orders applies, applied at
         # creation instead of one cycle later — see `data/theme_gate.py` for
@@ -359,9 +378,6 @@ def _create_pending_order_impl(
         # counterfactual has to see. Built from the same terms as the
         # placement below, because "what it would have ordered" and "what it
         # refused to order" are the same intent with a different action.
-        terms = {"entry_low": entry_low, "entry_high": entry_high,
-                 "stop_loss": stop_loss, "target_price": target_price,
-                 "source": source, "reason": reason}
         weak = theme_admits(theme)
         if weak:
             attribution.record_refusal(
@@ -417,12 +433,13 @@ def _create_pending_order_impl(
         # is what keeps a second pending order from spending the same
         # cash; computing it here, before commit, means the order and
         # the reservation are written together or not at all.
-        reservation_amount = (trader_capital(trader_id) * MAX_POSITION_PCT
-                              * (1 + SLIPPAGE_RATE))
         reservations.reserve_for_order(
             conn, order_id=order_id, trader_id=trader_id,
             code=code, amount=reservation_amount,
             reason="pending-order backstop")
+        risk_reservations.reserve_theme_risk(
+            conn, order_id=order_id, trader_id=trader_id,
+            code=code, themes=related_themes, amount=reservation_amount)
         conn.commit()
 
         zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
@@ -435,6 +452,7 @@ def check_pending_orders(
     realtime_prices: dict[str, float],
     today: str,
     trader_id: str | None = None,
+    max_shares_by_code: dict[str, int] | None = None,
 ) -> list[dict]:
     """Check pending orders against realtime prices. Fill if price in entry zone.
 
@@ -621,7 +639,11 @@ def check_pending_orders(
         triggered = in_entry_zone(price, entry_low, entry_high)
 
         if triggered:
-            fill_alert = _fill_order(order, fill_price=price, fill_date=today)
+            fill_alert = _fill_order(
+                order, fill_price=price, fill_date=today,
+                max_shares=(
+                    max_shares_by_code.get(code)
+                    if max_shares_by_code is not None else None))
             if fill_alert:
                 alerts.append(fill_alert)
         elif expire_days is not None and days_pending >= expire_days:
@@ -637,71 +659,9 @@ def check_pending_orders(
     return alerts
 
 
-def _order_conviction(code: str, trader_id: str = DEFAULT_TRADER) -> float:
-    """The stated conviction behind an order, or a neutral 0.5.
-
-    Neutral rather than zero for an order with no thesis: those predate
-    theses entirely, and sorting them to the back would starve them of
-    capital for a reason that is about the code's history, not the idea.
-    """
-    try:
-        from alpha_agents.data.thesis import get_active
-        theses = get_active(code=code, trader_id=trader_id)
-        return theses[-1].conviction if theses else 0.5
-    except Exception as e:
-        logger.debug("Conviction sort fallback for %s: %s", code, e)
-        return 0.5
-
-
-def _thesis_already_broken(code: str, price: float, order: dict) -> str | None:
-    """Would this order's thesis have been invalidated the moment it filled?
-
-    Evaluated against the fill price with no position history — there is
-    no peak and no holding period yet, so drawdown and time conditions
-    cannot fire and are not meant to. What can fire is everything about
-    the world: the price level, the theme's strength and today's score,
-    its rank and flow. Those are exactly the conditions that decay while
-    an order waits.
-
-    Returns the condition's description, or None to fill.
-    """
-    try:
-        from alpha_agents.data import thesis as T
-    except Exception as e:
-        logger.debug("Thesis pre-check unavailable for %s: %s", code, e)
-        return None
-
-    try:
-        theses = [t for t in T.get_active(
-            code=code, trader_id=order.get("trader_id") or DEFAULT_TRADER)
-            if t.position_id is None]
-        if not theses:
-            return None
-        th = theses[-1]
-        open_price = order.get("entry_high") or order.get("entry_low") or price
-        mv = T.MarketView(
-            price=price,
-            current_return_pct=round((price - open_price) / open_price * 100, 2)
-            if open_price else 0.0,
-        )
-        theme = order.get("theme")
-        if theme:
-            row = get_theme_by_name(theme)
-            if row:
-                mv.theme_strength = row.get("strength")
-                mv.theme_daily_score = row.get("daily_score")
-                mv.theme_status = row.get("status")
-        fired = T.evaluate(th.conditions, mv)
-        if fired:
-            T.close(th.id, T.INVALIDATED, close_kind=fired.kind,
-                    close_note=f"成交前失效：{T.describe(fired)}")
-            return T.describe(fired)
-    except Exception as e:
-        logger.warning("Thesis pre-check failed for %s: %s", code, e)
-    return None
-
-
-def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
+def _fill_order(
+        order: dict, fill_price: float, fill_date: str,
+        max_shares: int | None = None) -> dict | None:
     """Convert a pending order to an open position at fill_price.
 
     Every limit below is measured against the order's own trader: its
@@ -756,6 +716,9 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
                                   MAX_POSITION_PCT)
         max_per_stock = min(capital * _wanted_pct(code, trader_id),
                             capital * max_pos_pct)
+        plan_risk_cap = risk_reservations.plan_risk_amount_cap(
+            fill_price, order.get("stop_loss"), capital, max_pos_pct,
+            hard_stop_pct=HARD_STOP_PCT, lot_size=LOT_SIZE)
         max_for_theme = (capital * MAX_THEME_PCT
                          - get_theme_exposure(theme, trader_id))
         # Themes that share most of their constituents are one bet. The
@@ -772,9 +735,15 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         # that trader instead of skipping one order. Found by the walk-forward
         # on 2025-07-08; no room is a refusal, and ``shares == 0`` below is the
         # code that already knows how to say so.
-        max_amount = max(0.0, min(available, max_per_stock,
-                                   max(0, max_for_theme), sentiment_room,
-                                   cluster_cap))
+        capacity_amount = (
+            float("inf")
+            if max_shares is None
+            else max(0, int(max_shares)) * fill_price
+        )
+        max_amount = max(0.0, min(
+            available, max_per_stock, plan_risk_cap,
+            max(0, max_for_theme), sentiment_room, cluster_cap,
+            capacity_amount))
 
         # Portfolio drawdown gates *new* risk and never forces an exit.
         # Liquidating at a drawdown level sells the bottom, and in a system
@@ -796,9 +765,10 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
             # the book, which is a selection bias in the learning data
             # with nothing to do with the agent's judgement.
             one_lot = fill_price * LOT_SIZE
-            ceiling = max(0.0, min(available, capital * max_pos_pct,
-                                   max(0, max_for_theme), sentiment_room,
-                                   cluster_cap))
+            ceiling = max(0.0, min(
+                available, capital * max_pos_pct, plan_risk_cap,
+                max(0, max_for_theme), sentiment_room, cluster_cap,
+                capacity_amount))
             if one_lot <= ceiling:
                 shares = LOT_SIZE
                 logger.info("%s: 一手 %.0f元 超过目标 %.0f元，但在上限 %.0f元"
@@ -869,6 +839,12 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         actual_cost = shares * fill_price * (1 + SLIPPAGE_RATE)
         reservations.consume_reservation(
             conn, order_id=order["id"], actual_cost=actual_cost)
+        # Pending theme-risk holds become redundant once the position is open;
+        # the open position itself is now counted by _theme_committed_exposure.
+        reservations.release_all_held_for_order(
+            conn, order_id=order["id"],
+            reason="filled: risk now represented by open position",
+            include_cash=False)
         # T+1 share-side: each fill is its own settlement lot. settle_date
         # is fill_date + 1 calendar day, so the position cannot be sold
         # back the same day the order fills. The legacy open_date check

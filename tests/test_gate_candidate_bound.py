@@ -39,6 +39,7 @@ The tests are in nine groups:
 from __future__ import annotations
 
 import inspect
+from unittest.mock import patch
 from datetime import datetime, timedelta
 
 import pytest
@@ -46,6 +47,7 @@ import pytest
 from alpha_agents.data import memory_store, policy_registry as PR
 from alpha_agents.data import scoring
 from alpha_agents.evolution import holdout_gate as HG
+from alpha_agents.evolution import gene_registry
 from alpha_agents.evolution import shadow as SH
 
 FROZEN_AT = "2026-06-01"
@@ -62,6 +64,11 @@ _SOURCES = {
     # an honest freeze records the code default block.
     "decision": dict(scoring.DEFAULT_DECISION_PARAMS),
 }
+
+
+def _open_at(when: str, **kwargs):
+    with patch.object(SH, "_today", return_value=when):
+        return SH.open_run(**kwargs)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -92,8 +99,9 @@ def frozen(store) -> int:
     version = PR.freeze(sources=_SOURCES, created_by="kylin",
                         reason="frozen for the forward window",
                         frozen_at=FROZEN_AT)
-    SH.open_run(policy_version_id=version, reason="measure the baseline",
-                report_type=REPORT, opened_at=FROZEN_AT)
+    _open_at(
+        FROZEN_AT, policy_version_id=version,
+        reason="measure the baseline", report_type=REPORT)
     return version
 
 
@@ -231,8 +239,8 @@ class TestMalformedQuestionsAreRefused:
     def test_a_run_of_another_report_type_does_not_qualify(self, store):
         version = PR.freeze(sources=_SOURCES, created_by="kylin",
                             reason="intraday only", frozen_at=FROZEN_AT)
-        SH.open_run(policy_version_id=version, reason="intraday",
-                    report_type="intraday_signal", opened_at=FROZEN_AT)
+        _open_at(FROZEN_AT, policy_version_id=version, reason="intraday",
+                    report_type="intraday_signal",)
         with pytest.raises(HG.GateError):
             _run(version, report_type=REPORT)
 
@@ -474,8 +482,8 @@ class TestTheLookbackDoesNotTruncateTheWindow:
         old_freeze = (datetime.now() - timedelta(days=800)).strftime("%Y-%m-%d")
         version = PR.freeze(sources=_SOURCES, created_by="kylin",
                             reason="old", frozen_at=old_freeze)
-        SH.open_run(policy_version_id=version, reason="measure",
-                    report_type=REPORT, opened_at=old_freeze)
+        _open_at(old_freeze, policy_version_id=version, reason="measure",
+                    report_type=REPORT,)
 
         day = (datetime.now() - timedelta(days=600)).strftime("%Y-%m-%d")
         graded_on = (datetime.now() - timedelta(days=590)).strftime("%Y-%m-%d")
@@ -550,7 +558,7 @@ def candidate(monkeypatch) -> str:
         name=CANDIDATE, kind=SH.KIND_CANDIDATE,
         forecast=lambda date, code, ctx: float(
             ctx.params["confidence_priors"]["high"]),
-        observed_genes=frozenset({"decision.confidence_priors"})))
+        observed_genes=gene_registry.CONFIDENCE_PRIOR_GENES))
     return CANDIDATE
 
 
@@ -592,7 +600,7 @@ class TestTheScopeBelongsToTheProducer:
         stayed 0.5. The guard was satisfied by a word.
         """
         with pytest.raises(SH.ShadowError, match="No registered producer"):
-            SH.open_run(policy_version_id=bare, reason="rename to promote",
+            _open_at(FROZEN_AT, policy_version_id=bare, reason="rename to promote",
                         report_type=REPORT, producer="definitely_a_candidate")
         assert SH.runs() == []
 
@@ -633,8 +641,7 @@ class TestTheScopeBelongsToTheProducer:
             sources=_with_decision("same", decision), parent_id=incumbent,
             created_by="kylin", reason="candidate", frozen_at=FROZEN_AT)
         run_id = SH.open_run(policy_version_id=target, reason="the candidate",
-                             report_type=REPORT, producer=candidate,
-                             opened_at=FROZEN_AT)
+                             report_type=REPORT, producer=candidate,)
         _emit_and_grade(store, run_id, monkeypatch)
         got = _run(target)
         assert got["evidence_scope"] == PR.SCOPE_CANDIDATE
@@ -665,9 +672,8 @@ class TestTheWholePathIsReachable:
             created_by="kylin", reason="the candidate", frozen_at=FROZEN_AT)
         assert PR.active()["version_id"] == incumbent
 
-        run_id = SH.open_run(policy_version_id=target, reason="the candidate",
-                             report_type=REPORT, producer=candidate,
-                             opened_at=FROZEN_AT)
+        run_id = _open_at(FROZEN_AT, policy_version_id=target, reason="the candidate",
+                             report_type=REPORT, producer=candidate,)
         _emit_and_grade(store, run_id, monkeypatch)
 
         verdict = _run(target)
@@ -706,16 +712,16 @@ class TestAnAmbiguousGateQuestionIsRefused:
                  "confidence_priors": priors}),
             parent_id=incumbent, created_by="kylin",
             reason="candidate", frozen_at=FROZEN_AT)
-        SH.open_run(policy_version_id=target, reason="a baseline reference",
-                    report_type=REPORT, opened_at=FROZEN_AT)
-        SH.open_run(policy_version_id=target, reason="the candidate",
-                    report_type=REPORT, producer=candidate, opened_at=FROZEN_AT)
+        _open_at(FROZEN_AT, policy_version_id=target, reason="a baseline reference",
+                    report_type=REPORT,)
+        _open_at(FROZEN_AT, policy_version_id=target, reason="the candidate",
+                    report_type=REPORT, producer=candidate,)
         with pytest.raises(HG.GateError, match="shadow runs are open"):
             _run(target)
 
     def test_one_open_shadow_is_answered_not_refused(self, store, bare):
-        SH.open_run(policy_version_id=bare, reason="the only one",
-                    report_type=REPORT, opened_at=FROZEN_AT)
+        _open_at(FROZEN_AT, policy_version_id=bare, reason="the only one",
+                    report_type=REPORT,)
         got = _run(bare)
         assert got["abstained"]
 
@@ -760,19 +766,15 @@ class TestTheShippedCandidate:
             "2026-06-02", "A", incumbent_ctx) == pytest.approx(0.58)
 
         _champion(store, "2026-06-02", "A", 0.30)
-        run_id = SH.open_run(
-            policy_version_id=target, reason="measure it",
-            report_type=REPORT, producer=SH.CANDIDATE_NAME,
-            opened_at=FROZEN_AT)
+        run_id = _open_at(FROZEN_AT, policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,)
         SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
         assert SH.predictions_for(run_id)[0]["prob"] == pytest.approx(0.72)
 
     def test_it_does_not_read_the_champions_probability(self, store):
         _, target = self._target()
-        run_id = SH.open_run(
-            policy_version_id=target, reason="measure it",
-            report_type=REPORT, producer=SH.CANDIDATE_NAME,
-            opened_at=FROZEN_AT)
+        run_id = _open_at(FROZEN_AT, policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,)
         _champion(store, "2026-06-02", "A", 0.30)
         SH.emit_for_date(run_id, "2026-06-02", panel=["A"])
         before = SH.predictions_for(run_id)[0]["prob"]
@@ -787,10 +789,8 @@ class TestTheShippedCandidate:
 
     def test_a_code_with_no_recorded_label_falls_to_a_coin_flip(self, store):
         _, target = self._target()
-        run_id = SH.open_run(
-            policy_version_id=target, reason="measure it",
-            report_type=REPORT, producer=SH.CANDIDATE_NAME,
-            opened_at=FROZEN_AT)
+        run_id = _open_at(FROZEN_AT, policy_version_id=target, reason="measure it",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,)
         SH.emit_for_date(run_id, "2026-06-02",
                          panel=["NOBODY_FORECAST_THIS"])
         rows = SH.predictions_for(run_id)
@@ -800,10 +800,8 @@ class TestTheShippedCandidate:
     def test_the_shipped_candidate_reaches_a_promotable_verdict(
             self, store, monkeypatch):
         incumbent, target = self._target()
-        run_id = SH.open_run(
-            policy_version_id=target, reason="the candidate",
-            report_type=REPORT, producer=SH.CANDIDATE_NAME,
-            opened_at=FROZEN_AT)
+        run_id = _open_at(FROZEN_AT, policy_version_id=target, reason="the candidate",
+            report_type=REPORT, producer=SH.CANDIDATE_NAME,)
         _emit_and_grade(store, run_id, monkeypatch)
 
         got = _run(target)
@@ -811,4 +809,3 @@ class TestTheShippedCandidate:
         assert got["outcome"] == "promote"
         assert got["validation_days"] >= 20
         assert PR.active()["version_id"] == incumbent, "a verdict moves nothing"
-

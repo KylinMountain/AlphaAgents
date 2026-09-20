@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from alpha_agents.data import clock, memory_store, policy_registry, scoring
 from alpha_agents.evolution.dream_world import DreamWorld
+from alpha_agents.evolution import gene_registry
 
 EVIDENCE_SCOPE = "historical_dream_only"
 SURVIVOR = "survivor"
@@ -39,7 +40,7 @@ class DreamEvaluator:
 CONFIDENCE_BRIER = DreamEvaluator(
     name="confidence_brier_v1",
     metric="mean_brier_delta",
-    observed_genes=frozenset({"decision.confidence_priors"}),
+    observed_genes=gene_registry.CONFIDENCE_PRIOR_GENES,
 )
 
 EVALUATORS = {CONFIDENCE_BRIER.name: CONFIDENCE_BRIER}
@@ -119,22 +120,18 @@ def changed_genes(parent_version_id: int, variant_version_id: int) -> list[str]:
     return changed
 
 
-def _covered(gene: str, scopes: frozenset[str]) -> bool:
-    return any(gene == scope or gene.startswith(scope + ".")
-               for scope in scopes)
-
-
 def _manifest(*, world: DreamWorld, parent_version_id: int,
               variant_version_id: int, evaluator: DreamEvaluator,
               minimum_samples: int, tolerance: float) -> dict:
     changed = changed_genes(parent_version_id, variant_version_id)
-    uncovered = [gene for gene in changed
-                 if not _covered(gene, evaluator.observed_genes)]
-    if uncovered:
+    try:
+        gene_registry.assert_exact_coverage(
+            changed, evaluator.observed_genes,
+            actor=f"evaluator {evaluator.name!r}")
+    except gene_registry.GeneRegistryError as exc:
         raise DreamError(
-            f"evaluator {evaluator.name!r} cannot observe changed gene(s): "
-            f"{', '.join(uncovered)}. Dreaming faster cannot repair an "
-            "experiment that asks the wrong question.")
+            f"{exc}. Dreaming faster cannot repair an experiment that asks "
+            "the wrong question.") from exc
     if minimum_samples <= 0:
         raise DreamError("minimum_samples must be positive")
     if tolerance < 0:

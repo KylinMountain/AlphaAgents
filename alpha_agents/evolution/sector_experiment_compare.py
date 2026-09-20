@@ -127,6 +127,11 @@ def load_arm(run_dir: Path, arm: str) -> dict:
         "architecture": actual,
         "experiment_arm": meta.get("experiment_arm"),
         "experiment_manifest_hash": meta.get("experiment_manifest_hash"),
+        "code_ref": meta.get("code_ref"),
+        "policy_ref": meta.get("policy_ref"),
+        "input_identity": meta.get("input_identity") or {},
+        "world_read_set_hashes": list(
+            meta.get("world_read_set_hashes") or []),
         "frozen_directions_hash": meta.get("frozen_directions_hash"),
         "window": window,
         "initial_account": initial_account,
@@ -266,6 +271,16 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
                 f"experiment_arm={value['experiment_arm']!r}, expected {arm}")
         if value["experiment_manifest_hash"] != manifest_hash:
             problems.append("experiment_manifest_hash mismatch")
+        identity = manifest.get("baseline_identity") or {}
+        if value.get("code_ref") != identity.get("code_ref"):
+            problems.append("code_ref mismatch")
+        if value.get("policy_ref") != identity.get("policy_ref"):
+            problems.append("policy_ref mismatch")
+        if (value.get("input_identity") or {}).get(
+                "input_hash") != identity.get("input_hash"):
+            problems.append("input_hash mismatch")
+        if not value.get("world_read_set_hashes"):
+            problems.append("missing world_read_set_hashes")
         if arm == "C" and not value["frozen_directions_hash"]:
             problems.append("C is missing frozen_directions_hash")
         if problems:

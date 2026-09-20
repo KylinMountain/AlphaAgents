@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import patch
 
 import pytest
 
@@ -51,9 +52,10 @@ def _experiment(store):
     target = PR.freeze(
         sources=_sources(decision), parent_id=incumbent,
         created_by="kylin", reason="candidate", frozen_at="2026-06-01")
-    run = SH.open_run(
-        policy_version_id=target, reason="measure it", report_type="morning",
-        producer=SH.CANDIDATE_NAME, opened_at="2026-06-01")
+    with patch.object(SH, "_today", return_value="2026-06-01"):
+        run = SH.open_run(
+            policy_version_id=target, reason="measure it", report_type="morning",
+            producer=SH.CANDIDATE_NAME)
     return incumbent, target, run
 
 
@@ -94,7 +96,10 @@ class TestManifest:
         assert manifest["changed_genes"] == [
             "decision.confidence_priors.high"]
         assert manifest["observed_genes"] == [
-            "decision.confidence_priors"]
+            "decision.confidence_priors.high",
+            "decision.confidence_priors.low",
+            "decision.confidence_priors.medium",
+        ]
         assert manifest["minimum_samples"] == HG.MIN_VALIDATION_SAMPLES
         assert manifest["stopping_rule"] == (
             "one_verdict_at_or_after_minimum_paired_samples")

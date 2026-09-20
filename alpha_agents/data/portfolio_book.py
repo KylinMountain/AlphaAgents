@@ -121,7 +121,11 @@ def _cancel_order_unlocked(order_id: int, reason: str) -> None:
     # — the drawdown gate and the unaffordable lot in _fill_order — never pass
     # through it, and closing the episode says this decision never traded.
     episodes.note_cancel(conn, order_id, reason)
-    reservations.release_reservation(conn, order_id=order_id, reason=reason)
+    released = reservations.release_all_held_for_order(
+        conn, order_id=order_id, reason=reason)
+    if not released:
+        raise reservations.ReservationStateError(
+            f"No held reservation for order #{order_id} to release")
     conn.commit()
     logger.info("Cancelled order #%d: %s", order_id, reason)
 

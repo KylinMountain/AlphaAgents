@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 
 from agents import Agent, Runner
@@ -166,6 +167,7 @@ async def propose(*, day: str, as_of_session: str, sectors: list[dict],
         model=model,
         tools=list(tools) if tools else [],
     )
+    started = time.monotonic()
     try:
         if budget is None:
             result = await Runner.run(agent, message, max_turns=max_turns)
@@ -177,6 +179,8 @@ async def propose(*, day: str, as_of_session: str, sectors: list[dict],
             "themes": [], "refused": [], "raw": "",
             "parse_error": f"MaxTurnsExceeded after {max_turns} turns ({exc})",
             "research_budget": budget.summary() if budget else None,
+            "research_trace": budget.trace() if budget else [],
+            "model_elapsed_ms": int((time.monotonic() - started) * 1000),
         }
 
     raw = result.final_output or ""
@@ -184,6 +188,8 @@ async def propose(*, day: str, as_of_session: str, sectors: list[dict],
         raw, {str(row.get("sector_id") or "") for row in sectors})
     parsed["raw"] = raw
     parsed["research_budget"] = budget.summary() if budget else None
+    parsed["research_trace"] = budget.trace() if budget else []
+    parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return parsed
 
 

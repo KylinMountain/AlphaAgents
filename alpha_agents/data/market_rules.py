@@ -20,10 +20,10 @@ What is encoded, and from where
   ChiNext risk-warned names follow the board's limit, **not** the main board's 5%；
 * 创业板新股上市后**前五个交易日不设涨跌幅限制**。
 
-Main boards are ±10%, and their risk-warned names ±5%. A 2026-07-06 change of the
-main-board ST limit to ±10% is reported by secondary sources only and is
-**deliberately not encoded** — guessing a market rule is how a replay quietly
-turns into fiction.
+Main boards are ±10%. Shanghai main-board risk-warned names were ±5% before
+**2026-07-06** and are ±10% from that date under the Shanghai Stock Exchange's
+2026 Trading Rules; Shenzhen main-board risk-warned names remain modelled at
+±5% because the Shanghai rule must not be projected onto another exchange.
 
 What this module refuses to decide
 ----------------------------------
@@ -47,8 +47,11 @@ from dataclasses import dataclass, field
 
 #: 《创业板交易特别规定》施行日 — the first registration-system listing.
 CHINEXT_REFORM_DATE = "2020-08-24"
+SSE_RISK_WARNING_REFORM_DATE = "2026-07-06"
 
-MAIN_BOARD_PREFIXES = ("60", "000", "001", "002", "003")
+SSE_MAIN_BOARD_PREFIXES = ("60",)
+SZSE_MAIN_BOARD_PREFIXES = ("000", "001", "002", "003")
+MAIN_BOARD_PREFIXES = SSE_MAIN_BOARD_PREFIXES + SZSE_MAIN_BOARD_PREFIXES
 CHINEXT_PREFIXES = ("300", "301")
 
 MAIN_BOARD_LIMIT = 0.10
@@ -169,10 +172,24 @@ def market_rules(code: str, date: str, *, name: str | None = None,
         return MarketRule(price_limit_pct=limit, lot_size=LOT_SIZE,
                           reason=reason, unchecked=tuple(unchecked))
 
-    limit = RISK_WARNED_LIMIT if risk_warned else MAIN_BOARD_LIMIT
+    if risk_warned and instrument.startswith(SSE_MAIN_BOARD_PREFIXES):
+        if day >= SSE_RISK_WARNING_REFORM_DATE:
+            limit = MAIN_BOARD_LIMIT
+            reason = (
+                "Shanghai main-board risk-warned name from 2026-07-06 is ±10%")
+        else:
+            limit = RISK_WARNED_LIMIT
+            reason = (
+                "Shanghai main-board risk-warned name before 2026-07-06 is ±5%")
+    elif risk_warned:
+        limit = RISK_WARNED_LIMIT
+        reason = (
+            "Shenzhen main-board risk-warned name remains modelled at ±5%; "
+            "the Shanghai 2026 rule is not applied cross-exchange")
+    else:
+        limit = MAIN_BOARD_LIMIT
+        reason = "main board ±10%"
     unchecked.append("listing_day_exemption")
     return MarketRule(
         price_limit_pct=limit, lot_size=LOT_SIZE,
-        reason=(f"main board ±{limit:.0%}"
-                + (" (risk-warned)" if risk_warned else "")),
-        unchecked=tuple(unchecked))
+        reason=reason, unchecked=tuple(unchecked))

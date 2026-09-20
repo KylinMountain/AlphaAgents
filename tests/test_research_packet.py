@@ -111,7 +111,7 @@ def test_explicit_tool_invalidation_is_deterministic_refusal():
         policy_ref=None,
         membership_snapshot_id="m1",
         membership_hash="h1",
-        directions=[],
+        directions=[{"sector_id": "算力"}],
         selected_panel=selected,
         stock_choices=_choice(),
         research_trace=[{

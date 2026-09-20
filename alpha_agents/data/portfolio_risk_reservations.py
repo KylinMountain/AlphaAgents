@@ -8,10 +8,13 @@ turning portfolio.py into a second risk engine.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
-from alpha_agents.data import order_theme_exposure, reservations
+from alpha_agents.data import attribution, order_theme_exposure, reservations
 from alpha_agents.data.theme_gate import resolve_theme
+
+logger = logging.getLogger(__name__)
 
 
 def related_themes(primary_theme: str,
@@ -75,6 +78,29 @@ def first_theme_cap_breach(conn: sqlite3.Connection, *,
         if committed + reservation_amount > theme_cap + 1e-9:
             return theme, committed
     return None
+
+
+def refuse_if_theme_cap_breached(
+        conn: sqlite3.Connection, *, trader_id: str, code: str,
+        order_date: str, primary_theme: str, themes: list[str],
+        reservation_amount: float, theme_cap: float,
+        thesis_id: int | None, prediction_id: int | None,
+        terms: dict) -> bool:
+    """Record and return a deterministic pre-trade theme-cap refusal."""
+    breach = first_theme_cap_breach(
+        conn, trader_id=trader_id, themes=themes,
+        reservation_amount=reservation_amount, theme_cap=theme_cap)
+    if breach is None:
+        return False
+    theme, committed = breach
+    attribution.record_refusal(
+        conn, trader_id=trader_id, code=code, order_date=order_date,
+        refused_by=f"theme_risk_cap:{theme}", theme=primary_theme,
+        thesis_id=thesis_id, prediction_id=prediction_id, **terms)
+    logger.info(
+        "Rejected order %s: %s committed %.2f + %.2f > %.2f",
+        code, theme, committed, reservation_amount, theme_cap)
+    return True
 
 
 def reserve_theme_risk(conn: sqlite3.Connection, *, order_id: int,

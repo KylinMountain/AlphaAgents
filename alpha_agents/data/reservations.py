@@ -42,6 +42,50 @@ HELD = "held"
 CONSUMED = "consumed"
 RELEASED = "released"
 CASH_RESERVE = "cash_reserve"
+THEME_RISK_PREFIX = "theme_risk:"
+
+
+def theme_risk_kind(theme: str) -> str:
+    value = str(theme or "").strip()
+    if not value:
+        raise ValueError("theme is required for a risk reservation")
+    return THEME_RISK_PREFIX + value
+
+
+def held_total(conn: sqlite3.Connection, trader_id: str, *,
+               kind: str) -> float:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM reservations "
+        "WHERE trader_id=? AND kind=? AND state='held'",
+        (trader_id, kind),
+    ).fetchone()
+    return float(row["total"] or 0.0)
+
+
+def release_all_held_for_order(conn: sqlite3.Connection, order_id: int,
+                               reason: str, *,
+                               include_cash: bool = True) -> list[int]:
+    """Release every still-held reservation for one order.
+
+    Used by terminal order paths so new reservation kinds cannot leak merely
+    because a caller only knew about the original cash kind.
+    """
+    sql = "SELECT id,kind FROM reservations WHERE order_id=? AND state='held'"
+    args: list = [int(order_id)]
+    if not include_cash:
+        sql += " AND kind<>?"
+        args.append(CASH_RESERVE)
+    rows = conn.execute(sql + " ORDER BY id", args).fetchall()
+    released = []
+    for row in rows:
+        conn.execute(
+            "UPDATE reservations SET state='released', reason=?, "
+            "released_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+            (reason, row["id"]),
+        )
+        released.append(int(row["id"]))
+    return released
 
 
 class ReservationStateError(ValueError):
@@ -188,6 +232,7 @@ def unconsumed_total(conn: sqlite3.Connection, trader_id: str) -> float:
         "SELECT "
         "  COALESCE(SUM(CASE WHEN state = 'held' THEN amount "
         "                   ELSE 0 END), 0) AS held_total "
-        "FROM reservations WHERE trader_id = ?", (trader_id,),
+        "FROM reservations WHERE trader_id = ? AND kind = ?",
+        (trader_id, CASH_RESERVE),
     ).fetchone()
     return float(row["held_total"] or 0)

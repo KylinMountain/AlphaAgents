@@ -174,7 +174,8 @@ def snapshot(*, trader_id: str, price_map: dict[str, float],
         else:
             reservation = target.execute(
                 "SELECT amount FROM reservations "
-                "WHERE order_id=? AND state='held' ORDER BY id DESC LIMIT 1",
+                "WHERE order_id=? AND kind='cash_reserve' AND state='held' "
+                "ORDER BY id DESC LIMIT 1",
                 (order_id,),
             ).fetchone()
             if reservation is None:

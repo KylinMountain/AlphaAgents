@@ -166,6 +166,9 @@ class TradeIntent:
     # ── size constraints ──
     shares: int | None = None
     size_pct: float | None = None
+    # Full correlated exposure set for pre-trade risk. The primary theme
+    # remains in `theme`; these are additional/overlapping labels.
+    risk_themes: list[str] = field(default_factory=list)
     #: Sizing policy flag: recompute the stop to hold its original distance
     #: from the new average. Only the automated pullback top-up sets it.
     recalc_stop: bool = False
@@ -199,6 +202,7 @@ class TradeIntent:
             "target_price": self.target_price,
             "shares": self.shares,
             "size_pct": self.size_pct,
+            "risk_themes": list(self.risk_themes),
             "recalc_stop": self.recalc_stop,
             "expire_days": self.expire_days,
             "order_date": self.order_date,
@@ -260,6 +264,10 @@ def _reject_reason(intent: TradeIntent) -> str | None:
     if intent.shares is not None and (type(intent.shares) is not int
                                       or intent.shares <= 0):
         return f"shares must be a positive int or None, got {intent.shares!r}"
+    if not isinstance(intent.risk_themes, list) or any(
+            not isinstance(theme, str) or not theme.strip()
+            for theme in intent.risk_themes):
+        return "risk_themes must be a list of non-empty strings"
     return None
 
 
@@ -282,7 +290,8 @@ def _dispatch(intent: TradeIntent):
             stop_loss=intent.stop_loss, target_price=intent.target_price,
             source=intent.source or "intent", reason=intent.reason,
             trader_id=intent.trader_id,
-            prediction_id=intent.prediction_id, thesis_id=intent.thesis_id)
+            prediction_id=intent.prediction_id, thesis_id=intent.thesis_id,
+            risk_themes=intent.risk_themes)
         return order_id, {"order_id": order_id}
 
     if intent.action == OPEN_NOW:

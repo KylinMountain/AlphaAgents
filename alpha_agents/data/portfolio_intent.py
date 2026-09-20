@@ -48,6 +48,7 @@ def create_pending_order(
     trader_id: str = DEFAULT_TRADER,
     prediction_id: int | None = None,
     thesis_id: int | None = None,
+    risk_themes: list[str] | None = None,
 ) -> int | None:
     """Place a pending order. Compatibility wrapper over the intent path.
 
@@ -64,7 +65,8 @@ def create_pending_order(
             order_date=order_date, entry_low=entry_low, entry_high=entry_high,
             stop_loss=stop_loss, target_price=target_price, source=source,
             reason=reason, trader_id=trader_id, prediction_id=prediction_id,
-            thesis_id=thesis_id, information_cutoff=order_date),
+            thesis_id=thesis_id, risk_themes=list(risk_themes or []),
+            information_cutoff=order_date),
         conn=P._get_conn())
     return result.result if result.accepted else None
 

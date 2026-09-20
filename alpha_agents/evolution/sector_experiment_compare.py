@@ -274,6 +274,12 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
     }
     if len(windows) != 1:
         raise SectorCompareError("A/B/C/D do not share one validation window")
+    observed_calendars = {
+        tuple(value["observed_days"]) for value in arms.values()
+    }
+    if len(observed_calendars) != 1:
+        raise SectorCompareError(
+            "A/B/C/D do not share the same observed trading-day calendar")
     actual_window = next(iter(arms.values()))["window"]
     if not _registered_window(manifest, actual_window):
         raise SectorCompareError(

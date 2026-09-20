@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 import random
 import statistics
@@ -46,8 +47,15 @@ def _read_csv(path: Path) -> list[dict]:
 
 def _float(value) -> float:
     if value in {None, ""}:
-        return 0.0
-    return float(value)
+        raise SectorCompareError("numeric artifact value is missing")
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SectorCompareError(
+            f"numeric artifact value is invalid: {value!r}") from exc
+    if not math.isfinite(out):
+        raise SectorCompareError("numeric artifact value must be finite")
+    return out
 
 
 def _theme_exposure(run_dir: Path) -> float | None:

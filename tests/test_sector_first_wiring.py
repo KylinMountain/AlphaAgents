@@ -374,13 +374,31 @@ def test_sector_first_missing_relation_is_refused_before_intent(monkeypatch):
         # Deliberately absent: primary_theme_relation_evidence_id.
         "supporting_theme_relation_evidence_ids": [],
     }]
-    monkeypatch.setattr(
-        wf, "_sector_first_stage", lambda *a, **k: (panel, None))
+    def missing_relation_stage(*_args, **_kwargs):
+        ctx.last_sector_context = {
+            "membership_snapshot_id": snapshot.snapshot_id,
+            "membership_hash": snapshot.content_hash,
+            "selected_themes": ["AI"],
+            "direction_research": [{
+                "sector_id": "AI",
+                "thesis": "fixture",
+                "counterevidence": "",
+                "unknowns": "",
+                "invalidations": [],
+            }],
+        }
+        return panel, None
+
+    monkeypatch.setattr(wf, "_sector_first_stage", missing_relation_stage)
     monkeypatch.setattr(
         wf, "_sector_stock_choice",
         lambda *a, **k: {
-            "stocks": [{"code": "600001", "reason": "pick"}],
+            "stocks": [{
+                "code": "600001", "primary_theme": "AI",
+                "reason": "pick", "counterevidence": "",
+            }],
             "refused": [], "parse_error": None, "research_budget": None,
+            "research_trace": [],
         })
     monkeypatch.setattr(
         wf, "_sector_trade_plan",
@@ -406,8 +424,8 @@ def test_sector_first_missing_relation_is_refused_before_intent(monkeypatch):
         row for row in journal["refusals"]
         if row.get("why") == "theme_unresolved")
     assert refusal["code"] == "600001"
-    assert refusal["stage"] == "relation_validation"
-    assert "primary_relation_evidence_mismatch" in refusal["detail"]
+    assert refusal["stage"] == "research_packet_validation"
+    assert "no relation evidence" in refusal["detail"]
 
 
 def test_sector_relation_validation_rejects_tampered_membership_hash():

@@ -124,9 +124,11 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         day=day, prev_day=prev_day, panel=panel, news=news, market=market,
         book=book, knowledge=knowledge, trader_note=trader_note, picks=picks)
 
+    # A tool-less stage may still carry the shared decision budget.
+    from alpha_agents.tools.budget import ResearchBudget, use_research_budget
+
     budget = research_budget
     if tools:
-        from alpha_agents.tools.budget import ResearchBudget, use_research_budget
         budget = budget or ResearchBudget()
         message += "\n\n" + budget.prompt_hint()
 

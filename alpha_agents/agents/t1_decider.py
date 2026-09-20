@@ -78,7 +78,7 @@ DECIDER_NAME = "t1_llm"
 #: **Sized from measurement, twice.** The first tool-enabled recording showed
 #: three rounds of up to six parallel calls; 8 was set from that. A 3-day
 #: window then measured what 8 actually bought: 211 tool calls across 9
-#: decisions — ~23 per decision, with only **one** repeated (tool, arguments)
+#: decisions — ~23 per decision — with only **one** repeated (tool, arguments)
 #: pair among them, so it was reconnoitering different names rather than
 #: looping. Even so, 5 of 9 decisions exhausted the budget, and a decision
 #: that never answers is a day with no order.
@@ -482,9 +482,11 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         template=template if template is not None else load_prompt(),
         market=market, phase=phase)
 
+    # A tool-less stage may still carry the shared decision budget.
+    from alpha_agents.tools.budget import ResearchBudget, use_research_budget
+
     budget = research_budget
     if tools:
-        from alpha_agents.tools.budget import ResearchBudget, use_research_budget
         budget = budget or ResearchBudget()
         message += "\n\n" + budget.prompt_hint()
 

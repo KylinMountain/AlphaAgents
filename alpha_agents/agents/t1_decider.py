@@ -78,7 +78,7 @@ DECIDER_NAME = "t1_llm"
 #: **Sized from measurement, twice.** The first tool-enabled recording showed
 #: three rounds of up to six parallel calls; 8 was set from that. A 3-day
 #: window then measured what 8 actually bought: 211 tool calls across 9
-#: decisions — ~23 per decision, with only **one** repeated (tool, arguments)
+#: decisions — ~23 per decision — with only **one** repeated (tool, arguments)
 #: pair among them, so it was reconnoitering different names rather than
 #: looping. Even so, 5 of 9 decisions exhausted the budget, and a decision
 #: that never answers is a day with no order.
@@ -142,22 +142,47 @@ def format_panel(panel: list[dict]) -> str:
     """
     if not panel:
         return "（今天没有可交易的候选）"
-    lines = ["| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    sector_first = any(row.get("primary_theme") for row in panel)
+    if sector_first:
+        lines = [
+            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+    else:
+        lines = [
+            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
     for row in panel:
         adv = row.get("adv20")
         turn = row.get("turnover_rate")
         concepts = row.get("concepts") or []
         streak = row.get("consecutive_limits")
         net = row.get("net_amount")
+        if sector_first:
+            primary = row.get("primary_theme") or "-"
+            supporting = row.get("supporting_themes") or []
+            peer_rel = row.get("primary_theme_peer_relative_5d_pct")
+            peer_covered = row.get("primary_theme_peer_covered")
+            peer_total = row.get("primary_theme_peer_total")
+            peer_text = (
+                "-"
+                if peer_rel is None
+                else f"{peer_rel:+.2f}% ({peer_covered}/{peer_total})"
+            )
+            tail = (
+                f"{peer_text} | {primary} | "
+                f"{'、'.join(supporting) if supporting else '-'} |"
+            )
+        else:
+            tail = f"{'、'.join(concepts) if concepts else '-'} |"
         lines.append(
             f"| {row['code']} | {row.get('name', '')} | {row.get('close')} | "
             f"{row.get('change_pct')}% | "
             f"{'-' if turn is None else turn} | "
             f"{'-' if adv is None else int(adv)} | "
             f"{'-' if not streak else str(int(streak)) + '板'} | "
-            f"{'-' if net is None else f'{net:+,.0f}'} | "
-            f"{'、'.join(concepts) if concepts else '-'} |")
+            f"{'-' if net is None else f'{net:+,.0f}'} | {tail}")
     return "\n".join(lines)
 
 
@@ -416,7 +441,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   trader_note: str = "", picks: int = 2,
                   model=None, template: str | None = None,
                   max_turns: int | None = None, market: dict | None = None,
-                  phase: str = "open", tools: list | None = None) -> dict:
+                  phase: str = "open", tools: list | None = None,
+                  research_budget=None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -456,11 +482,23 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         template=template if template is not None else load_prompt(),
         market=market, phase=phase)
 
+    # A tool-less stage may still carry the shared decision budget.
+    from alpha_agents.tools.budget import ResearchBudget, use_research_budget
+
+    budget = research_budget
+    if tools:
+        budget = budget or ResearchBudget()
+        message += "\n\n" + budget.prompt_hint()
+
     agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
                   instructions=SYSTEM_INSTRUCTIONS, model=model,
                   tools=list(tools) if tools else [])
     try:
-        result = await Runner.run(agent, message, max_turns=max_turns)
+        if budget is None:
+            result = await Runner.run(agent, message, max_turns=max_turns)
+        else:
+            with use_research_budget(budget):
+                result = await Runner.run(agent, message, max_turns=max_turns)
     except MaxTurnsExceeded as exc:
         # A model that spends its whole turn budget asking questions has not
         # said what to buy, and "it did not answer" is not "buy nothing" — the
@@ -479,10 +517,12 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         parsed = {"orders": [], "refused": [], "raw": "",
                   "parse_error": f"MaxTurnsExceeded after {max_turns} turns "
                                  f"({exc})"}
+        parsed["research_budget"] = budget.summary() if budget else None
         return parsed
     raw = result.final_output or ""
     parsed = parse_orders(raw, {row["code"] for row in panel})
     parsed["raw"] = raw
+    parsed["research_budget"] = budget.summary() if budget else None
     logger.info("%s: decider proposed %d, refused %d, parse_error=%s",
                 day, len(parsed["orders"]), len(parsed["refused"]),
                 parsed["parse_error"])

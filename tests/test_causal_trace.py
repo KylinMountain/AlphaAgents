@@ -331,4 +331,5 @@ class TestTheLinkIsRecordedOnce:
         assert row["candidate_id"] == cid
         assert row["parent_version_id"] == parent
         change = json.loads(row["change_json"])
-        assert change["param"] == "w_rel"
+        assert change["block"] == "selection_rank"
+        assert change["param"] == "change_share"

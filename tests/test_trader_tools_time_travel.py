@@ -80,6 +80,17 @@ def market_dbs(tmp_path, monkeypatch):
         CREATE TABLE stock_fund_flow_daily (
             date TEXT, code TEXT, main_net_yi REAL, main_net_pct REAL,
             turnover_rate REAL);
+        CREATE TABLE event_calendar_snapshots (
+            id INTEGER PRIMARY KEY, event_key TEXT, event_type TEXT,
+            scope TEXT, subject TEXT, scheduled_at TEXT, captured_at TEXT,
+            source TEXT, metadata_json TEXT, content_hash TEXT);
+        CREATE TABLE event_expectation_snapshots (
+            id INTEGER PRIMARY KEY, event_key TEXT, captured_at TEXT,
+            consensus_json TEXT, market_implied_json TEXT,
+            source TEXT, content_hash TEXT);
+        CREATE TABLE event_realizations (
+            id INTEGER PRIMARY KEY, event_key TEXT, announced_at TEXT,
+            actual_json TEXT, source TEXT, content_hash TEXT);
     """)
     for i, day in enumerate(DAYS):
         px = 10.0 + i                       # 10, 11, 12, 13, 14
@@ -107,6 +118,19 @@ def market_dbs(tmp_path, monkeypatch):
         s.execute(
             "INSERT INTO stock_fund_flow_daily VALUES (?,?,?,?,?)",
             (day, "600127", 1.0 + i, 3.0, 5.0))
+    s.execute(
+        "INSERT INTO event_calendar_snapshots VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (1, "e1", "earnings_report", "stock", "600127",
+         "2026-03-06 23:59:59", "2026-03-03 23:59:59",
+         "test", "{}", "h1"))
+    s.execute(
+        "INSERT INTO event_expectation_snapshots VALUES (?,?,?,?,?,?,?)",
+        (1, "e1", "2026-03-04 23:59:59",
+         '{"eps":1.2}', None, "test", "h2"))
+    s.execute(
+        "INSERT INTO event_realizations VALUES (?,?,?,?,?,?)",
+        (1, "e1", "2026-03-06 23:59:59",
+         '{"eps":1.3}', "test", "h3"))
     s.commit()
     s.close()
 
@@ -135,7 +159,8 @@ class TestTheContractIsDeclared:
         The declaration is data, not prose, so it can be checked."""
         assert set(T.AS_OF_FIELDS) == {
             "get_market_regime", "get_theme_state", "get_stock_context",
-            "get_intraday_shape", "get_stock_memory", "get_my_state",
+            "get_intraday_shape", "get_event_context",
+            "get_stock_memory", "get_my_state",
         }
         for name, (db, column, question) in T.AS_OF_FIELDS.items():
             assert db.endswith(".db"), name
@@ -214,6 +239,22 @@ class TestTheReplayCutIsApplied:
         assert out["highest_streak"] == 2, out
 
 
+
+    def test_event_context_does_not_reveal_realization_early(self, market_dbs):
+        replay_mode.set_replay_as_of("2026-03-05 09:00")
+        out = json.loads(T.get_event_context_fn("600127"))
+        assert out["available"] is True
+        assert out["events"][0]["expectation"]["consensus"]["eps"] == 1.2
+        assert out["events"][0]["realization"] is None
+
+    def test_event_context_reveals_realization_only_after_announcement(
+            self, market_dbs):
+        replay_mode.set_replay_as_of("2026-03-06 23:59:59")
+        out = json.loads(T.get_event_context_fn("600127"))
+        assert out["available"] is True
+        assert out["events"][0]["realization"]["actual"]["eps"] == 1.3
+
+
 class TestReadingTheFutureFails:
     """Two different things must not collapse into one output.
 
@@ -268,6 +309,7 @@ class TestTheToolsReportFactsNotVerdicts:
         yield "theme_state", T.get_theme_state_fn("农业")
         yield "stock_context", T.get_stock_context_fn("600127")
         yield "intraday_shape", T.get_intraday_shape_fn("600127")
+        yield "event_context", T.get_event_context_fn("600127")
         yield "stock_memory", T.get_stock_memory_fn("600127")
         yield "my_state", T.get_my_state_fn()
 

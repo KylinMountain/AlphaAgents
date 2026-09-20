@@ -431,9 +431,12 @@ class TestIsolation:
         after = _dump(store)
         assert set(before) == set(after)
         changed = {name for name in before if before[name] != after[name]}
-        assert changed == {"shadow_runs", "shadow_predictions"}, (
-            f"the challenger changed {sorted(changed)}; it forecasts and is "
-            "graded, and it must not trade")
+        assert changed == {
+            "shadow_manifests", "shadow_runs", "shadow_predictions",
+        }, (
+            f"the challenger changed {sorted(changed)}; only its immutable "
+            "experiment contract and forecast tables may move, never the "
+            "trading book")
 
     def test_a_shadow_run_writes_no_order_position_or_intent(self, store, version):
         run = _open(version)
@@ -674,3 +677,101 @@ class TestTheChallengerInheritsTheChampionsHorizon:
         run = _open(version, report_type="intraday")
         SH.emit_for_date(run, _today(), horizon_days=7)
         assert SH.predictions_for(run)[0]["horizon_days"] == 7
+
+
+
+# ── 9. Candidate evidence must execute the changed genes ───────────────
+
+
+class TestCandidateProducerGeneContract:
+    def _sources(self, decision):
+        return {
+            "prompts": {"morning_scan.md": "same"},
+            "model": {"agent_model": "qwen-plus"},
+            "retrieval": {"feedback._PLAYBOOKS_BUDGET": 400},
+            "rules": {"holdout_gate.MIN_VALIDATION_SAMPLES": 20},
+            "knowledge": {"snapshot_id": None},
+            "decision": decision,
+        }
+
+    def _incumbent(self, store):
+        incumbent = PR.freeze(
+            sources=self._sources(dict(scoring.DEFAULT_DECISION_PARAMS)),
+            created_by="kylin", reason="incumbent", frozen_at="2026-01-01")
+        PR.install(version_id=incumbent, actor="kylin", reason="first")
+        return incumbent
+
+    def test_remap_confidence_refuses_a_theme_gate_variant(self, store):
+        incumbent = self._incumbent(store)
+        gate = {
+            **scoring.DEFAULT_DECISION_PARAMS["theme_gate"],
+            "w_rel": 0.40,
+        }
+        decision = {**scoring.DEFAULT_DECISION_PARAMS, "theme_gate": gate}
+        target = PR.freeze(
+            sources=self._sources(decision), parent_id=incumbent,
+            created_by="kylin", reason="theme gate candidate",
+            frozen_at="2026-01-02")
+
+        with pytest.raises(SH.ShadowError, match=r"theme_gate\.w_rel"):
+            SH.open_run(
+                policy_version_id=target, reason="wrong evaluator",
+                report_type="morning", producer=SH.CANDIDATE_NAME)
+
+    def test_remap_confidence_accepts_a_confidence_prior_variant(self, store):
+        incumbent = self._incumbent(store)
+        priors = {
+            **scoring.DEFAULT_DECISION_PARAMS["confidence_priors"],
+            "high": 0.72,
+        }
+        decision = {
+            **scoring.DEFAULT_DECISION_PARAMS,
+            "confidence_priors": priors,
+        }
+        target = PR.freeze(
+            sources=self._sources(decision), parent_id=incumbent,
+            created_by="kylin", reason="confidence candidate",
+            frozen_at="2026-01-02")
+
+        run = SH.open_run(
+            policy_version_id=target, reason="right evaluator",
+            report_type="morning", producer=SH.CANDIDATE_NAME)
+        contract = SH.producer_compatibility(target, SH.CANDIDATE_NAME)
+        assert run > 0
+        assert contract["compatible"] is True
+        assert contract["changed_genes"] == ["decision.confidence_priors.high"]
+
+    def test_a_legacy_incompatible_run_cannot_emit_or_reach_the_gate(
+            self, store):
+        incumbent = self._incumbent(store)
+        gate = {
+            **scoring.DEFAULT_DECISION_PARAMS["theme_gate"],
+            "w_rel": 0.40,
+        }
+        decision = {**scoring.DEFAULT_DECISION_PARAMS, "theme_gate": gate}
+        target = PR.freeze(
+            sources=self._sources(decision), parent_id=incumbent,
+            created_by="kylin", reason="legacy wrong experiment",
+            frozen_at="2026-01-02")
+
+        SH.init_schema(store)
+        store.execute(
+            "INSERT INTO shadow_runs "
+            "(policy_version_id, trader_id, report_type, producer, status, "
+            " reason, opened_at) VALUES (?, ?, ?, ?, 'open', ?, ?)",
+            (target, f"shadow-{target}", "morning", SH.CANDIDATE_NAME,
+             "created before compatibility guard", "2026-01-03"))
+        store.commit()
+        run_id = store.execute(
+            "SELECT id FROM shadow_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()["id"]
+
+        with pytest.raises(
+                SH.ShadowError, match="immutable experiment manifest"):
+            SH.emit_for_date(run_id, "2026-02-01", panel=["600000"])
+        with pytest.raises(holdout_gate.GateError, match="cannot evaluate"):
+            holdout_gate.run_gate(
+                target, report_type="morning", today="2026-06-01")
+        assert any(
+            f"shadow run #{run_id} is not evaluable" in problem
+            for problem in SH.integrity())

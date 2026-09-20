@@ -33,12 +33,13 @@ PANEL = [
 
 
 class TestTheToolsAreWired:
-    def test_the_six_question_tools_are_offered(self):
-        assert len(TT.TRADER_TOOLS) == 6
+    def test_the_seven_question_tools_are_offered(self):
+        assert len(TT.TRADER_TOOLS) == 7
         names = {t.name for t in TT.TRADER_TOOLS}
         assert names == {
             "get_market_regime", "get_theme_state", "get_stock_context",
-            "get_intraday_shape", "get_stock_memory", "get_my_state",
+            "get_intraday_shape", "get_event_context",
+            "get_stock_memory", "get_my_state",
         }
 
     def test_every_tool_says_what_question_it_answers(self):
@@ -128,7 +129,7 @@ class TestTheModelActuallyUsesThem:
             tools=TT.TRADER_TOOLS, max_turns=3))
 
         assert out["orders"] == []
-        assert len(seen.get("tools") or []) == 6, (
+        assert len(seen.get("tools") or []) == 7, (
             "the Agent was built without the trader tools — this is the "
             "defect the review found (tools=[]) coming back")
         assert seen.get("_turns") == 3, (

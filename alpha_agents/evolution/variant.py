@@ -65,15 +65,14 @@ logger = logging.getLogger(__name__)
 #:
 #: ``t1_change_rank`` / ``down`` is the one the Evidence Analyzer produces:
 #: if ranking candidates by the previous session's change is backwards, the
-#: selection should move toward the lower end. The parameter it moves is the
-#: theme gate's ``w_rel`` — the weight on the cross-sectional relative
-#: strength that the ranking reads. The step is deliberately small and
-#: **declared here** rather than derived: a large first step would confound
-#: "the direction is right" with "the magnitude is right", and the forward
-#: window is the only thing that can separate them.
+#: *selection lane* should contribute fewer names from the change ranking.
+#: Older versions incorrectly mapped this evidence to ``theme_gate.w_rel``,
+#: which changed theme admission rather than the ranking being criticised.
+#: The live panel now reads ``selection_rank.change_share``, so evidence,
+#: intervention and evaluator name the same behavior.
 _SUPPORTED_DELTAS = {
-    ("t1_change_rank", "down"): ("theme_gate", "w_rel", -0.05),
-    ("t1_change_rank", "up"): ("theme_gate", "w_rel", +0.05),
+    ("t1_change_rank", "down"): ("selection_rank", "change_share", -0.10),
+    ("t1_change_rank", "up"): ("selection_rank", "change_share", +0.10),
 }
 
 
@@ -307,7 +306,13 @@ def _apply(decision: dict, change: dict) -> dict:
             f"Parameter {change['block']}.{change['param']} is not in the "
             "version being varied, so this delta has nothing to move. The "
             "mapping table and the decision parameters have drifted apart.")
-    block[change["param"]] = round(block[change["param"]] + change["step"], 6)
+    value = round(block[change["param"]] + change["step"], 6)
+    if (change["block"], change["param"]) == (
+            "selection_rank", "change_share") and not 0.0 <= value <= 1.0:
+        raise VariantError(
+            f"selection_rank.change_share would leave [0,1]: {value}. "
+            "A candidate may move the lane mix, not create an impossible mix.")
+    block[change["param"]] = value
     return out
 
 

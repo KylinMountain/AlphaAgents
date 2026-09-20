@@ -1,0 +1,24 @@
+{
+  "selector_budget_bug": {
+    "exception": "UnboundLocalError",
+    "message": "cannot access local variable 'use_research_budget' where it is not associated with a value",
+    "model_calls_before_failure": 0
+  },
+  "no_budget_control": "passed",
+  "initial_equity_omission": {
+    "initial_capital": 100.0,
+    "daily_equity": [
+      95.0,
+      100.0
+    ],
+    "reported_net_return_pct": 5.263157894736836,
+    "correct_net_return_pct": 0.0,
+    "reported_drawdown_pct": 0.0,
+    "correct_drawdown_pct": 5.000000000000004
+  },
+  "duplicate_dates_accepted": {
+    "input_rows": 60,
+    "daily_return_count": 1,
+    "error_raised": false
+  }
+}

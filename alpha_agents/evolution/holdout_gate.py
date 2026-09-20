@@ -180,7 +180,9 @@ def paired_keys(champion_scores: list[dict],
 
 
 def evaluate_candidate(champion_scores: list[dict],
-                       challenger_scores: list[dict]) -> dict:
+                       challenger_scores: list[dict], *,
+                       minimum_samples: int | None = None,
+                       brier_tolerance: float | None = None) -> dict:
     """Decide whether a challenger may be promoted.
 
     Both inputs are graded predictions keyed by (date, code), so the
@@ -191,16 +193,19 @@ def evaluate_candidate(champion_scores: list[dict],
     ``abstained``) are easy to read backwards, and the audit row is the thing
     a person actually reads months later.
     """
+    minimum = (MIN_VALIDATION_SAMPLES if minimum_samples is None
+               else int(minimum_samples))
+    tolerance = (BRIER_TOLERANCE if brier_tolerance is None
+                 else float(brier_tolerance))
     champ_by_key = {(r.get("date"), r.get("code")): r for r in champion_scores}
     chall_by_key = {(r.get("date"), r.get("code")): r for r in challenger_scores}
     shared = sorted(paired_keys(champion_scores, challenger_scores))
 
-    if len(shared) < MIN_VALIDATION_SAMPLES:
+    if len(shared) < minimum:
         return {
             "promote": False,
             "outcome": "insufficient",
-            "reason": (f"验证样本 {len(shared)} < {MIN_VALIDATION_SAMPLES}，"
-                       "维持 champion"),
+            "reason": (f"验证样本 {len(shared)} < {minimum}，维持 champion"),
             "n": len(shared),
             "abstained": True,
         }
@@ -213,7 +218,7 @@ def evaluate_candidate(champion_scores: list[dict],
         return {"promote": False, "outcome": "insufficient",
                 "reason": "无可比样本", "n": test["n"], "abstained": True}
 
-    degraded = test["mean_diff"] > BRIER_TOLERANCE
+    degraded = test["mean_diff"] > tolerance
     promote = not degraded
     if degraded:
         reason = (f"Brier 退化 {test['mean_diff']:+.4f} "
@@ -278,6 +283,8 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     n INTEGER,
     validation_days INTEGER,
     evidence_scope TEXT,
+    manifest_id INTEGER,
+    manifest_hash TEXT,
     mean_diff REAL,
     t_stat REAL,
     reason TEXT,
@@ -307,6 +314,8 @@ _GATE_MIGRATIONS = (
     "ALTER TABLE gate_decisions ADD COLUMN validation_days INTEGER",
     "ALTER TABLE gate_decisions ADD COLUMN policy_version_id INTEGER",
     "ALTER TABLE gate_decisions ADD COLUMN evidence_scope TEXT",
+    "ALTER TABLE gate_decisions ADD COLUMN manifest_id INTEGER",
+    "ALTER TABLE gate_decisions ADD COLUMN manifest_hash TEXT",
 )
 
 
@@ -324,7 +333,7 @@ def _ensure_gate_table(conn: sqlite3.Connection) -> None:
 
 
 def record_gate_decision(candidate_name: str, decision: dict,
-                         today: str | None = None) -> None:
+                         today: str | None = None) -> int | None:
     """Persist the verdict, including rejections.
 
     A rejected candidate that leaves no trace will be proposed again next
@@ -349,27 +358,31 @@ def record_gate_decision(candidate_name: str, decision: dict,
         with _write_lock:
             conn = _get_conn()
             _ensure_gate_table(conn)
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO gate_decisions (date, candidate, "
                 "policy_version_id, promoted, abstained, outcome, n, "
-                "validation_days, evidence_scope, mean_diff, t_stat, reason, "
-                "detail_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "validation_days, evidence_scope, manifest_id, manifest_hash, "
+                "mean_diff, t_stat, reason, detail_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (today, candidate_name, decision.get("policy_version_id"),
                  1 if decision.get("promote") else 0,
                  1 if decision.get("abstained") else 0,
                  decision.get("outcome"), decision.get("n"),
                  decision.get("validation_days"),
-                 decision.get("evidence_scope"), decision.get("mean_diff"),
+                 decision.get("evidence_scope"), decision.get("manifest_id"),
+                 decision.get("manifest_hash"), decision.get("mean_diff"),
                  decision.get("t_stat"), decision.get("reason", ""),
                  json.dumps(decision, ensure_ascii=False)),
             )
             conn.commit()
+            return int(cursor.lastrowid)
     except Exception as e:
         # The review must not fail because the audit did. Logged at warning
         # rather than debug: a verdict that leaves no record is the gap this
         # table exists to close, and a silent one is indistinguishable from
         # the gate never having run.
         logger.warning("Gate decision not recorded: %s", e)
+        return None
 
 
 def get_gate_history(days: int = 30) -> list[dict]:
@@ -463,15 +476,17 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
             f"{report_type!r}. There is nothing on the challenger side of the "
             "comparison, and a comparison against nothing is not a verdict.")
 
-    # The gene contract, re-asserted here rather than trusted from open time:
-    # a run opened before the rule existed keeps existing in the record, and
-    # "the paired sample filled" is exactly how a stale experiment would try
-    # to become promotable. The producer must execute the genes the version
-    # changed, or the paired comparison is of two copies of the same number.
+    if run.get("sealed_at"):
+        raise GateError(
+            f"Shadow run #{run['id']} was already sealed at "
+            f"{run['sealed_at']}. Re-evaluating it with more observations "
+            "would be optional stopping; open a new experiment instead.")
     try:
-        shadow.assert_producer_compatible(policy_version_id, run["producer"])
-    except shadow.ShadowError as e:
-        raise GateError(str(e)) from e
+        manifest = shadow.assert_run_evaluable(run)
+    except shadow.ShadowError as exc:
+        raise GateError(
+            f"Shadow run #{run['id']} cannot evaluate policy version "
+            f"#{policy_version_id}: {exc}") from exc
 
     champion = forward_window(
         get_scored_predictions(days=_lookback_days(frozen_at, when),
@@ -479,7 +494,13 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
         frozen_at)
     challenger = forward_window(shadow.scored_for(run["id"]), frozen_at)
 
-    decision = evaluate_candidate(champion, challenger)
+    minimum = (int(manifest["minimum_samples"]) if manifest
+               else MIN_VALIDATION_SAMPLES)
+    tolerance = (float(manifest["brier_tolerance"]) if manifest
+                 else BRIER_TOLERANCE)
+    decision = evaluate_candidate(
+        champion, challenger, minimum_samples=minimum,
+        brier_tolerance=tolerance)
     decision["validation_days"] = len(
         {day for day, _code in paired_keys(champion, challenger)})
     decision["policy_version_id"] = policy_version_id
@@ -490,9 +511,19 @@ def run_gate(policy_version_id: int, *, report_type: str = "morning",
     # forecasts were the no-skill constant, so the promotion guard was
     # satisfied by the label rather than by the evidence.
     decision["evidence_scope"] = shadow.scope_for(run["producer"])
+    if manifest:
+        decision["manifest_id"] = manifest["id"]
+        decision["manifest_hash"] = manifest["content_hash"]
 
     name = f"{version['policy_key']}#{policy_version_id}"
-    record_gate_decision(name, decision, when)
+    gate_decision_id = record_gate_decision(name, decision, when)
+    decision["gate_decision_id"] = gate_decision_id
+    if (gate_decision_id is not None and manifest
+            and decision["outcome"] in {"promote", "reject"}
+            and (decision.get("n") or 0) >= minimum):
+        shadow.seal_run(
+            run["id"], gate_decision_id=gate_decision_id,
+            reason=f"final {decision['outcome']} verdict", sealed_at=when)
     logger.info("Gate '%s': %s", name, decision["reason"])
     return decision
 

@@ -7,6 +7,17 @@ A document's **role** matters more than its date. A normative design is
 correct to describe a target that does not exist yet; a status record is
 wrong the moment it lags the code.
 
+## Sector-First: current pre-validation review and implementation entry
+
+**2026-09-20 验证前审查结论：REWORK。** 对 Sector-First 是否具备正式验证资格，
+先读 [整体流程合伙人审查](reviews/2026-09-20-sector-first-partner-review.md)，
+再按 [整改实施计划](exec-plans/active/2026-09-20-sector-first-review-remediation.md)
+领取 RP-00 / RP-01。报告冻结基线证据，实施计划记录任务状态、依赖、验收与放行门；
+原 Sector-First roadmap 保留目标设计和历史记录，不以旧复选框推断当前已验证。
+
+当前明确分开四件事：文档提交、代码修复、工程验收、策略有效性。新报告与计划本身
+不完成工程任务，不更改 active policy，也不把 n=0 改成有效策略样本。
+
 ## If you are reviewing this project from outside
 
 **要一份可以直接转发的单文件交接包？** 用 [`REVIEW_PACKET.md`](REVIEW_PACKET.md) ——
@@ -53,6 +64,7 @@ the one place the exit side was measured against market history.
 | How is the code laid out, and what may depend on what? | [`../ARCHITECTURE.md`](../ARCHITECTURE.md) | Layer map, databases, the day. |
 | How do I work in this repo? | [`../AGENTS.md`](../AGENTS.md) | Instructions, acceptance criteria, evidence rules. |
 | How do I review code / architecture / backtest / prompt? | [`REVIEW.md`](REVIEW.md) | Review mode and the required output format. |
+| Is Sector-First ready for formal validation, and what should be fixed first? | [Partner review](reviews/2026-09-20-sector-first-partner-review.md) · [Remediation plan](exec-plans/active/2026-09-20-sector-first-review-remediation.md) | Dated evidence / active work packages and acceptance gates. Not a strategy-promotion approval. |
 | What is in flight, what was decided, what do we owe? | [`exec-plans/`](exec-plans/) | `active/` in flight · `completed/` records · `tech-debt-tracker.md` debt |
 | How healthy is each area? | [`QUALITY_SCORE.md`](QUALITY_SCORE.md) | Graded on evidence, with the gap that caps each grade. |
 
@@ -75,6 +87,7 @@ understand *why* a decision was made, never to find out what the system does.
 | [`multi_trader.md`](multi_trader.md) | 2026-09-09 | Why variation has to be a file, and how two traders are kept independent. |
 | [`trader_toolkit.md`](trader_toolkit.md) | 2026-09-10 | What a trader should *ask*, instead of hunting for signals. |
 | [`DESIGN_REVIEW.md`](DESIGN_REVIEW.md) | 2026-09-11 | Point-in-time brief written for an external reviewer. §7's state queries are a 2026-09-11 snapshot and are stale; §6's measured negatives still stand. |
+| [Sector-First partner review](reviews/2026-09-20-sector-first-partner-review.md) | 2026-09-20 | Quant / A-share / Agent review at main@eab3f1ec, with evidence strength, F01–F14 findings and isolated reproductions. |
 
 ## Process
 

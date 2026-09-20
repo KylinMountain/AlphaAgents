@@ -49,6 +49,23 @@ AlphaAgents 不一样。
 
 每一次交易都会留下经验；但经验要过闸门，才会变成下一次判断的依据。
 
+### 当前跑到哪了（2026-09）
+
+AlphaAgents 已经不只是「会复盘的虚拟盘」，而是开始把 **Trade → Learn → Evolve** 串成一条可运行、可审计的链：
+
+| 层 | 当前状态 |
+| --- | --- |
+| **Trade** | T+1 日线 Trader 已能在决策前主动查询市场状态、主题、个股上下文、盘中形态、历史记忆与自身状态；拒绝交易也会留下 episode |
+| **Learn** | 决策、成交、结果、复盘、候选知识都能沿 lineage 追溯；候选不会因为模型「觉得有用」就直接生效 |
+| **Evolve** | 已有 policy variant、ON/OFF 反事实、单步基因干预、真实 forward shadow 与前向 gate；shadow 到达预注册样本量后才裁决，promotion 仍需人工授权 |
+| **还没有宣称的事** | **没有宣称“已经证明会自我进化赚钱”**。目前证明的是机制开始闭环；真正缺的是证明某次实验确实作用到了它声称改变的 policy gene，并在前向证据上胜出 |
+
+换句话说，现在最重要的不是再加一个 Agent、指标或模型，而是把：
+
+**改了什么 → 实际影响了什么行为 → 用什么独立指标验证 → 是否值得进入 forward shadow**
+
+这条实验因果链做扎实。
+
 ---
 
 ## What makes it different?
@@ -189,7 +206,7 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
 | 一次走运被自动写成一条原则 | 未验证经验只进候选区，**没有自动晋升路径**；生效要人显式批准并留下不可变快照 |
 | 「我们批准的是哪一版」说不清 | 批准落成不可变快照（谁 / 何时 / 因为什么 / 哪一版）；版本哈希**不含**会自己变的计数器 |
 | 修正被原地覆盖，看不出改过什么 | 修正是**追加**一行并指名被替代的那行，旧行始终可读 |
-| 「有流程在把关晋升」其实是空转 | Phase 1 **主动断开**了 `evolution/holdout_gate.py` 的每日调用：它拿到的曾是零长度留出窗口，三次运行全部弃权（`gate_decisions` 三行都是 `validation_days: 0`）——**一个永远不会触发的闸门比没有闸门更糟，因为它看起来像治理**。Phase 4 把它改成候选绑定，并让裁决带上**证据等级**（只有候选策略的比较才能晋升）；但它目前**仍没有生产调用者**，构建里也**还没有候选生产者**，所以生产里一次晋升都没发生过 |
+| 「有流程在把关晋升」其实是空转 | 早期的每日 gate 曾经拿到零长度留出窗口，三次运行全部弃权；现在 shadow 已有生产调度：挑战者按日写前向预测、到期评分，只有在预注册的配对样本量达到门槛时才问一次 gate，避免 optional stopping。**gate verdict 不会自动移动 active policy**，approve / promote 仍是独立的人类授权动作。当前仍把「version 绑定」与「changed gene 真的被 producer / evaluator 执行」视为两件事——实验若没真正作用到目标 gene，样本再多也不是有效进化证据 |
 
 > **LLM 负责思考，代码负责守纪律，市场负责打分。**
 
@@ -200,7 +217,9 @@ AlphaAgents 买入的不是一只股票，而是一条**可以被证伪的论点
   一条 `active` 但从未被批准过的行不再进入提示词，规则被改过或快照损坏时**明确阻断**
   而不是静默降级。范围限定：这关掉的是这两条路径，检索权重 / 校准器 / 退役决定
   仍能改变模型看到什么，仍属后续工作。
-- 上表最后一行是同一个道理的另一面。这类「承诺超过代码」的地方在本仓库都要求写下来，
+- 上表最后一行是同一个道理的另一面：**lineage 对上，不代表因果实验就对上。**
+  当前 shadow 已经真实运行，但「某个 policy version 被评估」和「这个版本真正改变的 gene
+  被 producer / evaluator 执行」仍必须分别证明。这类「承诺超过证据」的地方在本仓库都要求写下来，
   清单在 [`docs/TRADER_CORE_IMPLEMENTATION.md`](docs/TRADER_CORE_IMPLEMENTATION.md) §7。
 
 ---
@@ -218,7 +237,7 @@ data → sources → tools → evolution → pipeline → agents → server
 | `data/` | SQLite schema 与读写、评分、决策上下文、交易账本（订单 / 退出 / 论点 / 决策快照）、归属 | 不访问网络 |
 | `sources/` | 快讯源，各自归一成同一种形状 | 不做判断 |
 | `tools/` | Agent 可调用的行情查询：报价、资金流、涨跌家数、退出信号 | 不持有状态 |
-| `evolution/` | 记忆效用、原则、Playbook、前向闸门 | 不靠调 LLM 来决策 |
+| `evolution/` | 记忆效用、原则、Playbook、policy variant、反事实、shadow 与前向闸门 | 不让模型给自己裁决，也不直接改交易物理规则 |
 | `pipeline/` | 调度器与它的任务、快讯摄入循环 | 不含策略规则 |
 | `agents/` | LLM 提示词，以及包在它们外面的 runner | 不直接写存储 |
 | `server/` | FastAPI、WebSocket、看板，以及三个工作台的读模型（只做投影） | 不重算下层已经算过的数 |
@@ -230,7 +249,8 @@ data → sources → tools → evolution → pipeline → agents → server
 09:00        morning_scan      回看窗口到昨天收盘
 09:25        opening_reminder
 09:30–15:00  intraday_monitor  每 5 分钟；有异动才调用 LLM
-15:30        review            校验 → 评分 → 学习 → 闸门
+15:30        review            校验 → 评分 → 学习
+15:45        shadow_run        写挑战者预测 → 评分已成熟样本 → 达门槛时只问一次 gate
 20:00        night_scan
 周六 10:00    weekly_report
 ```
@@ -244,7 +264,7 @@ alpha_agents/
 ├── data/         # 交易账本、归属、决策快照、SQLite schema
 ├── sources/      # 快讯源，各自归一
 ├── tools/        # Agent 可调用的市场查询
-├── evolution/    # 校准 / 盲点 / 教训 / Playbook / 原则 / 前向闸门
+├── evolution/    # 校准 / 候选 / policy variant / 反事实 / shadow / 前向闸门
 ├── pipeline/     # 调度器与各任务
 ├── agents/       # 提示词 runner
 ├── prompts/      # 提示词模板（.md）

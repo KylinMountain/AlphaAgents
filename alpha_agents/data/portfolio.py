@@ -279,6 +279,41 @@ def get_theme_exposure(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
     return sum((r["open_price"] or 0) * (r["shares"] or 0) for r in rows)
 
 
+def _theme_committed_exposure(conn, theme: str,
+                              trader_id: str) -> float:
+    """Open cost plus pending risk holds for one correlated theme.
+
+    Sidecar labels are authoritative for new multi-theme orders. Legacy rows
+    without a sidecar fall back to virtual_portfolio.theme so old positions
+    continue to count exactly once.
+    """
+    from alpha_agents.data import order_theme_exposure as OTE
+
+    OTE.init_schema(conn)
+    sidecar = conn.execute(
+        "SELECT COALESCE(SUM(v.open_price * v.shares),0) AS amount "
+        "FROM virtual_portfolio v JOIN order_theme_exposures e "
+        "ON e.order_id=v.id "
+        "WHERE v.trader_id=? AND v.status='open' AND e.theme=?",
+        (trader_id, theme),
+    ).fetchone()
+    legacy = conn.execute(
+        "SELECT COALESCE(SUM(v.open_price * v.shares),0) AS amount "
+        "FROM virtual_portfolio v "
+        "WHERE v.trader_id=? AND v.status='open' AND v.theme=? "
+        "AND NOT EXISTS (SELECT 1 FROM order_theme_exposures e "
+        "                WHERE e.order_id=v.id)",
+        (trader_id, theme),
+    ).fetchone()
+    held = reservations.held_total(
+        conn, trader_id, kind=reservations.theme_risk_kind(theme))
+    return (
+        float(sidecar["amount"] or 0.0)
+        + float(legacy["amount"] or 0.0)
+        + held
+    )
+
+
 # ── Pending Orders (挂单) ───────────────────────────────────
 
 
@@ -297,6 +332,7 @@ def _create_pending_order_impl(
     trader_id: str = DEFAULT_TRADER,
     prediction_id: int | None = None,
     thesis_id: int | None = None,
+    risk_themes: list[str] | None = None,
 ) -> int | None:
     """Create a pending order (挂单). Triggered when price enters entry zone.
 
@@ -350,6 +386,42 @@ def _create_pending_order_impl(
                 code, name, theme)
             return None
         theme = resolved
+        related_themes = [theme]
+        for raw_theme in risk_themes or []:
+            value = str(raw_theme or "").strip()
+            if not value:
+                continue
+            canonical = resolve_theme(value) or value
+            if canonical not in related_themes:
+                related_themes.append(canonical)
+
+        # Reserve against the same worst-case amount used by cash. The check
+        # runs under _write_lock, so two concurrent individually-legal orders
+        # cannot both consume the last theme headroom.
+        capital = trader_capital(trader_id)
+        reservation_amount = (
+            capital * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE))
+        theme_cap = capital * MAX_THEME_PCT
+        for risk_theme in related_themes:
+            committed = _theme_committed_exposure(
+                conn, risk_theme, trader_id)
+            if committed + reservation_amount > theme_cap + 1e-9:
+                terms = {
+                    "entry_low": entry_low, "entry_high": entry_high,
+                    "stop_loss": stop_loss, "target_price": target_price,
+                    "source": source, "reason": reason,
+                }
+                attribution.record_refusal(
+                    conn, trader_id=trader_id, code=code,
+                    order_date=order_date,
+                    refused_by=f"theme_risk_cap:{risk_theme}",
+                    theme=theme, thesis_id=thesis_id,
+                    prediction_id=prediction_id, **terms)
+                logger.info(
+                    "Rejected order %s: %s committed %.2f + %.2f > %.2f",
+                    code, risk_theme, committed, reservation_amount,
+                    theme_cap)
+                return None
 
         # The same admission bar check_pending_orders applies, applied at
         # creation instead of one cycle later — see `data/theme_gate.py` for
@@ -417,12 +489,16 @@ def _create_pending_order_impl(
         # is what keeps a second pending order from spending the same
         # cash; computing it here, before commit, means the order and
         # the reservation are written together or not at all.
-        reservation_amount = (trader_capital(trader_id) * MAX_POSITION_PCT
-                              * (1 + SLIPPAGE_RATE))
         reservations.reserve_for_order(
             conn, order_id=order_id, trader_id=trader_id,
             code=code, amount=reservation_amount,
             reason="pending-order backstop")
+        for risk_theme in related_themes:
+            reservations.reserve_for_order(
+                conn, order_id=order_id, trader_id=trader_id,
+                code=code, amount=reservation_amount,
+                kind=reservations.theme_risk_kind(risk_theme),
+                reason=f"pending theme-risk backstop:{risk_theme}")
         conn.commit()
 
         zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
@@ -869,6 +945,12 @@ def _fill_order(order: dict, fill_price: float, fill_date: str) -> dict | None:
         actual_cost = shares * fill_price * (1 + SLIPPAGE_RATE)
         reservations.consume_reservation(
             conn, order_id=order["id"], actual_cost=actual_cost)
+        # Pending theme-risk holds become redundant once the position is open;
+        # the open position itself is now counted by _theme_committed_exposure.
+        reservations.release_all_held_for_order(
+            conn, order_id=order["id"],
+            reason="filled: risk now represented by open position",
+            include_cash=False)
         # T+1 share-side: each fill is its own settlement lot. settle_date
         # is fill_date + 1 calendar day, so the position cannot be sold
         # back the same day the order fills. The legacy open_date check

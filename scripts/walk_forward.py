@@ -2877,6 +2877,46 @@ def _experiment_contract(args, *, architecture: str,
     return manifest, digest
 
 
+_SELECTION_EXPERIMENT_ARMS = frozenset({"CONTROL", "SECTOR"})
+
+
+def _selection_experiment_contract(
+        args, *, architecture: str,
+        membership_archive) -> tuple[dict | None, str | None]:
+    path = getattr(args, "selection_experiment_manifest", None)
+    arm = getattr(args, "selection_experiment_arm", None)
+    if (path is None) != (arm is None):
+        raise SystemExit(
+            "--selection-experiment-manifest and "
+            "--selection-experiment-arm must be supplied together")
+    if path is None:
+        return None, None
+    if getattr(args, "experiment_manifest", None) is not None:
+        raise SystemExit(
+            "legacy A/B/C/D and nf_discovery_v1 manifests are mutually exclusive")
+    if arm not in _SELECTION_EXPERIMENT_ARMS:
+        raise SystemExit(f"unknown selection experiment arm {arm!r}")
+
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        digest = selection_experiment.require_valid(manifest)
+    except selection_experiment.SelectionExperimentError as exc:
+        raise SystemExit(str(exc)) from exc
+    expected = manifest["arms"][arm]["architecture"]
+    if architecture != expected:
+        raise SystemExit(
+            f"selection experiment arm {arm} requires {expected}, "
+            f"got {architecture}")
+    if args.decider != "llm":
+        raise SystemExit(
+            "nf_discovery_v1 uses one shared LLM planner; --decider must be llm")
+    if not membership_archive:
+        raise SystemExit(
+            "nf_discovery_v1 requires the same --sector-membership archive "
+            "for both arms, even when CONTROL does not use it for discovery")
+    return manifest, digest
+
+
 def _experiment_runtime_contract(args) -> dict:
     """Behavioral runtime facts a formal A/B/C/D run must freeze.
 
@@ -2927,6 +2967,58 @@ def _experiment_runtime_contract(args) -> dict:
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
     }
+
+
+def _selection_experiment_runtime_contract(args) -> dict:
+    """Effective runtime facts for the minimal no-flow experiment."""
+    from alpha_agents.data import portfolio, portfolio_exit
+    from alpha_agents.model_factory import model_identity
+
+    return {
+        "decision_config": {
+            "trader": str(args.trader),
+            "picks_per_day": int(args.picks),
+            "panel_size": int(args.panel_size),
+            "participation": float(args.participation),
+            "max_turns_per_decision": 1,
+            "model_timeout_seconds": float(args.model_timeout),
+            "pace_seconds": float(args.pace_seconds),
+            "news_limit": 0,
+            "trader_tools_enabled": False,
+            "direction_limit": 3,
+            "learning_input": "frozen",
+        },
+        "model": model_identity(),
+        "cost_model": {
+            "name": "virtual_a_share_v1",
+            "commission_rate": portfolio_exit.COMMISSION_RATE,
+            "min_commission_rmb": portfolio_exit.MIN_COMMISSION,
+            "stamp_duty_sell_rate": portfolio_exit.STAMP_DUTY_SELL_RATE,
+            "transfer_fee_rate": portfolio_exit.TRANSFER_FEE_RATE,
+            "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
+        },
+        "exit_policy": {
+            "mechanical_stop": bool(args.mechanical_stop),
+            "mechanical_target": bool(args.mechanical_target),
+            "agent_exits": bool(args.agent_exits),
+            "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
+        },
+    }
+
+
+def _verify_selection_experiment_runtime(args, manifest: dict | None) -> None:
+    if manifest is None:
+        return
+    actual = _selection_experiment_runtime_contract(args)
+    mismatches = {}
+    for field, observed in actual.items():
+        frozen = manifest.get(field)
+        if frozen != observed:
+            mismatches[field] = {"manifest": frozen, "runtime": observed}
+    if mismatches:
+        raise SystemExit(
+            "nf_discovery_v1 runtime does not match its manifest: "
+            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
 
 
 def _verify_experiment_identity(

@@ -14,6 +14,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 
 SCHEMA_VERSION = 1
@@ -208,3 +209,39 @@ def file_identity(paths: dict[str, Path]) -> dict:
         }
     payload = {"files": files}
     return {**payload, "input_hash": _hash(payload)}
+
+
+def git_code_ref(repo: Path) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(repo), check=False, capture_output=True, text=True)
+    ref = completed.stdout.strip()
+    if completed.returncode != 0 or len(ref) != 40:
+        raise WorldReadSetError(
+            "formal replay needs a measurable 40-character git code ref")
+    return ref
+
+
+def replay_input_identity(corpus: Path, membership: Path) -> dict:
+    return file_identity({
+        "market_history.db": Path(corpus) / "market_history.db",
+        "market_snapshots.db": Path(corpus) / "market_snapshots.db",
+        "stocks.db": Path(corpus) / "stocks.db",
+        "sector_membership": Path(membership),
+    })
+
+
+def fact_ref(payload: dict, *, available_at: str | None = None,
+             point_in_time_grade: str = "A",
+             strict_replay_eligible: bool = True) -> dict:
+    """Content-address one consumed fact without mutating the source row."""
+    body = dict(payload)
+    ref = {
+        **body,
+        "content_hash": _hash(body),
+        "point_in_time_grade": point_in_time_grade,
+        "strict_replay_eligible": bool(strict_replay_eligible),
+    }
+    if available_at is not None:
+        ref["available_at"] = str(available_at)
+    return ref

@@ -199,8 +199,17 @@ class TestTheRatesCarryTheirDenominator:
 
     def test_it_names_what_traced_does_not_mean(self, store):
         """The boundary, in the payload. A reader must not read 'traced' as
-        'the decision quoted the candidate'."""
-        assert "not which rule text" in CT.rates()["note"]
+        'the decision quoted the candidate'.
+
+        The note changed on 2026-09-21, when the rendered knowledge block
+        began being hashed per decision: it can no longer say the rule text
+        is unpersisted. It says what is now checkable instead, and keeps the
+        boundary that "traced" is lineage.
+        """
+        note = CT.rates()["note"]
+        assert "knowledge_hash" in note
+        assert "checkable" in note
+        assert "does not mean the decision quoted the candidate" in note
 
     def test_lineage_is_not_behaviour_change_and_says_so(self, store):
         """The defect this fixes: a decision that ran on a candidate's version

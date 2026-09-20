@@ -193,3 +193,55 @@ class TestReplayDay:
         conn.execute("UPDATE predictions SET features_json = '{bad json'")
         conn.commit()
         assert replay_day("2026-09-07")["picks"][0]["features"] == {}
+
+
+class TestTheRenderedKnowledgeIsFingerprinted:
+    """Which rule text a decision read, as a checkable fact.
+
+    ``causal_trace`` used to say it could not answer this — it recorded the
+    policy version and admitted it did not record the text. The hash closes
+    that: re-render the block as of the decision and compare.
+    """
+
+    def test_the_same_block_hashes_the_same(self):
+        from alpha_agents.data.decision_context import knowledge_hash
+        assert knowledge_hash("A\nB") == knowledge_hash("A\nB")
+
+    def test_one_character_changes_the_hash(self):
+        from alpha_agents.data.decision_context import knowledge_hash
+        assert knowledge_hash("A\nB") != knowledge_hash("A\nC")
+
+    def test_no_knowledge_is_none_not_a_hash_of_nothing(self):
+        """`no rules in force` and `a block that rendered empty` differ."""
+        from alpha_agents.data.decision_context import knowledge_hash
+        assert knowledge_hash(None) is None
+        assert knowledge_hash("") is None
+        assert knowledge_hash("   ") is None
+
+    def test_surrounding_whitespace_does_not_change_the_hash(self):
+        """The render is stripped before hashing, so a trailing newline from
+        the join cannot make two identical blocks look different."""
+        from alpha_agents.data.decision_context import knowledge_hash
+        assert knowledge_hash("\nA\n") == knowledge_hash("A")
+
+    def test_the_context_carries_it_when_a_block_was_rendered(self):
+        from alpha_agents.data.decision_context import (
+            build_decision_context, knowledge_hash)
+        ctx = build_decision_context(task="morning_scan", knowledge="A\nB")
+        assert ctx["knowledge_hash"] == knowledge_hash("A\nB")
+
+    def test_the_key_is_absent_when_no_block_was_passed(self):
+        """Backward compatibility: an older caller records what it always did.
+
+        Writing the key for an omitted argument would claim a reading that
+        never happened, and would make "this path does not pass knowledge"
+        indistinguishable from "no knowledge was in force".
+        """
+        from alpha_agents.data.decision_context import build_decision_context
+        assert "knowledge_hash" not in build_decision_context(task="morning_scan")
+
+    def test_an_empty_render_records_none_not_absent(self):
+        """The caller *did* render; the answer is that nothing was in force."""
+        from alpha_agents.data.decision_context import build_decision_context
+        ctx = build_decision_context(task="morning_scan", knowledge="")
+        assert "knowledge_hash" in ctx and ctx["knowledge_hash"] is None

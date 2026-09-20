@@ -13,9 +13,37 @@ from alpha_agents.evolution.feedback import (
 )
 
 
+def knowledge_in_force() -> str:
+    """The rules the system has learned, rendered as the agent sees them.
+
+    The knowledge half of the context — approved principles and playbooks —
+    and nothing else. ``sentiment`` / ``cognition`` are the market, the
+    calibration and entry blocks are the trader's own record; only these two
+    are "knowledge" in the sense ``decision_snapshots`` records.
+
+    Exists so the *rendered text* can be hashed by the caller that shows it.
+    A hash is only worth anything if it covers the same bytes that reached
+    the prompt, so this is the single place the block is composed and both
+    the context builder and the recorder read it here.
+    """
+    parts = []
+    for fn in (inject_principles, inject_playbooks):
+        try:
+            part = fn()
+        except Exception:                              # noqa: BLE001
+            # A retrieval failure is an empty block, not a broken decision:
+            # the same posture ``feedback`` takes everywhere else. The hash
+            # then records "nothing was in force", which is the truth.
+            part = ""
+        if part:
+            parts.append(part)
+    return "\n\n".join(parts)
+
+
 def build_morning_context(themes: list[dict], stats: str,
                           mode: str = "full",
-                          trader_id: str | None = None) -> str:
+                          trader_id: str | None = None,
+                          knowledge: str | None = None) -> str:
     """Build the enriched context injected into the morning agent.
 
     mode: "full" (default) includes Phase 1/2/3 sections except raw lessons.
@@ -64,9 +92,14 @@ def build_morning_context(themes: list[dict], stats: str,
         if part:
             sections.append(part)
     if mode != "baseline":
-        for part in (inject_principles(), inject_playbooks()):
-            if part:
-                sections.append(part)
+        # ``knowledge`` lets the caller render once and hand the *same string*
+        # back for hashing. Without it the caller would have to re-render, and
+        # the claim "the hash covers what the agent read" would rest on the
+        # approved rows not having changed in between — an assumption this
+        # module cannot check. Supplying it makes the identity structural.
+        block = knowledge_in_force() if knowledge is None else knowledge
+        if block:
+            sections.append(block)
     if stats:
         sections.append(stats)
     return "\n\n".join(sections)

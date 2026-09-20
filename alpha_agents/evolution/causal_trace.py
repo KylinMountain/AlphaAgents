@@ -209,11 +209,15 @@ def rates(*, limit: int = 200,
         "counterfactual_pairs": cf["pairs"],
         "broken": [c.as_dict() for c in chains if not c.complete][:10],
         "note": (
-            "A decision records which policy version it ran under, not which "
-            "rule text it read: the rendered knowledge block is not persisted "
-            "per decision. So 'traced' means the chain "
-            "episode → candidate → variant → decision is complete, and it "
-            "does not mean the decision quoted the candidate."),
+            "A decision records which policy version it ran under. Since "
+            "2026-09-21 it also records the sha256 of the rendered knowledge "
+            "block it was shown (features_json._ctx.knowledge_hash), so "
+            "'was this note in front of the agent' is now checkable rather "
+            "than inferred: re-render the block as of decided_at and compare. "
+            "'traced' still means only that the chain "
+            "episode → candidate → variant → decision is complete; it does "
+            "not mean the decision quoted the candidate, and a decision "
+            "predating the hash has none to check."),
         "lineage_note": (
             "decision_change_rate / lineage_rate counts decisions that ran "
             "under a version a candidate proposed. That is lineage, not "

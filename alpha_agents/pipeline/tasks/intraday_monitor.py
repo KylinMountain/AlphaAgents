@@ -770,12 +770,16 @@ async def _save_intraday_recommendations(report: str) -> None:
     except Exception as e:
         logger.debug("Failed to fetch prices for intraday recs: %s", e)
 
-    # G6: one context per cycle, shared by the picks it produced.
+    # G6: one context per cycle, shared by the picks it produced. The
+    # knowledge hash is what makes "this note was in front of the agent"
+    # checkable instead of inferred — see decision_context.knowledge_hash.
+    from alpha_agents.evolution.context_builder import knowledge_in_force
     _intraday_ctx = build_decision_context(
         task="intraday_monitor",
         themes=safe_active_themes(),
         market_regime=safe_market_regime(),
         sentiment_phase=safe_sentiment_phase(),
+        knowledge=knowledge_in_force(),
         extra={"has_anomaly": True},
     )
 

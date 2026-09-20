@@ -360,9 +360,18 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
 
     # Phase 1: enrich stats_ctx with sentiment + cognition via evolution
     # module. Previously `cognition` was fetched but silently dropped.
+    #
+    # The knowledge block is rendered **once**, here, and the same string is
+    # both shown to the agent and hashed into the decision record below. A
+    # second render after the model call would only be the same text if the
+    # approved rows had not moved in between, and that is an assumption, not
+    # a guarantee — the hash has to cover the bytes the agent actually read.
     from alpha_agents.evolution import build_morning_context
+    from alpha_agents.evolution.context_builder import knowledge_in_force
+    knowledge_block = knowledge_in_force()
     stats_ctx = build_morning_context(themes=themes or [], stats=stats_ctx,
-                                      trader_id=trader.id)
+                                      trader_id=trader.id,
+                                      knowledge=knowledge_block)
 
     report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx,
                                         trader=trader)
@@ -381,7 +390,8 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
         recs = _extract_table_recommendations(report)
     if recs:
         recs = await _cross_validate_recommendations(recs)
-        _save_recommendations_list(recs, trader)
+        _save_recommendations_list(recs, trader,
+                                   knowledge_block=knowledge_block)
 
     # The morning's verdict on yesterday's book. Stored rather than
     # executed: at 09:00 there is no live price and a sell needs one.
@@ -630,13 +640,19 @@ def _morning_relation_status(
 
 def _save_recommendations_list(
         recs: list[dict], trader=None, *, relation_archive=None,
-        strict_relations: bool = False) -> None:
+        strict_relations: bool = False,
+        knowledge_block: str | None = None) -> None:
     """Save pre-validated recommendations as predictions, fetching entry prices.
 
     ``trader`` owns the resulting predictions, theses and orders, and
     supplies the entry zone when the pick did not state one — which is
     where 回调 and 突破 stop being words in a prompt and become different
     orders.
+
+    ``knowledge_block`` is the exact text the scan showed the agent, so the
+    decision record can hash it. Passed in rather than re-rendered: a second
+    render would be the same bytes only if nothing wrote a principle in
+    between, and "the hash covers what the agent read" must not rest on that.
     """
     from alpha_agents.data.trader import DEFAULT_TRADER, get_trader
     trader = trader or get_trader(DEFAULT_TRADER)
@@ -662,7 +678,9 @@ def _save_recommendations_list(
         except Exception as e:
             logger.debug("Failed to fetch entry prices: %s", e)
 
-    # G6: one context per run, shared by every pick it produced.
+    # G6: one context per run, shared by every pick it produced. The
+    # knowledge hash comes from the block the scan actually rendered, so
+    # "this note was in front of the agent" is checkable rather than inferred.
     _decision_ctx = build_decision_context(
         task="morning_scan",
         news_window_hours=_WINDOW_STATE.get("hours"),
@@ -670,6 +688,7 @@ def _save_recommendations_list(
         themes=safe_active_themes(),
         market_regime=safe_market_regime(),
         sentiment_phase=safe_sentiment_phase(),
+        knowledge=knowledge_block,
     )
 
     saved = 0

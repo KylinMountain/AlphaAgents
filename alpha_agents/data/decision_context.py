@@ -18,6 +18,7 @@ sufficient to recover them, and copying text into every prediction row
 would bloat the table for no gain.
 """
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -29,6 +30,35 @@ logger = logging.getLogger(__name__)
 CONTEXT_VERSION = 1
 
 
+def knowledge_hash(text: str | None) -> str | None:
+    """The fingerprint of the knowledge block a decision actually read.
+
+    ``causal_trace`` records which policy version a decision ran under and
+    then has to admit it cannot say which rule text that decision read — so
+    "traced" means the chain episode → candidate → variant → decision is
+    complete, not that the decision quoted the candidate. This closes that
+    gap: the rendered block is hashed and stored beside the decision, and
+    "this note was in front of the agent" becomes checkable rather than
+    inferred.
+
+    **The hash, not the text.** The block is rendered from rows that are
+    already in the database, so copying its body into every prediction row
+    would bloat the table to say something a re-render can say. Same reason
+    the module docstring gives for excluding news bodies.
+
+    ``None`` for an empty or missing block, and that is a distinct answer
+    from "a block that rendered to nothing": the first means no knowledge
+    was in force, the second would be a hash of the empty string and would
+    make the two indistinguishable in the record.
+    """
+    if text is None:
+        return None
+    body = str(text).strip()
+    if not body:
+        return None
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 def build_decision_context(
     *,
     task: str,
@@ -38,6 +68,7 @@ def build_decision_context(
     market_regime: str | None = None,
     sentiment_phase: str | None = None,
     extra: dict | None = None,
+    knowledge: str | None = None,
     decided_at: datetime | None = None,
 ) -> dict:
     """Describe the decision point behind a recommendation.
@@ -50,6 +81,11 @@ def build_decision_context(
         market_regime: strong / neutral / weak, from exit_signals.
         sentiment_phase: the sentiment-cycle label.
         extra: task-specific fields.
+        knowledge: the rendered knowledge block this decision was shown, if
+            the caller rendered one. Only its hash is recorded — see
+            :func:`knowledge_hash` — and the key is **absent** when the
+            argument is omitted, so an older caller records exactly what it
+            recorded before.
         decided_at: defaults to now.
     """
     decided_at = decided_at or datetime.now()
@@ -82,6 +118,14 @@ def build_decision_context(
         ctx["sentiment_phase"] = sentiment_phase
     if extra:
         ctx.update(extra)
+
+    # Recorded only when the caller actually rendered a block. An omitted
+    # argument and an empty render are different facts: the first is "this
+    # path does not pass knowledge", the second is "no knowledge was in
+    # force". Writing a key for the first would claim a reading that never
+    # happened.
+    if knowledge is not None:
+        ctx["knowledge_hash"] = knowledge_hash(knowledge)
 
     return ctx
 

@@ -180,3 +180,36 @@ def test_build_morning_context_default_mode_is_full():
         from alpha_agents.evolution.context_builder import build_morning_context
         result = build_morning_context(themes=[], stats="")
     assert "【交易经验手册】" in result
+
+
+def test_a_supplied_knowledge_block_is_used_verbatim():
+    """The caller renders once and hands the same string back for hashing.
+
+    Without this the recorder would re-render, and "the hash covers what the
+    agent read" would hold only if no principle had been approved in between.
+    Passing it in makes that identity structural instead of assumed.
+    """
+    supplied = "【交易经验手册】\n• 我渲染过一次"
+    with patch("alpha_agents.evolution.context_builder.inject_sentiment", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_cognition", return_value=""), \
+         patch("alpha_agents.evolution.context_builder.inject_principles",
+               side_effect=AssertionError("must not re-render")), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
+               side_effect=AssertionError("must not re-render")):
+        from alpha_agents.evolution.context_builder import build_morning_context
+        result = build_morning_context(themes=[], stats="", knowledge=supplied)
+    assert supplied in result
+
+
+def test_knowledge_in_force_is_empty_when_retrieval_fails():
+    """A retrieval failure is an empty block, not a broken decision.
+
+    The hash then records "nothing was in force", which is the truth, rather
+    than the caller crashing before it can record anything.
+    """
+    with patch("alpha_agents.evolution.context_builder.inject_principles",
+               side_effect=RuntimeError("db down")), \
+         patch("alpha_agents.evolution.context_builder.inject_playbooks",
+               return_value=""):
+        from alpha_agents.evolution.context_builder import knowledge_in_force
+        assert knowledge_in_force() == ""

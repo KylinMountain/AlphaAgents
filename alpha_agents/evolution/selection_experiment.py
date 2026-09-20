@@ -39,6 +39,13 @@ ARMS = {
     },
 }
 
+DECISION_KEYS = frozenset({
+    "trader", "picks_per_day", "panel_size", "participation",
+    "max_turns_per_decision", "model_timeout_seconds", "pace_seconds",
+    "news_limit", "trader_tools_enabled", "direction_limit",
+    "learning_input",
+})
+
 RISK_KEYS = (
     "max_drawdown_pct",
     "max_tail_loss_pct",
@@ -116,6 +123,21 @@ def validate(manifest: dict) -> list[str]:
             "cost_model", "exit_policy"):
         if not manifest.get(field):
             errors.append(f"{field} is required")
+
+    decision = manifest.get("decision_config") or {}
+    if set(decision) != DECISION_KEYS:
+        errors.append(
+            "decision_config keys must equal the closed no-flow contract")
+    else:
+        if decision.get("news_limit") != 0:
+            errors.append("decision_config.news_limit must be 0")
+        if decision.get("trader_tools_enabled") is not False:
+            errors.append(
+                "decision_config.trader_tools_enabled must be false")
+        if decision.get("learning_input") != "frozen":
+            errors.append("decision_config.learning_input must be frozen")
+        if decision.get("direction_limit") != 3:
+            errors.append("decision_config.direction_limit must be 3")
 
     identity = manifest.get("baseline_identity") or {}
     for key in ("code_ref", "policy_ref", "input_hash"):

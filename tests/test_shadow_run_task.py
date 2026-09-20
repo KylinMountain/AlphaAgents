@@ -14,6 +14,7 @@ with it (the shadow branch is graded and never traded).
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 from datetime import datetime, timedelta
 
 import pytest
@@ -24,6 +25,11 @@ from alpha_agents.evolution import holdout_gate, shadow
 from alpha_agents.pipeline.tasks.shadow_run import run_shadow_run
 
 CANDIDATE = "600000"
+
+
+def _open_at(when: str, **kwargs):
+    with patch.object(shadow, "_today", return_value=when):
+        return _open_at(_day(-30, **kwargs)
 
 
 @pytest.fixture()
@@ -73,8 +79,7 @@ def experiment(store) -> dict:
         frozen_at=_day(-30))
     run_id = shadow.open_run(policy_version_id=target, reason="measure it",
                              report_type="morning",
-                             producer=shadow.CANDIDATE_NAME,
-                             opened_at=_day(-30))
+                             producer=shadow.CANDIDATE_NAME,))
     return {"incumbent": incumbent, "target": target, "run": run_id}
 
 
@@ -325,11 +330,9 @@ class TestAClosedRunDoesNotReadAsPending:
         this line.
         """
         shadow.close_run(experiment["run"], reason="the book cannot be paired")
-        shadow.open_run(
-            policy_version_id=experiment["incumbent"],
+        _open_at(_day(-30, policy_version_id=experiment["incumbent"],
             reason="a live one, so the task has something to report",
-            report_type="morning", producer=shadow.BASELINE_NAME,
-            opened_at=_day(-30))
+            report_type="morning", producer=shadow.BASELINE_NAME,))
         report = asyncio.run(run_shadow_run())
         assert report is not None
         assert "已结束" in report

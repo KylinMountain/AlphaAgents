@@ -592,8 +592,7 @@ def _positive_id(value, field: str) -> int:
 
 def open_run(*, policy_version_id: int, reason: str,
              trader_id: str | None = None, report_type: str = "intraday",
-             producer: str = BASELINE_NAME,
-             opened_at: str | None = None) -> int:
+             producer: str = BASELINE_NAME) -> int:
     """Open a shadow run of one frozen policy version. Returns its id.
 
     Bound to a version rather than to "the current policy": the point of the
@@ -622,7 +621,9 @@ def open_run(*, policy_version_id: int, reason: str,
             "the name decides the verdict's evidence scope, and a scope nobody "
             f"emitted is a promise with nothing behind it. Registered: "
             f"{sorted(PRODUCERS)}.")
-    when = _text(opened_at, "opened_at") if opened_at else _today()
+    # Registration time is writer-controlled. A caller cannot backfill a
+    # historical start date and later present already-known rows as forward.
+    when = _today()
     if policy_registry.get_version(policy_version_id) is None:
         raise ShadowError(
             f"No policy version #{policy_version_id} to shadow: a run that "

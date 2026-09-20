@@ -1562,6 +1562,107 @@ def _validate_sector_order_relations(
     return accepted, refused
 
 
+def _decision_world_read_set(
+        ctx, *, day: str, ranking_day: str, phase: str,
+        panel: list[dict], news: list[dict]) -> dict:
+    """Freeze the actual source identities consumed by one buy decision."""
+    cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
+
+    price_ref = world_read_set.fact_ref(
+        {
+            "source": "market_history.db:daily_kline",
+            "session": ranking_day,
+            "input_hash": ctx.input_identity["input_hash"],
+        },
+        available_at=f"{ranking_day} 15:00:00",
+    )
+
+    membership_ref = None
+    if ctx.sector_membership_archive:
+        membership = sector_membership.as_of(
+            ctx.sector_membership_archive, cutoff)
+        membership_ref = {
+            "snapshot_id": membership.snapshot_id,
+            "content_hash": membership.content_hash,
+            "available_at": membership.available_at,
+        }
+
+    # The local stocks table stores today's ST/suspension flags. Keep the
+    # consumed status fact in the read set, but grade it C rather than letting
+    # a historical replay silently claim it knew the historical status.
+    security_ref = world_read_set.fact_ref(
+        {
+            "source": "stocks.db:stocks",
+            "input_hash": ctx.input_identity["input_hash"],
+            "codes": sorted(
+                str(row.get("code") or "")
+                for row in panel if row.get("code")),
+        },
+        point_in_time_grade="C",
+        strict_replay_eligible=False,
+    )
+
+    flow_rows = [
+        {"code": row.get("code"), "net_amount": row.get("net_amount")}
+        for row in panel if row.get("net_amount") is not None
+    ]
+    fund_refs = []
+    if flow_rows:
+        fund_refs.append(world_read_set.fact_ref(
+            {
+                "source": "stock_fund_flow_daily",
+                "session": ranking_day,
+                "rows": flow_rows,
+            },
+            available_at=f"{ranking_day} 15:00:00",
+            point_in_time_grade="B",
+            strict_replay_eligible=False,
+        ))
+
+    event_refs = [
+        {
+            **dict(ref),
+            "point_in_time_grade": "A",
+            "strict_replay_eligible": True,
+        }
+        for ref in _event_snapshot_refs(panel, cutoff)
+    ]
+
+    extra_refs = []
+    if news:
+        extra_refs.append(world_read_set.fact_ref(
+            {
+                "source": "decision_news_window",
+                "rows": [
+                    {
+                        "time": row.get("time"),
+                        "source": row.get("source"),
+                        "title": row.get("title"),
+                    }
+                    for row in news
+                ],
+            },
+            point_in_time_grade="U",
+            strict_replay_eligible=False,
+        ))
+
+    read_set = world_read_set.build(
+        cutoff=cutoff,
+        ranking_session=ranking_day,
+        source_identity_hash=ctx.input_identity["input_hash"],
+        code_ref=ctx.code_ref or "unbound",
+        policy_ref=ctx.policy_ref or "unbound",
+        membership=membership_ref,
+        security_status=security_ref,
+        price_refs=[price_ref],
+        event_refs=event_refs,
+        fund_flow_refs=fund_refs,
+        extra_refs=extra_refs,
+    )
+    world_read_set.require_valid(read_set, strict=False)
+    return read_set
+
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """Model-backed buy decision through the declared selection architecture."""
@@ -1780,6 +1881,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 list(verdict.get("refused") or []) + relation_refusals
             )
 
+    ctx.last_world_read_set = _decision_world_read_set(
+        ctx, day=day, ranking_day=ranking_day, phase=phase,
+        panel=(planner_panel if sector_mode else panel), news=news)
+    ctx.world_read_set_hashes.append(
+        ctx.last_world_read_set["read_set_hash"])
+
     try:
         from alpha_agents.data import opportunity_journal as OJ
         cutoff = f"{day} {'14:55:00' if phase == 'close' else '09:00:00'}"
@@ -1832,6 +1939,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "event_snapshot_refs": _event_snapshot_refs(panel, cutoff),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
+                "world_read_set": ctx.last_world_read_set,
                 "decision_trace": {
                     "direction": (
                         getattr(ctx, "last_sector_context", {}).get(
@@ -3515,6 +3623,10 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "selection_architecture": ctx.selection_architecture,
         "experiment_arm": ctx.experiment_arm,
         "experiment_manifest_hash": ctx.experiment_manifest_hash,
+        "code_ref": ctx.code_ref,
+        "policy_ref": ctx.policy_ref,
+        "input_identity": ctx.input_identity,
+        "world_read_set_hashes": list(ctx.world_read_set_hashes),
         "frozen_directions_hash": (
             (ctx.frozen_directions or {}).get("archive_hash")
             if hasattr(ctx, "frozen_directions") else None),

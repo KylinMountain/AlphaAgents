@@ -469,6 +469,11 @@ def _research_stage(ctx, snapshot, panel):
             "unknowns": "持续性",
             "invalidations": ["核心订单被取消"],
         }],
+        "direction_trace": {
+            "status": "selected",
+            "model_elapsed_ms": 3,
+            "refused": 0,
+        },
     }
     return panel, None
 
@@ -516,6 +521,7 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
             "refused": [], "parse_error": None,
             "research_budget": {
                 "used": 1, "deep_dive_names": ["600001"]},
+            "model_elapsed_ms": 5,
             "research_trace": [{
                 "tool": "get_stock_context",
                 "code": "600001",
@@ -537,6 +543,7 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
         return {
             "orders": [], "refused": [], "parse_error": None,
             "raw": "{}", "research_budget": None,
+            "model_elapsed_ms": 7,
         }
 
     monkeypatch.setattr(wf, "_sector_trade_plan", planner)
@@ -558,6 +565,13 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
     assert packet["stocks"][0]["tool_facts"][0]["payload"]["atr_pct"] == 3.2
     assert journal["context"]["research_packet"]["packet_hash"] == (
         packet["packet_hash"])
+    trace = journal["context"]["decision_trace"]
+    assert trace["direction"] == {
+        "status": "selected", "model_elapsed_ms": 3, "refused": 0}
+    assert trace["stock"]["status"] == "selected"
+    assert trace["stock"]["model_elapsed_ms"] == 5
+    assert trace["planner"]["status"] == "empty"
+    assert trace["planner"]["model_elapsed_ms"] == 7
 
 
 def test_hard_research_invalidation_never_reaches_planner(monkeypatch):

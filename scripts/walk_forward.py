@@ -1184,7 +1184,8 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
     sessions = ctx.corpus.days[max(0, index - 20):index + 1]
     bars_by_day = {session: ctx.corpus.bars(session) for session in sessions}
     flow = (
-        None if ctx.selection_architecture == "sector_first_no_flow"
+        None if ctx.selection_architecture in {
+            "sector_first_no_flow", "sector_rank_price_v1"}
         else _fund_flow_map(ctx, ranking_day)
     )
     snapshots = sector_selection.build_sector_snapshots(

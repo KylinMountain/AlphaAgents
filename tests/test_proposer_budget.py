@@ -9,8 +9,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agents import RunContextWrapper, function_tool
+from agents import function_tool
 from agents.exceptions import MaxTurnsExceeded
+from agents.tool_context import ToolContext
 
 from alpha_agents.agents import sector_selector, sector_stock_selector, t1_decider
 from alpha_agents.tools import budget as B
@@ -46,7 +47,15 @@ def tool():
 
 
 async def _call_tool(agent):
-    return await agent.tools[0].on_invoke_tool(RunContextWrapper(context=None), "{}")
+    offered = agent.tools[0]
+    context = ToolContext(
+        context=None,
+        tool_name=offered.name,
+        tool_call_id="offline-budget-call",
+        tool_arguments="{}",
+        agent=agent,
+    )
+    return await offered.on_invoke_tool(context, "{}")
 
 
 async def _propose(module, *, tools, budget):

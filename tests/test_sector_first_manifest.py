@@ -207,6 +207,16 @@ def test_capability_report_is_content_addressed_and_formal_gate_is_explicit(
                     "evidence": "provider revision semantics + archived vintages checked",
                 },
             },
+            "security_status": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "test-reviewer",
+                    "verified_at": "2026-09-20T09:00:00+08:00",
+                    "evidence": "dated ST/suspension archive checked",
+                },
+            },
         },
     })
     assert P.formal_errors(report) == []
@@ -241,3 +251,41 @@ def test_fund_flow_grade_a_needs_named_verification_evidence():
         "fund_flow grade A requires verification.evidence"
         in P.formal_errors(report)
     )
+
+
+def test_current_stock_status_columns_are_not_historical_pit(tmp_path):
+    path = tmp_path / "stocks.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE stocks ("
+        "code TEXT PRIMARY KEY, name TEXT, is_st INTEGER, "
+        "is_suspended INTEGER)")
+    conn.execute(
+        "INSERT INTO stocks VALUES ('600001','甲',0,0)")
+    conn.commit()
+    conn.close()
+
+    got = P.probe_all(tmp_path)["security_status"]
+    assert got["status"] == "available"
+    assert got["point_in_time_grade"] == "C"
+    assert got["strict_replay_eligible"] is False
+    assert "current snapshot" in got["note"]
+
+
+def test_formal_gate_requires_historical_security_status():
+    report = P.with_content_hash({
+        "capabilities": {
+            "fund_flow": {
+                "status": "available",
+                "point_in_time_grade": "A",
+                "strict_replay_eligible": True,
+                "verification": {
+                    "verified_by": "reviewer",
+                    "verified_at": "2026-09-20",
+                    "evidence": "vintages",
+                },
+            },
+        },
+    })
+    errors = P.formal_errors(report)
+    assert "security_status capability is not available" in errors

@@ -491,8 +491,8 @@ class TestReservationsFollowTheOrderLifecycle:
         # And both rows exist independently on different orders.
         rows = _conn().execute(
             "SELECT order_id, state FROM reservations "
-            "WHERE order_id IN (?, ?) ORDER BY order_id",
-            (oid_a, oid_b)).fetchall()
+            "WHERE order_id IN (?, ?) AND kind=? ORDER BY order_id",
+            (oid_a, oid_b, R.CASH_RESERVE)).fetchall()
         assert [(r["order_id"], r["state"]) for r in rows] == \
             [(oid_a, R.HELD), (oid_b, R.HELD)]
 

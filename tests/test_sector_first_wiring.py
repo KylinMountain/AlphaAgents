@@ -104,8 +104,12 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     monkeypatch.setattr(
         wf, "_sector_stock_choice",
         lambda *a, **k: {
-            "stocks": [{"code": "600001", "primary_theme": "AI", "reason": "pick"}],
+            "stocks": [{
+                "code": "600001", "primary_theme": "算力",
+                "reason": "算力关系更直接", "counterevidence": "位置偏高",
+            }],
             "refused": [], "parse_error": None, "research_budget": None,
+            "research_trace": [],
         })
     monkeypatch.setattr(
         wf, "_sector_trade_plan",
@@ -123,15 +127,15 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
     )
 
     got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
-    assert got[0]["theme"] == "AI"
-    assert got[0]["supporting_themes"] == ["算力"]
-    assert captured["theme"] == "AI"
+    assert got[0]["theme"] == "算力"
+    assert got[0]["supporting_themes"] == ["AI"]
+    assert captured["theme"] == "算力"
     assert captured["theme"] != ctx.theme
     assert got[0]["membership_snapshot_id"] == "m1"
     assert got[0]["membership_hash"] == snapshot.content_hash
-    assert got[0]["primary_theme_relation_evidence_id"] == primary_relation
+    assert got[0]["primary_theme_relation_evidence_id"] == supporting_relation
     assert got[0]["supporting_theme_relation_evidence_ids"] == [
-        supporting_relation]
+        primary_relation]
 
 
 def test_dual_rank_default_keeps_run_theme(monkeypatch):
@@ -432,3 +436,181 @@ def test_sector_relation_validation_rejects_tampered_membership_hash():
     assert accepted == []
     assert refused[0]["why"] == "theme_unresolved"
     assert "hash mismatch" in refused[0]["detail"]
+
+
+def _research_stage(ctx, snapshot, panel):
+    ctx.last_sector_context = {
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "selected_themes": ["算力"],
+        "direction_research": [{
+            "sector_id": "算力",
+            "thesis": "订单上修",
+            "counterevidence": "估值偏高",
+            "unknowns": "持续性",
+            "invalidations": ["核心订单被取消"],
+        }],
+    }
+    return panel, None
+
+
+def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
+    from alpha_agents.data import policy_registry
+
+    ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"AI": ("600001",), "算力": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    rel_ai = SM.relation_evidence_id(
+        snapshot, sector_id="AI", code="600001")
+    rel_compute = SM.relation_evidence_id(
+        snapshot, sector_id="算力", code="600001")
+    panel = [{
+        "code": "600001", "name": "甲", "adv20": 100000,
+        "close": 10.0, "change_pct": 2.0, "turnover_rate": 3.0,
+        "primary_theme": "AI", "supporting_themes": ["算力"],
+        "eligible_themes": ["AI", "算力"],
+        "theme_relation_evidence_ids": {
+            "AI": rel_ai, "算力": rel_compute},
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "primary_theme_relation_evidence_id": rel_ai,
+        "supporting_theme_relation_evidence_ids": [rel_compute],
+    }]
+    monkeypatch.setattr(
+        wf, "_sector_first_stage",
+        lambda *a, **k: _research_stage(ctx, snapshot, panel))
+    monkeypatch.setattr(
+        wf, "_sector_stock_choice",
+        lambda *a, **k: {
+            "stocks": [{
+                "code": "600001", "primary_theme": "算力",
+                "reason": "同方向里关系更直接",
+                "counterevidence": "短线位置偏高",
+            }],
+            "refused": [], "parse_error": None,
+            "research_budget": {
+                "used": 1, "deep_dive_names": ["600001"]},
+            "research_trace": [{
+                "tool": "get_stock_context",
+                "code": "600001",
+                "status": "ok",
+                "elapsed_ms": 2,
+                "result_hash": "fact-hash",
+                "payload": {
+                    "available": True,
+                    "atr_pct": 3.2,
+                    "structure": "above_ma20",
+                },
+            }],
+        })
+    monkeypatch.setattr(policy_registry, "active_ref", lambda: "policy-v1")
+    captured = {}
+
+    def planner(**kwargs):
+        captured["packet"] = kwargs["research_packet_payload"]
+        return {
+            "orders": [], "refused": [], "parse_error": None,
+            "raw": "{}", "research_budget": None,
+        }
+
+    monkeypatch.setattr(wf, "_sector_trade_plan", planner)
+    _wire_common(monkeypatch)
+    journal = {}
+    monkeypatch.setattr(
+        OJ, "record_decision", lambda **kwargs: journal.update(kwargs) or 1)
+
+    assert wf._decide_llm(ctx, "2026-01-30", "2026-01-29") == []
+
+    packet = captured["packet"]
+    assert packet["decision"]["cutoff"] == "2026-01-30 09:00:00"
+    assert packet["decision"]["policy_ref"] == "policy-v1"
+    assert packet["world"]["membership_snapshot_id"] == "m1"
+    assert packet["stocks"][0]["primary_theme"] == "算力"
+    assert packet["stocks"][0]["selector_reason"] == "同方向里关系更直接"
+    assert packet["stocks"][0]["counterevidence"] == "短线位置偏高"
+    assert packet["stocks"][0]["direction_research"]["thesis"] == "订单上修"
+    assert packet["stocks"][0]["tool_facts"][0]["payload"]["atr_pct"] == 3.2
+    assert journal["context"]["research_packet"]["packet_hash"] == (
+        packet["packet_hash"])
+
+
+def test_hard_research_invalidation_never_reaches_planner(monkeypatch):
+    from alpha_agents.data import policy_registry
+
+    ctx = _Ctx()
+    snapshot = SS.MembershipSnapshot(
+        snapshot_id="m1",
+        available_at="2026-01-29 15:00:00",
+        source="fixture",
+        sector_type="concept",
+        members={"算力": ("600001",)},
+        point_in_time=True,
+    )
+    ctx.sector_membership_archive = (snapshot,)
+    relation = SM.relation_evidence_id(
+        snapshot, sector_id="算力", code="600001")
+    panel = [{
+        "code": "600001", "name": "甲", "adv20": 100000,
+        "close": 10.0, "change_pct": 2.0,
+        "primary_theme": "算力", "supporting_themes": [],
+        "eligible_themes": ["算力"],
+        "theme_relation_evidence_ids": {"算力": relation},
+        "membership_snapshot_id": snapshot.snapshot_id,
+        "membership_hash": snapshot.content_hash,
+        "primary_theme_relation_evidence_id": relation,
+        "supporting_theme_relation_evidence_ids": [],
+    }]
+    monkeypatch.setattr(
+        wf, "_sector_first_stage",
+        lambda *a, **k: _research_stage(ctx, snapshot, panel))
+    monkeypatch.setattr(
+        wf, "_sector_stock_choice",
+        lambda *a, **k: {
+            "stocks": [{
+                "code": "600001", "primary_theme": "算力",
+                "reason": "候选", "counterevidence": "",
+            }],
+            "refused": [], "parse_error": None,
+            "research_budget": {"used": 1, "deep_dive_names": ["600001"]},
+            "research_trace": [{
+                "tool": "get_event_context",
+                "code": "600001",
+                "status": "ok",
+                "elapsed_ms": 1,
+                "result_hash": "block-hash",
+                "payload": {
+                    "available": True,
+                    "must_not_buy": True,
+                    "reason": "核心订单取消已确认",
+                },
+            }],
+        })
+    monkeypatch.setattr(policy_registry, "active_ref", lambda: "policy-v1")
+    monkeypatch.setattr(
+        wf, "_sector_trade_plan",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("hard invalidation must not reach planner")))
+    _wire_common(monkeypatch)
+    journal = {}
+    monkeypatch.setattr(
+        OJ, "record_decision", lambda **kwargs: journal.update(kwargs) or 1)
+    monkeypatch.setattr(
+        wf, "create_pending_order",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("hard invalidation must not create intent")))
+
+    got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
+
+    assert got == []
+    refusal = next(
+        row for row in journal["refusals"]
+        if row.get("why") == "research_invalidation")
+    assert refusal["code"] == "600001"
+    assert refusal["detail"] == "核心订单取消已确认"

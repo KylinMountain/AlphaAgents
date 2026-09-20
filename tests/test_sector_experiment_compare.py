@@ -390,7 +390,8 @@ def test_load_arm_anchors_return_and_drawdown_to_initial_mark(tmp_path):
     got = C.load_arm(root, "A")
     assert got["portfolio"]["net_return_pct"] == 0.0
     assert got["portfolio"]["max_drawdown_pct"] == 5.0
-    assert got["daily_returns_pct"]["2026-01-05"] == -5.0
+    assert got["daily_returns_pct"]["2026-01-05"] == pytest.approx(
+        -5.0, abs=1e-12)
     assert got["daily_returns_pct"]["2026-01-06"] == pytest.approx(
         5.263157894736842)
 

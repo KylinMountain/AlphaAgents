@@ -147,6 +147,12 @@ def plan_risk_amount_cap(fill_price: float, stop_loss: float | None,
     if risk_per_share <= 0:
         return 0.0
     risk_budget = capital * max_position_pct * hard_stop_pct / 100.0
-    shares = math.floor(risk_budget / risk_per_share + 1e-12)
+    raw_shares = risk_budget / risk_per_share
+    nearest = round(raw_shares)
+    shares = (
+        int(nearest)
+        if math.isclose(raw_shares, nearest, rel_tol=1e-12, abs_tol=1e-9)
+        else math.floor(raw_shares)
+    )
     shares = shares // lot_size * lot_size
     return max(0.0, shares * fill_price)

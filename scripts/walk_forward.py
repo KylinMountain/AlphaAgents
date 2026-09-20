@@ -3356,6 +3356,12 @@ def write_report(result: dict, out_dir: Path) -> dict:
     model = result["model_calls"]
     model_usage_ok, model_usage_detail = _model_usage(ctx, model)
 
+    # Validate the whole equity history before writing even the first artifact.
+    # A half-written report directory is worse than a hard failure: a later
+    # comparator could mistake stale files from the same path for this run.
+    performance.equity_metrics(
+        result["initial_account"]["equity"], result["equity"])
+
     capability_matrix = replay_capabilities.build(window, _REPLAY_DIR)
 
     meta = {

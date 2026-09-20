@@ -204,6 +204,10 @@ def require_valid(packet: dict, *, cutoff: str | None = None,
 
     decision = packet.get("decision") or {}
     world = packet.get("world") or {}
+    if not str(world.get("membership_snapshot_id") or "").strip():
+        raise ResearchPacketError("research packet is missing membership snapshot")
+    if not str(world.get("membership_hash") or "").strip():
+        raise ResearchPacketError("research packet is missing membership hash")
     if cutoff is not None and decision.get("cutoff") != cutoff:
         raise ResearchPacketError(
             f"research packet cutoff {decision.get('cutoff')!r} != {cutoff!r}")
@@ -214,6 +218,11 @@ def require_valid(packet: dict, *, cutoff: str | None = None,
             and world.get("membership_hash") != membership_hash):
         raise ResearchPacketError("research packet membership hash mismatch")
 
+    direction_ids = {
+        str(row.get("sector_id") or "").strip()
+        for row in (packet.get("directions") or [])
+        if str(row.get("sector_id") or "").strip()
+    }
     for stock in packet.get("stocks") or []:
         if not str(stock.get("code") or "").strip():
             raise ResearchPacketError("research packet stock is missing code")
@@ -225,6 +234,10 @@ def require_valid(packet: dict, *, cutoff: str | None = None,
             raise ResearchPacketError(
                 f"research packet stock {stock.get('code')} has no "
                 "primary relation evidence")
+        if stock.get("primary_theme") not in direction_ids:
+            raise ResearchPacketError(
+                f"research packet stock {stock.get('code')} primary theme "
+                "was not selected by the direction stage")
     return stored
 
 

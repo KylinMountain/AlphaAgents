@@ -9,6 +9,7 @@ turning portfolio.py into a second risk engine.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 
 from alpha_agents.data import attribution, order_theme_exposure, reservations
@@ -146,6 +147,6 @@ def plan_risk_amount_cap(fill_price: float, stop_loss: float | None,
     if risk_per_share <= 0:
         return 0.0
     risk_budget = capital * max_position_pct * hard_stop_pct / 100.0
-    shares = int(risk_budget // risk_per_share)
+    shares = math.floor(risk_budget / risk_per_share + 1e-12)
     shares = shares // lot_size * lot_size
     return max(0.0, shares * fill_price)

@@ -682,9 +682,11 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     costs a history read per code and most of the pool is never shown.
     """
     bars_prev = ctx.corpus.bars(prev_day)
-    concepts = _concepts_map(ctx)
-    limit_pool = _limit_pool_map(ctx, day)
-    fund_flow = _fund_flow_map(ctx, prev_day)
+    minimal_no_flow = getattr(ctx, "selection_architecture", "") == (
+        "dual_rank_price_v1")
+    concepts = {} if minimal_no_flow else _concepts_map(ctx)
+    limit_pool = {} if minimal_no_flow else _limit_pool_map(ctx, day)
+    fund_flow = {} if minimal_no_flow else _fund_flow_map(ctx, prev_day)
     ranked = []
     for code in ctx.corpus.instruments:
         reason = _eligibility(ctx, code, day, prev_day)
@@ -856,8 +858,9 @@ def _news_window(day: str, prev_day: str, limit: int,
         return []
 
 
-def _book_and_knowledge(ctx, day: str,
-                        phase: str = "open") -> tuple[str, str]:
+def _book_and_knowledge(
+        ctx, day: str, phase: str = "open", *,
+        include_learning: bool = True) -> tuple[str, str]:
     """What the agent holds, and what it has learned, as of the replay day.
 
     Read through the same functions the live morning scan uses, so a replay
@@ -900,12 +903,14 @@ def _book_and_knowledge(ctx, day: str,
     except Exception as exc:                          # noqa: BLE001
         logger.warning("portfolio context unavailable: %s", exc)
         book = ""
+    if not include_learning:
+        return book, ""
     parts = []
     for fn in (feedback.inject_sentiment, feedback.inject_principles,
                feedback.inject_playbooks):
         try:
             parts.append(fn())
-        except Exception as exc:                      # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001
             logger.warning("%s unavailable: %s", fn.__name__, exc)
     parts.append(_knowledge_block(ctx, day))
     return book, "\n\n".join(p for p in parts if p)
@@ -1215,23 +1220,32 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
                         selected: list[str], limit: int) -> list[dict]:
     """Build stocks only after directions have been selected."""
     bars = ctx.corpus.bars(ranking_day)
-    limit_pool = _limit_pool_map(ctx, day)
-    fund_flow = _fund_flow_map(ctx, ranking_day)
-    concepts = sector_membership.concepts_by_code(membership)
+    minimal_no_flow = getattr(ctx, "selection_architecture", "") == (
+        "sector_rank_price_v1")
+    limit_pool = {} if minimal_no_flow else _limit_pool_map(ctx, day)
+    fund_flow = {} if minimal_no_flow else _fund_flow_map(ctx, ranking_day)
+    concepts = (
+        {} if minimal_no_flow
+        else sector_membership.concepts_by_code(membership)
+    )
     index = ctx.corpus.index.get(ranking_day)
     if index is None:
         raise ValueError(f"ranking day {ranking_day} is outside the corpus")
-    loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
-    loo_bars = {session: ctx.corpus.bars(session) for session in loo_sessions}
-    leave_one_out = sector_selection.candidate_leave_one_out_5d(
-        membership=membership,
-        decision_at=f"{day} 09:00:00",
-        as_of_session=ranking_day,
-        sessions=loo_sessions,
-        bars_by_day=loo_bars,
-        market_codes=set(ctx.corpus.bars(ranking_day)),
-        strict_pit=True,
-    )
+    if minimal_no_flow:
+        leave_one_out = {}
+    else:
+        loo_sessions = ctx.corpus.days[max(0, index - 5):index + 1]
+        loo_bars = {
+            session: ctx.corpus.bars(session) for session in loo_sessions}
+        leave_one_out = sector_selection.candidate_leave_one_out_5d(
+            membership=membership,
+            decision_at=f"{day} 09:00:00",
+            as_of_session=ranking_day,
+            sessions=loo_sessions,
+            bars_by_day=loo_bars,
+            market_codes=set(ctx.corpus.bars(ranking_day)),
+            strict_pit=True,
+        )
 
     candidate_codes = set()
     for sector in selected:
@@ -1346,16 +1360,19 @@ _MINIMAL_PLANNER_FIELDS = (
 )
 
 
-def _minimal_planner_panel(panel: list[dict]) -> list[dict]:
+def _minimal_planner_panel(
+        panel: list[dict], *, limit: int) -> list[dict]:
     """Closed planner view shared by CONTROL and SECTOR.
 
     Theme names, peer metrics, concepts, limit-sector labels and fund flow are
     deliberately absent. The SECTOR arm may use PIT themes to *discover* the
     candidates, but the shared planner cannot receive extra explanatory data.
     """
+    if limit <= 0:
+        return []
     return [
         {key: row.get(key) for key in _MINIMAL_PLANNER_FIELDS}
-        for row in panel
+        for row in panel[:limit]
     ]
 
 
@@ -1776,7 +1793,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
         else:
             discovered = _build_panel(
                 ctx, day, ranking_day, ctx.panel_size)
-        panel = _minimal_planner_panel(discovered)
+        panel = _minimal_planner_panel(discovered, limit=ctx.picks)
     elif sector_mode:
         if phase != "open":
             raise RuntimeError(
@@ -1805,9 +1822,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
         logger.info("%s: empty panel, nothing to decide", day)
         return []
 
-    book, knowledge = _book_and_knowledge(ctx, day, phase)
-    if minimal_mode:
-        knowledge = ""
+    book, knowledge = _book_and_knowledge(
+        ctx, day, phase, include_learning=not minimal_mode)
     stock_choice = None
     planner_panel = panel
 
@@ -3176,6 +3192,13 @@ def _verify_experiment_window(ctx, window: list[str]) -> None:
         raise SystemExit(
             f"run window {actual['start']}..{actual['end']} is not one of "
             "the preregistered validation windows")
+    if getattr(ctx, "experiment_family", None) == selection_experiment.FAMILY:
+        expected = int(
+            ctx.experiment_manifest.get("expected_days_per_window") or 0)
+        if len(window) != expected:
+            raise SystemExit(
+                f"nf_discovery_v1 window has {len(window)} trading days; "
+                f"expected exactly {expected}")
 
 
 class Context:

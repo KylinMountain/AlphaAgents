@@ -29,6 +29,51 @@ from alpha_agents.tools.sector_ranking import (
 
 logger = logging.getLogger(__name__)
 
+#: The five concept-fund-flow anomaly conditions, as named numbers.
+#:
+#: | case | meaning | change | net flow |
+#: |------|---------|--------|----------|
+#: | A | 涨 + 大额流入，量价确认 | > +1.0% | > +3 亿 |
+#: | B | 涨但流出，可能借涨出货 | > +2.0% | < -1 亿 |
+#: | C | 不涨但大额流入，暗中布局 | < +1.0% | > +5 亿 |
+#: | D | 跌 + 大额流出，真下杀 | < -1.5% | < -3 亿 |
+#: | E | 跌但流入，逆势接盘 | < -2.0% | > +2 亿 |
+#:
+#: **These are not policy genes, and the difference matters.** A gene is a
+#: number an evidence-backed variant is allowed to move; these are the
+#: constants that decide *whether the trader looks at a concept at all*. They
+#: are named so that the set of selection variables is enumerable — before
+#: 2026-09-21 they were five pairs of literals inside `if` branches, and
+#: "what decides a concept anomaly?" could not be answered without reading
+#: every one of them.
+#:
+#: Moving one on evidence needs a forward sample to grade it, and the
+#: concept-flow history is 13 sessions with only 9 overlapping the replay
+#: corpus — far short of the 50 this repository requires. So the thresholds
+#: are recorded, compared and reported, but no variant mapping exists for
+#: them (``evolution.variant._SUPPORTED_DELTAS`` is empty by design).
+CONCEPT_ANOMALY_THRESHOLDS: dict = {
+    "a_change_pct": 1.0,
+    "a_net_flow_yi": 3.0,
+    "b_change_pct": 2.0,
+    "b_net_flow_yi": -1.0,
+    "c_change_pct": 1.0,
+    "c_net_flow_yi": 5.0,
+    "d_change_pct": -1.5,
+    "d_net_flow_yi": -3.0,
+    "e_change_pct": -2.0,
+    "e_net_flow_yi": 2.0,
+}
+
+#: How many concepts the scan looks at, and how deep into each list.
+#: Named for the same reason as the thresholds: they are selection variables
+#: sitting in the same decision, and a bare `[:5]` does not read as one.
+CONCEPT_SCAN_LIMITS: dict = {
+    "ranking_top_n": 10,
+    "gainers_examined": 5,
+    "losers_examined": 3,
+}
+
 
 def _refresh_theme_strengths() -> None:
     """Lightweight theme strength update using current sector ranking data.
@@ -195,48 +240,66 @@ def _detect_anomalies() -> tuple[bool, str]:
     # ── 1. CONCEPT FUND FLOW (primary anomaly detection) ──
     # Thresholds calibrated for concept scale (concept ~30-50 members per
     # board, so inflow figures are roughly 1/3 of industry for same signal).
+    #
+    # Named in CONCEPT_ANOMALY_THRESHOLDS rather than left inline. Until
+    # 2026-09-21 they were five pairs of literals inside these branches, which
+    # made the set of selection variables impossible to enumerate — you could
+    # not answer "what decides a concept anomaly?" without reading every `if`.
+    # Naming them is the first step toward making them evolvable, and it is
+    # deliberately *only* naming: nothing here is a policy gene yet. A gene
+    # needs a forward sample to be graded on, and the concept-flow history is
+    # 13 sessions (9 overlapping the replay corpus), far short of the 50 the
+    # repository requires before a threshold may be moved on evidence.
+    t = CONCEPT_ANOMALY_THRESHOLDS
     try:
-        ranking = json.loads(get_concept_ranking_fn(top_n=10))
+        lim = CONCEPT_SCAN_LIMITS
+        ranking = json.loads(
+            get_concept_ranking_fn(top_n=lim["ranking_top_n"]))
         top_gainers = ranking.get("gainers", [])
         top_losers = ranking.get("losers", [])
 
-        for concept in top_gainers[:5]:
+        for concept in top_gainers[:lim["gainers_examined"]]:
             name = concept.get("concept", "")
             chg = concept.get("change_pct", 0)
             flow = concept.get("net_flow_yi", 0)
             leader = concept.get("leader", "")
 
             # Case A: 涨 + 大资金流入 = 真异动（量价确认）
-            if chg > 1.0 and flow > 3:
+            if (chg > t["a_change_pct"]
+                    and flow > t["a_net_flow_yi"]):
                 signals.append(
                     f"🔴资金异动(量价确认): {name} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
                     f"领涨{leader}"
                 )
             # Case B: 涨 + 资金流出 = 量价背离（可能出货）
-            elif chg > 2.0 and flow < -1:
+            elif (chg > t["b_change_pct"]
+                    and flow < t["b_net_flow_yi"]):
                 signals.append(
                     f"⚠️量价背离: {name} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
                     f"— 可能主力借涨出货"
                 )
             # Case C: 不怎么涨但资金大幅流入 = 暗中吸筹
-            elif chg < 1.0 and flow > 5:
+            elif (chg < t["c_change_pct"]
+                    and flow > t["c_net_flow_yi"]):
                 signals.append(
                     f"🔵暗流涌动: {name} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
                     f"— 资金暗中布局"
                 )
 
-        for concept in top_losers[:3]:
+        for concept in top_losers[:lim["losers_examined"]]:
             name = concept.get("concept", "")
             chg = concept.get("change_pct", 0)
             flow = concept.get("net_flow_yi", 0)
 
             # Case D: 跌 + 大资金流出 = 真下杀
-            if chg < -1.5 and flow < -3:
+            if (chg < t["d_change_pct"]
+                    and flow < t["d_net_flow_yi"]):
                 signals.append(
                     f"🔴资金出逃: {name} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿"
                 )
             # Case E: 跌 + 资金流入 = 逆势吸筹
-            elif chg < -2.0 and flow > 2:
+            elif (chg < t["e_change_pct"]
+                    and flow > t["e_net_flow_yi"]):
                 signals.append(
                     f"🔵逆势吸筹: {name} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
                     f"— 有人在接盘"

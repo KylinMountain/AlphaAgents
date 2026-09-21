@@ -22,6 +22,7 @@ from alpha_agents.data.report_store import (
 )
 from alpha_agents.notify import notify_all, format_review_notification
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -214,16 +215,20 @@ async def run_daily_review(target_date: str | None = None) -> dict:
                 f"预测详情:\n{json.dumps(details, ensure_ascii=False, indent=2)}\n\n"
                 f"整体准确率: {accuracy * 100:.0f}% ({correct_count}/{total_matched} 匹配的预测正确)"
             )
+            # No max_tokens: a review cut off mid-sentence is worse than a
+            # long one, and a reasoning model spends the budget before it
+            # writes the first character.
             response = await client.chat.completions.create(
                 model=model,
-                max_tokens=2048,
-                timeout=90,
+                timeout=180,
                 messages=[
                     {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
             )
-            review_text = (response.choices[0].message.content if response.choices else "") or ""
+            review_text = content_or_none(response, where="daily_review")
+            if review_text is None:
+                review_text = "LLM分析失败: 模型返回空内容"
         except Exception as e:
             logger.warning("LLM review analysis failed: %s", e)
             review_text = f"LLM分析失败: {e}"

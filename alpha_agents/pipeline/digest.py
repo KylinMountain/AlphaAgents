@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 from alpha_agents import llm_roles
 from alpha_agents.config import DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -263,9 +264,12 @@ async def _digest_once(client: AsyncOpenAI,
     and every one of them was accepted silently.
     """
     user_message = _build_user_message(batch)
+    # ``MAX_OUTPUT_TOKENS`` still sizes the batch (see ``_RESERVED_TOKENS``
+    # and the split below) but is no longer sent as a ceiling: with a
+    # reasoning model the budget is spent thinking before any JSON is
+    # written, so a cap that used to truncate a list now empties it.
     response = await client.chat.completions.create(
         model=_digest_credentials()[2],
-        max_tokens=MAX_OUTPUT_TOKENS,
         timeout=DIGEST_TIMEOUT,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -273,7 +277,7 @@ async def _digest_once(client: AsyncOpenAI,
         ],
     )
     choice = response.choices[0] if response.choices else None
-    text = (choice.message.content if choice else "") or ""
+    text = content_or_none(response, where="digest") or ""
     truncated = bool(choice and choice.finish_reason == "length")
     return _parse_response(text), truncated
 

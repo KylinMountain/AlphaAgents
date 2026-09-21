@@ -16,6 +16,7 @@ from openai import OpenAI
 
 from alpha_agents import llm_roles
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -260,13 +261,16 @@ class ContextCompressor:
             api_key, base_url, summary_model = llm_roles.resolve(llm_roles.SUMMARY)
             client = instrument(OpenAI(api_key=api_key, base_url=base_url),
                                 module="context_compressor")
+            # No max_tokens: a summary truncated mid-clause is stored and
+            # then fed back as context, so the damage compounds.
             response = client.chat.completions.create(
                 model=summary_model or "qwen-plus",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2000,
                 temperature=0.3,
             )
-            summary = response.choices[0].message.content.strip()
+            summary = content_or_none(response, where="context_compressor")
+            if summary is None:
+                return None
             self._previous_summary = summary
             logger.info("Context summary generated (%d chars)", len(summary))
             return summary

@@ -14,6 +14,7 @@ from alpha_agents.data.memory_store import (
 )
 from alpha_agents.data.learning_candidates import record_observation, save_candidate
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -107,15 +108,19 @@ def _call_consolidation_llm(lessons: list[dict], principles: list[dict]) -> dict
             {"role": "system", "content": _CONSOLIDATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        # 4000, not 3000: the observed failure was a response that began
-        # with valid JSON and simply stopped — cut off mid-object, which no
-        # regex salvage can repair. Principles are the only long-term
-        # memory this system has, so the call that produces them should not
-        # be the one running closest to its ceiling.
-        max_tokens=4000,
-        timeout=90,
+        # No ceiling at all. It was 3000, then 4000 for the same reason each
+        # time — a response that began with valid JSON and simply stopped,
+        # which no regex salvage can repair. Raising a ceiling that keeps
+        # being hit is not a fix, and a reasoning model spends the budget
+        # before the first character of JSON. Principles are the only
+        # long-term memory this system has; the call that produces them
+        # should not be the one running closest to anything.
+        timeout=180,
     )
-    content = (resp.choices[0].message.content or "").strip()
+    content = content_or_none(resp, where="lessons.consolidate")
+    if content is None:
+        _log_consolidation_failure("Empty response", "")
+        return {"operations": []}
     try:
         return json.loads(content)
     except json.JSONDecodeError:

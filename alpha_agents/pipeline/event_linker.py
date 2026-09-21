@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 
 from alpha_agents import llm_roles
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -105,17 +106,18 @@ async def analyze_event_links(events: list[dict]) -> list[dict]:
     try:
         client = instrument(AsyncOpenAI(api_key=api_key, base_url=base_url),
                             module="event_linker")
+        # No max_tokens: 1024 was below what a reasoning model spends before
+        # it writes anything, which returns 200 with an empty body.
         response = await client.chat.completions.create(
             model=model,
-            max_tokens=1024,
-            timeout=60,
+            timeout=120,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
         )
 
-        text = ((response.choices[0].message.content if response.choices else "") or "").strip()
+        text = content_or_none(response, where="event_linker") or ""
 
         # Strip markdown fences
         if text.startswith("```"):

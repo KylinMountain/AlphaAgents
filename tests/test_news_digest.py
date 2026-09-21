@@ -195,10 +195,15 @@ async def test_digest_news_calls_api_correctly():
 
     call_kwargs = mock_create.call_args.kwargs
     assert call_kwargs["model"] == "test-model"
-    # Read the constant rather than restating it: the ceiling moved once
-    # already, when every batch of a real scan came back at exactly the
-    # old value.
-    assert call_kwargs["max_tokens"] == digest_mod.MAX_OUTPUT_TOKENS
+    # No ceiling is sent. It used to be MAX_OUTPUT_TOKENS, and the ceiling
+    # moved once already when every batch of a real scan came back at exactly
+    # the old value. With a reasoning model a ceiling stops truncating the
+    # list and starts emptying it: measured 2026-09-21, a capped analytical
+    # call returned finish_reason="length" with 800 reasoning tokens and no
+    # content at all. The constant still sizes the batch — see
+    # _RESERVED_TOKENS — it is just not a limit on the answer.
+    assert "max_tokens" not in call_kwargs
+    assert digest_mod.MAX_OUTPUT_TOKENS > 0      # still used for batching
     # User message should contain all titles
     user_msg = call_kwargs["messages"][1]["content"]
     for item in SAMPLE_NEWS:

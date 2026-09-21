@@ -14,6 +14,7 @@ from alpha_agents.data.learning_candidates import (
     save_candidate,
 )
 from alpha_agents.data.token_usage import instrument
+from alpha_agents.llm_output import content_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -188,13 +189,18 @@ def annotate_degraded(playbook: dict) -> str:
         client = instrument(OpenAI(api_key=AGENT_API_KEY,
                                    base_url=AGENT_BASE_URL),
                             module="playbook")
+        # No max_tokens. It was 80 — enough for the thirty characters asked
+        # for, and not enough for a reasoning model to finish thinking, so the
+        # call returned HTTP 200 with an empty body and this function handed
+        # back "" instead of its own fallback. Nothing raised, so the except
+        # below never saw it.
         resp = client.chat.completions.create(
             model=AGENT_MODEL or "qwen-plus",
             messages=[{"role": "user", "content": msg}],
-            max_tokens=80,
-            timeout=30,
+            timeout=60,
         )
-        return (resp.choices[0].message.content or "").strip()[:60]
+        text = content_or_none(resp, where="playbook.annotate_degraded")
+        return (text or "近期胜率下滑")[:60]
     except Exception as e:
         logger.debug("annotate_degraded failed: %s", e)
         return "近期胜率下滑"

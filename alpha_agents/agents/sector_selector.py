@@ -14,7 +14,7 @@ from pathlib import Path
 from agents import Agent, Runner
 from agents.exceptions import MaxTurnsExceeded
 
-from alpha_agents.agents.json_reply import json_body
+from alpha_agents.agents.json_reply import json_body, match_offered
 from alpha_agents.config import PROMPTS_DIR
 
 
@@ -110,10 +110,16 @@ def parse_selection(text: str, offered: set[str],
                             "detail": str(index)})
             continue
         sector_id = str(raw.get("sector_id") or "").strip()
-        if sector_id not in offered:
+        # Whitespace-insensitive, for the reason in json_reply.squeeze_name.
+        # A direction refused here costs the whole session: no direction means
+        # no panel, and no panel means no orders — a harsher outcome than the
+        # same mismatch in the stock selector, which only drops one name.
+        matched = match_offered(sector_id, offered)
+        if matched is None:
             refused.append({"sector_id": sector_id, "why": "outside_shortlist",
                             "detail": ""})
             continue
+        sector_id = matched
         if sector_id in seen:
             refused.append({"sector_id": sector_id, "why": "duplicate",
                             "detail": ""})

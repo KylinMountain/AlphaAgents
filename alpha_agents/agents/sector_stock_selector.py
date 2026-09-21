@@ -17,7 +17,7 @@ from agents import Agent, Runner
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.agents import t1_decider
-from alpha_agents.agents.json_reply import json_body
+from alpha_agents.agents.json_reply import json_body, match_offered
 from alpha_agents.config import PROMPTS_DIR
 
 
@@ -113,13 +113,23 @@ def parse(text: str, offered: set[str], *, picks: int,
                 refused.append({
                     "code": code, "why": "missing_primary_theme", "detail": ""})
                 continue
-            if primary_theme not in eligible:
+            # Match on the name with its whitespace removed. THS concept
+            # names carry spaces a model reliably drops — measured
+            # 2026-01-06, the selector answered "中国AI50" for the offered
+            # "中国AI 50" and both of its picks were refused, so a day whose
+            # direction, stocks and reasoning were all correct placed no
+            # orders at all. This does not loosen the check: only the exact
+            # offered names are accepted, and the one that matches is the one
+            # written down, so nothing downstream sees the model's spelling.
+            match = match_offered(primary_theme, eligible)
+            if match is None:
                 refused.append({
                     "code": code,
                     "why": "invalid_primary_theme",
                     "detail": f"{primary_theme!r} not in {eligible}",
                 })
                 continue
+            primary_theme = match
         seen.add(code)
         row = {
             "code": code,

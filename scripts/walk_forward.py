@@ -307,10 +307,25 @@ CONCEPTS_ABLATED_LIMITATION = (
 )
 
 
+#: Stated on every run that used today's membership for a past session.
+#: Not a footnote: a reader comparing two windows has to know that the sector
+#: membership in both is the one assigned after them, because it means the
+#: sector arms were told which names would later be labelled with the theme.
+CURRENT_MEMBERSHIP_LIMITATION = (
+    "concept membership is the CURRENT stocks.db:concept_stocks snapshot "
+    "applied to every replayed session (--allow-current-membership). No dated "
+    "membership source is available at this account's API tier, so a concept "
+    "assigned after the window still appears in it; sector-level conclusions "
+    "from this run are exploratory, not promotion-grade")
+
+
 def _limitations(ctx) -> tuple[str, ...]:
     base = list(LIMITATIONS)
     extra = list(
         LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
+    if not _membership_is_strict(ctx) and getattr(
+            ctx, "sector_membership_archive", ()):
+        base.append(CURRENT_MEMBERSHIP_LIMITATION)
     if (ctx.decider == "llm"
             and getattr(ctx, "selection_architecture", "") in {
                 "sector_first_v0", "sector_first_simple_selector",
@@ -1306,11 +1321,33 @@ def _trader_tools(ctx):
     return TRADER_TOOLS
 
 
+def _membership_is_strict(ctx) -> bool:
+    """Whether this run can claim a point-in-time membership world.
+
+    True only when **every** snapshot in the archive is point-in-time. An
+    archive mixing dated and current-only rows is not strict: one current-only
+    snapshot is enough to make some session decide on labels assigned later,
+    and a run that reports itself as PIT while doing that is the failure mode
+    this whole flag exists to prevent.
+
+    Empty archives read as strict, which is correct — there is no membership
+    world to be wrong about, and the caller has already been refused by
+    ``_require_sector_membership`` if the architecture needed one.
+    """
+    archive = getattr(ctx, "sector_membership_archive", ()) or ()
+    return all(item.point_in_time for item in archive)
+
+
 def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
     """Build the PIT direction world and its transparent top-8 shortlist."""
     cutoff = f"{day} 09:00:00"
+    # ``strict_pit`` follows the membership itself rather than being asserted
+    # here. A current-only snapshot is a stated lookahead the operator opted
+    # into; forcing True would either crash that run or, worse, let a caller
+    # believe a non-PIT world had been verified as PIT.
     membership = sector_membership.as_of(
-        ctx.sector_membership_archive, cutoff)
+        ctx.sector_membership_archive, cutoff,
+        strict_pit=_membership_is_strict(ctx))
     index = ctx.corpus.index.get(ranking_day)
     if index is None:
         raise ValueError(f"ranking day {ranking_day} is outside the corpus")
@@ -1329,7 +1366,7 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
         bars_by_day=bars_by_day,
         market_codes=set(ctx.corpus.bars(ranking_day)),
         fund_flow_by_code=flow,
-        strict_pit=True,
+        strict_pit=_membership_is_strict(ctx),
     )
     ranked = sector_selection.rank_sector_snapshots(snapshots)
     by_sector = {snapshot.sector_id: snapshot for snapshot in snapshots}
@@ -1372,7 +1409,7 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
             sessions=loo_sessions,
             bars_by_day=loo_bars,
             market_codes=set(ctx.corpus.bars(ranking_day)),
-            strict_pit=True,
+            strict_pit=_membership_is_strict(ctx),
         )
 
     candidate_codes = set()
@@ -3374,9 +3411,25 @@ class Context:
         self.selection_architecture = getattr(
             args, "selection_architecture", "dual_rank_v0")
         membership_path = getattr(args, "sector_membership", None)
-        self.sector_membership_archive = (
-            sector_membership.load(membership_path)
-            if membership_path is not None else ())
+        allow_current = bool(getattr(args, "allow_current_membership", False))
+        if membership_path is not None and allow_current:
+            raise SystemExit(
+                "--sector-membership and --allow-current-membership are "
+                "mutually exclusive: one supplies a dated archive, the other "
+                "says no dated archive exists. Passing both would leave the "
+                "run unable to state which membership it decided on.")
+        if membership_path is not None:
+            self.sector_membership_archive = sector_membership.load(
+                membership_path)
+        elif allow_current:
+            # Today's membership applied to every replayed session. A real
+            # lookahead, opted into by a line the operator wrote. The snapshot
+            # carries point_in_time=False, which is what makes every consumer
+            # below run non-strict rather than silently strict.
+            self.sector_membership_archive = (
+                sector_membership.current_from_corpus())
+        else:
+            self.sector_membership_archive = ()
         if _REPLAY_DIR is None:
             # Context is also constructed directly by unit tests. A real run
             # refuses an unbound replay directory before reaching here; keep
@@ -3441,8 +3494,19 @@ class Context:
                     f"{self.selection_architecture} requires --decider llm")
             if not self.sector_membership_archive:
                 raise SystemExit(
-                    f"{self.selection_architecture} requires "
-                    "--sector-membership with PIT snapshots")
+                    f"{self.selection_architecture} requires either "
+                    "--sector-membership (a dated PIT archive) or "
+                    "--allow-current-membership (today's concept_stocks, "
+                    "applied to every replayed session, which is a stated "
+                    "lookahead)")
+            if (getattr(self, "experiment_manifest", None) is not None
+                    and not all(item.point_in_time
+                                for item in self.sector_membership_archive)):
+                raise SystemExit(
+                    "a preregistered experiment requires a point-in-time "
+                    "membership archive; --allow-current-membership is for "
+                    "exploratory runs, because a formal arm must not decide "
+                    "on labels that were assigned after the window")
             if self.selection_architecture == "sector_first_simple_selector":
                 if self.frozen_directions is None:
                     raise SystemExit(
@@ -4498,6 +4562,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sector-membership", type=Path, default=None,
         help="PIT membership archive required by sector-first modes")
+    parser.add_argument(
+        "--allow-current-membership", action="store_true",
+        help="use today's concept_stocks for every replayed session when no "
+             "dated archive exists. This is a stated lookahead: a concept "
+             "assigned after the window still appears in it. Refused for "
+             "preregistered experiments, which need a real PIT archive.")
     parser.add_argument(
         "--frozen-directions", type=Path, default=None,
         help="B-arm frozen direction archive required by C")

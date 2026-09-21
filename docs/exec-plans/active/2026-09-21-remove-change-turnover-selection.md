@@ -164,6 +164,62 @@ IDENTICAL     : True
 **beta 不能用 `sector_betas` 缓存**——那是**当前**快照，用在 replay 里会把
 今天的 beta 泄漏进过去的决策。
 
+## 读法 A：用当前成分（owner 2026-09-21 决定）
+
+owner 说「实在搞不到就用历史的概念也问题不大」，并明确选**读法 A**：
+用**当前**成分当作历史成分。已实施。
+
+### 为什么只能这样
+
+唯一带日期的成员源是 Tushare `concept` / `concept_cons`（字段 `in_date`），
+但实测该账号两个接口都**限速 1 次/小时**（等 65 秒重试仍返回超限），
+375 个概念回填约需 16 天。其余接口（`ths_member`/`kpl_concept_cons`/
+`ths_daily` 等）**无权限**。本地 `concept_stocks` 只有两列、无时点列。
+
+### 做法：把它做成「显式选择的、被标注的」路径
+
+新增 `sector_membership.current_from_corpus()`，产出**一个**
+`point_in_time=False` 的快照（实测 375 板块 / 3657 成员），并新增 CLI：
+
+```
+--allow-current-membership   # 与 --sector-membership 互斥
+```
+
+**关键设计：默认拒绝，必须显式选择。** `as_of(..., strict_pit=True)` 是默认值，
+对 current-only 快照直接抛 `SectorSnapshotError`；调用方必须写
+`strict_pit=False`。这样「用了 lookahead」是**有人写下的一行**，
+不是继承来的默认。
+
+### 三处独立的标注（不靠一个 docstring）
+
+1. `replay_capabilities` **早已**记录 `concept_membership: current_only` +
+   `point_in_time: False`（我复用，没有新造机制）；
+2. `_limitations` 在每份报告里追加 `CURRENT_MEMBERSHIP_LIMITATION`（实测仅
+   非严格运行时出现）；
+3. 面板列名是「概念（当前成分）」。
+
+### 一道硬闸：预注册实验不许用它
+
+`experiment_manifest is not None` 且档案非全 PIT 时直接 `SystemExit`：
+
+> a preregistered experiment requires a point-in-time membership archive;
+> --allow-current-membership is for exploratory runs, because a formal arm
+> must not decide on labels that were assigned after the window
+
+### 实测（`/tmp`）
+
+```
+sectors=375 memberships=3657  point_in_time=False  id=current-only
+strict_pit=True  -> refused: strict sector replay requires point-in-time membership
+strict_pit=False -> accepted: id=current-only sectors=375
+任意历史日期（2025-07-01 / 2026-01-02 / 2026-08-18）均可解析
+```
+
+### 新增测试（`tests/test_sector_membership_current.py`，7 条）
+
+标注正确、默认拒绝、显式放行、任意历史日期可解析、空语料拒绝（而非返回空
+宇宙——那会让 replay 选不出任何东西，看起来像策略结果）。
+
 ## 验收（已达成）
 
 1. `grep -rn 'change_share' alpha_agents/ scripts/` → 仅剩 5 处**历史注释**，

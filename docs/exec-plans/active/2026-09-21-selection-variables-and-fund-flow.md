@@ -205,6 +205,64 @@ measurement」。所以：
 4. 抽出的异动阈值可在 `DEFAULT_DECISION_PARAMS` 里 `grep` 到（第一步完成后）；
 5. `tests/` 全绿；`lint_harness` / `lint_docs` 通过。
 
+## 网络通道探测：CF worker 可用，东财历史不可得
+
+### CF worker 是好的（实测）
+
+`deploy/cloudflare/worker.js` 是一个通用 HTTP 转发（`POST {url,...}` → `{status, body}`），
+`CF_WORKER_URL` 已配置。实测：
+
+| 目标 | worker | 上游 | 说明 |
+|---|---|---|---|
+| `httpbin.org/get` | 200 | **200** | 477 bytes 真实响应，cf colo=`SJC` |
+| `data.10jqka.com.cn/funds/gnzjl/` | 200 | **401** | 同花顺反爬页（未带 `hexin-v` 签名）|
+| `push2his.eastmoney.com/...` | 200 | **520** | Cloudflare「未知错误」|
+| `push2his.eastmoney.com.cn/...` | 200 | **526** | 无效 SSL 证书 |
+| `push2.eastmoney.com/api/qt/clist` | 200 | **None** | 超时/拦截 |
+
+**结论**：worker 完全正常（能取 httpbin，也真实转发了同花顺）。**是东财按来源 IP
+拒绝了 Cloudflare 数据中心。** 520/526 是 CF 边缘错误码，不是东财的应用层响应。
+
+### 本地代理的现状（2026-09-21 实测）
+
+```
+DNS: push2his.eastmoney.com -> 198.18.0.34   (Clash fake-IP)
+     data.10jqka.com.cn    -> 198.18.0.33
+监听端口: clash-ver 在 33331，**7890 没有监听**
+系统代理设置: http/https/socks 都指向 http://127.0.0.1:7890
+```
+
+域名全部解析到 `198.18.0.x`（Clash 的 fake-IP 段），说明**流量必须经过代理**，
+但配置指向的 7890 端口没有进程监听（clash-verge 实际在 33331）。所以本地直连
+和走系统代理都失败。**这解释了上一轮东财请求 `ConnectionError`。**
+
+### 可用的路，与不通的路
+
+| 源 | 通道 | 状态 |
+|---|---|---|
+| 同花顺网页 `gnzjl` | 本地生成 `hexin-v` + 直连 | ✅ 已成功一次（33KB / 11 列）|
+| 同花顺网页 `gnzjl` | 同上，改走 CF worker | ✅ 可行（worker 能到）|
+| 同花顺客户端本地 | 离线读容器文件 | ✅ **已用于重建成分表** |
+| 东财 `push2his` 历史 | 本地 / CF worker | ❌ 520 / 526 |
+| 本地 `sector_flow_snapshots` | SQLite | ✅ 13 天（2026-09-08 起）|
+| Tushare `concept`/`concept_cons` | API | ⚠️ 限速 1 次/小时 |
+
+### 对「资金异动 replay」的影响
+
+**没有好转，但也不是死路。** 长历史资金流仍只有东财一个候选，而它当前被边缘拒。
+不过：
+
+1. **同花顺网页接口走 worker 是通的**——若哪天找到一个带日期的 THS 接口，
+   这条路立刻可用；
+2. **CF worker 本身是可复用资产**：以后遇到「域名被本地网络挡」或「需要换出口
+   IP」时，它已在位、已验证；
+3. **换个思路：不需要东财。** 用新重建的**完整成分表**聚合个股资金流——
+   `stock_fund_flow_daily` 有 2026-08-18 起约 21 天、每日约 5,500 行个股净额，
+   按概念成分聚合即可得到概念级资金流。**窗口比 `sector_flow_snapshots` 的
+   13 天更长，且不依赖任何被墙的外部接口。**
+
+第 3 点是这一轮探索最有价值的副产品：**我们可能根本不需要东财。**
+
 ## 决策记录
 
 - 2026-09-21：**beta 修复已交付**（d68550c）。原注释声称 as-of 重算、实际

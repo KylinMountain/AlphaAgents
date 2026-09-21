@@ -1,11 +1,17 @@
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS concepts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    source TEXT NOT NULL DEFAULT 'ths'
+    source TEXT NOT NULL DEFAULT 'ths',
+    -- THS 概念的建立日期 (YYYY-MM-DD)。NULL = 早于已知最早日期，
+    -- 一律视为"回放窗口开始前就存在"。见 concept_dates.py。
+    created_date TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stocks (
@@ -49,4 +55,25 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.close()
+
+
+#: ``(table, column, type)`` added after the table first shipped. CREATE TABLE
+#: IF NOT EXISTS leaves an existing table alone, so a new column in _SCHEMA
+#: never reaches a database that already has the table.
+_ADDED_COLUMNS = (
+    ("concepts", "created_date", "TEXT"),
+)
+
+
+def _migrate(conn) -> None:
+    """Add columns that _SCHEMA gained after the table already existed."""
+    for table, column, coltype in _ADDED_COLUMNS:
+        have = {r[1] for r in conn.execute(
+            "PRAGMA table_info(%s)" % table).fetchall()}
+        if column not in have:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                         % (table, column, coltype))
+            logger.info("migrated %s: added column %s", table, column)
+    conn.commit()

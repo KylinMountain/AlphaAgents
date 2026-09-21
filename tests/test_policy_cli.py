@@ -574,6 +574,22 @@ class TestTheExperimentIsDrivable:
         assert "nothing is under experiment" in capsys.readouterr().out
 
 
+#: The production evidence -> parameter table is empty since 2026-09-21 (the
+#: only entry moved a parameter that no trading path read). `variant-build`
+#: is still the operator surface for the machinery, so this class injects a
+#: synthetic mapping rather than testing through a deleted gene.
+_SYNTHETIC_DELTAS = {
+    ("t1_change_rank", "down"): ("theme_gate", "w_rel", -0.10),
+    ("t1_change_rank", "up"): ("theme_gate", "w_rel", +0.10),
+}
+
+
+@pytest.fixture(autouse=True)
+def synthetic_mapping(monkeypatch):
+    from alpha_agents.evolution import variant as _V
+    monkeypatch.setattr(_V, "_SUPPORTED_DELTAS", dict(_SYNTHETIC_DELTAS))
+
+
 class TestAVariantIsBuiltFromACandidate:
     """`variant-build` — the operator half of `evolution.variant`.
 

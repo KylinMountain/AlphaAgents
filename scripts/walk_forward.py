@@ -170,7 +170,7 @@ from alpha_agents.data import (  # noqa: E402
     market_rules, order_theme_exposure, portfolio as P, security_eligibility,
     policy_registry, portfolio_exit, reservations,
     research_packet, sector_membership, sector_panel, sector_selection,
-    selection_policy, t1_settlement as S,
+    t1_settlement as S,
 )
 from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
@@ -670,6 +670,108 @@ def _resolve_concepts(ctx, prev_day: str, code: str) -> list[str]:
         return []
 
 
+def _legacy_pool_rows(by_change: list[tuple], by_turnover: list[tuple],
+                      *, lane_depth: int) -> list[dict]:
+    """The frozen pre-panel world of the legacy whole-market control.
+
+    Moved here from the deleted ``data/selection_policy`` on 2026-09-21.
+    It lives beside its only caller because it is a control, not a policy:
+    the A arm must replay the same ordering it always did, and a shared
+    helper would let it drift with the target selection logic.
+
+    Persist the two ordinal ranks as well as their values. Equal values must
+    replay in the same order as the live stable sort; reconstructing a tie
+    from values alone can choose a different security and turn a tie-break
+    into an apparent policy effect.
+    """
+    change_rank = {
+        code: rank for rank, (_score, code, _row)
+        in enumerate(by_change[:lane_depth])
+    }
+    turnover_rank = {
+        code: rank for rank, (_score, code, _row)
+        in enumerate(by_turnover[:lane_depth])
+    }
+    raw = {}
+    for _score, code, row in [
+            *by_change[:lane_depth], *by_turnover[:lane_depth]]:
+        raw.setdefault(code, row)
+
+    rows = []
+    for code in dict.fromkeys([
+            *[x[1] for x in by_change[:lane_depth]],
+            *[x[1] for x in by_turnover[:lane_depth]]]):
+        row = raw[code]
+        rows.append({
+            "code": code,
+            "change_pct": (
+                float(row["change_pct"])
+                if row.get("change_pct") is not None else None),
+            "turnover_rate": (
+                float(row.get("turnover_rate"))
+                if row.get("turnover_rate") is not None else None),
+            "change_rank": change_rank.get(code),
+            "turnover_rank": turnover_rank.get(code),
+        })
+    return rows
+
+
+def _legacy_lane_mix(rows: list[dict], *, limit: int, eligible) -> list[str]:
+    """Strict change/turnover alternation over a legacy pool. 0.5 share.
+
+    This is the exact sequence the old ``change_share=0.5`` produced:
+    change, turnover, change, turnover, ... Kept as a literal so the control
+    stays byte-for-byte what it was, now that the gene that parameterised it
+    is gone.
+    """
+    if limit <= 0:
+        return []
+    usable = [
+        row for row in rows
+        if row.get("code")
+        and row.get("change_pct") is not None
+        and row.get("turnover_rate") is not None
+    ]
+    if all(row.get("change_rank") is not None for row in usable):
+        by_change = sorted(usable, key=lambda row: int(row["change_rank"]))
+    else:
+        by_change = sorted(
+            usable, key=lambda row: float(row["change_pct"]), reverse=True)
+    if all(row.get("turnover_rank") is not None for row in usable):
+        by_turnover = sorted(usable, key=lambda row: int(row["turnover_rank"]))
+    else:
+        by_turnover = sorted(
+            usable, key=lambda row: float(row["turnover_rate"]), reverse=True)
+
+    merged = []
+    ci = ti = 0
+    total = max(limit * 4, limit)
+    while len(merged) < total and (
+            ci < len(by_change) or ti < len(by_turnover)):
+        prefer_change = len(merged) % 2 == 0
+        if prefer_change and ci < len(by_change):
+            merged.append(by_change[ci]); ci += 1
+        elif not prefer_change and ti < len(by_turnover):
+            merged.append(by_turnover[ti]); ti += 1
+        elif ci < len(by_change):
+            merged.append(by_change[ci]); ci += 1
+        elif ti < len(by_turnover):
+            merged.append(by_turnover[ti]); ti += 1
+
+    chosen, seen = [], set()
+    for row in merged:
+        code = str(row["code"])
+        if code in seen:
+            continue
+        seen.add(code)
+        if not eligible(code):
+            continue
+        chosen.append(code)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
 def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     """The securities the decision may order, and the only ones.
 
@@ -732,15 +834,21 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
     by_turnover = sorted(
         ranked, key=lambda t: (t[2].get("turnover_rate") or 0.0), reverse=True)
 
-    # The historical behavior was strict alternation. It is now the explicit
-    # default gene selection_rank.change_share=0.5, so changing the gene moves
-    # this exact live path instead of an unrelated theme weight.
-    ctx.last_panel_candidate_pool = selection_policy.candidate_pool_rows(
+    # **Legacy whole-market control, not the target strategy.** This lane mix
+    # was briefly exposed as the policy gene ``selection_rank.change_share``,
+    # which was removed on 2026-09-21: no trading path ever read it, and the
+    # live trader selects by concept fund flow and a within-sector multi-factor
+    # score instead (``tools/sector_beta``). It is kept here only because the
+    # A arm of the preregistered comparison needs a frozen incumbent baseline.
+    #
+    # The merge is inlined rather than imported so that the control cannot
+    # drift when the target selection logic changes — a control that moves
+    # with the treatment measures nothing.
+    ctx.last_panel_candidate_pool = _legacy_pool_rows(
         by_change, by_turnover, lane_depth=limit * 4)
-    chosen_codes = selection_policy.materialize_codes(
+    chosen_codes = _legacy_lane_mix(
         ctx.last_panel_candidate_pool,
         limit=limit,
-        params=None,
         eligible=lambda code: (
             (ctx.corpus.adv20(code, prev_day) or 0) > 0),
     )
@@ -2059,13 +2167,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     ctx, "last_panel_candidate_pool", []),
                 "panel_limit": ctx.panel_size,
                 "selection_architecture": ctx.selection_architecture,
-                "selection_rank": (
-                    selection_policy.in_force_params()
-                    if ctx.selection_architecture == "dual_rank_v0"
-                    else ({
-                        "method": "whole_market_change_turnover_v1"
-                    } if ctx.selection_architecture == "dual_rank_price_v1"
-                    else None)),
+                # ``selection_rank`` was removed 2026-09-21 with the gene it
+                # recorded. It named a whole-market change/turnover mix that
+                # no trading path read; the legacy control still runs that
+                # mix, but as a frozen baseline rather than a tunable policy,
+                # so there is no in-force parameter left to journal.
+                "selection_rank": None,
                 "sector_first": getattr(
                     ctx, "last_sector_context", {}),
                 "stock_preselection": stock_preselection,

@@ -33,6 +33,24 @@ from alpha_agents.data import scoring
 from alpha_agents.evolution import variant as V
 
 
+#: A synthetic evidence -> parameter mapping, injected because the production
+#: table is deliberately **empty** since 2026-09-21 (see the note on
+#: ``variant._SUPPORTED_DELTAS``). These tests pin the *machinery* —
+#: inheritance, archiving, the no-pointer-move property — and that machinery
+#: must keep working for the next real gene. Testing it through a deleted gene
+#: would couple the mechanism to a parameter the repository no longer has.
+#: ``theme_gate.w_rel`` is a real, known leaf, so the coverage guard accepts it.
+_SYNTHETIC_DELTAS = {
+    ("t1_change_rank", "down"): ("theme_gate", "w_rel", -0.10),
+    ("t1_change_rank", "up"): ("theme_gate", "w_rel", +0.10),
+}
+
+
+@pytest.fixture(autouse=True)
+def synthetic_mapping(monkeypatch):
+    monkeypatch.setattr(V, "_SUPPORTED_DELTAS", dict(_SYNTHETIC_DELTAS))
+
+
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_store, "MEMORY_DB_PATH",
@@ -101,13 +119,13 @@ class TestItInheritsFromItsParent:
         before = scoring.decision_params_of(parent)
         after = scoring.decision_params_of(built.version_id)
 
-        assert after["selection_rank"]["change_share"] == pytest.approx(
-            before["selection_rank"]["change_share"] - 0.10)
+        assert after["theme_gate"]["w_rel"] == pytest.approx(
+            before["theme_gate"]["w_rel"] - 0.10)
         # Everything else is inherited verbatim. This is the load-bearing
         # assertion: a variant built from the code defaults would revert any
         # other promoted parameter and still look like a one-field change.
         for key in before:
-            if key == "selection_rank":
+            if key == "theme_gate":
                 continue
             assert after[key] == before[key], f"{key} was not inherited"
 
@@ -232,7 +250,7 @@ class TestTheVariantIsArchived:
         assert doc["candidate_id"] == cid
         assert doc["policy_version_id"] == built.version_id
         assert doc["parent_version_id"] == parent
-        assert doc["change"]["param"] == "change_share"
+        assert doc["change"]["param"] == "w_rel"
         assert "not in force" in doc["note"]
 
     def test_the_file_can_be_skipped(self, store, parent):

@@ -43,6 +43,20 @@ def store(tmp_path, monkeypatch):
     memory_store._local.conn = None
 
 
+#: See the note in ``test_policy_variant``: the production evidence ->
+#: parameter table is empty since 2026-09-21, so these tests inject a
+#: synthetic mapping to exercise the chain-walking machinery itself.
+_SYNTHETIC_DELTAS = {
+    ("t1_change_rank", "down"): ("theme_gate", "w_rel", -0.10),
+    ("t1_change_rank", "up"): ("theme_gate", "w_rel", +0.10),
+}
+
+
+@pytest.fixture(autouse=True)
+def synthetic_mapping(monkeypatch):
+    monkeypatch.setattr(V, "_SUPPORTED_DELTAS", dict(_SYNTHETIC_DELTAS))
+
+
 def _sources(tag="a"):
     return {
         "prompts": {"m": tag}, "model": {"agent_model": "q"},
@@ -340,5 +354,5 @@ class TestTheLinkIsRecordedOnce:
         assert row["candidate_id"] == cid
         assert row["parent_version_id"] == parent
         change = json.loads(row["change_json"])
-        assert change["block"] == "selection_rank"
-        assert change["param"] == "change_share"
+        assert change["block"] == "theme_gate"
+        assert change["param"] == "w_rel"

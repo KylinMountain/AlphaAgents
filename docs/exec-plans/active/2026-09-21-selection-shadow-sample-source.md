@@ -25,7 +25,7 @@
 
 | | 位置 | 合并方式 | 基因 | 引入 |
 |---|---|---|---|---|
-| 交替双通道 | `alpha_agents/data/selection_policy.py` | `weighted_merge` 交替，参数 `change_share` | `selection_rank.change_share` | Kylin `765cd97` 2026-09-19 |
+| 交替双通道 | ~~`data/selection_policy.py`~~（**2026-09-21 已删除**） | `weighted_merge` 交替，参数 `change_share` | ~~`selection_rank.change_share`~~（已删除） | Kylin `765cd97` 2026-09-19 |
 | 板块内平均排名 | `alpha_agents/data/sector_panel.py` | `(change_rank + turnover_rank) / 2` | **无** | Kylin `bbf327e` 2026-09-19 |
 
 两者语义不同，不是同一份代码。**两者都只被 `scripts/walk_forward.py` 调用**

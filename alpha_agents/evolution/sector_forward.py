@@ -25,6 +25,24 @@ EVALUATOR = "sector_forward_portfolio_v1"
 EVALUATOR_VERSION = "1"
 MINIMUM_SAMPLES = 50
 
+#: The policy genes this producer/evaluator pair observes. **Empty, and that
+#: is the finding.**
+#:
+#: Until 2026-09-21 this was ``gene_registry.SELECTION_RANK_GENES`` — the
+#: whole-market change/turnover lane mix. That was wrong on its face: this
+#: module is the promotion gate for the *Sector-First* protocol, its producer
+#: is ``sector_rank_price_v1``, and that path never calls
+#: ``selection_policy``. So the gate declared it observed a gene its own
+#: producer never executed, and ``assert_exact_coverage`` could not catch it
+#: because that function checks direction only (changed ⊆ supported) and never
+#: whether a declared gene is actually read.
+#:
+#: Sector-First has no selection gene of its own yet. An empty set makes that
+#: explicit: every candidate is now refused by name until a real gene with a
+#: real reader exists. That is the honest state, and it is better than a gate
+#: that passes candidates measuring a parameter nothing reads.
+SECTOR_FORWARD_GENES: frozenset = frozenset()
+
 
 class SectorForwardError(ValueError):
     pass
@@ -153,7 +171,7 @@ def open_run(*, parent_version_id: int, candidate_version_id: int,
     changed = dream_agent.changed_genes(parent_version_id, candidate_version_id)
     try:
         gene_registry.assert_exact_coverage(
-            changed, gene_registry.SELECTION_RANK_GENES,
+            changed, SECTOR_FORWARD_GENES,
             actor=f"producer {PRODUCER!r} and evaluator {EVALUATOR!r}")
     except gene_registry.GeneRegistryError as exc:
         raise SectorForwardError(str(exc)) from exc
@@ -184,10 +202,10 @@ def open_run(*, parent_version_id: int, candidate_version_id: int,
         "minimum_samples": int(minimum_samples),
         "changed_genes": changed,
         "producer": PRODUCER,
-        "producer_genes": sorted(gene_registry.SELECTION_RANK_GENES),
+        "producer_genes": sorted(SECTOR_FORWARD_GENES),
         "evaluator": EVALUATOR,
         "evaluator_version": EVALUATOR_VERSION,
-        "evaluator_genes": sorted(gene_registry.SELECTION_RANK_GENES),
+        "evaluator_genes": sorted(SECTOR_FORWARD_GENES),
         "protocol_hash": _nonempty_hash(protocol_hash, "protocol_hash"),
         "code_hash": _nonempty_hash(code_hash, "code_hash", lengths=(40, 64)),
         "data_hash": _nonempty_hash(data_hash, "data_hash"),

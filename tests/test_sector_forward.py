@@ -10,6 +10,20 @@ from alpha_agents.data import memory_store, policy_registry as PR, scoring
 from alpha_agents.evolution import gene_registry, sector_forward as SF
 
 
+#: ``SF.SECTOR_FORWARD_GENES`` is deliberately empty: the Sector-First path has
+#: no selection gene of its own yet, and the gene it used to declare
+#: (``selection_rank.change_share``) was one its own producer never read. These
+#: tests pin the *gate machinery* — exact sample sealing, CI hash binding, the
+#: drawdown veto — which must keep working once a real gene exists. So they
+#: inject one: ``theme_gate.w_rel`` is a known leaf with a live reader.
+_SYNTHETIC_GENES = frozenset({"decision.theme_gate.w_rel"})
+
+
+@pytest.fixture(autouse=True)
+def synthetic_genes(monkeypatch):
+    monkeypatch.setattr(SF, "SECTOR_FORWARD_GENES", _SYNTHETIC_GENES)
+
+
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -23,10 +37,22 @@ def store(tmp_path, monkeypatch):
     memory_store._local.conn = None
 
 
-def _sources(share: float) -> dict:
+def _sources(weight: float) -> dict:
+    """Two versions differing in exactly one gene with a real reader.
+
+    This used ``selection_rank.change_share`` until 2026-09-21, when that
+    gene was deleted: it mixed a whole-market change/turnover lane that no
+    trading path read — including ``sector_rank_price_v1``, which this very
+    module names as its producer. The fixture now moves ``theme_gate.w_rel``,
+    a real leaf, so these tests exercise the gate rather than a parameter
+    nothing consumes.
+    """
     decision = {
         **scoring.DEFAULT_DECISION_PARAMS,
-        "selection_rank": {"change_share": share},
+        "theme_gate": {
+            **scoring.DEFAULT_DECISION_PARAMS["theme_gate"],
+            "w_rel": weight,
+        },
     }
     return {
         "prompts": {"t1_decide.md": "same"},
@@ -40,11 +66,11 @@ def _sources(share: float) -> dict:
 
 def _versions():
     parent = PR.freeze(
-        sources=_sources(0.5), created_by="test", reason="parent",
+        sources=_sources(0.35), created_by="test", reason="parent",
         frozen_at="2026-09-19")
     PR.install(version_id=parent, actor="test", reason="seed")
     candidate = PR.freeze(
-        sources=_sources(0.8), parent_id=parent, created_by="test",
+        sources=_sources(0.45), parent_id=parent, created_by="test",
         reason="candidate", frozen_at="2026-09-20")
     return parent, candidate
 
@@ -267,6 +293,6 @@ def test_complete_safe_forward_evidence_gets_one_persisted_verdict(store):
 def test_unknown_future_child_is_not_covered_by_a_parent_prefix():
     with pytest.raises(gene_registry.GeneRegistryError, match="unknown"):
         gene_registry.assert_exact_coverage(
-            ["decision.selection_rank.future_magic"],
-            gene_registry.SELECTION_RANK_GENES,
+            ["decision.theme_gate.future_magic"],
+            _SYNTHETIC_GENES,
             actor="selection evaluator")

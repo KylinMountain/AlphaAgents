@@ -34,9 +34,9 @@
 | --- | --- | --- |
 | `alpha_agents/prompts/morning_scan.md` | 默认晨扫已要求看市场、概念资金流，再从概念内找标的 | 保留研究意图，不能照搬其中未经验证的阈值与建议 |
 | `scripts/walk_forward.py` 的 `_build_panel` | T1 先用全市场涨幅/换手排名构造面板，概念与资金等随后附加 | 将现有行为冻结为可复现对照，不删除 |
-| `alpha_agents/data/selection_policy.py` | `selection_rank.change_share` 控制两条候选排名的混合 | 保留为旧策略参数，不把它当作已经验证的 alpha 来源 |
+| ~~`data/selection_policy.py`~~ | `selection_rank.change_share` 控制两条候选排名的混合 | **2026-09-21 已删除**。本行原写「保留为旧策略参数」，但该参数无任何交易路径读取——连声称执行它的 producer `sector_rank_price_v1` 也不读；保留等于把死基因留在每个版本里。见 [移除计划](2026-09-21-remove-change-turnover-selection.md) |
 | `alpha_agents/data/opportunity_journal.py` | 已记录股票级候选、研究与选择状态 | 在其上游补方向级记录，不伪造旧记录 |
-| `alpha_agents/evolution/selection_gate.py` | 计算配对统计量，最终改善判断主要是均值差超过阈值 | 新架构不得仅凭此获得生产晋升资格；见第 8 节 |
+| ~~`evolution/selection_gate.py`~~ | 计算配对统计量，最终改善判断主要是均值差超过阈值 | **2026-09-21 已删除**：它门控的正是 `selection_rank.change_share` 这颗死基因。Sector-First 自己的晋升门是 `evolution/sector_forward.py` |
 | `scripts/walk_forward.py` 的订单创建 | 订单主题来自 run-level `ctx.theme` | 新模式必须由股票自己的论点绑定主题 |
 | `alpha_agents/data/event_expectations.py` | 已有事件、预期与实际结果快照接口 | 接入来源与时间语义要验证，表存在不等于数据可用 |
 

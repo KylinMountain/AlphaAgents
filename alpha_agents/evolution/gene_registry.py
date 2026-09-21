@@ -19,9 +19,14 @@ CONFIDENCE_DIMENSION_GENES = frozenset({
     "decision.dim_step",
 })
 
-SELECTION_RANK_GENES = frozenset({
-    "decision.selection_rank.change_share",
-})
+#: ``decision.selection_rank.change_share`` was removed 2026-09-21. It
+#: governed a whole-market change/turnover lane mix that no trading path
+#: ever ran: production selects by concept fund flow and a within-sector
+#: multi-factor score, and the replay runner's sector arms never called
+#: ``selection_policy`` either. Its own promotion-grade producer declared
+#: the gene without executing it, so it was a declared-but-dead leaf. The
+#: repository's RP-05 plan had already marked it "旧策略参数，不把它当作已经
+#: 验证的 alpha 来源"; this removes it instead of carrying it forward.
 
 THEME_GATE_GENES = frozenset({
     "decision.theme_gate.w_flow",
@@ -34,7 +39,6 @@ THEME_GATE_GENES = frozenset({
 KNOWN_POLICY_GENES = frozenset().union(
     CONFIDENCE_PRIOR_GENES,
     CONFIDENCE_DIMENSION_GENES,
-    SELECTION_RANK_GENES,
     THEME_GATE_GENES,
 )
 

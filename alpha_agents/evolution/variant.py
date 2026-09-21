@@ -63,17 +63,22 @@ logger = logging.getLogger(__name__)
 #: a guessed magnitude frozen into a version is indistinguishable from a
 #: measured one afterwards.
 #:
-#: ``t1_change_rank`` / ``down`` is the one the Evidence Analyzer produces:
-#: if ranking candidates by the previous session's change is backwards, the
-#: *selection lane* should contribute fewer names from the change ranking.
-#: Older versions incorrectly mapped this evidence to ``theme_gate.w_rel``,
-#: which changed theme admission rather than the ranking being criticised.
-#: The live panel now reads ``selection_rank.change_share``, so evidence,
-#: intervention and evaluator name the same behavior.
-_SUPPORTED_DELTAS = {
-    ("t1_change_rank", "down"): ("selection_rank", "change_share", -0.10),
-    ("t1_change_rank", "up"): ("selection_rank", "change_share", +0.10),
-}
+#: **Empty since 2026-09-21, and that is the honest state.**
+#:
+#: The only entry was ``t1_change_rank`` -> ``selection_rank.change_share``.
+#: The Evidence Analyzer still emits that field, but the parameter it moved
+#: was deleted: it mixed a whole-market change lane with a turnover lane, and
+#: no trading path ever read it. Production selects by concept fund flow and a
+#: within-sector multi-factor score; the replay runner's sector arms never
+#: called ``selection_policy`` either.
+#:
+#: An empty table is deliberate rather than a gap. ``t1_change_rank`` evidence
+#: is real — the analyzer measured it — but there is now no policy parameter
+#: it corresponds to. Refusing it by name is correct: the alternative is to
+#: remap it onto some other parameter, which is exactly the defect that was
+#: fixed on 2026-09-19 when this evidence was moved *off* ``theme_gate.w_rel``
+#: for changing theme admission instead of the ranking it criticised.
+_SUPPORTED_DELTAS: dict = {}
 
 
 class VariantError(ValueError):
@@ -307,11 +312,6 @@ def _apply(decision: dict, change: dict) -> dict:
             "version being varied, so this delta has nothing to move. The "
             "mapping table and the decision parameters have drifted apart.")
     value = round(block[change["param"]] + change["step"], 6)
-    if (change["block"], change["param"]) == (
-            "selection_rank", "change_share") and not 0.0 <= value <= 1.0:
-        raise VariantError(
-            f"selection_rank.change_share would leave [0,1]: {value}. "
-            "A candidate may move the lane mix, not create an impossible mix.")
     block[change["param"]] = value
     return out
 

@@ -1133,14 +1133,34 @@ def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
 
 
 def _trader_note(ctx) -> str:
-    """The trader's own words, so the style is a file and not a branch."""
+    """The trader's own words, so the style is a file and not a branch.
+
+    ``load_traders`` returns a **list**, and this called ``.get(ctx.trader)``
+    on it — an ``AttributeError`` on every run, swallowed by the broad except
+    below and logged as "trader note unavailable", which reads like a missing
+    config rather than a call that cannot work. So the note this function
+    exists to deliver had never reached a prompt: every replay ran the sector
+    and planner stages without the trader's own instructions, while
+    ``traders/pullback.yaml`` carried several hundred characters telling it to
+    find real support with ``get_price_levels``, size the band by ATR, and put
+    a theme condition in every invalidation.
+
+    The except stays — an unreadable ``traders/`` directory should cost the
+    note, not the run — but it no longer hides a type error, because
+    ``tests/test_trader_note.py`` fails if the note stops arriving.
+    """
     try:
         from alpha_agents.data.trader import load_traders
-        trader = load_traders().get(ctx.trader)
+        trader = next(
+            (item for item in load_traders() if item.id == ctx.trader), None)
+        if trader is None:
+            logger.warning("trader note: no trader with id %s", ctx.trader)
+            return ""
         note = getattr(trader, "extra_prompt", "") or ""
     except Exception as exc:                          # noqa: BLE001
         logger.warning("trader note unavailable: %s", exc)
-        note = ""
+        return ""
+    logger.info("trader note: %s, %d chars", ctx.trader, len(note))
     return note
 
 
@@ -1761,6 +1781,17 @@ def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
         ctx, day, ranking_day, membership, selected, ctx.panel_size)
 
 
+def _one_line(text, limit: int) -> str:
+    """Collapse a model's prose to one greppable log line.
+
+    Theses run to several hundred characters with newlines in them; a log line
+    that wraps is a log line nobody reads, and one that is cut mid-word gives
+    no hint that more exists.
+    """
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
 def _sector_first_stage(ctx, day: str, ranking_day: str,
                         market: dict, news: list[dict]) -> tuple[list[dict], object]:
     """Resolve directions, journal them, then materialize the stock panel."""
@@ -1877,6 +1908,26 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
     if not selected:
         ctx.counters["sector_selector_empty"] += 1
         return [], budget
+
+    # The chosen directions and the model's reason for each belong in the log,
+    # not only in the LLM journal. A reader following a 20-session run sees
+    # "ordered 1" and cannot tell which direction produced it, nor whether the
+    # direction came from fund flow or from price — and the journal is a
+    # response-hash archive, not something anyone greps mid-run.
+    for row in verdict.get("themes") or []:
+        logger.info(
+            "%s: direction %s — %s", day, row.get("sector_id"),
+            _one_line(row.get("thesis"), 220))
+        if row.get("invalidations"):
+            logger.info(
+                "%s:   invalidated by: %s", day,
+                " | ".join(_one_line(item, 90)
+                           for item in row["invalidations"][:3]))
+    for row in verdict.get("refused") or []:
+        logger.info("%s: direction refused %s — %s", day,
+                    row.get("sector_id") if isinstance(row, dict) else row,
+                    _one_line((row or {}).get("reason")
+                              if isinstance(row, dict) else "", 120))
 
     for sector in selected:
         upsert_theme(
@@ -2004,8 +2055,16 @@ def _decision_world_read_set(
     membership_ref = None
     membership_archive = getattr(ctx, "sector_membership_archive", ())
     if membership_archive:
+        # ``strict_pit`` has to be stated here, exactly as ``_sector_cards``
+        # states it. Omitting it took the default — True — so a run started
+        # with ``--allow-current-membership`` was refused at this call with
+        # "strict sector replay requires point-in-time membership", and the
+        # flag could never take effect for the architectures that reach here.
+        # The predicate is the same one the rest of the run uses, so the read
+        # set records the same membership world the panel was built from.
         membership = sector_membership.as_of(
-            membership_archive, cutoff)
+            membership_archive, cutoff,
+            strict_pit=_membership_is_strict(ctx))
         membership_ref = {
             "snapshot_id": membership.snapshot_id,
             "content_hash": membership.content_hash,
@@ -3933,6 +3992,13 @@ def _run_window(ctx, args) -> dict:
             with replay_as_of(f"{day} 09:00"):
                 placed = _run_decider(ctx, day, prev_day)
             logger.info("%s: ordered %d", day, len(placed))
+            # The price band is already logged by the portfolio; the reason is
+            # not, and the reason is the only part a reader can disagree with.
+            for order in placed:
+                logger.info(
+                    "%s:   %s %s — %s", day, order.get("code") or "?",
+                    order.get("primary_theme") or order.get("theme") or "",
+                    _one_line(order.get("reason"), 300))
         except Exception as exc:                      # noqa: BLE001
             logger.exception("%s: the decider failed; settling the book anyway",
                              day)

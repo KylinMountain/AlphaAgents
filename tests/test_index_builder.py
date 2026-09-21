@@ -23,18 +23,16 @@ def _mock_concept_names():
     })
 
 
-def _mock_concept_cons(concept_code):
-    data = {
-        "301001": [
-            {"code": "688001", "name": "华兴源创"},
-            {"code": "688002", "name": "睿创微纳"},
-        ],
-        "301002": [
-            {"code": "300236", "name": "上海新阳"},
-            {"code": "688001", "name": "华兴源创"},
-        ],
+def _mock_local_members():
+    """What the local THS client holds: name -> bare codes.
+
+    Keyed by name, not by the detail-page code, because that is what
+    block_conception.ini carries — see alpha_agents/data/ths_local.py.
+    """
+    return {
+        "国产替代": ["688001", "688002"],
+        "光刻胶": ["300236", "688001"],
     }
-    return data.get(concept_code, [])
 
 
 def _mock_stock_info():
@@ -56,7 +54,7 @@ def _mock_industry():
 
 @patch("alpha_agents.data.index_builder._fetch_industry_baostock", side_effect=lambda: _mock_industry())
 @patch("alpha_agents.data.index_builder._fetch_stock_info", side_effect=lambda: _mock_stock_info())
-@patch("alpha_agents.data.index_builder._fetch_concept_constituents", side_effect=_mock_concept_cons)
+@patch("alpha_agents.data.index_builder._load_local_members", side_effect=_mock_local_members)
 @patch("alpha_agents.data.index_builder._fetch_concept_names", side_effect=lambda: _mock_concept_names())
 def test_build_index_creates_concepts(mock_names, mock_cons, mock_info, mock_ind, tmp_db):
     build_index(tmp_db)
@@ -68,7 +66,7 @@ def test_build_index_creates_concepts(mock_names, mock_cons, mock_info, mock_ind
 
 @patch("alpha_agents.data.index_builder._fetch_industry_baostock", side_effect=lambda: _mock_industry())
 @patch("alpha_agents.data.index_builder._fetch_stock_info", side_effect=lambda: _mock_stock_info())
-@patch("alpha_agents.data.index_builder._fetch_concept_constituents", side_effect=_mock_concept_cons)
+@patch("alpha_agents.data.index_builder._load_local_members", side_effect=_mock_local_members)
 @patch("alpha_agents.data.index_builder._fetch_concept_names", side_effect=lambda: _mock_concept_names())
 def test_build_index_creates_stocks(mock_names, mock_cons, mock_info, mock_ind, tmp_db):
     build_index(tmp_db)
@@ -81,7 +79,7 @@ def test_build_index_creates_stocks(mock_names, mock_cons, mock_info, mock_ind, 
 
 @patch("alpha_agents.data.index_builder._fetch_industry_baostock", side_effect=lambda: _mock_industry())
 @patch("alpha_agents.data.index_builder._fetch_stock_info", side_effect=lambda: _mock_stock_info())
-@patch("alpha_agents.data.index_builder._fetch_concept_constituents", side_effect=_mock_concept_cons)
+@patch("alpha_agents.data.index_builder._load_local_members", side_effect=_mock_local_members)
 @patch("alpha_agents.data.index_builder._fetch_concept_names", side_effect=lambda: _mock_concept_names())
 def test_build_index_creates_mappings(mock_names, mock_cons, mock_info, mock_ind, tmp_db):
     build_index(tmp_db)
@@ -100,7 +98,7 @@ def test_build_index_creates_mappings(mock_names, mock_cons, mock_info, mock_ind
 
 @patch("alpha_agents.data.index_builder._fetch_industry_baostock", side_effect=lambda: _mock_industry())
 @patch("alpha_agents.data.index_builder._fetch_stock_info", side_effect=lambda: _mock_stock_info())
-@patch("alpha_agents.data.index_builder._fetch_concept_constituents", side_effect=_mock_concept_cons)
+@patch("alpha_agents.data.index_builder._load_local_members", side_effect=_mock_local_members)
 @patch("alpha_agents.data.index_builder._fetch_concept_names", side_effect=lambda: _mock_concept_names())
 def test_build_index_is_idempotent(mock_names, mock_cons, mock_info, mock_ind, tmp_db):
     build_index(tmp_db)
@@ -113,7 +111,7 @@ def test_build_index_is_idempotent(mock_names, mock_cons, mock_info, mock_ind, t
 
 @patch("alpha_agents.data.index_builder._fetch_industry_baostock", side_effect=lambda: _mock_industry())
 @patch("alpha_agents.data.index_builder._fetch_stock_info", side_effect=lambda: _mock_stock_info())
-@patch("alpha_agents.data.index_builder._fetch_concept_constituents", side_effect=_mock_concept_cons)
+@patch("alpha_agents.data.index_builder._load_local_members", side_effect=_mock_local_members)
 @patch("alpha_agents.data.index_builder._fetch_concept_names", side_effect=lambda: _mock_concept_names())
 def test_build_index_adds_industry(mock_names, mock_cons, mock_info, mock_ind, tmp_db):
     build_index(tmp_db)
@@ -121,3 +119,51 @@ def test_build_index_adds_industry(mock_names, mock_cons, mock_info, mock_ind, t
     stock = conn.execute("SELECT industry FROM stocks WHERE code = '688001'").fetchone()
     conn.close()
     assert stock["industry"] == "半导体"
+
+
+@patch("alpha_agents.data.index_builder._fetch_industry_baostock",
+       side_effect=lambda: _mock_industry())
+@patch("alpha_agents.data.index_builder._fetch_stock_info",
+       side_effect=lambda: _mock_stock_info())
+@patch("alpha_agents.data.index_builder._load_local_members",
+       side_effect=lambda: {})
+@patch("alpha_agents.data.index_builder._fetch_concept_names",
+       side_effect=lambda: _mock_concept_names())
+def test_build_index_refuses_to_rebuild_without_local_membership(
+        mock_names, mock_local, mock_info, mock_ind, tmp_db):
+    """No local client means no rebuild — never a fallback to the first page.
+
+    build_index opens with DELETE FROM concept_stocks, and the only other
+    source caps each concept at its detail page's first ten names. Quietly
+    taking that path turned a 67,417-row corpus into 3,657 rows once already,
+    and a short member list is indistinguishable from a small concept.
+    """
+    with pytest.raises(RuntimeError, match="concept membership unavailable"):
+        build_index(tmp_db)
+
+
+@patch("alpha_agents.data.index_builder._fetch_industry_baostock",
+       side_effect=lambda: _mock_industry())
+@patch("alpha_agents.data.index_builder._fetch_stock_info",
+       side_effect=lambda: _mock_stock_info())
+@patch("alpha_agents.data.index_builder._load_local_members",
+       side_effect=lambda: {"国产替代": ["688001"], "机器人概念": ["688002"]})
+@patch("alpha_agents.data.index_builder._fetch_concept_names",
+       side_effect=lambda: _mock_concept_names())
+def test_build_index_keeps_concepts_only_the_local_client_knows(
+        mock_names, mock_local, mock_info, mock_ind, tmp_db):
+    """The union is written, not just the name list.
+
+    The client carried 15 concepts the name list did not when this was
+    measured; writing only the intersection would shrink the universe without
+    saying so.
+    """
+    build_index(tmp_db)
+    conn = get_connection(tmp_db)
+    names = {r["name"] for r in conn.execute("SELECT name FROM concepts")}
+    members = conn.execute(
+        "SELECT COUNT(*) c FROM concept_stocks").fetchone()["c"]
+    conn.close()
+    assert "机器人概念" in names, "concept only the client knows was dropped"
+    assert {"国产替代", "光刻胶"} <= names, "name-list concepts were dropped"
+    assert members == 2

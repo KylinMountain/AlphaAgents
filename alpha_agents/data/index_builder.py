@@ -84,8 +84,14 @@ def _fetch_concept_names_ths() -> pd.DataFrame:
 def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
     """Scrape concept constituents from THS detail page (10jqka.com).
 
-    Returns top stocks from the first page (usually 10-20).
-    THS blocks ajax pagination but the first page with auth cookie works.
+    Returns top stocks from the **first page** (usually 10-20), because THS
+    blocks ajax pagination. :func:`build_index` no longer calls this: the
+    truncation was not cosmetic — 303 of 375 concepts sat at exactly ten
+    members, which is a pagination boundary and not a market fact, and that
+    corpus fed the within-sector scorer, the sector benchmark in
+    ``beta_calculator`` and the live ``get_sector_best_stocks``. Kept because
+    it is the only network path to a concept's members if the client is ever
+    unavailable, and deleting it would hide that the option exists.
     """
     ths_headers = _get_ths_headers()
     url = f"https://q.10jqka.com.cn/gn/detail/code/{concept_code}/"
@@ -113,6 +119,12 @@ def _fetch_concept_constituents_ths(concept_code: str) -> list[dict]:
                 "name": cells[2].text.strip(),
             })
     return stocks
+
+
+def _load_local_members() -> dict[str, list[str]]:
+    """``{concept name: [6-digit codes]}`` from the local THS client."""
+    from alpha_agents.data.ths_local import load_concept_members
+    return load_concept_members()
 
 
 # Module-level aliases for easy mocking in tests
@@ -157,20 +169,47 @@ def build_index(db_path: Path) -> None:
                     (industry, code),
                 )
 
-        # 3. THS concept names + constituents (all via 10jqka.com, no eastmoney)
+        # 3. Concept names from THS, members from the **local THS client**.
+        #
+        # Members used to come from _fetch_concept_constituents, which reads
+        # the first page of each detail page because THS blocks pagination.
+        # That capped every concept at ten members, and because this function
+        # opens with DELETE FROM concept_stocks, one manual `build-index` was
+        # enough to take a rebuilt 67,417-row corpus back to 3,657 — silently,
+        # since a short list looks exactly like a small concept.
+        #
+        # The client already holds the whole list offline, so that is the
+        # source. If it is unreadable the build **stops**: falling back to the
+        # scrape would restore the truncation this replaced, and a corpus that
+        # is wrong in that particular way is worse than no rebuild at all.
         logger.info("Fetching concept names via THS...")
         concept_names_df = _fetch_concept_names()
         name_col = "name" if "name" in concept_names_df.columns else "概念名称"
-        code_col = "code" if "code" in concept_names_df.columns else "概念代码"
 
+        local_members = _load_local_members()
+        if not local_members:
+            raise RuntimeError(
+                "concept membership unavailable: the local THS client holds "
+                "no block_conception.ini this process can read. Refusing to "
+                "rebuild, because the only other source caps every concept "
+                "at its detail page's first ten names. See "
+                "alpha_agents/data/ths_local.py")
+
+        # The client carries concepts the name list does not (15 of them when
+        # this was measured), and dropping them would silently shrink the
+        # universe, so the union is what gets written.
+        names = list(dict.fromkeys(
+            [str(row[name_col]) for _, row in concept_names_df.iterrows()]
+            + sorted(local_members)))
+
+        known_codes = {row["code"] for row in conn.execute(
+            "SELECT code FROM stocks")}
         concept_success = 0
         concept_fail = 0
-        total = len(concept_names_df)
+        dropped_unknown = 0
+        total = len(names)
 
-        for i, (_, row) in enumerate(concept_names_df.iterrows()):
-            concept_name = str(row[name_col])
-            concept_code = str(row[code_col])
-
+        for i, concept_name in enumerate(names):
             conn.execute(
                 "INSERT OR REPLACE INTO concepts (name, source) VALUES (?, 'ths')",
                 (concept_name,),
@@ -179,30 +218,30 @@ def build_index(db_path: Path) -> None:
                 "SELECT id FROM concepts WHERE name = ?", (concept_name,)
             ).fetchone()["id"]
 
-            # Scrape constituents from THS detail page
-            stocks = _fetch_concept_constituents(concept_code)
-            if not stocks:
+            codes = local_members.get(concept_name) or []
+            kept = [code for code in codes if code in known_codes]
+            dropped_unknown += len(codes) - len(kept)
+            if not kept:
                 concept_fail += 1
             else:
                 concept_success += 1
-                for stock in stocks:
-                    # Only insert mapping if stock exists in stocks table
-                    exists = conn.execute(
-                        "SELECT 1 FROM stocks WHERE code = ?", (stock["code"],)
-                    ).fetchone()
-                    if exists:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO concept_stocks (concept_id, stock_code) VALUES (?, ?)",
-                            (concept_id, stock["code"]),
-                        )
+                conn.executemany(
+                    "INSERT OR IGNORE INTO concept_stocks "
+                    "(concept_id, stock_code) VALUES (?, ?)",
+                    [(concept_id, code) for code in kept],
+                )
 
             if (i + 1) % 50 == 0:
                 logger.info("Progress: %d/%d concepts processed", i + 1, total)
                 conn.commit()  # Intermediate commit
 
-            time.sleep(0.3)  # Be nice to THS servers
-
         conn.commit()
+        logger.info(
+            "Concept members from the local client: %d concepts, %d rows, "
+            "%d codes dropped as unknown to the stocks table",
+            concept_success,
+            conn.execute("SELECT COUNT(*) c FROM concept_stocks").fetchone()["c"],
+            dropped_unknown)
 
         logger.info("Index build complete.")
         logger.info(

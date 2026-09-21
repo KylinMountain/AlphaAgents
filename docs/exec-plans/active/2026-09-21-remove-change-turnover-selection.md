@@ -220,6 +220,25 @@ strict_pit=False -> accepted: id=current-only sectors=375
 标注正确、默认拒绝、显式放行、任意历史日期可解析、空语料拒绝（而非返回空
 宇宙——那会让 replay 选不出任何东西，看起来像策略结果）。
 
+### 端到端实证：sector replay 真的能跑了
+
+用真实语料副本 + `current_from_corpus()` 跑 `_sector_cards` + `_build_sector_panel`：
+
+```
+membership: 375 sectors, pit = False
+
+2026-08-18: shortlist=8 selected=[F5G概念, 5G, 6G概念]
+    panel=13 first5=[002281, 301486, 002579, 301183, 301529] theme=F5G概念
+2026-08-19: shortlist=8 selected=[玉米, 粮食概念, 共封装光学(CPO)]
+    panel=7  first5=[600785, 300570, 600186, 300811, 600540] theme=粮食概念
+2026-08-20: shortlist=8 selected=[玉米, 转基因, 草甘膦]
+    panel=11 first5=[600313, 002041, 000525, 300189, 600354] theme=玉米
+```
+
+注意 selected 是**概念板块名**（F5G概念 / 玉米 / 共封装光学(CPO)），
+panel 行带 `primary_theme` —— 这正是 owner 要的「从概念板块选股」那条路径。
+修复前这条路径在缺 `--sector-membership` 时直接 `SystemExit`。
+
 ## 验收（已达成）
 
 1. `grep -rn 'change_share' alpha_agents/ scripts/` → 仅剩 5 处**历史注释**，

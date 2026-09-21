@@ -1,36 +1,30 @@
-"""Deterministic stock panel construction inside selected sectors."""
+"""Deterministic stock panel construction inside selected sectors.
+
+**Ordering comes from ``data/sector_scoring``, the same function the live
+trader calls.** Until 2026-09-21 this module ranked within a sector by
+``(change_rank + turnover_rank) / 2`` while the live path ranked by a
+four-factor score (beta/position/institutional/liquidity). Two formulas meant
+a replay measured a decision the trader never makes, so its evidence was about
+this module rather than about the strategy.
+"""
 
 from __future__ import annotations
 
-
-def _rank(rows: list[dict], key: str) -> dict[str, int]:
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            -float(row.get(key) or 0.0),
-            str(row["code"]),
-        ),
-    )
-    return {str(row["code"]): index + 1 for index, row in enumerate(ordered)}
+from alpha_agents.data import sector_scoring
 
 
 def _within_sector(rows: list[dict]) -> list[str]:
+    """Members of one sector, best first, by the shared live scoring rule.
+
+    ``rows`` must already carry the four resolved inputs
+(``beta_weighted``, ``change_pct``, ``avg_daily_amount``, and ``code``);
+    the caller resolves them from the replayed corpus. Anything missing is
+    treated as its zero value by the shared scorer rather than guessed at.
+    """
     if not rows:
         return []
-    by_change = _rank(rows, "change_pct")
-    by_turnover = _rank(rows, "turnover_rate")
-    return [
-        str(row["code"])
-        for row in sorted(
-            rows,
-            key=lambda row: (
-                (by_change[str(row["code"])] +
-                 by_turnover[str(row["code"])]) / 2.0,
-                by_change[str(row["code"])],
-                str(row["code"]),
-            ),
-        )
-    ]
+    ranked = sector_scoring.score_members(rows)
+    return [str(row["code"]) for row in ranked]
 
 
 def materialize(*, candidates: dict[str, dict],

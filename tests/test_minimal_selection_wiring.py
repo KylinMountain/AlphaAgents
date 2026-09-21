@@ -25,14 +25,18 @@ class _Corpus:
         self.index = {day: i for i, day in enumerate(self.days)}
         self.first_bar = {code: "2020-01-01" for code in self.instruments}
         self._bars = {
+            # ``turnover_rate`` is no longer what orders a sector's members:
+            # ``data/sector_scoring`` is, and it reads beta and traded amount.
+            # ``volume`` is sized so ADV20 x close clears the shared
+            # liquidity floor, or both names would be dropped as ineligible.
             "2026-01-29": {
                 "600001": {
                     "code": "600001", "close": 10.0, "change_pct": 2.0,
-                    "turnover_rate": 3.0, "volume": 1000,
+                    "turnover_rate": 3.0, "volume": 2_000_000,
                 },
                 "600002": {
                     "code": "600002", "close": 20.0, "change_pct": 1.0,
-                    "turnover_rate": 4.0, "volume": 2000,
+                    "turnover_rate": 4.0, "volume": 2_000_000,
                 },
             },
             "2026-01-28": {},
@@ -43,7 +47,12 @@ class _Corpus:
         return self._bars.get(day, {})
 
     def adv20(self, code, before):
-        return 1000.0
+        # ADV20 in shares. The replay multiplies it by the T-1 close to get
+        # an amount, and ``data/sector_scoring`` drops anything below
+        # 5e7 yuan as too illiquid to rank. A small number here would make
+        # the panel empty for a reason that has nothing to do with what the
+        # test is about.
+        return 20_000_000.0
 
     def is_listed(self, code, day):
         return True

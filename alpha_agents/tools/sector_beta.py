@@ -7,87 +7,30 @@ multi-factor score: beta 40% + position 25% + institutional 20% + liquidity 15%.
 import json
 import logging
 
+from alpha_agents.data import sector_scoring
 from alpha_agents.data.beta_calculator import get_cached_betas, calculate_concept_betas, save_concept_betas
 from alpha_agents.data.market_data import get_realtime_quotes
 
 logger = logging.getLogger(__name__)
 
-# Factor weights
-W_BETA = 0.40
-W_POSITION = 0.25
-W_INSTITUTIONAL = 0.20
-W_LIQUIDITY = 0.15
-
-
-def _score_position(change_pct: float) -> float:
-    """Score based on intraday change — prefer stocks with moderate gains (2-6%).
-
-    V2 design: "从板块内选涨幅中段（2-6%）、还没涨停的标的"
-    Logic: stocks actively being bought (rising) but not yet overextended.
-    Negative change = market is buying the sector but not this stock = weak, avoid.
-    """
-    if change_pct >= 9.8:
-        return 0    # Limit up, can't buy
-    if change_pct >= 6:
-        return 30   # Rising fast, getting expensive
-    if change_pct >= 3:
-        return 100  # Sweet spot: actively rising, confirmed by market
-    if change_pct >= 1:
-        return 80   # Starting to move, good entry
-    if change_pct >= 0:
-        return 50   # Flat while sector rises — lukewarm
-    if change_pct >= -2:
-        return 20   # Falling while sector rises — weak, market doesn't want it
-    return 0        # Falling hard — something wrong, avoid
-
-
-def _score_liquidity(avg_daily_amount: float) -> float:
-    """Score based on average daily trading amount."""
-    yi = avg_daily_amount / 1e8  # Convert to 亿
-    if yi < 0.5:
-        return 0    # Too illiquid, skip
-    if yi < 1:
-        return 40
-    if yi < 5:
-        return 70
-    return 100
+# The four factor weights and the score functions live in
+# ``data/sector_scoring``, which the replay runner calls too. They were
+# duplicated here until 2026-09-21, and the replay's copy ranked by a
+# different formula entirely, so its evidence described its own rule rather
+# than this one. Re-exported for callers that imported them from here.
+W_BETA = sector_scoring.FACTOR_WEIGHTS["beta"]
+W_POSITION = sector_scoring.FACTOR_WEIGHTS["position"]
+W_INSTITUTIONAL = sector_scoring.FACTOR_WEIGHTS["institutional"]
+W_LIQUIDITY = sector_scoring.FACTOR_WEIGHTS["liquidity"]
+_score_position = sector_scoring.score_position
+_score_liquidity = sector_scoring.score_liquidity
+_normalize_beta_scores = sector_scoring.normalize_beta_scores
 
 
 def _score_institutional(code: str, north_data: dict, lhb_data: dict) -> float:
-    """Score based on institutional recognition signals."""
-    score = 0
-
-    # North flow
-    if code in north_data:
-        nd = north_data[code]
-        if nd.get("pct", 0) > 1:
-            score += 30
-        if nd.get("change", "") == "增持":
-            score += 20
-
-    # LHB
-    if code in lhb_data:
-        ld = lhb_data[code]
-        if ld.get("is_institutional") and ld.get("net_buy", 0) > 0:
-            score += 30
-
-    return min(score, 100)
-
-
-def _normalize_beta_scores(betas: list[dict]) -> dict[str, float]:
-    """Normalize beta_weighted to 0-100 scale across the sector."""
-    if not betas:
-        return {}
-    values = [b["beta_weighted"] for b in betas if b.get("beta_weighted")]
-    if not values:
-        return {}
-    max_b = max(values)
-    min_b = min(values)
-    range_b = max_b - min_b if max_b > min_b else 1
-    return {
-        b["code"]: round(((b.get("beta_weighted") or 0) - min_b) / range_b * 100, 1)
-        for b in betas
-    }
+    """Kept as a positional-argument shim over the shared implementation."""
+    return sector_scoring.score_institutional(
+        code, north=north_data, lhb=lhb_data)
 
 
 def _fuzzy_match_concept(name: str) -> str | None:
@@ -198,78 +141,51 @@ def get_sector_best_stocks_fn(concept_name: str, top_n: int = 10) -> str:
     except Exception as e:
         logger.debug("LHB data fetch failed: %s", e)
 
-    # 4. Normalize beta scores
-    beta_scores = _normalize_beta_scores(betas)
-
-    # 5. Multi-factor scoring
-    from alpha_agents.config import is_tradable
-    scored = []
+    # 4-5. Multi-factor scoring — the shared definition, not a local copy.
+    #
+    # This loop used to be written out here, and the replay had a *different*
+    # one (``sector_panel._within_sector`` averaged change and turnover
+    # ranks). Two implementations meant a replay measured a different
+    # decision from the one this function makes. The arithmetic now lives in
+    # ``data/sector_scoring``; only the fetching stays here, because live and
+    # replay get their inputs from different places.
+    members = []
     for b in betas:
         code = b["code"]
-        name = b.get("name", "")
-
-        # Skip markets the user can't trade (科创板 / 北交所 / B股)
-        if not is_tradable(code):
-            continue
-
-        # Get realtime data
         real = rt.get(code, {})
-        price = real.get("price", 0)
-        change_pct = real.get("change_pct", 0)
-
-        # Skip limit-up stocks (can't buy)
-        if change_pct >= 9.8:
-            continue
-
-        # Skip illiquid stocks
-        avg_amount = b.get("avg_daily_amount", 0)
-        if avg_amount < 5e7:  # < 5000万
-            continue
-
-        # Score each factor
-        s_beta = beta_scores.get(code, 50)
-        s_position = _score_position(change_pct)
-        s_institutional = _score_institutional(code, north_data, lhb_data)
-        s_liquidity = _score_liquidity(avg_amount)
-
-        total = round(
-            s_beta * W_BETA +
-            s_position * W_POSITION +
-            s_institutional * W_INSTITUTIONAL +
-            s_liquidity * W_LIQUIDITY,
-            1,
-        )
-
-        # Build note
-        notes = []
-        if s_beta >= 70:
-            notes.append("高beta")
-        if s_position >= 80:
-            notes.append("低涨幅")
-        if s_institutional >= 50:
-            notes.append("机构认可")
-        if s_liquidity >= 70:
-            notes.append("流动性好")
-
-        inst_signals = []
-        if code in north_data and north_data[code].get("change") == "增持":
-            inst_signals.append("北向增持")
-        if code in lhb_data and lhb_data[code].get("is_institutional"):
-            inst_signals.append("龙虎榜机构买入")
-
-        scored.append({
+        members.append({
             "code": code,
-            "name": name,
-            "score": total,
+            "name": b.get("name", ""),
             "beta_weighted": b.get("beta_weighted", 0),
-            "today_change_pct": change_pct,
-            "price": price,
-            "institutional": "+".join(inst_signals) if inst_signals else "无",
-            "avg_amount_yi": round(avg_amount / 1e8, 2),
-            "note": "+".join(notes) if notes else "",
+            "change_pct": real.get("change_pct", 0),
+            "avg_daily_amount": b.get("avg_daily_amount", 0),
+            "price": real.get("price", 0),
         })
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
+    ranked = sector_scoring.score_members(
+        members, north=north_data, lhb=lhb_data)
+
+    scored = []
+    for row in ranked:
+        code = row["code"]
+        inst_signals = []
+        if north_data.get(code, {}).get("change") == "增持":
+            inst_signals.append("北向增持")
+        if lhb_data.get(code, {}).get("is_institutional"):
+            inst_signals.append("龙虎榜机构买入")
+        scored.append({
+            "code": code,
+            "name": row.get("name", ""),
+            "score": row["score"],
+            "beta_weighted": row.get("beta_weighted", 0),
+            "today_change_pct": row.get("change_pct", 0),
+            "price": row.get("price", 0),
+            "institutional": "+".join(inst_signals) if inst_signals else "无",
+            "avg_amount_yi": round(
+                (row.get("avg_daily_amount") or 0) / 1e8, 2),
+            "note": row.get("note", ""),
+        })
+
     top = scored[:top_n]
 
     # Add rank

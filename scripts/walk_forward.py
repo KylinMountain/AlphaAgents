@@ -1397,10 +1397,18 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
         if not adv or adv <= 0:
             ctx.counters["sector_eligibility:no_adv20"] += 1
             continue
+        # The four inputs the shared scorer reads, resolved from the
+        # replayed corpus rather than from a live quote API. ``adv`` is the
+        # ADV20 in shares; the scorer wants an amount, so it is converted at
+        # the T-1 close. ``beta_weighted`` is computed as-of below, because
+        # the cached table is a *current* snapshot and using it in a replay
+        # would leak today's betas into a past decision.
         candidates[code] = {
             "code": code,
+            "name": ctx.corpus.instruments.get(code, {}).get("name", ""),
             "change_pct": float(change),
             "turnover_rate": float(row.get("turnover_rate") or 0.0),
+            "avg_daily_amount": float(adv) * float(close),
         }
         raw_rows[code] = (row, adv)
 

@@ -122,6 +122,48 @@ target strategy」。理由：A 臂（`dual_rank_v0`）需要冻结的 incumbent
 这是诚实的（没有基因可动），但意味着「证据 → 挑战者」这条链整体停摆，
 直到给 sector 路径定义真正的基因。测试用注入合成映射的方式继续覆盖机制本身。
 
+## 第 2 件的核心：live 与 replay 必须同一套逻辑
+
+owner 指令：「要一致，别搞得不一样，乱七八槽的」。这条比「删掉双通道」更根本，
+因为**两套实现本身**才是乱的来源。实测确认有两套：
+
+| | 位置 | 板块内排序 |
+|---|---|---|
+| live | `tools/sector_beta` | 四因子加权：beta .40 / 位置 .25 / 机构 .20 / 流动性 .15 |
+| replay | `data/sector_panel._within_sector` | `(change_rank + turnover_rank) / 2` |
+
+所以 replay 度量的**不是交易员做的那个决策**，它的证据描述的是 replay 自己的规则。
+
+### 做法：抽出一个纯函数模块，两边都调它
+
+新建 `alpha_agents/data/sector_scoring.py`，把四因子加权、四个分档函数、
+资格过滤、板块内 beta 归一化全部收进来。它是**纯函数**：所有输入都是参数，
+不读数据库、不读时钟。取数留在调用方，因为 live 从行情 API 取、replay 从
+`daily_kline` 取——这正是同一个函数能服务两边而不需要 `if replaying` 分支的原因。
+
+### 实测一致性（同输入 → 同排序）
+
+```
+shared scorer : [600003, 600001, 600004, 600002, 600005]
+replay panel  : [600003, 600001, 600004, 600002, 600005]
+IDENTICAL     : True
+```
+
+### 新增回归测试（`tests/test_sector_scoring.py`，11 条）
+
+除了打分本身，**关键的一条是防止有人再写第二份实现**：它用 `inspect` +
+`tokenize` 剥掉注释和字符串后，断言 `sector_panel` 里不再出现 `turnover_rank`
+或 `_rank`，并断言 live 模块确实调用 `sector_scoring.score_members`。
+（先剥注释是必须的——模块 docstring 会**描述**被删掉的旧公式来解释它为何被删，
+直接匹配文本会让测试被自己的历史绊倒。）
+
+### replay 侧补上缺的输入
+
+`walk_forward` 的 sector 候选原来只构造 `change_pct` / `turnover_rate`，
+现在补上 `beta_weighted` 与 `avg_daily_amount`（ADV20 股数 × T-1 收盘价）。
+**beta 不能用 `sector_betas` 缓存**——那是**当前**快照，用在 replay 里会把
+今天的 beta 泄漏进过去的决策。
+
 ## 验收（已达成）
 
 1. `grep -rn 'change_share' alpha_agents/ scripts/` → 仅剩 5 处**历史注释**，

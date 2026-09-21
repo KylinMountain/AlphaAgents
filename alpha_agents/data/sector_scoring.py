@@ -122,6 +122,52 @@ def normalize_beta_scores(betas: list[dict]) -> dict[str, float]:
     }
 
 
+def rank_concepts_by_flow(rows: list[dict]) -> dict:
+    """Shape raw concept-flow rows into ranked ``gainers`` / ``losers``.
+
+    Lives here, in the lowest layer, because both the live ranking tool and the
+    replay runner need it and ``tools`` may not import ``pipeline``. Before
+    2026-09-21 the shaping was written inside the live fetcher, so the replay
+    could not reuse it and ranked concepts by price/breadth instead — which is
+    why the two paths disagreed about which concept was hot.
+
+    Accepts either the akshare column names (``行业`` / ``行业-涨跌幅`` /
+    ``净额`` / ``领涨股``) or the already-normalised ones, because the live
+    reader hands over a DataFrame row and the replay hands over a database row.
+
+    Pure: no fetch, no clock. Sorting breaks ties by name, because two concepts
+    at the same inflow otherwise order by whichever the caller passed first.
+    """
+    gainers: list[dict] = []
+    losers: list[dict] = []
+    for row in rows:
+        name = str(row.get("concept") or row.get("行业") or row.get("名称") or "")
+        if not name:
+            continue
+        raw_flow = row.get("net_flow_yi")
+        if raw_flow is None:
+            raw_flow = row.get("净额") or 0
+        net_flow = float(raw_flow or 0)
+        raw_chg = row.get("change_pct")
+        if raw_chg is None:
+            raw_chg = row.get("行业-涨跌幅") or 0
+        entry = {
+            "concept": name,
+            "change_pct": float(raw_chg or 0),
+            "net_flow_yi": round(net_flow, 2),
+            "leader": str(row.get("leader") or row.get("领涨股") or ""),
+            "leader_change_pct": float(
+                row.get("leader_change_pct")
+                if row.get("leader_change_pct") is not None
+                else row.get("领涨股-涨跌幅") or 0),
+            "company_count": int(row.get("company_count") or 0),
+        }
+        (gainers if net_flow > 0 else losers).append(entry)
+    gainers.sort(key=lambda x: (-x["net_flow_yi"], x["concept"]))
+    losers.sort(key=lambda x: (x["net_flow_yi"], x["concept"]))
+    return {"gainers": gainers, "losers": losers}
+
+
 def is_eligible(code: str, change_pct: float, avg_daily_amount: float) -> bool:
     """Whether a concept member may be ranked at all.
 

@@ -145,6 +145,58 @@ measurement」。所以：
 这也顺便回答了「能不能从资金面着手」——能，而且它是唯一有 PIT 历史的
 通道，但它的历史**还不够长到支持调参**。
 
+## 第二步已完成：replay 与 live 同源读资金流
+
+### 发现：管道早就铺好了，只是没人接
+
+`market_data.get_concept_fund_flow()` **本来就是 replay 感知的**——它读
+`get_replay_as_of()`，在 replay 里走 `_replay_sector_flow` →
+`snapshot_store.read_sector_flow`。而 `walk_forward` 也早就在
+`replay_as_of(f"{day} 09:00")` 块里跑决策。
+
+**缺的只有一步：replay 从不调用概念异动检测。**
+
+### 做法：抽出两个纯函数，两边共用
+
+1. `data/sector_scoring.rank_concepts_by_flow(rows)` —— 排名成形（涨/跌榜、
+   按净额排序、名字平手）。放在 `data/` 是因为 `tools/` 也要用，而
+   `tools` 不能 import `pipeline`（分层方向），lint 会拦。
+2. `pipeline/tasks/anomaly_scan.concept_anomaly_signals(ranking)` —— Case A–E
+   逻辑，返回 `(概念名, 文案)` 对。
+
+**返回结构化对而不是只返回文案**：replay 之前要从渲染好的句子里把概念名
+再解析出来，那让消息格式变成承重结构，措辞一改就断。
+
+### 一处实测纠正
+
+我最初的过滤条件用「价格 shortlist」交集，实测三次（09-09/09-16/09-18）
+交集分别是 **0 / 1 / 0**——资金异动板块基本不在价格前 8 里，**这正是资金
+信号的意义所在**（它本就该与价格排名不一致）。改成只要求**在成分表里**
+（面板能解析出成员），否则这个分支会退化成它要取代的价格分支。
+
+### 实测
+
+```
+=== 资金流窗口内（>= 2026-09-08）===
+2026-09-09: method=concept_fund_flow_anomaly
+             selected=[国企改革, 金属铜, 小金属概念] panel=19
+2026-09-16: method=concept_fund_flow_anomaly
+             selected=[存储芯片, 汽车芯片, 中芯国际概念] panel=16
+
+=== 窗口外（回退，并说明）===
+2026-08-18: method=transparent_price_breadth_top3
+             selected=[F5G概念, 5G, 6G概念] panel=13
+```
+
+`direction_trace.method` 会写进 journal，所以**读者能分辨**这次选板块用的是
+资金流还是价格——不能只从代码判断。
+
+### 新增测试（`tests/test_shared_concept_flow.py`，10 条）
+
+成形/异动的算术，加上两条**防第二份实现**的：`inspect` 断言 live 的
+`get_concept_ranking_fn` 调用共享函数且不再有 `gainers.sort`；
+`_detect_anomalies` 不再内联任何阈值字面量。
+
 ## 验收
 
 1. `Corpus.sector_beta` 返回非 None，且面板内**至少 5 个不同值**（已实测 6 个）；

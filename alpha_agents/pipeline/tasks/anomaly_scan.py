@@ -18,6 +18,10 @@ import re
 from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes
+# ``rank_concepts_by_flow`` lives in the data layer because ``tools`` needs it
+# too and may not import this package. Imported here so existing callers keep
+# their import surface.
+from alpha_agents.data.sector_scoring import rank_concepts_by_flow  # noqa: F401
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, maybe_discover_theme, update_theme_strength,
 )
@@ -212,6 +216,53 @@ def _news_for_sectors(sectors: list[str]) -> str:
         return ""
     return ("\n【异动板块的近期快讯】（本地实时快讯库语义检索，"
             f"{_NEWS_LOOKBACK_HOURS}小时内）\n" + "\n".join(blocks))
+def concept_anomaly_signals(ranking: dict,
+                           thresholds: dict | None = None,
+                           limits: dict | None = None) -> list[tuple[str, str]]:
+    """The Case A-E signals for one concept ranking. Pure.
+
+    Shared by the live intraday monitor and the replay runner. A concept is
+    "anomalous" here in the fund-flow sense — money moving against or with the
+    price — which is a different question from "this board rose a lot". The
+    live trader has always asked the fund-flow one; the replay used to ask the
+    price one, and the two labelled different concepts as hot.
+    """
+    t = thresholds if thresholds is not None else CONCEPT_ANOMALY_THRESHOLDS
+    lim = limits if limits is not None else CONCEPT_SCAN_LIMITS
+    out: list[tuple[str, str]] = []
+
+    for concept in (ranking.get("gainers") or [])[:lim["gainers_examined"]]:
+        name = concept.get("concept", "")
+        chg = concept.get("change_pct", 0)
+        flow = concept.get("net_flow_yi", 0)
+        leader = concept.get("leader", "")
+        if chg > t["a_change_pct"] and flow > t["a_net_flow_yi"]:
+            out.append((name, (
+                f"🔴资金异动(量价确认): {name} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
+                f"领涨{leader}")))
+        elif chg > t["b_change_pct"] and flow < t["b_net_flow_yi"]:
+            out.append((name, (
+                f"⚠️量价背离: {name} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
+                f"— 可能主力借涨出货")))
+        elif chg < t["c_change_pct"] and flow > t["c_net_flow_yi"]:
+            out.append((name, (
+                f"🔵暗流涌动: {name} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
+                f"— 资金暗中布局")))
+
+    for concept in (ranking.get("losers") or [])[:lim["losers_examined"]]:
+        name = concept.get("concept", "")
+        chg = concept.get("change_pct", 0)
+        flow = concept.get("net_flow_yi", 0)
+        if chg < t["d_change_pct"] and flow < t["d_net_flow_yi"]:
+            out.append((name, (
+                f"🔴资金出逃: {name} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿")))
+        elif chg < t["e_change_pct"] and flow > t["e_net_flow_yi"]:
+            out.append((name, (
+                f"🔵逆势吸筹: {name} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
+                f"— 有人在接盘")))
+    return out
+
+
 def _detect_anomalies() -> tuple[bool, str]:
     """Detect anomalies with FUND FLOW FIRST, price second.
 
@@ -250,60 +301,13 @@ def _detect_anomalies() -> tuple[bool, str]:
     # needs a forward sample to be graded on, and the concept-flow history is
     # 13 sessions (9 overlapping the replay corpus), far short of the 50 the
     # repository requires before a threshold may be moved on evidence.
-    t = CONCEPT_ANOMALY_THRESHOLDS
+    lim = CONCEPT_SCAN_LIMITS
     try:
-        lim = CONCEPT_SCAN_LIMITS
         ranking = json.loads(
             get_concept_ranking_fn(top_n=lim["ranking_top_n"]))
-        top_gainers = ranking.get("gainers", [])
-        top_losers = ranking.get("losers", [])
-
-        for concept in top_gainers[:lim["gainers_examined"]]:
-            name = concept.get("concept", "")
-            chg = concept.get("change_pct", 0)
-            flow = concept.get("net_flow_yi", 0)
-            leader = concept.get("leader", "")
-
-            # Case A: 涨 + 大资金流入 = 真异动（量价确认）
-            if (chg > t["a_change_pct"]
-                    and flow > t["a_net_flow_yi"]):
-                signals.append(
-                    f"🔴资金异动(量价确认): {name} 涨{chg:.1f}% + 净流入{flow:.1f}亿 "
-                    f"领涨{leader}"
-                )
-            # Case B: 涨 + 资金流出 = 量价背离（可能出货）
-            elif (chg > t["b_change_pct"]
-                    and flow < t["b_net_flow_yi"]):
-                signals.append(
-                    f"⚠️量价背离: {name} 涨{chg:.1f}% 但资金净流出{abs(flow):.1f}亿 "
-                    f"— 可能主力借涨出货"
-                )
-            # Case C: 不怎么涨但资金大幅流入 = 暗中吸筹
-            elif (chg < t["c_change_pct"]
-                    and flow > t["c_net_flow_yi"]):
-                signals.append(
-                    f"🔵暗流涌动: {name} 仅涨{chg:.1f}% 但净流入{flow:.1f}亿 "
-                    f"— 资金暗中布局"
-                )
-
-        for concept in top_losers[:lim["losers_examined"]]:
-            name = concept.get("concept", "")
-            chg = concept.get("change_pct", 0)
-            flow = concept.get("net_flow_yi", 0)
-
-            # Case D: 跌 + 大资金流出 = 真下杀
-            if (chg < t["d_change_pct"]
-                    and flow < t["d_net_flow_yi"]):
-                signals.append(
-                    f"🔴资金出逃: {name} 跌{abs(chg):.1f}% + 净流出{abs(flow):.1f}亿"
-                )
-            # Case E: 跌 + 资金流入 = 逆势吸筹
-            elif (chg < t["e_change_pct"]
-                    and flow > t["e_net_flow_yi"]):
-                signals.append(
-                    f"🔵逆势吸筹: {name} 跌{abs(chg):.1f}% 但净流入{flow:.1f}亿 "
-                    f"— 有人在接盘"
-                )
+        # The Cases are computed by a pure function shared with the replay
+        # runner, so both ask the same question of the same numbers.
+        signals.extend(text for _name, text in concept_anomaly_signals(ranking))
     except Exception as e:
         logger.debug("Concept ranking fetch failed: %s", e)
 

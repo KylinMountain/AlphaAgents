@@ -215,33 +215,16 @@ def get_concept_ranking_fn(top_n: int = 20) -> str:
         if df is None or df.empty:
             return json.dumps({"error": "no concept data", "gainers": [], "losers": []}, ensure_ascii=False)
 
+        # One implementation of the shaping, shared with the replay runner.
+        # It was written out here until 2026-09-21, which is why the replay
+        # could not reuse it and ranked concepts by price/breadth instead.
+        from alpha_agents.data.sector_scoring import rank_concepts_by_flow
         name_col = "行业" if "行业" in df.columns else "名称"
-
-        gainers = []
-        losers = []
-        for _, row in df.iterrows():
-            name = str(row.get(name_col, ""))
-            change_pct = float(row.get("行业-涨跌幅", 0) or 0)
-            net_flow = float(row.get("净额", 0) or 0)
-            leader = str(row.get("领涨股", ""))
-            leader_change = float(row.get("领涨股-涨跌幅", 0) or 0)
-
-            entry = {
-                "concept": name,
-                "change_pct": change_pct,
-                "net_flow_yi": round(net_flow, 2),
-                "leader": leader,
-                "leader_change_pct": leader_change,
-                "company_count": int(row.get("公司家数", 0) or 0),
-            }
-
-            if net_flow > 0:
-                gainers.append(entry)
-            else:
-                losers.append(entry)
-
-        gainers.sort(key=lambda x: x["net_flow_yi"], reverse=True)
-        losers.sort(key=lambda x: x["net_flow_yi"])
+        raw = [dict(row) for _, row in df.iterrows()]
+        for row in raw:
+            row.setdefault("concept", str(row.get(name_col, "")))
+        shaped = rank_concepts_by_flow(raw)
+        gainers, losers = shaped["gainers"], shaped["losers"]
 
         return json.dumps({
             "total_concepts": len(gainers) + len(losers),

@@ -1633,15 +1633,87 @@ def _minimal_planner_panel(
     ]
 
 
+def _concept_flow_directions(ctx, day: str) -> list[str]:
+    """The concepts the LIVE monitor would call anomalous, in the same order.
+
+    This is the replay half of the one thing the two paths never shared: the
+    live intraday trader picks directions from **concept fund-flow anomalies**
+    (``anomaly_scan._detect_anomalies``, Cases A-E), while the replay picked
+    them from a price/breadth ranking. So "which concept is hot" was answered
+    two different ways, and sector-level replay evidence described the
+    replay's rule rather than the trader's.
+
+    Both now run the same arithmetic: ``get_concept_fund_flow`` is already
+    replay-aware (it reads ``sector_flow_snapshots`` at or before the replayed
+    instant), ``rank_concepts_by_flow`` is the shared shaping, and
+    ``concept_anomaly_signals`` is the shared Case A-E logic. Nothing here is
+    a second implementation.
+
+    **The window is the limit.** ``sector_flow_snapshots`` begins 2026-09-08,
+    so this returns ``[]`` for every earlier session and the caller falls back
+    to the price/breadth ranking with that stated in the report. An empty
+    return is "no fund-flow history", never "nothing was anomalous".
+    """
+    from alpha_agents.data.market_data import get_concept_fund_flow
+    from alpha_agents.pipeline.tasks.anomaly_scan import (
+        concept_anomaly_signals, rank_concepts_by_flow)
+
+    with replay_as_of(f"{day} 09:00"):
+        frame = get_concept_fund_flow()
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    name_col = "行业" if "行业" in frame.columns else "名称"
+    raw = [dict(row) for _, row in frame.iterrows()]
+    for row in raw:
+        row.setdefault("concept", str(row.get(name_col, "")))
+    shaped = rank_concepts_by_flow(raw)
+    # ``concept_anomaly_signals`` returns (name, text) pairs. Parsing the
+    # concept back out of the rendered sentence would be a second definition of
+    # the format, and the first thing to break when the wording changes.
+    names: list[str] = []
+    for name, _text in concept_anomaly_signals(shaped):
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
-    """Transparent top-3 price/breadth directions, no model and no flow."""
+    """Transparent top-3 directions: fund-flow anomalies when history exists,
+    price/breadth otherwise.
+
+    The fund-flow branch is what makes a sector replay comparable with the
+    live trader. It only exists for sessions ``sector_flow_snapshots``
+    covers (2026-09-08 onward); earlier sessions keep the price/breadth rule
+    and the report says which was used, because a reader cannot tell a
+    fund-flow pick from a price pick by looking at the code alone.
+    """
     from alpha_agents.data import theme_opportunity_journal as TOJ
 
     membership, cards, shortlist = _sector_cards(ctx, day, ranking_day)
-    selected = [
-        row["sector_id"] for row in shortlist[:3]
-        if row.get("sector_id")
+    shortlist_ids = [row["sector_id"] for row in shortlist]
+
+    # Fund-flow anomalies first, exactly as the live monitor picks directions.
+    #
+    # The filter is **membership**, not the price shortlist. A concept can be
+    # anomalous today without being in this session's top-8 by price/breadth —
+    # that is the whole point of a fund-flow signal, it is supposed to disagree
+    # with the price ranking. Filtering by the shortlist was measured on
+    # 2026-09-09/16/18 and intersected a fund-flow anomaly zero, one and zero
+    # times respectively, which would have reduced this branch to the price one
+    # it exists to replace. Membership is the only requirement the panel has: a
+    # selected direction must resolve to member codes or `_build_sector_panel`
+    # selects nothing.
+    member_sectors = set(membership.members)
+    flow_directions = [
+        name for name in _concept_flow_directions(ctx, day)
+        if name in member_sectors
     ]
+    if flow_directions:
+        selected = flow_directions[:3]
+        method = "concept_fund_flow_anomaly"
+    else:
+        selected = shortlist_ids[:3]
+        method = "transparent_price_breadth_top3"
     cutoff = f"{day} 09:00:00"
     try:
         TOJ.record(
@@ -1652,10 +1724,11 @@ def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
             information_cutoff=cutoff,
             architecture=ctx.selection_architecture,
             snapshots=cards,
-            shortlist=[row["sector_id"] for row in shortlist],
+            shortlist=shortlist_ids,
             selected=selected,
             research={
-                "method": "transparent_price_breadth_top3",
+                "method": method,
+                "flow_directions": flow_directions,
                 "selected_ids": selected,
             },
             refusals=[],
@@ -1668,7 +1741,7 @@ def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
     ctx.last_sector_context = {
         "membership_snapshot_id": membership.snapshot_id,
         "membership_hash": membership.content_hash,
-        "shortlist": [row["sector_id"] for row in shortlist],
+        "shortlist": shortlist_ids,
         "selected_themes": selected,
         "direction_research": [],
         "snapshot_hashes": {
@@ -1677,7 +1750,7 @@ def _price_sector_stage(ctx, day: str, ranking_day: str) -> list[dict]:
         },
         "direction_trace": {
             "status": "selected" if selected else "empty",
-            "method": "transparent_price_breadth_top3",
+            "method": method,
             "model_elapsed_ms": 0,
             "refused": 0,
         },

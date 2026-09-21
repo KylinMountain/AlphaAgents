@@ -85,6 +85,8 @@ class ResearchBudget:
     by_name: dict[str, int] = field(default_factory=dict)
     deep_dive_names: set[str] = field(default_factory=set)
     denied: int = 0
+    #: Reservations given back because the source had no rows (see refund).
+    refunded: int = 0
     trace_records: list[dict] = field(default_factory=list, repr=False)
 
     def _category(self, tool_name: str) -> str:
@@ -151,6 +153,40 @@ class ResearchBudget:
         self.denied += 1
         return False, reason
 
+    def refund(self, tool_name: str, args: tuple, kwargs: dict) -> None:
+        """Give back a reservation the source could not honour.
+
+        ``claim`` reserves before the call, so a tool answering "this source
+        has no rows for that session" spent budget anyway. Measured on the
+        2026-01-05 replay: the agent put all four of its ``theme`` calls into
+        ``get_theme_state``, which is empty for the whole January window
+        (``limit_pool_snapshots`` starts 2026-08-25), and then had nothing
+        left for the theme questions it could have answered.
+
+        This budget exists to stop one source starving the scan's deadline
+        (see the module docstring), and an empty answer is the cheapest thing
+        a source can do — a query that matches no rows and returns. It costs
+        neither time nor evidence, so it should cost no slot. A **timeout**
+        is the opposite case and stays charged: it spent the largest share of
+        the deadline there is. An **error** stays charged too, because it
+        spent real time before failing.
+
+        The refund is exact because ``claim`` adds to ``by_name`` and
+        ``deep_dive_names`` together, so a name belongs in the deep-dive set
+        exactly while its count is above zero.
+        """
+        category = self._category(tool_name)
+        name = self._name(tool_name, args, kwargs)
+        self.total_calls = max(0, self.total_calls - 1)
+        self.by_category[category] = max(0, self.by_category.get(category, 0) - 1)
+        if name is not None:
+            remaining = max(0, self.by_name.get(name, 0) - 1)
+            self.by_name[name] = remaining
+            if remaining == 0:
+                self.by_name.pop(name, None)
+                self.deep_dive_names.discard(name)
+        self.refunded += 1
+
     def record_tool(self, tool_name: str, args: tuple, kwargs: dict,
                     result, *, status: str, elapsed_ms: int | None = None) -> None:
         """Preserve exactly the facts a model actually received from a tool.
@@ -196,6 +232,7 @@ class ResearchBudget:
             "deep_dive_names": sorted(self.deep_dive_names),
             "by_name": dict(sorted(self.by_name.items())),
             "denied": self.denied,
+            "refunded": self.refunded,
             "limits": {
                 "market": self.max_market_calls,
                 "theme": self.max_theme_calls,
@@ -255,6 +292,23 @@ _POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="tool")
 
 
+def _is_no_data(result) -> bool:
+    """Whether a tool said the source has nothing, rather than answering.
+
+    The tools signal this with ``{"available": false, ...}`` (see
+    ``trader_tools._no_data``). Anything unparseable counts as a real answer:
+    a refund is a favour to the caller and guessing wrong in that direction
+    would hand out free calls.
+    """
+    if not isinstance(result, str):
+        return False
+    try:
+        payload = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload, dict) and payload.get("available") is False
+
+
 def with_timeout(fn, timeout: int | None = None):
     """Wrap a synchronous tool function in its own deadline.
 
@@ -283,8 +337,17 @@ def with_timeout(fn, timeout: int | None = None):
         try:
             result = future.result(timeout=limit)
             if active is not None:
+                # A tool that answers "this source has no rows for that
+                # session" did no research, so it should not have cost any.
+                # Charging it let one empty source drain a whole category —
+                # measured 2026-01-05, four theme calls into a table that
+                # starts 2026-08-25.
+                empty = _is_no_data(result)
+                if empty:
+                    active.refund(fn.__name__, args, kwargs)
                 active.record_tool(
-                    fn.__name__, args, kwargs, result, status="ok",
+                    fn.__name__, args, kwargs, result,
+                    status="no_data" if empty else "ok",
                     elapsed_ms=int((time.monotonic() - started) * 1000))
             return result
         except concurrent.futures.TimeoutError:

@@ -46,6 +46,10 @@ class _Corpus:
     def bars(self, day):
         return self._bars.get(day, {})
 
+    def sector_beta(self, code, peers, before):
+        """The replay computes beta as-of from the corpus; so does this stub."""
+        return 1.0
+
     def adv20(self, code, before):
         # ADV20 in shares. The replay multiplies it by the T-1 close to get
         # an amount, and ``data/sector_scoring`` drops anything below

@@ -516,6 +516,7 @@ class Corpus:
         self.first_bar: dict[str, str] = mh.first_bar_dates()
         self._bars: dict[str, dict[str, dict]] = {}
         self._adv: dict[tuple[str, str], float | None] = {}
+        self._beta: dict[tuple[str, str], float | None] = {}
 
     def is_listed(self, code: str, day: str) -> bool:
         """Was ``code`` already trading strictly before decision day ``day``?
@@ -558,6 +559,67 @@ class Corpus:
         if day not in self._bars:
             self._bars[day] = {r["code"]: r for r in mh.get_klines_for_date(day)}
         return self._bars[day]
+
+    def sector_beta(self, code: str, peers: tuple[str, ...],
+                    before: str) -> float | None:
+        """Weighted beta of ``code`` against its sector peers, as of ``before``.
+
+        The live path reads ``sector_betas``, which is a **current** table with
+        one row per (concept, code) and an ``updated_at`` that is overwritten
+        weekly. Using it in a replay would leak today's betas into a past
+        decision, so this recomputes from the corpus instead.
+
+        The formula is deliberately the live one, not a new one:
+        ``beta_calculator`` computes 20/60/120-session betas of the stock
+        against the equal-weighted sector return and combines them
+        ``0.50/0.30/0.20``. Reimplementing it here would recreate exactly the
+        two-implementations problem that ``data/sector_scoring`` was built to
+        end, so this calls the same functions and only supplies a different
+        source of returns.
+
+        ``None`` when the history is too short, which the scorer reads as "no
+        beta", not as zero — a zero beta is a real measurement meaning the
+        name does not track its sector, and conflating the two would let a
+        newly listed name look like an uncorrelated one.
+        """
+        key = (code, before)
+        if key in self._beta:
+            return self._beta[key]
+        from alpha_agents.data.beta_calculator import (
+            _returns_from_history, compute_beta, weighted_beta)
+
+        stock_hist = mh.get_local_history(code, days=120, as_of=before)
+        if not stock_hist or len(stock_hist) < 20:
+            self._beta[key] = None
+            return None
+        stock_returns = _returns_from_history(stock_hist)
+
+        # The sector return series is the equal-weighted average across peers.
+        # Capped at the live calculator's own cap so the two cannot diverge on
+        # a large concept.
+        series = []
+        for peer in peers[:50]:
+            hist = mh.get_local_history(peer, days=120, as_of=before)
+            if hist and len(hist) >= 20:
+                series.append(_returns_from_history(hist))
+        if not series:
+            self._beta[key] = None
+            return None
+        span = min(len(item) for item in series)
+        sector_returns = [
+            sum(item[i] for item in series) / len(series)
+            for i in range(span)
+        ]
+
+        beta_120 = (compute_beta(stock_returns, sector_returns)
+                    if len(stock_returns) >= 100 else None)
+        beta_60 = (compute_beta(stock_returns[-59:], sector_returns[-59:])
+                   if len(stock_returns) >= 59 and span >= 59 else None)
+        beta_20 = (compute_beta(stock_returns[-19:], sector_returns[-19:])
+                   if len(stock_returns) >= 19 and span >= 19 else None)
+        value = weighted_beta(beta_20, beta_60, beta_120)
+        self._beta[key] = value if value else None
+        return self._beta[key]
 
     def adv20(self, code: str, before: str) -> float | None:
         """ADV20 over the twenty sessions **ending at** ``before``.
@@ -1416,6 +1478,19 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
     for sector in selected:
         candidate_codes.update(membership.members.get(sector, ()))
 
+    # Which sector each candidate came from, so its beta is measured against
+    # the peers it is actually being compared with rather than the whole
+    # market. Built before the loop because the loop is per-code and the
+    # membership is per-sector.
+    sector_peers: dict[str, tuple[str, ...]] = {
+        sector: tuple(membership.members.get(sector, ()))
+        for sector in selected
+    }
+    code_sector: dict[str, str] = {}
+    for sector in selected:
+        for code in membership.members.get(sector, ()):
+            code_sector.setdefault(code, sector)
+
     candidates = {}
     raw_rows = {}
     for code in sorted(candidate_codes):
@@ -1437,15 +1512,24 @@ def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
         # The four inputs the shared scorer reads, resolved from the
         # replayed corpus rather than from a live quote API. ``adv`` is the
         # ADV20 in shares; the scorer wants an amount, so it is converted at
-        # the T-1 close. ``beta_weighted`` is computed as-of below, because
-        # the cached table is a *current* snapshot and using it in a replay
-        # would leak today's betas into a past decision.
+        # the T-1 close.
+        #
+        # ``beta_weighted`` is recomputed as-of, not read from
+        # ``sector_betas``: that table holds one current row per (concept,
+        # code), so a replay reading it would rank every historical session by
+        # today's betas. It is the 40% factor, so leaving it out entirely —
+        # which is what happened until 2026-09-21 — made the largest weight a
+        # constant 50 for every name and turned a four-factor score into a
+        # three-factor one without saying so.
         candidates[code] = {
             "code": code,
             "name": ctx.corpus.instruments.get(code, {}).get("name", ""),
             "change_pct": float(change),
             "turnover_rate": float(row.get("turnover_rate") or 0.0),
             "avg_daily_amount": float(adv) * float(close),
+            "beta_weighted": ctx.corpus.sector_beta(
+                code, sector_peers.get(code_sector.get(code, ""), ()),
+                ranking_day),
         }
         raw_rows[code] = (row, adv)
 

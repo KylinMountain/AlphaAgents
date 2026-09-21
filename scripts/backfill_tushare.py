@@ -1,7 +1,7 @@
 """Backfill Tushare EOD data (2026-01-01 → today or user-specified range).
 
 Five endpoints, all filled via shared community token:
-  - moneyflow_dc       → stock_fund_flow_daily
+  - moneyflow          → stock_fund_flow_daily
   - top_list           → lhb_daily
   - top_inst           → lhb_inst_daily
   - hm_detail          → hm_daily
@@ -15,6 +15,12 @@ Usage:
 """
 
 from __future__ import annotations
+
+# Load .env BEFORE tushare_client, or configured_token() falls back to the
+# shared default and every call answers "您的token不对" — which
+# backfill_one logs as an ordinary failure, not a credential problem.
+from dotenv import load_dotenv
+load_dotenv()
 
 import argparse
 import logging
@@ -50,7 +56,13 @@ def _date_range(start: str, end: str) -> list[str]:
 
 # Each entry: (name, tushare_api_name, save_fn, one_call_per_day, extra_kwargs)
 ENDPOINTS = [
-    ("fund_flow",   "moneyflow_dc",     save_stock_fund_flow_daily, True, {}),
+    # `moneyflow`, not `moneyflow_dc`, for the reason recorded in
+    # pipeline/tasks/daily_archive.py: the current token cannot read the
+    # richer endpoint (measured 2026-09-17 and again 2026-09-21,
+    # "您没有接口(moneyflow_dc)访问权限"), and backfill_one treats a
+    # permission error as "skip the endpoint" — so this line silently
+    # backfilled nothing at all.
+    ("fund_flow",   "moneyflow",        save_stock_fund_flow_daily, True, {}),
     ("lhb",         "top_list",         save_lhb_daily,             True, {}),
     ("lhb_inst",    "top_inst",         save_lhb_inst_daily,        True, {}),
     ("hm",          "hm_detail",        save_hm_daily,              True, {}),

@@ -182,8 +182,13 @@ def fund_flow_as_of(as_of: str,
     data that is already a single scan.
 
     Returns ``{}`` when the session is not archived, which the caller renders
-    as a blank column. Older sessions are not archived — the table began
-    2026-09-16 — and a blank cell means "not archived", not "no fund flow".
+    as a blank column, and a blank cell means "not archived", not "no fund
+    flow". The archive now starts **2026-01-05**, not 2026-09-16 as this said:
+    ``scripts/backfill_tushare.py`` was pointed at ``moneyflow_dc``, which the
+    token cannot read, so it filled nothing and the window was whatever the
+    daily job had accumulated. It runs on ``moneyflow`` now — whose
+    ``net_mf_amount`` is the same figure, matching the old rows stock for
+    stock — and 175 sessions are archived.
     """
     day = str(as_of)[:10].replace("-", "")
     sql = ("SELECT code, name, net_amount, net_amount_rate, buy_lg_amount, "

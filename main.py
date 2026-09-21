@@ -546,12 +546,27 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
 
 def cmd_review(args: argparse.Namespace) -> None:
-    """Run daily prediction review."""
+    """Run daily prediction review over the **v1** report predictions.
+
+    This reads ``reports.db:predictions``, which only ``pipeline/monitor.py``
+    writes — the v1 monitor loop. The scheduled 15:30 review is a different
+    function (``pipeline/tasks/review.py::run_review``) reading
+    ``memory.db:predictions``, and the two tables have different schemas and
+    different rows: measured 2026-09-22, reports.db last gained rows on
+    2026-09-08 while memory.db had 56 for 2026-09-21.
+
+    Neither is broken; they belong to different pipelines. But "没有找到预测
+    记录" from this command reads like "the system made no calls", which is
+    the opposite of true, so the empty case now says which table it looked in.
+    """
     from alpha_agents.pipeline.daily_review import run_daily_review
     import json as _json
     result = asyncio.run(run_daily_review(target_date=args.date))
     if result.get("status") == "no_predictions":
         print(f"没有找到 {result['date']} 的预测记录")
+        print("  （这条命令读的是 v1 的 reports.db:predictions，只有 "
+              "`main.py run` 的监控循环会写它。）")
+        print("  当前主线的复盘是：uv run python main.py run-v2 --task review")
     elif result.get("status") == "no_market_data":
         print(f"无法获取行情数据")
     else:

@@ -14,6 +14,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+#: ``(file, table, day_expr)``. ``day_expr`` is SQL that yields an ISO day for
+#: one row — a bare column where the column already is one, an expression where
+#: it is not. ``stock_fund_flow_daily`` keys on ``trade_date`` as YYYYMMDD, and
+#: naming a column that does not exist used to raise ``sqlite3.Error``, which
+#: :func:`_observed_days` reported as "unreadable" — indistinguishable from a
+#: source that genuinely has no rows. fund_flow read 0/20 days with 175
+#: sessions in the table.
 _SOURCE_CAPABILITIES = {
     "daily_price": ("market_history.db", "daily_kline", "date"),
     "news": ("market_snapshots.db", "news_items", "published_at"),
@@ -24,7 +31,9 @@ _SOURCE_CAPABILITIES = {
     "intraday_shape": (
         "market_snapshots.db", "all_quote_snapshots", "captured_at"),
     "fund_flow": (
-        "market_snapshots.db", "stock_fund_flow_daily", "date"),
+        "market_snapshots.db", "stock_fund_flow_daily",
+        "substr(trade_date,1,4)||'-'||substr(trade_date,5,2)"
+        "||'-'||substr(trade_date,7,2)"),
     "event_expectations": (
         "market_snapshots.db", "event_expectation_snapshots", "captured_at"),
 }
@@ -50,8 +59,11 @@ def _observed_days(path: Path, table: str, field: str,
             f"WHERE substr({field},1,10) BETWEEN ? AND ?",
             (start, end)).fetchall()
         return {str(row[0]) for row in rows if row[0]}, "available"
-    except sqlite3.Error:
-        return set(), "unreadable"
+    except sqlite3.Error as e:
+        # Name the error. A misspelt column is a bug in the map above, not an
+        # empty source, and reporting both as a bare "unreadable" is how
+        # fund_flow read 0/20 for a table holding 175 sessions.
+        return set(), f"unreadable: {e}"
     finally:
         conn.close()
 

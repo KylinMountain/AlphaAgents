@@ -433,23 +433,38 @@ def _limit_streak(bars: list) -> dict:
 
 
 def _fund_flow_series(code: str, cut_day: str) -> dict:
-    """最近 5 个交易日的资金流。缺表或没数据都说清楚。"""
+    """最近 5 个交易日的资金流。缺表或没数据都说清楚。
+
+    此前这里查的是 ``date, main_net_yi, main_net_pct, turnover_rate`` —— 这四
+    个列在 ``stock_fund_flow_daily`` 里**一个都不存在**，所以本工具从来只
+    返回 ``资金流表不可用: no such column: date``。``sqlite3.Error`` 把模式
+    错误和"表真的没有"兜成了同一句话，两者从调用方看不出区别。真实列名是
+    ``trade_date``（YYYYMMDD）与 ``net_amount``（万元）/``net_amount_rate``。
+
+    ``turnover_rate`` 不在这张表里，也不再假装有：换手率来自日线，调用方
+    在 kline 段已经拿到了它。
+    """
     try:
         conn = _conn(_SNAPSHOTS)
     except Exception as e:
         return {"available": False, "reason": f"快照库不可用: {e}"}
+    # cut_day 是 ISO（``as_of[:10]``），这张表的键是 YYYYMMDD。
+    cut_compact = cut_day.replace("-", "")
     try:
         rows = conn.execute(
-            "SELECT date, main_net_yi, main_net_pct, turnover_rate "
-            "FROM stock_fund_flow_daily WHERE code = ? AND date <= ? "
-            "ORDER BY date DESC LIMIT 5", (code, cut_day)).fetchall()
+            "SELECT trade_date, net_amount, net_amount_rate "
+            "FROM stock_fund_flow_daily WHERE code = ? AND trade_date <= ? "
+            "ORDER BY trade_date DESC LIMIT 5", (code, cut_compact)).fetchall()
         if not rows:
             return {"available": False,
                     "reason": f"{code} 在 {cut_day} 及之前没有资金流记录"}
         return {"available": True, "recent": [
-            {"date": r["date"], "main_net_yi": r["main_net_yi"],
-             "main_net_pct": r["main_net_pct"],
-             "turnover_rate": r["turnover_rate"]} for r in rows]}
+            {"date": "%s-%s-%s" % (r["trade_date"][:4], r["trade_date"][4:6],
+                                   r["trade_date"][6:]),
+             # 表里是万元，对外统一用亿元，与其它工具一致。
+             "main_net_yi": (None if r["net_amount"] is None
+                             else round(r["net_amount"] / 1e4, 4)),
+             "main_net_pct": r["net_amount_rate"]} for r in rows]}
     except sqlite3.Error as e:
         return {"available": False, "reason": f"资金流表不可用: {e}"}
     finally:

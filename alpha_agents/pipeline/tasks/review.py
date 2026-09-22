@@ -4,6 +4,7 @@ Verifies today's predictions, updates theme line strengths,
 updates market cognition, and generates review report.
 """
 
+import asyncio
 import logging
 import json
 from datetime import datetime
@@ -908,6 +909,36 @@ async def run_review() -> str | None:
             report += "\n\n" + evolution_report
     except Exception as e:
         logger.warning("Evolution post_review failed: %s", e)
+
+    # Phase 3: let the market-data verdict move the pointer.
+    #
+    # The gate already ran forward-only paired comparisons and already
+    # abstained below its sample floor; what it could not do was act. The
+    # only caller was `scripts/policy.py`, which printed "the pointer did not
+    # move: approve is a separate act by a person" — so the loop ended at a
+    # command a human had to remember to run, and `decision_change_rate` read
+    # 0.0% because nothing had ever been promoted.
+    #
+    # Design §11 calls the human boundary the *initial* one; the clause that
+    # stays is "no LLM may approve its own candidate", and the approver here
+    # is a statistical rule over market outcomes, recorded under its own name.
+    try:
+        from alpha_agents.evolution.auto_promote import run as auto_promote
+        promotion = await asyncio.to_thread(auto_promote, today=today)
+        if promotion.get("promoted"):
+            line = (f"\n\n【自动晋升】指针移到版本 #{promotion['promoted']}"
+                    f"（批准人 holdout_gate，非人工）")
+            report += line
+            logger.info("auto-promote moved the pointer to #%s",
+                        promotion["promoted"])
+        elif promotion.get("examined"):
+            # Why nothing moved is the useful half on almost every day.
+            for row in promotion["examined"][:3]:
+                logger.info("auto-promote: version #%s %s (n=%s) — %s",
+                            row.get("version_id"), row.get("outcome"),
+                            row.get("n"), row.get("reason"))
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Auto-promotion failed: %s", e)
 
     # Archive the review the Memory page reads. Until 2026-09-16 the only
     # caller of `save_review` was the manual CLI in

@@ -59,8 +59,21 @@ INVALIDATED = "invalidated"
 VALIDATED = "validated"
 EXPIRED = "expired"
 BLIND_SPOT = "blind_spot"
+#: The order was cancelled before it ever filled, so the claim was never
+#: tested. Distinct from ``expired``, which is a position that ran its
+#: horizon: "I sat at my limit for five days and never got filled" and "I
+#: held for five days and nothing happened" are different failures and only
+#: one of them is about the thesis.
+#:
+#: It exists because without it these theses never close. Measured on a
+#: 20-day replay: 29 theses, 9 filled, **20 left active with no position**,
+#: growing without bound and returned by every ``get_active`` call. And the
+#: missing 69% is not a random slice — 15 of the 17 cancels were 价格已涨走,
+#: the ones that went up. A system that grades only what filled is grading
+#: only the names that came back to its limit.
+UNFILLED = "unfilled"
 
-CLOSED_STATUSES = (INVALIDATED, VALIDATED, EXPIRED, BLIND_SPOT)
+CLOSED_STATUSES = (INVALIDATED, VALIDATED, EXPIRED, BLIND_SPOT, UNFILLED)
 
 
 @dataclass

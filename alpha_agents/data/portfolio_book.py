@@ -86,6 +86,38 @@ def entry_stop(pos, open_price: float, fallback_pct: float | None) -> float:
     return round(open_price * (1 - fallback_pct), 2)
 
 
+def _close_unfilled_thesis(conn, order_id: int, reason: str) -> None:
+    """A claim whose order never filled was never tested; close it as such.
+
+    The cancel path updated the order, closed the episode and released the
+    reservation, and left the thesis alone. Measured on a 20-day replay: 29
+    theses, 9 filled, **20 still ``active`` with no position**, which every
+    ``get_active`` call returns and nothing ever closes.
+
+    ``unfilled`` rather than ``invalidated``: the claim was not falsified,
+    it was never put in front of the market. Calling it invalidated would
+    book 20 failures the agent never had.
+
+    Best-effort. A bookkeeping failure must not stop a cancel; the
+    alternative is an order left pending with its cash still held.
+    """
+    try:
+        from alpha_agents.data import thesis as thesis_data
+        row = conn.execute(
+            "SELECT thesis_id FROM virtual_portfolio WHERE id = ?",
+            (order_id,)).fetchone()
+        thesis_id = _column(row, "thesis_id") if row else None
+        if not thesis_id:
+            return
+        thesis_data.close(int(thesis_id), thesis_data.UNFILLED,
+                          close_note=f"未成交即撤单：{reason}")
+        logger.info("Thesis #%s closed unfilled with order #%d: %s",
+                    thesis_id, order_id, reason)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("Could not close the thesis of cancelled order #%d: %s",
+                       order_id, exc)
+
+
 def _cancel_order_unlocked(order_id: int, reason: str) -> None:
     """Cancel a pending order. Caller must already hold _write_lock.
 
@@ -121,6 +153,7 @@ def _cancel_order_unlocked(order_id: int, reason: str) -> None:
     # — the drawdown gate and the unaffordable lot in _fill_order — never pass
     # through it, and closing the episode says this decision never traded.
     episodes.note_cancel(conn, order_id, reason)
+    _close_unfilled_thesis(conn, order_id, reason)
     released = reservations.release_all_held_for_order(
         conn, order_id=order_id, reason=reason)
     if not released:

@@ -380,9 +380,11 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     # them. Writes the challenger's forecasts and grades what matured. It asks
     # the gate exactly once per experiment -- the day the preregistered paired
     # sample first reaches the required count -- and never before or after:
-    # approve/promote remains a person's call, and asking daily would only
-    # record the same "insufficient" verdict until the sample fills. The
-    # report carries each experiment's paired/needed progress instead.
+    # asking daily would only record the same "insufficient" verdict until
+    # the sample fills. The report carries each experiment's paired/needed
+    # progress instead. Since evolution/auto_promote.py the pointer moves
+    # without a person, but the gate it moves on is unchanged -- the actor
+    # is holdout_gate, a forward-only paired test over market outcomes.
     scheduler.add_task(Task("shadow_run", run_shadow_run, dtime(15, 45),
                             timeout_seconds=300, catch_up_grace_minutes=90))
 

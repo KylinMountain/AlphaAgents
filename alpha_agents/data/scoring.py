@@ -272,6 +272,67 @@ def _ols_residual(y: list[float], X: list[list[float]], y0: float,
     return y0 - fitted
 
 
+def excess_over_market(return_pct: float, entry_date: str,
+                       exit_date: str | None = None, *,
+                       sessions: int | None = None) -> float | None:
+    """A realised return with the market's own move over the same window out.
+
+    ``residual_alpha`` cannot answer this: it computes the forward return
+    itself over a fixed horizon, while a closed position already has its
+    realised return and a holding period nobody chose in advance. Both
+    graders of ``playbooks.hit_rate`` need the same subtraction, and one of
+    them was not doing it — ``portfolio_exit`` scored a real close as a hit
+    whenever the price went up, which on a rising tape books the whole book
+    as hits and teaches a playbook that it works.
+
+    The window is given as two dates, not a session count. ``holding_days``
+    is a derived column that is not always filled in by the time a close
+    feeds the learning loop, and a grader that silently measures nothing
+    when it is absent is the same failure in a new place. ``sessions`` stays
+    available for a caller that genuinely has only a length.
+
+    Returns None when the benchmark leg cannot be read. The caller records
+    nothing rather than falling back to the raw return: an unmeasured trade
+    is a gap in the evidence, a wrongly measured one is a false lesson.
+    """
+    conn = _connect()
+    if conn is None:
+        return None
+    try:
+        if sessions is None:
+            if not exit_date:
+                return None
+            sessions = _sessions_between(conn, entry_date, exit_date)
+        if sessions is None or sessions < 1:
+            return None
+        market = _market_forward_return(conn, entry_date, int(sessions))
+    except sqlite3.Error as e:
+        # A benchmark that cannot be read is "not measured", never zero.
+        logger.debug("scoring: no market leg for %s: %s", entry_date, e)
+        return None
+    finally:
+        conn.close()
+    if market is None:
+        return None
+    return round(return_pct - market, 4)
+
+
+def _sessions_between(conn: sqlite3.Connection, entry_date: str,
+                      exit_date: str) -> int | None:
+    """Trading sessions from ``entry_date`` to ``exit_date``, inclusive of
+    neither end as a count — 0 when a position opened and closed the same day.
+
+    The market's calendar, for the reason ``_market_dates`` gives: a
+    suspended stock missing its own bars is a different fact from a day the
+    market did not trade.
+    """
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT date) FROM daily_kline "
+        "WHERE date > ? AND date <= ?", (entry_date, exit_date),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def residual_alpha(code: str, entry_date: str,
                    horizon: int = DEFAULT_HORIZON_DAYS,
                    sample_size: int = 300) -> dict | None:

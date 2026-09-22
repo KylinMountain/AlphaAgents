@@ -272,8 +272,8 @@ def _feed_close_to_learning(position_id: int, return_pct: float,
     try:
         conn = _get_conn()
         pos = conn.execute(
-            "SELECT code, trader_id, prediction_id FROM virtual_portfolio "
-            "WHERE id = ?",
+            "SELECT code, trader_id, prediction_id, open_date, close_date "
+            "FROM virtual_portfolio WHERE id = ?",
             (position_id,),
         ).fetchone()
         if not pos:
@@ -295,15 +295,31 @@ def _feed_close_to_learning(position_id: int, return_pct: float,
                            position_id)
             return
 
-        hit = 1 if return_pct > 0 else 0
+        # Beating the market, not going up. review.py has always graded
+        # predictions this way and says why in its own comment: absolute
+        # direction scores the whole book as hits on an up day. This site
+        # graded the same playbooks on the raw return, so one table carried
+        # two definitions of success — and this is the caller that fires on
+        # real closes, the trades with money on them.
+        from alpha_agents.data.clock import today as _today
+        from alpha_agents.data.scoring import excess_over_market
+        excess = excess_over_market(return_pct, pos["open_date"],
+                                    pos["close_date"] or _today())
         # The playbook this decision matched, as recorded at decision time.
         try:
             import json as _json
             from alpha_agents.data.memory_store import record_playbook_trade
             feats = _json.loads(pred["features_json"] or "{}")
             pb_id = feats.get("playbook_id")
-            if pb_id:
-                record_playbook_trade(int(pb_id), hit=bool(hit),
+            if pb_id and excess is None:
+                # No benchmark leg, so no comparable outcome. Recording the
+                # raw return here is how the wrong definition got in.
+                logger.warning("playbook #%s: no market leg for %s from %s "
+                               "to %s — close #%d not scored",
+                               pb_id, pos["code"], pos["open_date"],
+                               pos["close_date"], position_id)
+            elif pb_id:
+                record_playbook_trade(int(pb_id), hit=bool(excess > 0),
                                       return_pct=return_pct)
         except Exception as e:
             logger.debug("Playbook feedback failed for #%d: %s", position_id, e)

@@ -179,12 +179,20 @@ class TestCloseFeedsLearning:
         assert row["week_return"] is None
 
     def test_the_matched_playbook_still_hears_the_outcome(self, store):
-        """Observation counting is allowed; only the forecast label is off limits."""
+        """Observation counting is allowed; only the forecast label is off limits.
+
+        The benchmark leg is supplied here. Since the close site grades on
+        excess return rather than the raw one, a test bench with no market
+        data records nothing at all — which is the correct behaviour and is
+        pinned separately in test_playbook_grading_is_excess.py.
+        """
         ms, conn = store
         from alpha_agents.data import portfolio_exit as pe
+        from alpha_agents.data import scoring
         self._seed(ms, conn, prediction_id=True, features={"playbook_id": 7})
 
         with patch.object(pe, "_get_conn", lambda: conn), \
+             patch.object(scoring, "excess_over_market", return_value=-6.0), \
              patch.object(ms, "record_playbook_trade") as m_trade:
             pe._feed_close_to_learning(1, -8.0, "止损触发")
 

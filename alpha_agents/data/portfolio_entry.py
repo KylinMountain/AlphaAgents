@@ -103,7 +103,10 @@ def thesis_already_broken(code: str, price: float, order: dict) -> str | None:
             _attach_theme_flow(view, theme)
         fired = thesis_data.evaluate(thesis.conditions, view)
         if fired:
-            thesis_data.close(
+            # Unlocked: `portfolio.check_pending_orders` holds `_write_lock`
+            # across the fill loop and this runs inside it. `close` would
+            # take the same non-reentrant lock and block forever.
+            thesis_data.close_unlocked(
                 thesis.id, thesis_data.INVALIDATED, close_kind=fired.kind,
                 close_note=f"成交前失效：{thesis_data.describe(fired)}")
             return thesis_data.describe(fired)

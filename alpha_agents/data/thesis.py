@@ -497,16 +497,43 @@ def add_checkpoint(thesis_id: int, observation: str, verdict: str,
 
 def close(thesis_id: int, status: str, close_kind: str = "",
           close_note: str = "") -> None:
+    """Resolve a thesis. Acquires the write lock.
+
+    Callers already holding it want :func:`close_unlocked`. ``_write_lock``
+    is a plain ``threading.Lock`` and a second acquire on the same thread
+    blocks forever, which is not a crash and not a log line — the process
+    stays alive at 0% CPU with nothing to show.
+    """
+    with _write_lock:
+        close_unlocked(thesis_id, status, close_kind, close_note)
+
+
+def close_unlocked(thesis_id: int, status: str, close_kind: str = "",
+                   close_note: str = "") -> None:
+    """The body of :func:`close`, for callers inside ``_write_lock``.
+
+    The same shape ``portfolio_book._cancel_order_unlocked`` already has, and
+    it exists for the same reason. ``portfolio.check_pending_orders`` holds
+    the lock across the whole fill loop and asks
+    ``portfolio_entry.thesis_already_broken`` whether the claim survived the
+    wait; that check closes the thesis when it did not.
+
+    The deadlock was latent for as long as the check could not fire. Its
+    ``MarketView`` carried price and the theme table only, so every
+    flow-dependent condition was skipped and this line was never reached.
+    Supplying the flow (2026-09-22) made ``theme_flow_negative`` fire at the
+    door for the first time — and the run stalled on day 1 with four write
+    handles open on its own database and no output for 103 minutes.
+    """
     if status not in CLOSED_STATUSES:
         raise ValueError(f"not a closing status: {status}")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with _write_lock:
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE theses SET status = ?, closed_at = ?, close_kind = ?, "
-            "close_note = ? WHERE id = ?",
-            (status, now, close_kind, close_note[:300], thesis_id))
-        conn.commit()
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE theses SET status = ?, closed_at = ?, close_kind = ?, "
+        "close_note = ? WHERE id = ?",
+        (status, now, close_kind, close_note[:300], thesis_id))
+    conn.commit()
 
 
 def get_closed(days: int = 30,

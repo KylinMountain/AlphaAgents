@@ -3098,9 +3098,20 @@ def _check_theses(ctx, day: str) -> list[dict]:
     breadth = round(up / len(bars), 4) if bars else None
 
     try:
-        result = thesis_monitor.check_all(
-            price_map, sector_ranks=ranks, sector_flows=flows,
-            breadth_ratio=breadth, trader_id=ctx.trader)
+        # Inside the replay clock, like every other write in a replayed day.
+        # It was not, and the consequence is visible in any run that closed a
+        # thesis: close_position calls clock.today(), which is replay-aware,
+        # so outside the block it stamped the wall-clock date. A January
+        # position closed on day 0 of holding carried close_date 2026-09-22.
+        # That is not cosmetic — portfolio_report selects the day's exits by
+        # close_date, holding-period arithmetic reads it, and so does
+        # scoring.excess_over_market, which would measure a same-day round
+        # trip over eight months of market. add_checkpoint and thesis.close
+        # stamp their own times the same way.
+        with replay_as_of(f"{day} 09:30"):
+            result = thesis_monitor.check_all(
+                price_map, sector_ranks=ranks, sector_flows=flows,
+                breadth_ratio=breadth, trader_id=ctx.trader)
     except Exception as exc:                          # noqa: BLE001
         ctx.counters["thesis_check_failed"] += 1
         logger.warning("%s: thesis check failed: %s", day, exc)

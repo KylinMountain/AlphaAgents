@@ -161,3 +161,45 @@ class TestThePromptDoesNotAnchorTheThreshold:
         text = self._prompt()
         assert "不要照抄" in text
         assert "ATR" in text
+
+
+class TestAutonomousNeedsAPromptThatAsksForTheThesis:
+    """``--autonomous`` turns off the mechanical stop and target because the
+    agent's own invalidations are meant to replace them. With a template that
+    never asks for them, both are off and nothing is on.
+
+    Measured 2026-09-22 on a run launched that way: 7 theses, every one
+    ``conditions=[]`` and ``entry_fraction=0.0``. Sizing fell back to the
+    trader default and the report said ``thesis_triggered 0``, which reads as
+    "none fired" rather than "there were none to fire". The default
+    architecture loads ``t1_decide.md`` — six price fields and nothing else.
+    """
+
+    def _check(self, *, autonomous, prompt, arch="dual_rank_v0"):
+        import walk_forward as wf
+        return wf._require_thesis_prompt(
+            SimpleNamespace(autonomous=autonomous), prompt, arch)
+
+    def test_a_prompt_without_invalidations_is_refused(self):
+        with pytest.raises(SystemExit) as e:
+            self._check(autonomous=True, prompt="只输出 code/entry_low/stop_loss")
+        assert "invalidations" in str(e.value)
+        assert "sector_first_v0" in str(e.value)
+
+    def test_a_prompt_that_asks_for_them_passes(self):
+        assert self._check(
+            autonomous=True,
+            prompt='{"invalidations": [{"kind": "drawdown_from_peak"}]}',
+            arch="sector_first_v0") is None
+
+    def test_without_autonomous_the_rails_are_on_and_it_is_not_this_check(self):
+        """The mechanical stop still runs, so a thesis-less prompt is a
+        legitimate configuration — it is the pairing that is empty."""
+        assert self._check(autonomous=False, prompt="no thesis here") is None
+
+    def test_the_shipped_templates_split_the_way_the_message_says(self):
+        """The remedy names sector_trade_plan.md; if that stopped being true
+        the message would send the operator somewhere useless."""
+        from alpha_agents.config import PROMPTS_DIR
+        assert "invalidations" in (PROMPTS_DIR / "sector_trade_plan.md").read_text()
+        assert "invalidations" not in (PROMPTS_DIR / "t1_decide.md").read_text()

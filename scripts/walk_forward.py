@@ -1153,6 +1153,38 @@ def _book_and_knowledge(
     return book, "\n\n".join(p for p in parts if p)
 
 
+def _require_thesis_prompt(args, prompt: str | None,
+                           architecture: str) -> None:
+    """``--autonomous`` without a prompt that asks for invalidations is empty.
+
+    The flag turns off the mechanical stop and the mechanical target on the
+    stated ground that the agent's own invalidations replace them. If the
+    template never asks for them, both are off and nothing is on: every
+    thesis is written with no conditions and ``size_pct`` 0, sizing silently
+    falls back to the trader's default, and the report says
+    ``thesis_triggered 0`` — which reads as "none fired" rather than "there
+    were none".
+
+    Measured 2026-09-22 on a run launched exactly this way: 7 theses, every
+    one of them ``conditions=[]`` and ``entry_fraction=0.0``. The default
+    architecture loads ``t1_decide.md``, which asks for six price fields and
+    nothing else; only the sector-first modes load ``sector_trade_plan.md``.
+
+    Refused rather than repaired, because choosing a template for the
+    operator would silently change which experiment ran.
+    """
+    if not getattr(args, "autonomous", False) or not prompt:
+        return
+    if "invalidations" in prompt:
+        return
+    raise SystemExit(
+        f"--autonomous 关掉了机械止损与止盈，因为它假定 agent 自己写的失效条件"
+        f"会接管；但 --selection-architecture {architecture} 用的模板从不问"
+        f" invalidations，于是两边都没有出场逻辑。\n"
+        f"  用一个会问的架构（sector_first_v0 等加载 sector_trade_plan.md），"
+        f"或者去掉 --autonomous 把机械护栏留着。")
+
+
 def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
     """The stock decider prompt, frozen once per replay window."""
     from alpha_agents.agents import t1_decider
@@ -4072,6 +4104,7 @@ class Context:
             if args.decider == "llm" else None)
         self.prompt_sha256 = (hashlib.sha256(self.prompt.encode("utf-8"))
                               .hexdigest() if self.prompt else None)
+        _require_thesis_prompt(args, self.prompt, self.selection_architecture)
         #: Static, so read once: the trader's prompt file does not change
         #: inside a window, and re-reading it per day would make the run
         #: depend on when a file was edited.

@@ -169,8 +169,23 @@ def _capture_date(cutoff: str) -> str:
 
 
 def fund_flow_as_of(as_of: str,
-                    codes: set[str] | None = None) -> dict[str, dict]:
-    """``code → {net_amount, trend-ish fields}`` for one session.
+                    codes: set[str] | None = None,
+                    sessions: int = 1) -> dict[str, dict]:
+    """``code → {net_amount, trend-ish fields}`` over ``sessions`` ending at ``as_of``.
+
+    ``sessions`` defaults to 1, the original behaviour. Above 1, ``net_amount``
+    is the **cumulative** figure over that many archived sessions and
+    ``net_amount_rate`` stays the final session's — a rate is an intensity for
+    one day and summing it would mean nothing.
+
+    Why the parameter exists. The direction table renders this sum in a row
+    whose neighbours are all labelled 5日, and the agent read it as a 5-day
+    number: its own invalidation notes say "5日净额合计1995963.71" for a value
+    that was one session. Meanwhile ``theme_state`` hands the evaluator a
+    genuine five-session cumulative. So the agent was writing a threshold
+    against one quantity and having it judged against another — 金属铜 was
+    +69.66亿 in the note and −110.2亿 to the evaluator, opposite signs. One
+    window, named where it is shown.
 
     Read from ``stock_fund_flow_daily``, which is **dated** (``trade_date``
     as ``YYYYMMDD``) rather than timestamped, so the bound is a day and there
@@ -191,26 +206,45 @@ def fund_flow_as_of(as_of: str,
     stock — and 175 sessions are archived.
     """
     day = str(as_of)[:10].replace("-", "")
-    sql = ("SELECT code, name, net_amount, net_amount_rate, buy_lg_amount, "
-           "       buy_elg_amount FROM stock_fund_flow_daily "
-           " WHERE trade_date = ?")
-    params: list = [day]
-    if codes:
-        placeholders = ",".join("?" for _ in codes)
-        sql += f" AND code IN ({placeholders})"
-        params.extend(sorted(codes))
     try:
         from alpha_agents.data import snapshot_store
-        rows = snapshot_store._get_conn().execute(sql, params).fetchall()
+        conn = snapshot_store._get_conn()
+        # Read the window from the data, not a calendar: holidays and
+        # suspended sessions then need no special case, and nothing later
+        # than ``as_of`` can be reached.
+        window = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date FROM stock_fund_flow_daily "
+            "WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT ?",
+            (day, max(1, int(sessions)))).fetchall()]
+        if not window:
+            return {}
+        marks = ",".join("?" for _ in window)
+        sql = ("SELECT code, name, trade_date, net_amount, net_amount_rate, "
+               "       buy_lg_amount, buy_elg_amount "
+               "FROM stock_fund_flow_daily "
+               f"WHERE trade_date IN ({marks})")
+        params: list = list(window)
+        if codes:
+            placeholders = ",".join("?" for _ in codes)
+            sql += f" AND code IN ({placeholders})"
+            params.extend(sorted(codes))
+        rows = conn.execute(sql, params).fetchall()
     except sqlite3.DatabaseError as exc:
         logger.warning("Fund flow unavailable: %s", exc)
         return {}
-    return {
-        row["code"]: {
-            "net_amount": row["net_amount"],
-            "net_amount_rate": row["net_amount_rate"],
-            "buy_lg_amount": row["buy_lg_amount"],
-            "buy_elg_amount": row["buy_elg_amount"],
-        }
-        for row in rows
-    }
+
+    latest = max(window)
+    out: dict[str, dict] = {}
+    for row in rows:
+        entry = out.setdefault(row["code"], {
+            "net_amount": 0.0, "net_amount_rate": None,
+            "buy_lg_amount": 0.0, "buy_elg_amount": 0.0,
+            "sessions": 0,
+        })
+        entry["net_amount"] += float(row["net_amount"] or 0.0)
+        entry["buy_lg_amount"] += float(row["buy_lg_amount"] or 0.0)
+        entry["buy_elg_amount"] += float(row["buy_elg_amount"] or 0.0)
+        entry["sessions"] += 1
+        if row["trade_date"] == latest:
+            entry["net_amount_rate"] = row["net_amount_rate"]
+    return out

@@ -971,19 +971,28 @@ def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
 
 
 def _fund_flow_map(ctx, prev_day: str) -> dict[str, dict]:
-    """The previous session's whole-market fund flow, by code.
+    """Whole-market fund flow by code, cumulative over the theme window.
 
     Read from ``stock_fund_flow_daily``, which is **dated** — so the bound is
     the previous session and nothing later can be reached, unlike the
     timestamped snapshot tables. One query for the whole market rather than
     one per panel name.
 
+    The window is ``theme_state.WINDOW_SESSIONS`` and that is not a
+    coincidence: the agent writes ``theme_flow_negative`` thresholds off this
+    table and the evaluator judges them against ``theme_state``. When the two
+    disagreed — this read one session, the evaluator five — the agent's note
+    said 金属铜 was +69.66亿 while the condition was checked against −110.2亿,
+    and eight of twenty-five theses were created with an invalidation that
+    was *already true* on the day the position opened.
+
     Empty for sessions the archive does not hold, which the panel renders as
     a blank column: "not archived" and "no fund flow" are different claims.
     """
     try:
         from alpha_agents.data import stock_meta
-        return stock_meta.fund_flow_as_of(prev_day)
+        from alpha_agents.data.theme_state import WINDOW_SESSIONS
+        return stock_meta.fund_flow_as_of(prev_day, sessions=WINDOW_SESSIONS)
     except Exception as exc:                          # noqa: BLE001
         ctx.counters["fund_flow_unavailable"] += 1
         logger.debug("%s: fund flow unavailable: %s", prev_day, exc)

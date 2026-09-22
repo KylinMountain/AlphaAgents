@@ -49,18 +49,65 @@ NOON = datetime(2026, 9, 9, 11, 0)
 
 
 class TestFiring:
-    def test_a_fired_condition_closes_and_records_which(self, store):
-        tid = T.create(a_thesis([T.Condition("price_below", 50.0)]))
+    """A crossed invalidation wakes the agent. It does not close anything.
+
+    The old wiring closed the position here, on the reasoning that a claim
+    its own stated invalidation had broken was not a claim the agent should
+    re-argue. That turned a number written on entry day into a mechanical
+    stop — the agent never looked at the stock again — and it destroyed the
+    one observation worth having: whether the agent honours its own
+    commitment when the line is actually crossed.
+    """
+
+    def test_a_fired_condition_does_not_close_the_position(self, store):
+        T.create(a_thesis([T.Condition("price_below", 50.0)]))
         with patch.object(M, "get_open_positions", return_value=[a_position()]), \
              patch.object(M, "close_position", return_value=True) as close:
+            M.check_all({"000962": 49.5}, now=NOON)
+        close.assert_not_called()
+        assert len(T.get_active()) == 1, "the thesis stays alive until answered"
+
+    def test_a_fired_condition_produces_a_signal_naming_the_condition(self, store):
+        T.create(a_thesis([T.Condition("price_below", 50.0, "跌破50就是结构破了")]))
+        with patch.object(M, "get_open_positions", return_value=[a_position()]), \
+             patch.object(M, "close_position", return_value=True):
             out = M.check_all({"000962": 49.5}, now=NOON)
 
-        assert close.call_args.kwargs["close_reason"].startswith("论点失效")
-        assert out["closed"][0]["type"] == "thesis_invalidated"
-        closed = T.get_closed()[0]
-        assert closed.status == T.INVALIDATED
-        assert closed.close_kind == "price_below"
-        assert T.get_active() == []
+        assert out["closed"] == []
+        sig = out["signals"][0]
+        assert sig["type"] == "signal", "build_context only reads type=signal"
+        assert sig["kind"] == "price_below"
+        assert sig["code"] == "000962"
+
+    def test_the_signal_quotes_the_agents_own_words(self, store):
+        """The note is why this is a commitment and not a threshold."""
+        T.create(a_thesis([T.Condition("price_below", 50.0, "跌破50就是结构破了")]))
+        with patch.object(M, "get_open_positions", return_value=[a_position()]), \
+             patch.object(M, "close_position", return_value=True):
+            out = M.check_all({"000962": 49.5}, now=NOON)
+        assert "跌破50就是结构破了" in out["signals"][0]["reason"]
+        assert "还持有吗" in out["signals"][0]["reason"]
+
+    def test_the_trigger_is_recorded_as_a_checkpoint(self, store):
+        tid = T.create(a_thesis([T.Condition("price_below", 50.0)]))
+        with patch.object(M, "get_open_positions", return_value=[a_position()]), \
+             patch.object(M, "close_position", return_value=True):
+            M.check_all({"000962": 49.5}, now=NOON)
+        points = T.get_by_id(tid).checkpoints
+        assert points[-1]["verdict"] == T.TRIGGERED
+        assert points[-1]["kind"] == "price_below"
+
+    def test_a_repeat_crossing_tells_the_agent_it_is_a_repeat(self, store):
+        """Deliberately not suppressed: a trader at the line for the third
+        time, having overridden itself twice, is in a different situation."""
+        T.create(a_thesis([T.Condition("price_below", 50.0)]))
+        with patch.object(M, "get_open_positions", return_value=[a_position()]), \
+             patch.object(M, "close_position", return_value=True):
+            first = M.check_all({"000962": 49.5}, now=NOON)
+            second = M.check_all({"000962": 49.0}, now=NOON)
+        assert "第 1 次" not in first["signals"][0]["reason"]
+        assert "第 2 次触及" in second["signals"][0]["reason"]
+        assert "前 1 次你都选择了继续持有" in second["signals"][0]["reason"]
 
     def test_nothing_fires_means_no_close(self, store):
         T.create(a_thesis([T.Condition("price_below", 40.0)]))
@@ -78,7 +125,7 @@ class TestFiring:
         with patch.object(M, "get_open_positions", return_value=[a_position()]), \
              patch.object(M, "close_position", return_value=True):
             out = M.check_all({"000962": 53.24}, now=NOON)
-        assert out["closed"][0]["type"] == "thesis_invalidated"
+        assert out["signals"][0]["kind"] == "theme_strength_below"
 
     def test_sector_rank_is_passed_through(self, store):
         T.create(a_thesis([T.Condition("theme_rank_worse_than", 20)]))
@@ -86,7 +133,7 @@ class TestFiring:
              patch.object(M, "close_position", return_value=True):
             out = M.check_all({"000962": 53.24},
                               sector_ranks={"小金属概念": 44}, now=NOON)
-        assert out["closed"]
+        assert out["signals"][0]["kind"] == "theme_rank_worse_than"
 
 
 class TestHorizon:
@@ -116,14 +163,20 @@ class TestHorizon:
             M.check_all({"000962": 52.0}, now=NOON)
         close.assert_not_called()
 
-    def test_a_fired_condition_beats_the_horizon(self, store):
-        """Exiting on a reason is more informative than exiting on a date."""
+    def test_a_fired_condition_defers_the_horizon_close(self, store):
+        """A crossed line is a question for the agent, and it is asked first.
+
+        Closing on the horizon in the same pass would answer the question by
+        ending the position, which is the behaviour this design removed.
+        """
         T.create(a_thesis([T.Condition("price_below", 60.0)], horizon=1))
         with patch.object(M, "get_open_positions",
                           return_value=[a_position(holding_days=9)]), \
-             patch.object(M, "close_position", return_value=True):
+             patch.object(M, "close_position", return_value=True) as close:
             out = M.check_all({"000962": 53.0}, now=NOON)
-        assert out["closed"][0]["type"] == "thesis_invalidated"
+        close.assert_not_called()
+        assert out["closed"] == []
+        assert out["signals"][0]["kind"] == "price_below"
 
 
 class TestNarrative:

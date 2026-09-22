@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 # than the trade. It is the one worth learning from, and it exists as a
 # distinct status so the review can count it instead of inferring it.
 ACTIVE = "active"
+#: A stated invalidation fired and the agent was asked. Not a status —
+#: the thesis stays alive until the agent answers. A trader who wrote
+#: "8% off the peak proves me wrong" and then holds at 8% has said
+#: something, and the old wiring threw it away by closing the position
+#: before the agent could speak.
+TRIGGERED = "triggered"
+
 INVALIDATED = "invalidated"
 VALIDATED = "validated"
 EXPIRED = "expired"
@@ -443,12 +450,20 @@ def attach_position(thesis_id: int, position_id: int) -> None:
         conn.commit()
 
 
-def add_checkpoint(thesis_id: int, observation: str, verdict: str) -> None:
+def add_checkpoint(thesis_id: int, observation: str, verdict: str,
+                   kind: str = "") -> None:
     """Record one re-read of a live thesis.
 
     Checkpoints are what let the review ask whether the agent changed its
     mind, and when — a thesis that flipped three times in a session is a
     different object from one held with conviction, even if both end flat.
+
+    ``kind`` names the condition when this checkpoint is a ``TRIGGERED``
+    one. A stated invalidation that fires and is then overridden is the
+    single most informative thing a thesis can produce — it is the only
+    place the agent's own commitment and its own later judgement can be
+    read against each other — and that comparison needs the condition by
+    name, not buried in prose.
     """
     with _write_lock:
         conn = _get_conn()
@@ -457,8 +472,11 @@ def add_checkpoint(thesis_id: int, observation: str, verdict: str) -> None:
         if not row:
             return
         points = json.loads(row["checkpoints"] or "[]")
-        points.append({"at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                       "observation": observation[:300], "verdict": verdict})
+        point = {"at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                 "observation": observation[:300], "verdict": verdict}
+        if kind:
+            point["kind"] = kind
+        points.append(point)
         conn.execute("UPDATE theses SET checkpoints = ? WHERE id = ?",
                      (json.dumps(points, ensure_ascii=False), thesis_id))
         conn.commit()

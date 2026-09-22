@@ -3042,6 +3042,12 @@ def _check_theses(ctx, day: str) -> list[dict]:
     """
     from alpha_agents.pipeline.tasks import thesis_monitor
 
+    # Cleared first, before any early return. Every path out of this
+    # function leaves the field meaning "what fired today"; leaving
+    # yesterday's list in place would hand the agent a stale wake-up and
+    # look exactly like a fresh one.
+    ctx.pending_signals = []
+
     bars = ctx.corpus.bars(day)
     price_map = {code: float(row["close"]) for code, row in bars.items()
                  if row.get("close")}
@@ -3086,8 +3092,13 @@ def _check_theses(ctx, day: str) -> list[dict]:
         logger.warning("%s: thesis check failed: %s", day, exc)
         return []
 
+    # Signals, not closes. A crossed invalidation is handed to the agent on
+    # this day's exit turn; only the horizon still closes on its own, and
+    # that is a different claim — "my window ended", not "I was wrong".
+    ctx.pending_signals = result.get("signals") or []
+    ctx.counters["thesis_triggered"] += len(ctx.pending_signals)
     closed = result.get("closed") or []
-    ctx.counters["thesis_invalidated"] += len(closed)
+    ctx.counters["thesis_closed_on_horizon"] += len(closed)
     return [{"code": row.get("code"), "kind": row.get("reason", "")[:40]}
             for row in closed]
 
@@ -3220,7 +3231,8 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
                              model=ctx.model,
                              mechanical_stops=(ctx.mechanical_stop
                                                and ctx.mechanical_target),
-                             phase=phase))
+                             phase=phase,
+                             signals=ctx.pending_signals))
     if not decisions:
         return []
 
@@ -3810,6 +3822,9 @@ class Context:
     def __init__(self, args):
         self.args = args
         self.corpus = Corpus(_REPLAY_DIR)
+        #: Invalidations that fired today, waiting for the agent's exit turn.
+        #: Rewritten by every `_check_theses`, read once by `_agent_exits`.
+        self.pending_signals: list[dict] = []
         self.trader = args.trader
         self.picks = args.picks
         self.theme = args.theme
@@ -4215,14 +4230,23 @@ def _run_window(ctx, args) -> dict:
             # `drawdown_from_peak` and it fired zero times, while four
             # positions gave back 75–94% of peaks above +15%.
             #
-            # Placed here for the same reason the agent's turn is placed
-            # after settlement: a claim its own stated invalidation has
-            # already broken is not a claim the agent should get to re-argue.
+            # Placed before the agent's turn because what it produces is
+            # *input* to that turn. The earlier version closed the position
+            # here, on the reasoning that "a claim its own stated
+            # invalidation has broken is not a claim the agent should get
+            # to re-argue". That was wrong: it made a number written on
+            # entry day into a mechanical stop, and it threw away the one
+            # observation worth having — whether the agent honours its own
+            # commitment when the line is actually crossed.
             invalidated = _check_theses(ctx, day)
             if invalidated:
-                logger.info("%s: theses invalidated %s", day,
+                logger.info("%s: theses closed on horizon %s", day,
                             ", ".join(f"{r['code']}({r['kind']})"
                                       for r in invalidated))
+            if ctx.pending_signals:
+                logger.info("%s: theses triggered, agent asked: %s", day,
+                            ", ".join(f"{s['code']}({s['kind']})"
+                                      for s in ctx.pending_signals))
 
             # The agent's sell side, run *after* the mechanical settlement and
             # inside its own replay_as_of block. The order matters and is the

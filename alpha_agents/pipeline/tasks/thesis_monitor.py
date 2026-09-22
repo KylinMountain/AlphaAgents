@@ -79,16 +79,56 @@ def _horizon_verdict(th: T.Thesis, mv: T.MarketView) -> str:
     return T.EXPIRED
 
 
+def _wake(th: T.Thesis, fired: T.Condition, mv: T.MarketView) -> dict:
+    """The signal a crossed invalidation hands to the exit agent.
+
+    Carries three things the agent cannot reconstruct: its own words from
+    entry day (``fired.note``), what the stock has done since (peak,
+    drawdown, days held), and **how many times it has already crossed this
+    same line and chosen to hold**.
+
+    That last one is deliberately not suppressed. A trader who is at the
+    line for the third time, having overridden itself twice, is in a
+    different situation from one seeing it for the first time, and hiding
+    the repetition would be withholding the agent's own history from it.
+    """
+    drawdown = max(0.0, (mv.peak_return_pct or 0.0) - mv.current_return_pct)
+    prior = [c for c in th.checkpoints
+             if c.get("verdict") == T.TRIGGERED and c.get("kind") == fired.kind]
+    evidence = (f"峰值{mv.peak_return_pct:+.1f}% 回撤{drawdown:.1f}% "
+                f"浮动{mv.current_return_pct:+.2f}% 持仓{mv.holding_days}天")
+    T.add_checkpoint(th.id, f"{T.describe(fired)} | {evidence}",
+                     T.TRIGGERED, kind=fired.kind)
+
+    said = f"你买入时写的是「{fired.note}」。" if fired.note else ""
+    again = (f"这是第 {len(prior) + 1} 次触及，前 {len(prior)} 次你都选择了继续持有。"
+             if prior else "")
+    logger.info("Thesis #%d triggered (not closed): %s %s — %s | %s | 第%d次",
+                th.id, th.code, th.name, T.describe(fired), evidence,
+                len(prior) + 1)
+    return {
+        "type": "signal",
+        "code": th.code,
+        "reason": (f"你声明的失效条件触发：{T.describe(fired)}。{said}"
+                   f"当前 {evidence}。{again}还持有吗？"),
+        "thesis_id": th.id,
+        "kind": fired.kind,
+    }
+
+
 def check_all(price_map: dict[str, float],
               sector_ranks: dict[str, int] | None = None,
               sector_flows: dict[str, float] | None = None,
               breadth_ratio: float | None = None,
               now: datetime | None = None,
               trader_id: str | None = None) -> dict:
-    """Evaluate every live thesis. Closes what fired.
+    """Evaluate every live thesis. Closes what ran its horizon.
 
-    Returns {"closed": [...], "narrative_due": [...]}. The caller pushes
-    the closes and hands ``narrative_due`` to the LLM re-read.
+    Returns {"closed": [...], "narrative_due": [...], "signals": [...]}.
+    The caller pushes the closes, hands ``narrative_due`` to the LLM
+    re-read, and **must pass ``signals`` to the exit agent** — a crossed
+    invalidation no longer closes anything by itself. A caller that drops
+    them silently reverts the position to being held with no one asked.
 
     ``trader_id`` scopes it to one book, so the narrative re-read that
     follows goes to that trader's own prompt rather than to whichever
@@ -96,7 +136,7 @@ def check_all(price_map: dict[str, float],
     """
     now = now or datetime.now()
     positions = {p["id"]: p for p in get_open_positions(trader_id)}
-    closed, narrative_due = [], []
+    closed, narrative_due, signals = [], [], []
 
     for th in T.get_active(trader_id=trader_id):
         pos = positions.get(th.position_id) if th.position_id else None
@@ -113,16 +153,14 @@ def check_all(price_map: dict[str, float],
 
         fired = T.evaluate(th.conditions, mv)
         if fired:
-            reason = f"论点失效: {T.describe(fired)}"
-            if close_position(pos["id"], close_price=price, close_reason=reason):
-                T.close(th.id, T.INVALIDATED, close_kind=fired.kind,
-                        close_note=T.describe(fired))
-                logger.info("Thesis #%d invalidated: %s %s — %s",
-                            th.id, th.code, th.name, T.describe(fired))
-                closed.append({"type": "thesis_invalidated", "code": th.code,
-                               "name": th.name, "reason": reason,
-                               "close_price": price,
-                               "return_pct": mv.current_return_pct})
+            # Wake the agent; do not close. A number written on entry day
+            # closing a position five sessions later, with the agent never
+            # looking at the stock again, is a mechanical stop wearing a
+            # thesis. What the condition is *for* is the commitment: the
+            # agent said in advance what would prove it wrong, and the
+            # useful moment is when that line is crossed and it has to
+            # answer. See docs/exec-plans/active/invalidation-wakes-the-agent.md
+            signals.append(_wake(th, fired, mv))
             continue
 
         if mv.holding_days >= th.horizon_days:
@@ -143,7 +181,8 @@ def check_all(price_map: dict[str, float],
         if T.needs_narrative_review(th.conditions) and _narrative_due(now):
             narrative_due.append((th, mv))
 
-    return {"closed": closed, "narrative_due": narrative_due}
+    return {"closed": closed, "narrative_due": narrative_due,
+            "signals": signals}
 
 
 def _narrative_due(now: datetime) -> bool:

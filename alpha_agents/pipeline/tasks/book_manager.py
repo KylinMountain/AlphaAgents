@@ -91,6 +91,12 @@ async def manage_book(trader, price_map: dict, today_str: str,
                     w.get("breadth_ratio"),
                     trader_id=trader.id)
                 pos_alerts += result["closed"]
+                # Wake-ups: a stated invalidation fired and the position is
+                # still open on purpose. These ride in pos_alerts because
+                # that is what reaches exit_decision.run as its signals, and
+                # the notification loop already logs type="signal" without
+                # pushing it.
+                pos_alerts += result["signals"]
                 # A position the floor already took, with nothing the
                 # agent listed having fired — the blind spots.
                 await asyncio.to_thread(thesis_monitor.settle_orphans,

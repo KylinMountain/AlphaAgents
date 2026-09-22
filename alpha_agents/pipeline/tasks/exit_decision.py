@@ -469,11 +469,13 @@ async def run(price_map: dict[str, float], signals: list[dict],
               trader_id: str | None = None) -> list[dict]:
     """Call a model only where one is actually needed.
 
-    Two situations qualify. A thesis carrying a ``narrative`` condition has
-    reached its review slot — the agent wrote something no rule can check
-    and has to re-read it itself. Or a rule signal fired on a position that
-    has no thesis at all, which is every position opened before this design
-    existed and any pick whose recommendation omitted its invalidations.
+    Three situations qualify. A thesis carrying a ``narrative`` condition
+    has reached its review slot — the agent wrote something no rule can
+    check and has to re-read it itself. A thesis whose **stated
+    invalidation just fired**, which is the commitment coming due. Or a
+    rule signal on a position that has no thesis at all, which is every
+    position opened before this design existed and any pick whose
+    recommendation omitted its invalidations.
 
     Everything else was already settled in code by ``thesis_monitor``, for
     free and identically every cycle. A quiet market now costs zero model
@@ -486,6 +488,15 @@ async def run(price_map: dict[str, float], signals: list[dict],
     from alpha_agents.data.thesis import get_active
 
     signal_codes = {s["code"] for s in signals if s.get("type") == "signal"}
+    # A thesis whose own stated invalidation just fired. This is the one
+    # case that *must* reach the model: the agent committed in advance to
+    # what would prove it wrong, the line has been crossed, and the whole
+    # point is to hear its answer. The old wiring excluded exactly these
+    # positions — reasonably, back when thesis_monitor closed them in code
+    # — so leaving the exclusion in place would have made the wake-up
+    # signal arrive nowhere.
+    woken_codes = {s["code"] for s in signals
+                   if s.get("type") == "signal" and s.get("thesis_id")}
     narrative_codes = {th.code for th, _ in (narrative_due or [])}
 
     candidates = []
@@ -493,7 +504,7 @@ async def run(price_map: dict[str, float], signals: list[dict],
         code = pos["code"]
         if not price_map.get(code):
             continue
-        if code in narrative_codes:
+        if code in narrative_codes or code in woken_codes:
             candidates.append(pos)
         elif code in signal_codes and not get_active(code=code,
                                                      trader_id=trader_id):
@@ -530,16 +541,19 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                             *, day: str, news_by_theme: dict[str, list[str]]
                             | None = None, trader=None,
                             model=None, mechanical_stops: bool = True,
-                            phase: str = "open") -> list[dict]:
+                            phase: str = "open",
+                            signals: list[dict] | None = None) -> list[dict]:
     """The sell side, for a historical replay.
 
     A separate entry point rather than a flag on :func:`run`, because the two
     differ in what they may read, and that difference is the whole risk:
 
     * ``run`` decides *which* positions are worth a model call, using theses
-      and rule signals. A replay has no theses, and its rule signals are the
-      mechanical settlement — so it asks about every open position, every
-      day.
+      and rule signals. A replay asks about every open position, every day,
+      and passes its own ``signals`` — which since the autonomous arm do
+      include theses: a crossed invalidation arrives here as a signal
+      rather than having already closed the position, so the agent answers
+      for its own stated commitment instead of being overruled by it.
     * ``run`` builds its context with ``_news_for_theme``, which calls
       ``news_index.search_news(hours=...)``. That function searches the whole
       vector store by wall-clock offset and does **not** consult
@@ -561,7 +575,7 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
 
     if phase not in ("open", "close"):
         raise ValueError(f"phase must be 'open' or 'close', not {phase!r}")
-    context = build_context(positions, price_map, signals=[],
+    context = build_context(positions, price_map, signals=signals or [],
                            news_by_theme=news_by_theme,
                            mechanical_stops=mechanical_stops,
                            phase=phase)

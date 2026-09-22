@@ -22,8 +22,57 @@ def order_conviction(code: str, trader_id: str = DEFAULT_TRADER) -> float:
         return 0.5
 
 
+def _attach_theme_flow(view, theme: str) -> None:
+    """The same windowed measure the post-fill check reads.
+
+    One source for both, on purpose: an order refused at the door and a
+    position closed the next morning must be answering the same question,
+    or the replay measures a rule production does not run.
+
+    A failed read leaves the fields None, which ``thesis.evaluate`` treats
+    as "could not check" and never as "the thesis broke". Refusing a fill
+    because a database was busy would be the worse error.
+    """
+    try:
+        from alpha_agents.data.clock import today
+        from alpha_agents.data.theme_state import concept_state
+        ranks, flows = concept_state(today())
+        if theme in ranks:
+            view.theme_rank = ranks[theme]
+        if theme in flows:
+            view.theme_net_flow_yi = flows[theme]
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("Theme flow unavailable for the pre-fill check of %s: %s",
+                     theme, exc)
+
+
 def thesis_already_broken(code: str, price: float, order: dict) -> str | None:
-    """Return the invalidation already true at fill time, if any."""
+    """Return the invalidation already true at fill time, if any.
+
+    The gap between the decision and the fill is where this matters, and for
+    a pullback trader that gap is the whole strategy: it picks a theme
+    because money is flowing in, then waits for a dip. Measured on a 20-day
+    replay, **six of the seven theme_flow_negative closes were orders that
+    waited two to four sessions and then closed on day 0 of holding** —
+    bought and sold the same session, paying a round trip for a premise that
+    had already died while the order sat.
+
+    300475 is the clean case. Ordered 2026-01-08 on a table showing 存储芯片
+    at +294.2亿 over five sessions; the agent wrote "out if this turns to a
+    30亿 outflow", a 324亿 buffer. It filled 2026-01-12, by which time the
+    same measure read **−72.7亿** — the window had rolled −110, −6 and −251
+    across three sessions, more than the level itself. The invalidation
+    fired on the fill.
+
+    The check existed and could not see it. The view was built from price
+    and the theme table only, so ``theme_net_flow_yi``, ``theme_rank`` and
+    ``breadth_ratio`` were all None and ``evaluate`` skipped every condition
+    that needs them — the one condition that would have caught this was
+    structurally unable to run at the one moment it mattered. With the flow
+    supplied, these become cancellations, which cost nothing, instead of
+    same-session round trips, which cost spread twice and enter the learning
+    loop as trades.
+    """
     try:
         from alpha_agents.data import thesis as thesis_data
     except Exception as exc:
@@ -51,6 +100,7 @@ def thesis_already_broken(code: str, price: float, order: dict) -> str | None:
                 view.theme_strength = row.get("strength")
                 view.theme_daily_score = row.get("daily_score")
                 view.theme_status = row.get("status")
+            _attach_theme_flow(view, theme)
         fired = thesis_data.evaluate(thesis.conditions, view)
         if fired:
             thesis_data.close(

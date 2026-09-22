@@ -4682,6 +4682,78 @@ def write_report(result: dict, out_dir: Path) -> dict:
     return {"meta": meta, "summary": summary, "out_dir": out_dir}
 
 
+def _missed_moves(ctx) -> str:
+    """What the names the agent never got into did anyway.
+
+    The biggest number in a pullback run is not an exit. Measured on the
+    2026-01-05 window: market +6.15%, agent -0.117%, and 17 of 26 orders
+    cancelled — fifteen of them 价格已涨走. Two thirds of the agent's
+    decisions produced no outcome, and the missing two thirds are exactly
+    the names that went up.
+
+    This line separates the two skills that the P&L confuses. Selection
+    asks "were these the right names"; entry asks "could I get in at my
+    price". A trader whose misses beat the market has a good eye and a band
+    that is too tight; one whose misses lag has a band that saved money.
+    Without the split, both read as a bad month.
+
+    **Not a return the account earned.** It is measured from the session the
+    order was given up on, over the trader's own horizon, and it is reported
+    against the market over the same days so that a rising tape cannot make
+    it look like skill. It is deliberately absent from ``hit``,
+    ``excess_return`` and ``playbooks.hit_rate``: counting a move you did not
+    take is booking money that was never made.
+    """
+    import sqlite3
+    from statistics import median
+
+    horizon = _trader_horizon(ctx.trader)
+    try:
+        conn = sqlite3.connect(f"file:{_REPLAY_DIR / 'memory.db'}?mode=ro",
+                               uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT code, order_date, close_reason FROM virtual_portfolio "
+            "WHERE status = 'cancelled'").fetchall()
+        conn.close()
+    except sqlite3.Error as exc:                      # noqa: BLE001
+        logger.debug("missed-move read failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+
+    own, versus = [], []
+    for row in rows:
+        start = row["order_date"]
+        index = ctx.corpus.index.get(start)
+        if index is None or index + horizon >= len(ctx.corpus.days):
+            continue
+        end = ctx.corpus.days[index + horizon]
+        first, last = ctx.corpus.bars(start), ctx.corpus.bars(end)
+        bar0, barN = first.get(row["code"]), last.get(row["code"])
+        if not bar0 or not barN or not bar0.get("close"):
+            continue
+        ret = (float(barN["close"]) / float(bar0["close"]) - 1) * 100
+        # Median, not mean: A-share cross-sections are right-skewed and
+        # AGENTS.md makes comparing a median to a mean the house error.
+        moves = [(float(last[code]["close"]) / float(bar["close"]) - 1) * 100
+                 for code, bar in first.items()
+                 if bar.get("close") and code in last and last[code].get("close")]
+        if not moves:
+            continue
+        own.append(round(ret, 2))
+        versus.append(round(ret - median(moves), 2))
+    if not own:
+        return ""
+    beat = sum(1 for x in versus if x > 0)
+    return (f"  {'未成交的票后来':<20} {len(own):>6} 笔可测算"
+            f"  中位 {median(own):+.2f}%，超额中位 {median(versus):+.2f}%，"
+            f"跑赢大盘 {beat}/{len(own)}\n"
+            f"  （自放弃当日起算 {horizon} 个交易日，**不是账户收益**："
+            f"没进去的行情不计入 hit / excess_return / playbooks.hit_rate。"
+            f"这一行把「选得对不对」和「进不进得去」分开）")
+
+
 def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
              model_usage_detail: str, capability_matrix: dict) -> str:
     ctx = result["ctx"]
@@ -4734,6 +4806,9 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
     exit_lines = _exit_attribution(result)
     if exit_lines:
         lines.append(f"出场归因：{'；'.join(exit_lines)}")
+    # Computed once: it opens the book and walks the corpus per cancelled
+    # order, and the list below is built twice in a comprehension otherwise.
+    missed = _missed_moves(ctx)
     lines += [
         "",
         "— 结算判定（每个挂单-日一次）—",
@@ -4744,6 +4819,7 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
     lines += [
         f"  {'挂单撤销':<20} {sum(result['cancels'].values()):>6}"
         f"  （{_top_reasons(result['cancels'])}）",
+        *([missed] if missed else []),
         f"  本窗口未出现的判定    {('、'.join(unexercised)) or '无'}",
         "  （0 表示本窗口没遇到，不表示规则没生效——规则由 "
         "tests/test_t1_settlement.py 与 test_walk_forward.py 钉住）",

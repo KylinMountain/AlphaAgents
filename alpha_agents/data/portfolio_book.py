@@ -109,8 +109,14 @@ def _close_unfilled_thesis(conn, order_id: int, reason: str) -> None:
         thesis_id = _column(row, "thesis_id") if row else None
         if not thesis_id:
             return
-        thesis_data.close(int(thesis_id), thesis_data.UNFILLED,
-                          close_note=f"未成交即撤单：{reason}")
+        # Unlocked: the only caller is ``_cancel_order_unlocked``, whose
+        # name is the contract — the lock is already held. ``close`` takes the
+        # same non-reentrant lock and the process stops there, alive and
+        # silent. This is how the 2026-09-22 replay stalled on day 2: a themed
+        # order was cancelled before it filled, and the cancel deadlocked on
+        # the thesis it was closing.
+        thesis_data.close_unlocked(int(thesis_id), thesis_data.UNFILLED,
+                                   close_note=f"未成交即撤单：{reason}")
         logger.info("Thesis #%s closed unfilled with order #%d: %s",
                     thesis_id, order_id, reason)
     except Exception as exc:                          # noqa: BLE001

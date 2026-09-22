@@ -17,7 +17,7 @@ import argparse
 import ast
 import builtins
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -444,6 +444,160 @@ def check_duplication(files: list[tuple[Path, ast.AST]]) -> list[Violation]:
     return out
 
 
+def _module_name(path: Path) -> str:
+    return str(path.relative_to(REPO).with_suffix("")).replace("/", ".")
+
+
+def _import_table(mod: str, tree: ast.AST, known: set[str]) -> dict:
+    """Local name → what it refers to, for this module's own scope."""
+    table: dict[str, tuple[str, str]] = {}
+    parent = mod.rsplit(".", 1)[0]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = (parent if node.level == 1
+                        else ".".join(mod.split(".")[:-node.level]))
+                src = f"{base}.{node.module}" if node.module else base
+            else:
+                src = node.module or ""
+            if not src.startswith(PACKAGE):
+                continue
+            for a in node.names:
+                local = a.asname or a.name
+                full = f"{src}.{a.name}"
+                table[local] = (("mod", full) if full in known
+                                else ("func", f"{src}:{a.name}"))
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.startswith(PACKAGE):
+                    table[a.asname or a.name.split(".")[-1]] = ("mod", a.name)
+    return table
+
+
+def check_lock_reentry(files: list[tuple[Path, ast.AST]]) -> list[Violation]:
+    """``_write_lock`` is a plain Lock; re-entering it blocks forever.
+
+    It does not raise and it does not log. The thread stops on the second
+    acquire, the process stays alive at 0% CPU, and its own SQLite file is
+    locked against it — a shape that reads like a hung network call. Two
+    2026-09-22 replay runs ended this way, and the first sweep for it matched
+    direct calls only, so a three-hop chain
+    (``_cancel_order_impl`` → ``_cancel_order_unlocked`` →
+    ``_close_unfilled_thesis`` → ``thesis.close``) walked straight through.
+    This one follows the call graph.
+
+    Cross-module resolution goes through each module's imports; a callee it
+    cannot resolve is treated as a leaf, so the check under-reports rather
+    than inventing paths.
+    """
+    known = {_module_name(p) for p, _ in files}
+    takers: set[str] = set()
+    calls: dict[str, set[str]] = defaultdict(set)
+    inside: list[tuple[Path, int, str, str]] = []
+
+    def is_lock(item) -> bool:
+        e = item.context_expr
+        return ((isinstance(e, ast.Name) and e.id == "_write_lock")
+                or (isinstance(e, ast.Attribute) and e.attr == "_write_lock"))
+
+    class Walk(ast.NodeVisitor):
+        def __init__(self, path, mod, table):
+            self.path, self.mod, self.table = path, mod, table
+            self.stack: list[str] = []
+            self.depth = 0
+
+        def here(self) -> str:
+            return f"{self.mod}:{'.'.join(self.stack)}" if self.stack else self.mod
+
+        def target(self, node) -> str | None:
+            f = node.func
+            if isinstance(f, ast.Name):
+                hit = self.table.get(f.id)
+                if hit:
+                    return hit[1] if hit[0] == "func" else None
+                return f"{self.mod}:{f.id}"
+            if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+                hit = self.table.get(f.value.id)
+                if hit and hit[0] == "mod":
+                    return f"{hit[1]}:{f.attr}"
+            return None
+
+        def _func(self, node):
+            self.stack.append(node.name)
+            saved, self.depth = self.depth, 0
+            self.generic_visit(node)
+            self.depth = saved
+            self.stack.pop()
+
+        visit_FunctionDef = _func
+        visit_AsyncFunctionDef = _func
+
+        def visit_ClassDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_With(self, node):
+            if any(is_lock(i) for i in node.items):
+                takers.add(self.here())
+                self.depth += 1
+                for child in node.body:
+                    self.visit(child)
+                self.depth -= 1
+            else:
+                self.generic_visit(node)
+
+        visit_AsyncWith = visit_With
+
+        def visit_Call(self, node):
+            t = self.target(node)
+            if t:
+                calls[self.here()].add(t)
+                if self.depth > 0:
+                    inside.append((self.path, node.lineno, self.here(), t))
+            self.generic_visit(node)
+
+    for path, tree in files:
+        mod = _module_name(path)
+        Walk(path, mod, _import_table(mod, tree, known)).visit(tree)
+
+    reaches = set(takers)
+    changed = True
+    while changed:
+        changed = False
+        for caller, callees in calls.items():
+            if caller not in reaches and (callees & reaches):
+                reaches.add(caller)
+                changed = True
+
+    def chain(start: str) -> list[str]:
+        queue, seen = deque([(start, [start])]), set()
+        while queue:
+            node, path = queue.popleft()
+            if node in seen or len(path) > 8:
+                continue
+            seen.add(node)
+            if node in takers:
+                return path
+            for nxt in sorted(calls.get(node, ())):
+                queue.append((nxt, path + [nxt]))
+        return [start]
+
+    out = []
+    for path, line, holder, tgt in sorted(set(inside)):
+        if tgt not in reaches:
+            continue
+        hops = " → ".join(c.split(":")[-1] for c in chain(tgt))
+        out.append(Violation(
+            path, line, "lock-reentry",
+            f"{holder.split(':')[-1]}() 在 _write_lock 内调用 {hops}，"
+            "而这条链会再次获取同一把非重入锁",
+            "把锁内那一步换成 *_unlocked 版本，或者把它提到 with 之前——"
+            "读市场状态本来就不该在写锁里做。",
+        ))
+    return out
+
+
 def iter_python_files(roots: list[Path]) -> list[Path]:
     out = []
     for root in roots:
@@ -509,6 +663,7 @@ def main() -> int:
         violations += check_self_grading(path, tree)
 
     violations += check_duplication(parsed)
+    violations += check_lock_reentry(parsed)
 
     if args.write_baseline:
         keys = sorted({violation_key(v) for v in violations})

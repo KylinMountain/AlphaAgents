@@ -513,17 +513,15 @@ def close_unlocked(thesis_id: int, status: str, close_kind: str = "",
     """The body of :func:`close`, for callers inside ``_write_lock``.
 
     The same shape ``portfolio_book._cancel_order_unlocked`` already has, and
-    it exists for the same reason. ``portfolio.check_pending_orders`` holds
-    the lock across the whole fill loop and asks
-    ``portfolio_entry.thesis_already_broken`` whether the claim survived the
-    wait; that check closes the thesis when it did not.
+    it exists for the same reason: a cancel closes the unfilled thesis that
+    hung off the order, and the cancel already holds the lock.
 
-    The deadlock was latent for as long as the check could not fire. Its
-    ``MarketView`` carried price and the theme table only, so every
-    flow-dependent condition was skipped and this line was never reached.
-    Supplying the flow (2026-09-22) made ``theme_flow_negative`` fire at the
-    door for the first time — and the run stalled on day 1 with four write
-    handles open on its own database and no output for 103 minutes.
+    ``_write_lock`` is not reentrant, so the wrong choice here does not raise
+    and does not log — the thread stops on the second acquire and the process
+    sits alive at 0% CPU with its own database locked against it. Two 2026-09-22
+    replay runs died this way, and both times the stack was gone before anyone
+    looked, which is why ``scripts/lint_harness.py`` now walks the call graph
+    out of every lock block instead of trusting a reading of the source.
     """
     if status not in CLOSED_STATUSES:
         raise ValueError(f"not a closing status: {status}")

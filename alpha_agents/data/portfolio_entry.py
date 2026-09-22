@@ -103,10 +103,11 @@ def thesis_already_broken(code: str, price: float, order: dict) -> str | None:
             _attach_theme_flow(view, theme)
         fired = thesis_data.evaluate(thesis.conditions, view)
         if fired:
-            # Unlocked: `portfolio.check_pending_orders` holds `_write_lock`
-            # across the fill loop and this runs inside it. `close` would
-            # take the same non-reentrant lock and block forever.
-            thesis_data.close_unlocked(
+            # Locked: ``check_pending_orders`` takes ``_write_lock`` only
+            # around the reservation repair, not across the loop, so this runs
+            # with no lock held and must take it. (An earlier reading of that
+            # function had it holding the lock throughout; it does not.)
+            thesis_data.close(
                 thesis.id, thesis_data.INVALIDATED, close_kind=fired.kind,
                 close_note=f"成交前失效：{thesis_data.describe(fired)}")
             return thesis_data.describe(fired)

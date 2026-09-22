@@ -44,6 +44,12 @@ class TestTheStatus:
 
 
 class TestTheCancelPathClosesIt:
+    """Note what these do not test: the close is mocked, so none of them can
+    see that the real one takes ``_write_lock`` — which is what
+    ``_cancel_order_unlocked``'s caller is already holding. It closed the
+    thesis correctly and hung the process doing it. The unmocked path is in
+    ``tests/test_lock_reentry.py``."""
+
     @pytest.fixture
     def book(self):
         conn = sqlite3.connect(":memory:")
@@ -56,21 +62,21 @@ class TestTheCancelPathClosesIt:
 
     def test_the_linked_thesis_is_closed_unfilled(self, book):
         from alpha_agents.data import portfolio_book as pb
-        with patch("alpha_agents.data.thesis.close") as closed:
+        with patch("alpha_agents.data.thesis.close_unlocked") as closed:
             pb._close_unfilled_thesis(book, 11, "价格已涨走(7.51远超介入上限6.01)")
         assert closed.call_args.args == (77, T.UNFILLED)
         assert "价格已涨走" in closed.call_args.kwargs["close_note"]
 
     def test_an_order_with_no_thesis_is_a_no_op(self, book):
         from alpha_agents.data import portfolio_book as pb
-        with patch("alpha_agents.data.thesis.close") as closed:
+        with patch("alpha_agents.data.thesis.close_unlocked") as closed:
             pb._close_unfilled_thesis(book, 12, "到期未到价")
         closed.assert_not_called()
 
     def test_a_bookkeeping_failure_does_not_stop_the_cancel(self, book, caplog):
         """The alternative is an order left pending with its cash held."""
         from alpha_agents.data import portfolio_book as pb
-        with patch("alpha_agents.data.thesis.close",
+        with patch("alpha_agents.data.thesis.close_unlocked",
                    side_effect=sqlite3.DatabaseError("locked")), \
              caplog.at_level("WARNING"):
             pb._close_unfilled_thesis(book, 11, "到期未到价")

@@ -1039,123 +1039,6 @@ def _open_position_impl(
         return position_id
 
 
-def _round_lot(shares: int) -> int:
-    """Down to a whole 手. A-shares sell in multiples of 100."""
-    return (int(shares) // LOT_SIZE) * LOT_SIZE
-
-
-def _add_to_position_impl(position_id: int, *, price: float, reason: str,
-                          size_pct: float | None = None,
-                          recalc_stop: bool = False) -> dict | None:
-    """Buy the second tranche of a position the agent wants more of.
-
-    How many times to add, and how much each time, is the agent's call —
-    the only bound is the per-stock backstop. Returns None when the room
-    is gone, which is a legitimate answer and not a failure.
-
-    ``size_pct`` is the share of the book to add; without one it adds the
-    default position size again.
-
-    ``recalc_stop`` keeps the stop the same percentage below the new
-    (lower) average. It is on for the automated pullback top-up, off for
-    the agent's own adds — see the wrapper.
-    """
-    with _write_lock:
-        conn = _get_conn()
-        pos = conn.execute(
-            "SELECT code, name, theme, open_price, shares, reason, trader_id, "
-            "stop_loss, initial_stop_loss "
-            "FROM virtual_portfolio WHERE id = ? AND status = 'open'",
-            (position_id,)).fetchone()
-        if not pos or price <= 0:
-            return None
-
-        trader_id = pos["trader_id"] or DEFAULT_TRADER
-        capital = trader_capital(trader_id)
-        held = pos["shares"] or 0
-        cost = (pos["open_price"] or 0) * held
-        default_pct = _trader_pct(trader_id, "default_size_pct",
-                                  DEFAULT_POSITION_PCT)
-        wanted = capital * max(0.005, min(1.0, size_pct or default_pct))
-        available = get_available_capital(trader_id)
-
-        room = min(
-            wanted,
-            available,
-            capital * MAX_POSITION_WITH_ADD - cost,
-            capital * MAX_THEME_PCT
-            - get_theme_exposure(pos["theme"] or "", trader_id),
-            max(0.0, get_sentiment_exposure_limit(trader_id)
-                - get_invested_capital(trader_id)),
-        )
-        add_shares = _calc_shares(price, max(0.0, room))
-        if add_shares <= 0:
-            logger.info("Add refused for %s: no room (%.0f元)", pos["code"], room)
-            return None
-
-        total = held + add_shares
-        # Weighted average: the position's cost basis is now both buys, and
-        # every return the monitor computes has to be against that or the
-        # add would flatter the numbers for free.
-        avg = round((cost + add_shares * price) / total, 3)
-        # ``recalc_stop`` keeps the stop the same fraction below the new
-        # average: averaging down must not widen the risk per share. Only
-        # the automated top-up sets it; the agent's own adds leave the
-        # stop where the agent put it.
-        #
-        # The anchor comes from ``entry_stop``, the single definition of "the
-        # stop this position was opened with", shared with the trailing rule
-        # instead of re-derived here. Two derivations can disagree, and the
-        # disagreement is invisible until the numbers drift (D29).
-        #
-        # The lookup used to be guarded with ``"initial_stop_loss" in
-        # pos.keys()``, which tests the *query's* column list, not the table's:
-        # when the SELECT above forgot the column the guard answered False and
-        # the stop was silently left un-recalculated — a decline that looked
-        # exactly like a policy decision. The column is selected now, and the
-        # sanity check is on the value.
-        new_stop = None
-        if recalc_stop:
-            old_open = pos["open_price"] or 0
-            # ``None`` fallback = "do not invent a distance". Declining here is
-            # safe (averaging down narrows risk per share with or without the
-            # stop moving) but it is a gap, so it says so out loud.
-            anchor = entry_stop(pos, old_open, None)
-            if old_open > 0 and anchor > 0:
-                new_stop = round(avg * (1 - (old_open - anchor) / old_open), 2)
-            else:
-                logger.warning(
-                    "Top-up #%d %s left the stop alone: the entry stop cannot "
-                    "be measured (open=%.3f, stop=%s), so no fraction can be "
-                    "held (D29)",
-                    position_id, pos["code"], old_open, pos["stop_loss"])
-        if new_stop is not None:
-            conn.execute(
-                "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
-                "stop_loss = ?, initial_stop_loss = ?, reason = ? WHERE id = ?",
-                (total, avg, new_stop, new_stop,
-                 f"{pos['reason'] or ''} | {reason}"[:300], position_id))
-        else:
-            conn.execute(
-                "UPDATE virtual_portfolio SET shares = ?, open_price = ?, "
-                "reason = ? WHERE id = ?",
-                (total, avg, f"{pos['reason'] or ''} | {reason}"[:300],
-                 position_id))
-        # T+1 share-side: the add gets its own lot so its shares are
-        # sellable only from add_date + 1 onward. Without this, the
-        # entire position looked like one old batch on the monitor's
-        # T+1 check, and the agent could sell today's shares today.
-        add_date = clock.today()
-        settlement.create_lot(
-            conn, position_id=position_id, trader_id=trader_id,
-            code=pos["code"], shares=add_shares, open_date=add_date,
-            open_price=price, source="add")
-        conn.commit()
-
-    logger.info("Added to #%d %s: +%d股 @ %.2f → %d股 均价%.2f — %s",
-                position_id, pos["code"], add_shares, price, total, avg, reason)
-    return {"shares": add_shares, "avg_price": avg, "total_shares": total,
-            "stop_loss": new_stop}
 
 
 # ── Summaries ───────────────────────────────────────────────
@@ -1187,6 +1070,15 @@ __all__ = [
 # only consumer.
 from alpha_agents.data.portfolio_intent import (  # noqa: E402
     add_to_position, cancel_order, create_pending_order, open_position,
+)
+
+
+# Topping up an open position. Imported here rather than at the top because
+# portfolio_add reaches back into this namespace for the capital readings —
+# the same one-way shape portfolio_intent has. `portfolio_intent.add_to_position`
+# calls `P._add_to_position_impl`, so it has to be in this namespace.
+from alpha_agents.data.portfolio_add import (  # noqa: E402
+    _add_to_position_impl, _round_lot,
 )
 
 

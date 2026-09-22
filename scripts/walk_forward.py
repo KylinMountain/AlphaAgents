@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import faulthandler
 import hashlib
 import json
 import logging
@@ -4218,6 +4219,23 @@ def _close_decider_loop(ctx) -> None:
     ctx.loop = None
 
 
+#: A stalled run is silent, not loud. Two of them ended with a live process at
+#: 0% CPU, no log line for over an hour, and no stack left to read by the time
+#: anyone looked — both were re-entries of a non-reentrant lock, which raises
+#: nothing. The timer is re-armed at the top of every session, so it fires only
+#: when one session outlasts any session should, and prints every thread's
+#: stack to stderr. Set WF_STALL_DUMP_SECONDS=0 to turn it off.
+_STALL_DUMP_SECONDS = float(os.environ.get("WF_STALL_DUMP_SECONDS", "900"))
+
+
+def _arm_stall_dump() -> None:
+    if _STALL_DUMP_SECONDS <= 0:
+        return
+    faulthandler.cancel_dump_traceback_later()
+    faulthandler.dump_traceback_later(_STALL_DUMP_SECONDS, repeat=True,
+                                      exit=False)
+
+
 def _run_window(ctx, args) -> dict:
     _seed_theme(ctx)
 
@@ -4246,6 +4264,7 @@ def _run_window(ctx, args) -> dict:
     errors = []
 
     for day in window:
+        _arm_stall_dump()
         prev_day = ctx.corpus.previous(day)
         if prev_day is None:
             continue
@@ -4428,6 +4447,9 @@ def _run_window(ctx, args) -> dict:
         # free tier's per-minute token budget in about a dozen sessions.
         if args.pace_seconds:
             time.sleep(args.pace_seconds)
+
+    # The sessions are done; the report is not a stall.
+    faulthandler.cancel_dump_traceback_later()
 
     journal_after = _journal_records(_REPLAY_DIR)
     tools_after = _journal_tool_calls(_REPLAY_DIR)

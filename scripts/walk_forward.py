@@ -3117,6 +3117,21 @@ def _check_theses(ctx, day: str) -> list[dict]:
         logger.warning("%s: thesis check failed: %s", day, exc)
         return []
 
+    # Reconcile theses whose position is already gone. Only book_manager
+    # called this, so a replay left one active thesis behind for every
+    # agent sale — 300475 closed at -0.67% on 2026-01-15 with its thesis
+    # still open. settle_orphans now separates the two cases: a thesis the
+    # agent was warned about and then closed is `invalidated`, and only a
+    # position that ended with nothing the agent listed having fired is a
+    # blind spot. Wiring it in without that split would have marked every
+    # agent decision blind, which is the one failure statistic the design
+    # leans on.
+    try:
+        with replay_as_of(f"{day} 09:30"):
+            thesis_monitor.settle_orphans(price_map, ctx.trader)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("%s: orphan settle failed: %s", day, exc)
+
     # Signals, not closes. A crossed invalidation is handed to the agent on
     # this day's exit turn; only the horizon still closes on its own, and
     # that is a different claim — "my window ended", not "I was wrong".

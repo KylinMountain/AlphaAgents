@@ -215,10 +215,49 @@ def settle_orphans(price_map: dict[str, float],
     live_ids = {p["id"] for p in get_open_positions(trader_id)}
     orphaned = []
     for th in T.get_active(trader_id=trader_id):
-        if th.position_id and th.position_id not in live_ids:
+        if not th.position_id or th.position_id in live_ids:
+            continue
+        # Not every orphan is a blind spot, and the difference is the whole
+        # value of the statistic. A thesis that was woken by its own stated
+        # invalidation and then closed is the opposite of a blind spot: the
+        # agent wrote down what would prove it wrong, the line was crossed,
+        # and it acted. Marking that blind would poison the one failure
+        # number the design leans on — and in the autonomous arm there is no
+        # hard floor at all, so the old note asserted a mechanism that never
+        # ran.
+        warned = next((c for c in reversed(th.checkpoints)
+                       if c.get("verdict") == T.TRIGGERED), None)
+        if warned:
+            T.close(th.id, T.INVALIDATED, close_kind=warned.get("kind", ""),
+                    close_note=f"agent 在自己声明的条件触发后平仓："
+                               f"{warned.get('observation', '')}"[:300])
+            logger.info("Thesis #%d invalidated: %s %s — the agent acted on "
+                        "its own line (%s)", th.id, th.code, th.name,
+                        warned.get("kind", "?"))
+        else:
             T.close(th.id, T.BLIND_SPOT,
-                    close_note="仓位已被风控硬线平掉，但没有任何列出的失效条件触发")
-            logger.info("Thesis #%d blind_spot: %s %s — closed with nothing fired",
-                        th.id, th.code, th.name)
-            orphaned.append(th)
+                    close_note=f"仓位已平，但 agent 列出的失效条件一条也没触发："
+                               f"{_close_reason(th.position_id) or '原因未记录'}"[:300])
+            logger.info("Thesis #%d blind_spot: %s %s — closed with nothing "
+                        "fired", th.id, th.code, th.name)
+        orphaned.append(th)
     return orphaned
+
+
+def _close_reason(position_id: int) -> str:
+    """Why the book says the position ended, for the blind-spot note.
+
+    The note used to assert "closed by the hard floor" for every orphan.
+    In the autonomous arm the floor is switched off, so that sentence named
+    a mechanism that could not have run — and a reader chasing a blind spot
+    would have started from a false premise.
+    """
+    try:
+        from alpha_agents.data.memory_store import _get_conn
+        row = _get_conn().execute(
+            "SELECT close_reason FROM virtual_portfolio WHERE id = ?",
+            (position_id,)).fetchone()
+        return (row["close_reason"] or "") if row else ""
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("close reason unavailable for #%s: %s", position_id, exc)
+        return ""

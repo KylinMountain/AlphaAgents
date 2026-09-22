@@ -210,7 +210,43 @@ class TestBlindSpot:
         assert len(orphans) == 1
         closed = T.get_closed()[0]
         assert closed.status == T.BLIND_SPOT
-        assert "没有任何列出的失效条件触发" in closed.close_note
+        assert "一条也没触发" in closed.close_note
+
+    def test_a_warned_exit_is_not_a_blind_spot(self, store):
+        """The agent wrote the line, was woken when it broke, and closed.
+
+        That is the opposite of a blind spot, and marking it blind would
+        poison the one failure statistic this design leans on — in the
+        autonomous arm there is no hard floor, so every agent sale would
+        otherwise be filed as "I never saw it coming".
+        """
+        tid = T.create(a_thesis([T.Condition("price_below", 40.0)]))
+        T.add_checkpoint(tid, "股价跌破 40.0 | 浮动-3.1% 持仓2天",
+                         T.TRIGGERED, kind="price_below")
+        with patch.object(M, "get_open_positions", return_value=[]):
+            M.settle_orphans({"000962": 47.0})
+        closed = T.get_closed()[0]
+        assert closed.status == T.INVALIDATED
+        assert closed.close_kind == "price_below"
+        assert "agent 在自己声明的条件触发后平仓" in closed.close_note
+
+    def test_the_blind_spot_note_no_longer_asserts_a_hard_floor(self, store):
+        """--autonomous switches the floor off, so the old note named a
+        mechanism that could not have run."""
+        T.create(a_thesis([T.Condition("price_below", 40.0)]))
+        with patch.object(M, "get_open_positions", return_value=[]):
+            M.settle_orphans({"000962": 47.0})
+        assert "风控硬线" not in T.get_closed()[0].close_note
+
+    def test_the_replay_settles_orphans_too(self):
+        """Only book_manager called it, so a replay left one active thesis
+        behind for every agent sale."""
+        import inspect
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import walk_forward as wf
+        assert "settle_orphans" in inspect.getsource(wf._check_theses)
 
     def test_a_live_position_is_left_alone(self, store):
         T.create(a_thesis([T.Condition("price_below", 40.0)]))

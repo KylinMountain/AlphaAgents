@@ -2992,6 +2992,107 @@ def _fill_replay_peak_fields(ctx, positions: list[dict], day: str,
             holding = pos.get("holding_days", 0)
         pos["peak_return_pct"] = round(peak, 2)
         pos["holding_days"] = holding
+        _persist_peak(pos)
+
+
+def _persist_peak(pos: dict) -> None:
+    """Write the peak back to the row, not only into the prompt.
+
+    Filling the dict is enough for the exit prompt, which is what this
+    function was written for, and that is why the columns stayed 0 in the
+    replay's database for every position it ever opened. Two things read the
+    row rather than the dict, and both of them silently got zero:
+
+    ``thesis_monitor.build_view`` takes ``peak_return_pct`` from the position
+    row, so ``drawdown_from_peak`` — the one invalidation that asks "has this
+    already paid and started giving it back" — could never fire. Measured on
+    the 29-session autonomous run: 15 theses declared that condition and it
+    fired zero times, while four positions gave back 75–94% of peaks above
+    +15%. And the portfolio panel renders the same columns, so every position
+    showed a peak of zero and a holding age of zero to a reader as well.
+    """
+    from alpha_agents.data import memory_store
+    if not pos.get("id"):
+        return
+    try:
+        with memory_store._write_lock:
+            conn = memory_store._get_conn()
+            conn.execute(
+                "UPDATE virtual_portfolio SET peak_return_pct = ?, "
+                "holding_days = ? WHERE id = ?",
+                (pos["peak_return_pct"], pos["holding_days"], pos["id"]))
+            conn.commit()
+    except Exception as exc:                          # noqa: BLE001
+        # The prompt already has the number; losing the row update costs the
+        # condition check, not the decision.
+        logger.warning("peak not persisted for %s: %s", pos.get("code"), exc)
+
+
+def _check_theses(ctx, day: str) -> list[dict]:
+    """Close every position whose thesis says it is already wrong.
+
+    Reuses ``thesis_monitor.check_all`` rather than re-deciding what
+    "invalidated" means: a second implementation of that rule is how the live
+    path and the replay come to disagree about the same thesis.
+
+    The market view it needs is the day's closes plus the concept flow this
+    replay already synthesises, so the condition kinds an agent actually
+    writes — ``theme_flow_negative`` on 34 of 34 theses, ``price_below`` on
+    30, ``drawdown_from_peak`` on 15 — all have something to read.
+    """
+    from alpha_agents.pipeline.tasks import thesis_monitor
+
+    bars = ctx.corpus.bars(day)
+    price_map = {code: float(row["close"]) for code, row in bars.items()
+                 if row.get("close")}
+    if not price_map:
+        return []
+
+    ranks, flows = {}, {}
+    try:
+        from alpha_agents.data.market_data import get_concept_fund_flow
+        from alpha_agents.data.snapshot_store import SNAPSHOTS_DB_PATH
+        # Asked only when the file is already there. Opening the snapshot
+        # store *creates* it, and a replay that creates a corpus file has
+        # broken the property `TestTheProductionBookIsUntouched` exists to
+        # hold — the run is supposed to leave the corpus exactly as it found
+        # it, including not bringing a missing one into being.
+        if not SNAPSHOTS_DB_PATH.exists():
+            raise FileNotFoundError(SNAPSHOTS_DB_PATH)
+        with replay_as_of(f"{day} 09:30"):
+            frame = get_concept_fund_flow()
+        if frame is not None and not getattr(frame, "empty", True):
+            name_col = "行业" if "行业" in frame.columns else "名称"
+            for rank, (_, row) in enumerate(frame.iterrows(), 1):
+                name = str(row.get(name_col) or "")
+                if name:
+                    ranks.setdefault(name, rank)
+                    flows.setdefault(name, float(row.get("净额") or 0.0))
+    except Exception as exc:                          # noqa: BLE001
+        # A missing flow reading must not fire a condition: thesis.MarketView
+        # treats None as "could not check", never as "the thesis broke". So
+        # skipping here costs the two theme conditions their input for the
+        # day; it never closes a position that was not closing anyway.
+        logger.debug("%s: concept flow unavailable for thesis check: %s",
+                     day, exc)
+
+    up = sum(1 for row in bars.values()
+             if (row.get("change_pct") or 0) > 0)
+    breadth = round(up / len(bars), 4) if bars else None
+
+    try:
+        result = thesis_monitor.check_all(
+            price_map, sector_ranks=ranks, sector_flows=flows,
+            breadth_ratio=breadth, trader_id=ctx.trader)
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["thesis_check_failed"] += 1
+        logger.warning("%s: thesis check failed: %s", day, exc)
+        return []
+
+    closed = result.get("closed") or []
+    ctx.counters["thesis_invalidated"] += len(closed)
+    return [{"code": row.get("code"), "kind": row.get("reason", "")[:40]}
+            for row in closed]
 
 
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
@@ -4107,6 +4208,25 @@ def _run_window(ctx, args) -> dict:
                             dict(entries["counts"]))
                 exits = _settle_exits(ctx, day)
                 logger.info("%s: settled exits %s", day, dict(exits["counts"]))
+            # The conditions the agent itself wrote, checked before it is
+            # asked anything. A replay created theses and then never evaluated
+            # them: `thesis.evaluate` had three callers — thesis_monitor,
+            # portfolio_entry and consistency — and this file was none of
+            # them, so the only check that ever ran was portfolio_entry's,
+            # which fires *before* a fill. After a fill every condition was a
+            # dead letter. Measured on 29 sessions: 15 theses declared
+            # `drawdown_from_peak` and it fired zero times, while four
+            # positions gave back 75–94% of peaks above +15%.
+            #
+            # Placed here for the same reason the agent's turn is placed
+            # after settlement: a claim its own stated invalidation has
+            # already broken is not a claim the agent should get to re-argue.
+            invalidated = _check_theses(ctx, day)
+            if invalidated:
+                logger.info("%s: theses invalidated %s", day,
+                            ", ".join(f"{r['code']}({r['kind']})"
+                                      for r in invalidated))
+
             # The agent's sell side, run *after* the mechanical settlement and
             # inside its own replay_as_of block. The order matters and is the
             # contract: a position that gapped through its stop was closed

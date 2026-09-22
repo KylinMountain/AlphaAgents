@@ -1049,6 +1049,23 @@ def _concepts_map(ctx) -> dict[str, list[str]]:
     return cached
 
 
+def _news_window_label(day: str, prev_day: str, phase: str) -> str:
+    """What window the agent is actually being shown, in its own words.
+
+    The prompt used to head this block "截至 {prev_day} 的新闻窗口", which
+    named the window's *start* as if it were its end: the overnight block
+    runs from prev_day 15:00 to day 09:00, so flashes from 08:58 this
+    morning were labelled five days stale. An agent told its news is old
+    discounts it, which changes the decision without changing the data.
+
+    Derived here, beside the bounds themselves, so the label cannot drift
+    from the query the way it just did.
+    """
+    if phase == "close":
+        return f"{day} 09:00 → {day} 14:55（本场内，**不含隔夜**）"
+    return f"{prev_day} 15:00 → {day} 09:00（隔夜，**含今晨快讯**）"
+
+
 def _news_window(day: str, prev_day: str, limit: int,
                  phase: str = "open") -> list[dict]:
     """Flash news knowable at ``phase`` on ``day``.
@@ -1962,7 +1979,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
 def _sector_stock_choice(ctx, *, day: str, prev_day: str,
                          panel: list[dict], news: list[dict],
                          market: dict, book: str, knowledge: str,
-                         research_budget) -> dict:
+                         research_budget, phase: str = "open") -> dict:
     """B/D use the model; C swaps only this choice for a transparent rule."""
     from alpha_agents.agents import sector_stock_selector
 
@@ -1978,6 +1995,7 @@ def _sector_stock_choice(ctx, *, day: str, prev_day: str,
         knowledge=knowledge,
         trader_note=ctx.trader_note,
         picks=ctx.picks,
+        news_window=_news_window_label(day, prev_day, phase),
         model=ctx.model,
         loop=ctx.loop,
         tools=_trader_tools(ctx),
@@ -2243,6 +2261,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             book=book,
             knowledge=knowledge,
             research_budget=shared_budget,
+            phase=phase,
         )
         choice_error = stock_choice.get("parse_error")
         if choice_error:

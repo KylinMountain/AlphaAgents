@@ -40,12 +40,16 @@ def load_prompt(path: Path | None = None) -> str:
 
 
 def build_message(*, day: str, prev_day: str, panel: list[dict],
+                  news_window: str = "",
                   news: list[dict], market: dict, book: str,
                   knowledge: str, trader_note: str, picks: int | None,
                   template: str | None = None) -> str:
     fields = {
         "day": day,
         "prev_day": prev_day,
+        # Named by the caller, which is the code that computed the bounds.
+        # A default here would be the same guess the template used to make.
+        "news_window": news_window or f"{prev_day} 15:00 → {day} 09:00",
         "panel": t1_decider.format_panel(panel),
         "news": t1_decider.format_news(news),
         "market": t1_decider.format_market(market),
@@ -144,6 +148,7 @@ def parse(text: str, offered: set[str], *, picks: int | None,
 
 
 async def propose(*, day: str, prev_day: str, panel: list[dict],
+                  news_window: str = "",
                   news: list[dict], market: dict, book: str = "",
                   knowledge: str = "", trader_note: str = "", picks: int | None = None,
                   model=None, tools: list | None = None,
@@ -155,6 +160,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         model = create_model()
     message = build_message(
         day=day, prev_day=prev_day, panel=panel, news=news, market=market,
+        news_window=news_window,
         book=book, knowledge=knowledge, trader_note=trader_note, picks=picks)
 
     # A tool-less stage may still carry the shared decision budget.

@@ -20,7 +20,7 @@
 
 {panel}
 
-## 截至 {prev_day} 的新闻窗口
+## 新闻窗口：{news_window}
 
 {news}
 

@@ -355,7 +355,13 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             "code": code, "entry_low": round(low, 2),
             "entry_high": round(high, 2), "stop_loss": round(stop, 2),
             "target_price": target,
-            "reason": str(raw.get("reason") or "").strip()[:200],
+            # Whole. This string becomes the Thesis ``claim`` — the thing a
+            # later exit declares falsified and the review scores the
+            # reasoning of. Cut at 200 it stopped mid-clause: the 002230
+            # thesis written on the first autonomous run ends at "…也是我能
+            # 确认的最近真实买盘区；", on a semicolon, with the rest of the
+            # argument gone. Rendering widths belong to the renderer.
+            "reason": str(raw.get("reason") or "").strip(),
             # The thesis half. Absent means "the agent did not say", which
             # the caller renders as its trader's default — not as zero.
             **_thesis_fields(raw, code),

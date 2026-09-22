@@ -133,7 +133,7 @@ def parse(text: str, offered: set[str], *, picks: int,
         seen.add(code)
         row = {
             "code": code,
-            "reason": str(raw.get("reason") or "").strip()[:500],
+            "reason": str(raw.get("reason") or "").strip(),
             "counterevidence": str(
                 raw.get("counterevidence") or "").strip()[:400],
         }

@@ -714,7 +714,7 @@ def _save_recommendations_list(
                 confidence=r.get("confidence", "medium"),
                 theme_line=r.get("theme", ""),
                 entry_price=entry_prices.get(code),
-                reason=r.get("reason", "")[:100],
+                reason=r.get("reason", ""),
                 # G1: grade this on Brier, not on next-day direction.
                 prob=confidence_to_prob(r.get("confidence"),
                                         dims_passed=r.get("dims_passed")),
@@ -784,7 +784,7 @@ def _save_recommendations_list(
                     entry_high=entry_high,
                     stop_loss=stop_loss_val,
                     source="morning",
-                    reason=r.get("reason", "")[:100],
+                    reason=r.get("reason", ""),
                     trader_id=trader.id,
                     # The order names its own forecast. Without this the
                     # close path has no ownership link, and the realised

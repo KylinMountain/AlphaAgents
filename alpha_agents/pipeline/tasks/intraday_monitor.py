@@ -927,7 +927,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             confidence=confidence,
             theme_line=r.get("theme", ""),
             entry_price=entry_price,
-            reason=r.get("reason", "")[:100],
+            reason=r.get("reason", ""),
             features=features,
             # G1: gradable on Brier. A limit-up 'signal' row is an
             # observation, not a forecast, so only 'actionable' picks
@@ -986,7 +986,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             entry_high=entry_high,
             stop_loss=stop_loss_val,
             source="intraday",
-            reason=r.get("reason", "")[:100],
+            reason=r.get("reason", ""),
             trader_id=trader.id,
             # Names its own forecast, same as the morning path: the close
             # cannot attribute a result without an explicit link.

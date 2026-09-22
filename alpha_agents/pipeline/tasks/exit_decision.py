@@ -399,7 +399,9 @@ def apply(decisions: list[dict], positions: list[dict],
 
 
 def _apply_sell(pos: dict, price: float, d: dict) -> dict | None:
-    reason = f"agent卖出: {d['reason']}"[:200]
+    # Whole: this is close_reason, and close_reason is exactly what the
+    # review scores. Cutting it means the review grades the truncation.
+    reason = f"agent卖出: {d['reason']}"
     if not close_position(pos["id"], close_price=price, close_reason=reason):
         return None
     logger.info("Agent exit: %s %s @ %.2f — %s",
@@ -422,7 +424,7 @@ def _apply_trim(pos: dict, price: float, d: dict) -> dict | None:
     # (1750) — measured on a real run, where the second trim was refused and
     # the decision was silently dropped.
     sell = int(held * frac) // LOT_SIZE * LOT_SIZE
-    reason = f"agent减仓: {d['reason']}"[:200]
+    reason = f"agent减仓: {d['reason']}"
     if sell <= 0 or sell >= held:
         # Below one lot, or the whole position: neither is a trim. Holding is
         # the honest outcome for the first, and a full exit dressed as a trim
@@ -452,7 +454,7 @@ def _apply_add(pos: dict, price: float, d: dict) -> dict | None:
     except (TypeError, ValueError):
         size = None
     result = add_to_position(pos["id"], price=price, size_pct=size,
-                             reason=f"agent加仓: {d['reason']}"[:200])
+                             reason=f"agent加仓: {d['reason']}")
     if not result:
         return None
     return {"type": "agent_add", "code": d["code"], "name": pos.get("name", ""),

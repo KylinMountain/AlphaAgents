@@ -134,7 +134,7 @@ def place_buy_order(code: str, name: str, theme: str, entry_low: float = 0, entr
         entry_high=entry_high or None,
         stop_loss=stop_loss,
         source="chat",
-        reason=reason[:100],
+        reason=reason,   # whole: an order's reason is evidence, not a label
     )
     if result:
         available = get_available_capital()

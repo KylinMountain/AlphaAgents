@@ -492,6 +492,17 @@ def save_prediction(
 ) -> int:
     """Record a stock recommendation.
 
+    ``reason`` is stored whole. Both callers used to cut it at 100 characters,
+    which is roughly one clause: the 2026-09-22 intraday pick for 002384 was
+    archived as "…现价204.06已破20日高200.6，但ma60=206.01是头上真", losing the
+    noun the sentence was heading for and the conclusion after it. The column
+    is TEXT and nothing downstream reads a fixed width — ``daily_review`` feeds
+    this straight into the review context, where more is better, not less.
+
+    It matters because this field is the *evidence* for attribution. A review
+    that asks "was the reason right" against a clause that stops mid-word is
+    scoring the truncation. Display widths are the display's problem.
+
     ``features`` (Phase 1): optional dict of decision-time features used by the
     Playbook clustering in Phase 3. Serialized to ``features_json`` column.
     Pass None for legacy callers (stored as empty '{}').

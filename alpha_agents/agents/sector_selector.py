@@ -136,7 +136,7 @@ def parse_selection(text: str, offered: set[str],
         seen.add(sector_id)
         selected.append({
             "sector_id": sector_id,
-            "thesis": str(raw.get("thesis") or "").strip()[:500],
+            "thesis": str(raw.get("thesis") or "").strip(),
             "counterevidence": str(raw.get("counterevidence") or "").strip()[:500],
             "unknowns": str(raw.get("unknowns") or "").strip()[:500],
             "invalidations": [

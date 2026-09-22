@@ -82,7 +82,14 @@ def _theme_line(theme_name: str) -> str:
             f"今日{theme.get('daily_score', 0):+d} {theme.get('status', '')}")
 
 
-def _news_for_theme(theme_name: str) -> list[str]:
+def _news_for_theme(theme_name: str) -> list[str] | None:
+    """Recent flashes for a theme, or ``None`` when the index is unreadable.
+
+    The distinction is the point. An empty list means "searched, nothing
+    there", which the agent is entitled to read as calm. ``None`` means the
+    search did not happen, and the prompt must say so rather than describe
+    a quiet tape that nobody looked at.
+    """
     if not theme_name:
         return []
     try:
@@ -90,8 +97,10 @@ def _news_for_theme(theme_name: str) -> list[str]:
         hits = search_news(theme_name, hours=_NEWS_LOOKBACK_HOURS,
                            top_k=_NEWS_PER_THEME)
     except Exception as e:
-        logger.debug("Exit news lookup failed for %s: %s", theme_name, e)
-        return []
+        # warning, not debug: this ran at debug for three and a half hours
+        # of live trading while every theme reported 无新消息.
+        logger.warning("Exit news lookup unavailable for %s: %s", theme_name, e)
+        return None
     return [f"[{(h.get('time') or '')[11:16]} {h.get('source', '')}] "
             f"{h.get('title', '')[:70]}" for h in hits]
 
@@ -169,6 +178,12 @@ def build_context(positions: list[dict], price_map: dict[str, float],
             # was not shown any news, and saying "无" would read as a market
             # fact rather than as a missing input.
             lines.append(f"  {source}: 未提供（回放未接入新闻窗口，不等于没有消息）")
+        elif news is None:
+            # The search did not happen. The replay arm has always said so;
+            # the live arm said 无新消息 instead, which is a claim about the
+            # market made from an outage of ours.
+            lines.append(f"  {source}: **检索不可用**（新闻索引读取失败，"
+                         f"不等于没有消息——不要据此判断主线平静）")
         else:
             lines.append(f"  {source}: 无（主线无新消息，不等于逻辑破坏）")
         fired = by_code.get(code)

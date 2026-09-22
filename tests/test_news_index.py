@@ -132,12 +132,41 @@ class TestSearch:
     def test_empty_query(self, store):
         assert news_index.search_news("", hours=24) == []
 
-    def test_embedding_failure_is_not_fatal(self, store, caplog):
+    def test_an_unreadable_index_is_not_an_empty_one(self, store, caplog):
+        """Returning [] for a failure is how an outage became a market fact.
+
+        Live 2026-09-22: 343 embedding calls returned 402 "account balance
+        is insufficient" over three and a half hours. search_news swallowed
+        every one into an empty list, _news_for_theme swallowed that into
+        an empty list, and the exit prompt told the agent
+        "无（主线无新消息，不等于逻辑破坏）" for every theme it held. Three
+        layers each turning a failure into "no data", ending in a claim
+        about the market.
+        """
         with patch("alpha_agents.data.embeddings.embed_texts",
                    side_effect=RuntimeError("api down")), \
-             caplog.at_level("WARNING"):
-            assert news_index.search_news("原油", hours=24) == []
+             caplog.at_level("WARNING"), \
+             pytest.raises(news_index.NewsSearchUnavailable):
+            news_index.search_news("原油", hours=24)
         assert any("unavailable" in r.getMessage() for r in caplog.records)
+
+    def test_it_is_still_not_fatal_to_a_caller(self, store):
+        """The original intent survives: both callers catch it and carry on,
+        they just get to say which thing happened."""
+        import inspect
+        from alpha_agents.pipeline.tasks import anomaly_scan, exit_decision
+        for src in (inspect.getsource(anomaly_scan._news_block
+                                      if hasattr(anomaly_scan, "_news_block")
+                                      else anomaly_scan),
+                    inspect.getsource(exit_decision._news_for_theme)):
+            assert "except Exception" in src
+
+    def test_a_genuinely_quiet_theme_still_returns_empty(self, store):
+        """The distinction only means something if the other side works."""
+        with patch("alpha_agents.data.embeddings.embed_texts",
+                   fake_embed):
+            assert news_index.search_news("完全不相关的主题", hours=24,
+                                          min_score=0.99) == []
 
 
 class TestRetention:

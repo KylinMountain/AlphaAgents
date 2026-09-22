@@ -24,6 +24,16 @@ from alpha_agents.data.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
+
+class NewsSearchUnavailable(RuntimeError):
+    """The index could not be searched at all.
+
+    Distinct from an empty result on purpose. "This theme has no news" is a
+    statement about the market; "the embedding provider returned 402" is a
+    statement about us, and a caller that receives the same empty list for
+    both will report the first when the second is true.
+    """
+
 COLLECTION = "news_vectors"
 RETENTION_DAYS = int(os.environ.get("NEWS_INDEX_RETENTION_DAYS", "30"))
 
@@ -157,8 +167,15 @@ def search_news(query: str, hours: int = 24, top_k: int = 8,
     try:
         vector = embed_texts([query])[0]
     except Exception as e:
+        # Raised, not swallowed into an empty list. A caller that cannot
+        # tell "searched and found nothing" from "could not search" ends up
+        # telling an agent that a theme has no news when the embedding
+        # provider is down — a market fact reported from an outage. Seen
+        # live 2026-09-22: 343 of these in one session, every one a 402
+        # "account balance is insufficient", and every agent reading news
+        # was told 无新消息 for three and a half hours.
         logger.warning("News search unavailable (embedding failed): %s", e)
-        return []
+        raise NewsSearchUnavailable(str(e)) from e
 
     since = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
     hits = get_store().query(vector, top_k=top_k * 2, since=since)

@@ -104,3 +104,47 @@ def test_agent_exits_alone_still_keeps_the_rails():
     assert _flags(agent_exits=True) == {
         "agent_exits": True, "mechanical_stop": True,
         "mechanical_target": True}
+
+
+class TestThePromptDoesNotAnchorTheThreshold:
+    """A number in the example becomes the answer.
+
+    Measured on a 29-day autonomous replay: of 15 theses that declared
+    ``drawdown_from_peak``, **11 chose exactly 8.0** — the value the example
+    carried. The notes justified it as "约1.5倍ATR" on one stock and "约2倍
+    ATR" on another, and on a third as exceeding "ATR 2.37%"; a single
+    threshold cannot be 1.5, 2 and 3.4 ATRs at once, so the ATR arithmetic
+    was written after the number was chosen, not before.
+
+    The example's own note made it worse: it paired ``value: 8`` with
+    "峰值回吐八成", which is 80%, not 8%. The prompt taught the pairing of a
+    number with an unrelated justification.
+    """
+
+    def _prompt(self) -> str:
+        from pathlib import Path
+        import alpha_agents
+        return (Path(alpha_agents.__file__).parent / "prompts"
+                / "sector_trade_plan.md").read_text()
+
+    def test_the_example_drawdown_is_not_a_round_number(self):
+        """A value that looks computed resists being copied as a default."""
+        import re
+        m = re.search(r'"drawdown_from_peak", "value": ([\d.]+)', self._prompt())
+        assert m, "the example must still show the field"
+        value = float(m.group(1))
+        assert value != int(value), f"{value} is round enough to copy"
+
+    def test_the_example_note_states_the_arithmetic(self):
+        import re
+        m = re.search(r'"drawdown_from_peak"[^}]*"note": "([^"]+)"', self._prompt())
+        assert m and "ATR" in m.group(1), "the note must show where it came from"
+
+    def test_the_example_note_agrees_with_its_own_value(self):
+        """"八成" described 80% next to a value of 8."""
+        assert "峰值回吐八成" not in self._prompt()
+
+    def test_the_rules_forbid_copying_the_example(self):
+        text = self._prompt()
+        assert "不要照抄" in text
+        assert "ATR" in text

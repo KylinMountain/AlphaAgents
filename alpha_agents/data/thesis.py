@@ -159,7 +159,15 @@ _CONDITIONS: dict[str, dict] = {
     "breadth_below": {
         "needs": "breadth_ratio",
         "unit": "",
-        "template": "市场涨跌比跌破 {v}",
+        # "涨跌比" invited the advance/decline ratio, which is unbounded and
+        # is not what any producer feeds. The quantity is the fraction of
+        # stocks up on the day, 0–1. The base rate is in the template because
+        # a threshold is only meaningful against it: an agent that does not
+        # know the median is 0.44 writes 0.6 and means "be careful", while
+        # the evaluator reads "exit on two days out of three".
+        "template": "当日上涨家数占比跌破 {v}（0–1 小数，"
+                    "2026 上半年 116 日实测：中位 0.44，"
+                    "0.28 约四分之一的日子，0.17 约十分之一）",
         "hint": "大盘转弱",
         "fired": lambda mv, v: mv.breadth_ratio < v,
     },
@@ -197,6 +205,13 @@ _SANITY = {
     "loss_exceeds": (0.5, 50),
     "theme_rank_worse_than": (1, 100),
     "no_progress_by_day": (1, 60),
+    # Same argument as theme_daily_score_below, measured rather than assumed.
+    # Over the 116 trading days of 2026-H1 the up-fraction ran 0.056..0.939
+    # with a median of 0.444, so a threshold above 0.5 fires on most days and
+    # one below 0.1 never fired at all. The bound also catches the scale
+    # error this rule was written for: the agent wrote 30, 40 and 50 on a
+    # 0–1 quantity, each of which is permanently true.
+    "breadth_below": (0.1, 0.5),
 }
 
 

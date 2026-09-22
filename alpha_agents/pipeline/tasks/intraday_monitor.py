@@ -134,9 +134,19 @@ def _market_view() -> dict:
                        "类条件无法判定: %s", e)
     try:
         breadth = json.loads(get_market_breadth_fn())
-        ratio = breadth.get("ad_ratio") or breadth.get("advance_decline_ratio")
-        if ratio is not None:
-            out["breadth_ratio"] = float(ratio)
+        # Not ad_ratio. That is advances/declines — unbounded, 999 on a day
+        # with no decliners — while the replay feeds advances/total, a 0–1
+        # fraction. Same condition, two different quantities: a thesis that
+        # said "breadth_below 0.35" would exit at 26% up in production and
+        # at 35% up in the backtest. One definition, and it is the bounded
+        # one, because that is the one a threshold can be reasoned about on.
+        advances = breadth.get("advances")
+        total = breadth.get("total")
+        if advances is not None and total:
+            out["breadth_ratio"] = round(float(advances) / float(total), 4)
+        else:
+            logger.warning("市场宽度缺少 advances/total，本轮 breadth_below "
+                           "条件无法判定: %s", sorted(breadth))
     except Exception as e:
         logger.warning("市场宽度不可用，本轮 breadth_below 条件无法判定: %s", e)
     return out

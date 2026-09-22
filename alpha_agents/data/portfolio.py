@@ -372,16 +372,33 @@ def _create_pending_order_impl(
         # The check and reservations run under _write_lock, so two concurrent
         # individually-legal orders cannot both spend the last theme headroom.
         capital = trader_capital(trader_id)
+        # The backstop is what *this* order could spend at fill, which is
+        # what the thesis asked for. It was a flat MAX_POSITION_PCT, and
+        # once sizing became the agent's that stopped being an upper bound:
+        # an order stating 22.8% reserved 10% and spent 22.8%, so two pending
+        # orders could commit the same cash — the exact failure reservations
+        # exist to prevent, arrived at from the other side.
         reservation_amount = (
-            capital * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE))
+            capital * _wanted_pct(code, trader_id) * (1 + SLIPPAGE_RATE))
         terms = {"entry_low": entry_low, "entry_high": entry_high,
                  "stop_loss": stop_loss, "target_price": target_price,
                  "source": source, "reason": reason}
-        if risk_reservations.refuse_if_theme_cap_breached(
+        # The per-theme ceiling is policy, like every other sizing bound —
+        # `_fill_order`已经这样读它了，这道门漏了。Off by default: how much
+        # to concentrate is the agent's, and an envelope that binds has to
+        # earn its place through the policy registry rather than by being a
+        # module constant.
+        #
+        # It mattered more than it looks. A replay hangs every order off one
+        # synthetic theme, so a 30% per-theme cap was a 30% cap on the whole
+        # replay book — and with a flat 10% reservation that is three pending
+        # orders for the entire run, whatever the agent decided.
+        theme_pct = _sizing_policy().get("max_theme_pct")
+        if theme_pct is not None and risk_reservations.refuse_if_theme_cap_breached(
                 conn, trader_id=trader_id, code=code, order_date=order_date,
                 primary_theme=theme, themes=related_themes,
                 reservation_amount=reservation_amount,
-                theme_cap=capital * MAX_THEME_PCT, thesis_id=thesis_id,
+                theme_cap=capital * float(theme_pct), thesis_id=thesis_id,
                 prediction_id=prediction_id, terms=terms):
             return None
 
@@ -537,8 +554,12 @@ def check_pending_orders(
                     conn, order_id=order["id"],
                     trader_id=order.get("trader_id") or DEFAULT_TRADER,
                     code=code,
+                    # What the order would spend, read the same way the
+                    # door and the fill read it.
                     amount=(trader_capital(order.get("trader_id") or DEFAULT_TRADER)
-                            * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE)),
+                            * _wanted_pct(code, order.get("trader_id")
+                                          or DEFAULT_TRADER)
+                            * (1 + SLIPPAGE_RATE)),
                     reason="adopted: order predates reservations")
                 conn.commit()
             logger.warning(

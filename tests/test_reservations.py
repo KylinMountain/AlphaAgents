@@ -331,9 +331,14 @@ class TestAtomicThemeRisk:
     def test_second_order_cannot_double_spend_shared_theme_headroom(
             self, store, traders_dir, theme, monkeypatch):
         _write_trader(traders_dir, "slow", SLOW)
-        # Existing approved constants define each backstop at ~10% of capital.
-        # Tighten only the fixture's theme cap so one fits and two do not.
-        monkeypatch.setattr(P, "MAX_THEME_PCT", 0.15)
+        # The per-theme ceiling is policy and is off by default — how much to
+        # concentrate is the agent's. Turn it on for this test and set it so
+        # one backstop fits and two do not.
+        monkeypatch.setattr(
+            P, "_sizing_policy",
+            lambda: {"max_theme_pct": 0.05, "cluster_cap": False,
+                     "sentiment_scaling": False, "risk_budget_sizing": False,
+                     "drawdown_gate": False, "max_position_pct": None})
         first = P.create_pending_order(
             code="600000", name="A", theme="t",
             risk_themes=["shared"], order_date="2026-01-05",
@@ -399,16 +404,49 @@ class TestReservationsFollowTheOrderLifecycle:
             entry_low=9.0, entry_high=11.0, stop_loss=8.5,
             source="morning", reason="主线在流入", trader_id="slow")
         assert oid is not None
-        # The backstop is MAX_POSITION_PCT * capital * (1 + slippage).
-        from alpha_agents.data.portfolio import MAX_POSITION_PCT
+        # The backstop is what this order would spend at fill, which is what
+        # its thesis asked for — here nothing, so the trader's default. It was
+        # a flat MAX_POSITION_PCT, and once sizing became the agent's that
+        # stopped being an upper bound; see the sibling test below.
+        from alpha_agents.data.portfolio import DEFAULT_POSITION_PCT
         from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE
-        backstop = 500_000 * MAX_POSITION_PCT * (1 + SLIPPAGE_RATE)
+        backstop = 500_000 * DEFAULT_POSITION_PCT * (1 + SLIPPAGE_RATE)
         assert P.get_available_capital("slow") == before - backstop
         held = _conn().execute(
             "SELECT state, amount FROM reservations WHERE order_id = ?",
             (oid,)).fetchone()
         assert held["state"] == R.HELD
         assert held["amount"] == backstop
+
+    def test_a_big_claim_earmarks_what_it_will_spend(
+            self, store, traders_dir, theme):
+        """The reservation has to be an upper bound on the fill, or it is not
+        a reservation.
+
+        It was a flat 10% of capital while ``_fill_order`` spent whatever the
+        thesis said. An order stating 22.8% held 10% and took 22.8%, so two
+        pending orders could commit the same cash — the exact double-spend
+        reservations exist to prevent, reached from the other direction. Seen
+        live on 2026-09-22, the first replay session after sizing became the
+        agent's own decision.
+        """
+        from alpha_agents.data import thesis as T
+        from alpha_agents.data.portfolio_exit import SLIPPAGE_RATE
+        _write_trader(traders_dir, "slow", SLOW)
+        tid = T.create(T.Thesis(code="600000", name="A", theme="t",
+                                claim="资金在流入", size_pct=0.228,
+                                trader_id="slow"))
+        oid = P.create_pending_order(
+            code="600000", name="A", theme="t", order_date="2026-01-05",
+            entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+            source="morning", reason="主线在流入", trader_id="slow",
+            thesis_id=tid)
+        assert oid is not None
+        held = _conn().execute(
+            "SELECT amount FROM reservations WHERE order_id = ?",
+            (oid,)).fetchone()
+        assert held["amount"] == pytest.approx(
+            500_000 * 0.228 * (1 + SLIPPAGE_RATE))
 
     def test_filling_converts_the_hold_to_actual_cost(
             self, store, traders_dir, theme):
@@ -421,7 +459,9 @@ class TestReservationsFollowTheOrderLifecycle:
             code="600000", name="A", theme="t", order_date="2026-01-05",
             entry_low=9.0, entry_high=11.0, stop_loss=8.5,
             source="morning", reason="主线在流入", trader_id="slow")
-        backstop = trader_capital("slow") * 0.10 * (1 + SLIPPAGE_RATE)
+        from alpha_agents.data.portfolio import DEFAULT_POSITION_PCT
+        backstop = (trader_capital("slow") * DEFAULT_POSITION_PCT
+                    * (1 + SLIPPAGE_RATE))
         after_reserve = P.get_available_capital("slow")
         assert after_reserve == pytest.approx(
             trader_capital("slow") - backstop)

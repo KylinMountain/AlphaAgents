@@ -91,6 +91,16 @@ def build_morning_context(themes: list[dict], stats: str,
                  inject_entry_side(trader_id=trader_id)):
         if part:
             sections.append(part)
+    # What happened to this trader's own positions, in its own words. Not a
+    # rule and not gated as one: the snapshot gate is about a note *becoming*
+    # a rule, and this context picks stocks — it is the one that most needs
+    # to remember. Until 2026-09-22 the review had this and the morning scan
+    # did not, so the decision that could act on the memory was the one
+    # without it.
+    from alpha_agents.evolution.journal import own_trade_notes
+    notes = own_trade_notes()
+    if notes:
+        sections.append(notes)
     if mode != "baseline":
         # ``knowledge`` lets the caller render once and hand the *same string*
         # back for hashing. Without it the caller would have to re-render, and

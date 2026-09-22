@@ -1370,24 +1370,8 @@ def _knowledge_block(ctx, day: str) -> str:
     rather than of the loop's shape, and it is the difference between "no
     lookahead today" and "no lookahead by construction".
     """
-    try:
-        from alpha_agents.data import learning_candidates as LC
-        rows = [row for row in LC.candidates_by_status(LC.OBSERVATION, limit=200)
-                if (row["source_date"] or "") < day]
-    except Exception as exc:                          # noqa: BLE001
-        logger.warning("learning candidates unavailable: %s", exc)
-        return ""
-    if not rows:
-        return ""
-    lines = ["【你自己的交易记录（本次回放写下的观察；样本很小，是观察不是结论）】"]
-    for row in rows[-_KNOWLEDGE_LIMIT:]:
-        lines.append(f"· {row['source_date']}｜{row['claim']}")
-        cited = json.loads(row["evidence_episode_ids"] or "{}")
-        ids = sorted(set(cited.get("supporting") or [])
-                     | set(cited.get("opposing") or []))
-        if ids:
-            lines.append("  证据 episode：" + "、".join(f"#{i}" for i in ids))
-    return "\n".join(lines)
+    from alpha_agents.evolution.journal import own_trade_notes
+    return own_trade_notes(day)
 
 
 def _build_model(timeout: float | None):
@@ -5136,6 +5120,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="how many sessions to run (default 30).")
     parser.add_argument("--trader", default="pullback",
                         help="which trader's declared entry style to use.")
+    parser.add_argument("--no-keep-notes", action="store_true",
+                        help="do not merge this run's observations into the "
+                             "trader's durable journal. The default keeps "
+                             "them: a replay exists so the trader can "
+                             "accumulate experience, and notes that die with "
+                             "the scratch directory accumulate nothing.")
     parser.add_argument("--picks", type=int, default=None,
                         help="cap on orders per day. Default: no cap — how "
                              "many ideas to take is the agent's decision, "
@@ -5268,6 +5258,25 @@ def main(argv: list[str] | None = None) -> int:
     ok = (report["meta"]["production_db_unchanged"]
           and report["meta"]["corpus_read_only"]
           and report["meta"]["model_usage_ok"])
+
+    # The trader keeps what it learned. Deliberately **after** the checks
+    # above and outside `run`: `production_db_unchanged` is the proof that
+    # the replay's fills never touched a real position, and merging inside
+    # the run would have destroyed that proof to save a function call. The
+    # book stays isolated; the notes do not, because a trader that forgets
+    # every run cannot get better at anything and accumulating experience is
+    # the reason to run a replay at all.
+    #
+    # Nothing here becomes a rule. Merged rows land as `observation` and
+    # only the promotion path can move them; fingerprints are unique, so
+    # re-running a window is a no-op rather than a second copy of the same
+    # memory.
+    if not args.no_keep_notes:
+        from alpha_agents.evolution.journal_merge import merge_from
+        moved = merge_from(_REPLAY_DIR)
+        print(f"\n— 交易记录 —\n  本轮写下 {moved.get('seen', 0)} 条观察，"
+              f"新记住 {moved.get('merged', 0)} 条"
+              f"（其余已经记得）。它们从下一次决策起就是它自己的经验。")
     return 0 if ok else 1
 
 

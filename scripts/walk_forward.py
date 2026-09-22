@@ -3050,8 +3050,8 @@ def _check_theses(ctx, day: str) -> list[dict]:
 
     ranks, flows = {}, {}
     try:
-        from alpha_agents.data.market_data import get_concept_fund_flow
         from alpha_agents.data.snapshot_store import SNAPSHOTS_DB_PATH
+        from alpha_agents.data.theme_state import concept_state
         # Asked only when the file is already there. Opening the snapshot
         # store *creates* it, and a replay that creates a corpus file has
         # broken the property `TestTheProductionBookIsUntouched` exists to
@@ -3059,15 +3059,12 @@ def _check_theses(ctx, day: str) -> list[dict]:
         # it, including not bringing a missing one into being.
         if not SNAPSHOTS_DB_PATH.exists():
             raise FileNotFoundError(SNAPSHOTS_DB_PATH)
-        with replay_as_of(f"{day} 09:30"):
-            frame = get_concept_fund_flow()
-        if frame is not None and not getattr(frame, "empty", True):
-            name_col = "行业" if "行业" in frame.columns else "名称"
-            for rank, (_, row) in enumerate(frame.iterrows(), 1):
-                name = str(row.get(name_col) or "")
-                if name:
-                    ranks.setdefault(name, rank)
-                    flows.setdefault(name, float(row.get("净额") or 0.0))
+        # A window, not the session. One day's concept flow ranking has a
+        # day-over-day Spearman of -0.004, so the single-day rank this used
+        # to read made theme_rank_worse_than fire on noise and
+        # theme_flow_negative fire within three sessions 99.2% of the time.
+        # concept_state reads only sessions at or before `day`.
+        ranks, flows = concept_state(day)
     except Exception as exc:                          # noqa: BLE001
         # A missing flow reading must not fire a condition: thesis.MarketView
         # treats None as "could not check", never as "the thesis broke". So

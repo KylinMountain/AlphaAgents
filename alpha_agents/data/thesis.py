@@ -147,13 +147,28 @@ _CONDITIONS: dict[str, dict] = {
     "theme_flow_negative": {
         "needs": "theme_net_flow_yi",
         "unit": "亿",
-        "template": "主线资金净流出超过 {v}亿",
+        # Five sessions cumulative, not the day. See data/theme_state.py:
+        # on one session this fired within three days 99.2% of the time
+        # while riding on 34 of 34 theses, which is not a condition, it is
+        # a timer. The base rate is in the template for the reason the
+        # breadth_below one is: a threshold without it is a guess.
+        "template": "主线近 5 日累计资金净流出超过 {v}亿"
+                    "（实测：强势主线次日累计转负约三成）",
         "fired": lambda mv, v: mv.theme_net_flow_yi <= -abs(v),
     },
     "theme_rank_worse_than": {
         "needs": "theme_rank",
         "unit": "名",
-        "template": "主线掉出板块排名前 {v}",
+        # This one the window does not rescue, and saying so is the point.
+        # Rank is a position among ~385 competitors, so it moves when they
+        # move: a top-5 theme leaves the top 50 within five sessions 96.9%
+        # of the time even on the smoothed rank. The condition measures
+        # rotation, not deterioration. An agent that knows this can still
+        # use it for a one- or two-day trade; one that does not will put it
+        # on a five-day thesis and be stopped out by the calendar.
+        "template": "主线掉出近 5 日累计资金排名前 {v}"
+                    "（实测：前5主线次日掉出前5约六成、5日内掉出前50约97%；"
+                    "概念轮动本就一周一轮，这条只适合 1–2 日的交易）",
         "fired": lambda mv, v: mv.theme_rank > v,
     },
     "breadth_below": {

@@ -15,6 +15,8 @@ from alpha_agents.data.memory_store import get_active_themes, save_prediction, g
 from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
+from alpha_agents.data.clock import today as clock_today
+from alpha_agents.data.theme_state import concept_state
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.pipeline.theme_manager import (
     evaluate_theme_signals, maybe_discover_theme, refresh_theme_scores, update_theme_strength,
@@ -119,16 +121,20 @@ def _market_view() -> dict:
     """
     out: dict = {}
     try:
-        full = json.loads(get_concept_ranking_fn(top_n=999))
-        # Rank by net inflow across the whole board, not a slice: a theme
-        # that fell to 300th is the case theme_rank_worse_than exists for,
-        # and a truncated list would leave it unranked and unfireable.
-        ordered = sorted(full.get("gainers", []) + full.get("losers", []),
-                         key=lambda c: -(c.get("net_flow_yi") or 0))
-        out["sector_ranks"] = {c.get("concept", ""): i + 1
-                               for i, c in enumerate(ordered)}
-        out["sector_flows"] = {c.get("concept", ""): c.get("net_flow_yi")
-                               for c in ordered}
+        # Not today's ranking. The concept flow ranking has a day-over-day
+        # Spearman of -0.004 — a theme leading today is no likelier than
+        # chance to lead tomorrow — so a thesis checked against one session
+        # is checked against noise. concept_state accumulates five sessions,
+        # which is also what the replay now reads: the same condition has to
+        # mean the same thing in both, or a backtest measures a rule that
+        # production does not run.
+        ranks, flows = concept_state(clock_today())
+        if ranks:
+            out["sector_ranks"] = ranks
+            out["sector_flows"] = flows
+        else:
+            logger.warning("板块排名/资金流为空，本轮 theme_rank / theme_flow "
+                           "类条件无法判定")
     except Exception as e:
         logger.warning("板块排名/资金流不可用，本轮 theme_rank / theme_flow "
                        "类条件无法判定: %s", e)

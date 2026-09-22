@@ -57,6 +57,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+
+from alpha_agents.agents.json_reply import picks_line
 import re
 import time
 from pathlib import Path
@@ -372,8 +374,20 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
 #: What the agent may state about a position beyond its price plan. Each is
 #: optional and each falls back to the trader's own configuration, because a
 #: plan written before sizing was a decision must keep working.
+#:
+#: ``size_pct`` has no upper bound. It had 0.5, and the bound was worse than
+#: it looks: an out-of-range value is *dropped*, so an agent asking for 60%
+#: of the book got the trader's 3% default and no indication that its answer
+#: had been replaced. "How much to bet" is the decision this design exists to
+#: hand over, and a ceiling a person picked is the same mechanical rail the
+#: stop-loss was. What stops a position from exceeding the account is cash
+#: and T+1 settlement, which ``reservations`` enforces because they are facts
+#: about the market rather than opinions about risk.
+#:
+#: The floor stays above zero: an order for 0% of the book is not an order,
+#: and reading it as one would put a row in the book that can never fill.
 _THESIS_BOUNDS = {
-    "size_pct": (0.005, 0.5),      # share of the whole book
+    "size_pct": (0.0001, None),    # share of the whole book; no ceiling
     "prob": (0.0, 1.0),
     "conviction": (0.0, 1.0),
     "horizon_days": (1, 60),
@@ -390,9 +404,12 @@ def _thesis_fields(raw: dict, code: str) -> dict:
     ``thesis.evaluate`` is the code path that decides a claim has been
     falsified without asking a model.
 
-    Out-of-range numbers are dropped rather than clamped. A clamp would let a
-    model asking for 90% of the book quietly become the sanity limit and read,
-    afterwards, as if it had asked for that.
+    Out-of-range numbers are dropped rather than clamped, for the fields that
+    still have a range. A clamp would let a model asking for 90% of the book
+    quietly become the sanity limit and read, afterwards, as if it had asked
+    for that — which is exactly what ``size_pct``'s old 0.5 ceiling did, only
+    it substituted the trader's 3% default instead. ``size_pct`` now has no
+    ceiling: what the agent says is what the position is.
     """
     out: dict = {}
     for field, (lo, hi) in _THESIS_BOUNDS.items():
@@ -404,9 +421,10 @@ def _thesis_fields(raw: dict, code: str) -> dict:
             logger.warning("%s: %s is not a number (%r) — ignored",
                            code, field, raw[field])
             continue
-        if not lo <= value <= hi:
+        if value < lo or (hi is not None and value > hi):
             logger.warning("%s: %s=%s outside [%s, %s] — ignored",
-                           code, field, value, lo, hi)
+                           code, field, value, lo,
+                           "∞" if hi is None else hi)
             continue
         out[field] = int(value) if field == "horizon_days" else value
 
@@ -485,7 +503,7 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
               **moment,
               "book": book or "（空仓）",
               "knowledge": knowledge or "（还没有任何经验在生效）",
-              "trader_note": trader_note or "", "picks": picks,
+              "trader_note": trader_note or "", "picks": picks_line(picks),
               "research_packet": (
                   json.dumps(
                       research_packet, ensure_ascii=False, sort_keys=True,

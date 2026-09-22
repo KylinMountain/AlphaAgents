@@ -53,6 +53,8 @@ from alpha_agents.data.portfolio_exit import (
 # bottom because the implementations above call into them directly.
 from alpha_agents.data.portfolio_sizing import (
     _calc_shares,
+    _cluster_room,
+    _sizing_policy,
     _trader_pct,
     _wanted_pct,
     get_sentiment_exposure_limit,
@@ -129,21 +131,6 @@ HARD_STOP_PCT = float(os.environ.get("HARD_STOP_PCT", "8.0"))
 # waited to fill (106 of 117 orders cancelled, ~100 of them as 主线走弱). The bar
 # is now a cross-sectionally normalised score with two levels — admission above
 # cancellation — and it lives in `data/theme_gate.py` with that history.
-
-
-def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
-    """Headroom for this theme's correlated cluster, or unlimited on error.
-
-    Falling open rather than closed: a failure in the correlation lookup
-    must not silently stop the portfolio from trading. The per-theme and
-    per-stock caps still apply underneath.
-    """
-    try:
-        from alpha_agents.data.portfolio_risk import cluster_room
-        return cluster_room(theme, trader_id)
-    except Exception as e:
-        logger.warning("Cluster check unavailable for %r: %s", theme, e)
-        return float("inf")
 
 
 def _drawdown_blocks_new_risk(trader_id: str = DEFAULT_TRADER) -> bool:
@@ -723,6 +710,8 @@ def _fill_order(
     # because the 15:30 review pre-computes tomorrow's phase; a fresh walk-forward
     # directory has no phase, and M1's first fill hung on it. The failure is
     # silent and unbounded, which is why it is a fix and not a note.
+    # Computed outside the lock for the deadlock reason above; whether it
+    # *binds* is the policy's call and is decided below.
     sentiment_cap = get_sentiment_exposure_limit(trader_id)
 
     with _write_lock:
@@ -730,7 +719,9 @@ def _fill_order(
         # concurrent fills.
         available = get_available_capital(trader_id)
         invested = get_invested_capital(trader_id)
-        sentiment_room = max(0, sentiment_cap - invested)  # How much more we can invest given sentiment
+        sentiment_room = (max(0, sentiment_cap - invested)
+                          if _sizing_policy().get("sentiment_scaling")
+                          else float("inf"))
 
         # Size by conviction rather than filling every position to the cap.
         # A flat 15% everywhere throws away half of what a trader is for:
@@ -740,19 +731,32 @@ def _fill_order(
         # behaves exactly as before.
         # What the agent asked for, capped by the backstop. Conviction no
         # longer scales this behind its back — it says the number itself.
-        max_pos_pct = _trader_pct(trader_id, "max_position_pct",
-                                  MAX_POSITION_PCT)
-        max_per_stock = min(capital * _wanted_pct(code, trader_id),
-                            capital * max_pos_pct)
-        plan_risk_cap = risk_reservations.plan_risk_amount_cap(
-            fill_price, order.get("stop_loss"), capital, max_pos_pct,
-            hard_stop_pct=HARD_STOP_PCT, lot_size=LOT_SIZE)
-        max_for_theme = (capital * MAX_THEME_PCT
-                         - get_theme_exposure(theme, trader_id))
+        sizing = _sizing_policy()
+        wanted = capital * _wanted_pct(code, trader_id)
+        # The agent's number, and by default nothing trims it. Each term
+        # below is added only when the policy in force asks for it.
+        max_pos_pct = sizing.get("max_position_pct")
+        if max_pos_pct is None:
+            max_pos_pct = _trader_pct(trader_id, "max_position_pct",
+                                      MAX_POSITION_PCT)
+            max_per_stock = wanted
+        else:
+            max_per_stock = min(wanted, capital * float(max_pos_pct))
+        plan_risk_cap = (
+            risk_reservations.plan_risk_amount_cap(
+                fill_price, order.get("stop_loss"), capital,
+                float(max_pos_pct), hard_stop_pct=HARD_STOP_PCT,
+                lot_size=LOT_SIZE)
+            if sizing.get("risk_budget_sizing") else float("inf"))
+        theme_pct = sizing.get("max_theme_pct")
+        max_for_theme = (
+            capital * float(theme_pct) - get_theme_exposure(theme, trader_id)
+            if theme_pct is not None else float("inf"))
         # Themes that share most of their constituents are one bet. The
         # per-theme cap counted 金属铜 and 小金属概念 as two and would let
         # them take 60% between them while sharing 6 of 10 names.
-        cluster_cap = _cluster_room(theme, trader_id)
+        cluster_cap = (_cluster_room(theme, trader_id)
+                       if sizing.get("cluster_cap") else float("inf"))
         # Floor at zero, and that is a fix rather than formatting. Every term
         # above can be negative — ``available`` after a realized loss,
         # ``max_for_theme`` once the line is over its cap, ``cluster_cap`` once
@@ -785,7 +789,7 @@ def _fill_order(
         # Liquidating at a drawdown level sells the bottom, and in a system
         # built to learn from resolved theses it would destroy the samples
         # before they resolve. Positions already open keep their own stops.
-        if _drawdown_blocks_new_risk(trader_id):
+        if sizing.get("drawdown_gate") and _drawdown_blocks_new_risk(trader_id):
             _cancel_order_unlocked(order["id"], "组合回撤触及上限，暂停开新仓")
             return {"type": "cancelled", "code": code, "name": name,
                     "reason": "组合回撤触及上限"}

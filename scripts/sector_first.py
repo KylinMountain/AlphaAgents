@@ -48,6 +48,19 @@ from alpha_agents.evolution import selection_experiment_compare  # noqa: E402
 from alpha_agents.evolution import world_read_set  # noqa: E402
 
 
+
+def _picks_flag(decision: dict) -> list[str]:
+    """``--picks`` only when the manifest names a cap.
+
+    ``picks_per_day: null`` is a real setting — "no cap, the agent decides
+    how many ideas to take" — and the honest way to pass it is to pass
+    nothing, letting the runner's own default stand. ``str(None)`` produced
+    the literal "None", which argparse rejects as an int; substituting a
+    number would run an arm the manifest did not preregister.
+    """
+    picks = decision.get("picks_per_day")
+    return [] if picks is None else ["--picks", str(int(picks))]
+
 def _git_code_ref() -> str:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -297,7 +310,7 @@ def _walk_command(*, manifest: dict, manifest_path: Path,
         "--run-id", run_id,
         "--out", str(out),
         "--trader", str(decision["trader"]),
-        "--picks", str(decision["picks_per_day"]),
+        *_picks_flag(decision),
         "--panel-size", str(decision["panel_size"]),
         "--participation", str(decision["participation"]),
         "--news-limit", str(decision["news_limit"]),
@@ -347,7 +360,7 @@ def _selection_walk_command(
         "--out", str(out),
         "--trader", str(decision["trader"]),
         "--theme", str(decision["run_theme"]),
-        "--picks", str(decision["picks_per_day"]),
+        *_picks_flag(decision),
         "--panel-size", str(decision["panel_size"]),
         "--participation", str(decision["participation"]),
         "--news-limit", "0",

@@ -134,12 +134,23 @@ def validate(manifest: dict) -> list[str]:
     for key in DECISION_KEYS:
         if key not in decision:
             errors.append(f"decision_config.{key} is required")
-    for key in ("picks_per_day", "panel_size", "news_limit"):
+    for key in ("panel_size", "news_limit"):
         value = decision.get(key)
         if key in decision and (
                 not isinstance(value, int) or isinstance(value, bool)
                 or value <= 0):
             errors.append(f"decision_config.{key} must be a positive integer")
+    # picks_per_day admits null, and null is a real setting rather than a
+    # missing one: "no cap on orders per day — the agent decides how many
+    # ideas to take". The manifest has to be able to record that, because an
+    # arm run without a cap and an arm whose cap was forgotten are different
+    # experiments and the preregistration exists to tell them apart.
+    picks = decision.get("picks_per_day")
+    if "picks_per_day" in decision and picks is not None and (
+            not isinstance(picks, int) or isinstance(picks, bool)
+            or picks <= 0):
+        errors.append("decision_config.picks_per_day must be a positive "
+                      "integer or null (null = no cap)")
     participation = decision.get("participation")
     if participation is not None and (
             not isinstance(participation, (int, float))

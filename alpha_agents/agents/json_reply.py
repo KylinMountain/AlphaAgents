@@ -50,3 +50,23 @@ def match_offered(written: str, offered) -> str | None:
         return None
     return next((name for name in offered
                  if squeeze_name(name) == target), None)
+
+
+def picks_line(picks: int | None) -> str:
+    """How many names the agent may take, as a sentence rather than a number.
+
+    ``None`` means it decides. The cap was 2, a constant nobody could
+    defend: a trader does not stop at two ideas because a default said so,
+    and on a 20-day replay it was the hardest-binding of the six terms that
+    sized the book — mean exposure 3.2% against a market up 6.15%.
+
+    What replaces it is the constraint that is actually real, which the
+    prompt already carries elsewhere: the cash on hand and what is already
+    held. Concentration is then the agent's judgement, and it is recorded
+    as ``size_pct`` on the thesis where the review can grade it.
+    """
+    if picks is None:
+        return ("**下几单由你决定**，没有条数上限。约束只有可用现金与"
+                "你自己的集中度判断——两者都在上面的账户与持仓里。"
+                "**可以不下单**")
+    return f"最多 **{int(picks)}** 单。**可以不下单**"

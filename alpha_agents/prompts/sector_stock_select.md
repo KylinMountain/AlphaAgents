@@ -26,7 +26,7 @@
 
 ## 任务
 
-最多选择 {picks} 只进入“交易计划”阶段，也可以一只不选。
+{picks}。选中的进入“交易计划”阶段，也可以一只不选。
 
 1. 这里只决定 **选谁**，不要给 entry/stop/target/仓位；后续 Planner 会统一处理。
 2. primary_theme 是该股票本次论点的主方向；supporting_themes 只是重叠暴露。

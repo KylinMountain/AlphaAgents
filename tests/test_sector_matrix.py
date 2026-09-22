@@ -148,10 +148,36 @@ def test_matrix_command_carries_all_frozen_decision_knobs(tmp_path):
     )
     expected = manifest["decision_config"]
     assert cmd[cmd.index("--trader") + 1] == expected["trader"]
-    assert int(cmd[cmd.index("--picks") + 1]) == expected["picks_per_day"]
+    # picks_per_day is null by default now — "no cap, the agent decides how
+    # many ideas to take" — and the command says so by carrying no flag.
+    # Passing str(None) would hand argparse the literal "None"; substituting
+    # a number would run an arm the manifest never preregistered.
+    if expected["picks_per_day"] is None:
+        assert "--picks" not in cmd
+    else:
+        assert int(cmd[cmd.index("--picks") + 1]) == expected["picks_per_day"]
     assert int(cmd[cmd.index("--panel-size") + 1]) == expected["panel_size"]
     assert float(cmd[cmd.index("--participation") + 1]) == expected["participation"]
     assert float(cmd[cmd.index("--model-timeout") + 1]) == expected["model_timeout_seconds"]
+
+
+def test_a_manifest_naming_a_cap_still_passes_it(tmp_path):
+    """The flag is omitted because the manifest says null, not because the
+    builder forgot how to pass it."""
+    manifest = _manifest()
+    manifest["decision_config"]["picks_per_day"] = 3
+    cmd = SF._walk_command(
+        manifest=manifest,
+        manifest_path=tmp_path / "manifest.json",
+        membership_path=tmp_path / "membership.json",
+        target=tmp_path / "state" / "A",
+        out=tmp_path / "arms" / "A",
+        start="2026-01-01",
+        days=20,
+        arm="A",
+        run_id="matrix-A",
+    )
+    assert cmd[cmd.index("--picks") + 1] == "3"
 
 
 def _formal_capabilities():

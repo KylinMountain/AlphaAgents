@@ -445,6 +445,34 @@ DEFAULT_DECISION_PARAMS: dict = {
     "confidence_priors": {"high": 0.58, "medium": 0.53, "low": 0.50},
     "dim_step": 0.04,
     "dim_base": 0.44,
+    # How much of the book one idea may become. Every entry is a *policy*
+    # parameter, which is the whole point of it living here: a cap that comes
+    # back does so because a forward-only paired test over market outcomes
+    # moved the pointer, not because someone edited a yaml.
+    #
+    # The defaults are all off. ``size_pct`` from the thesis is what the
+    # position is. Before this, the agent's number was the first term of a
+    # ``min()`` over six others — MAX_POSITION_PCT 10%, a risk budget derived
+    # from HARD_STOP_PCT, MAX_THEME_PCT 30%, the sentiment phase's total
+    # exposure, a correlated-cluster cap and a drawdown gate — and the code
+    # said so itself: "the size the agent asked for is a target, not a
+    # ceiling". Calling that "the agent sizes the position" was not true.
+    #
+    # What is *not* here, because it is not policy: cash on hand, T+1
+    # settlement and ADV20 liquidity. Those are facts about the market and
+    # about the account, and they stay unconditional.
+    "sizing": {
+        "max_position_pct": None,     # None = the agent's number stands
+        "max_theme_pct": None,        # None = no per-theme headroom cap
+        "cluster_cap": False,         # correlated-theme headroom
+        "sentiment_scaling": False,   # phase-driven total exposure
+        # Sizing from the hard stop's risk budget. Off by default and
+        # incoherent when the stop is not executed at all: the autonomous
+        # arm switches HARD_STOP_PCT off, so this sized every position
+        # against a mechanism that could not fire.
+        "risk_budget_sizing": False,
+        "drawdown_gate": False,       # stop opening new risk in a drawdown
+    },
     # ``selection_rank.change_share`` was removed 2026-09-21. It mixed a
     # whole-market change lane with a turnover lane, and no trading path ever
     # read it: production selects by concept fund flow and a within-sector

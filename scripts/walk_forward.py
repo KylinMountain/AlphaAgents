@@ -2196,7 +2196,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
         else:
             discovered = _build_panel(
                 ctx, day, ranking_day, ctx.panel_size)
-        panel = _minimal_planner_panel(discovered, limit=ctx.picks)
+        panel = _minimal_planner_panel(
+            discovered,
+            limit=ctx.picks if ctx.picks is not None else len(discovered))
     elif sector_mode:
         if phase != "open":
             raise RuntimeError(
@@ -2713,8 +2715,11 @@ def _decide(ctx, day: str, prev_day: str) -> list[dict]:
 
     low_pct, high_pct = ctx.entry_zone
     placed, seen = [], set()
+    # The placeholder is a fixed rule with nothing to decide, so it keeps a
+    # number. The LLM deciders get None and choose for themselves.
+    placeholder_picks = ctx.picks if ctx.picks is not None else 2
     for _chg, code in ranked:
-        if len(placed) >= ctx.picks:
+        if len(placed) >= placeholder_picks:
             break
         if code in seen:
             continue
@@ -3704,7 +3709,8 @@ def _experiment_runtime_contract(args) -> dict:
     return {
         "decision_config": {
             "trader": str(args.trader),
-            "picks_per_day": int(args.picks),
+            "picks_per_day": (int(args.picks) if args.picks is not None
+                              else None),
             "panel_size": int(args.panel_size),
             "participation": float(args.participation),
             "trader_tools_enabled": bool(args.trader_tools),
@@ -3749,7 +3755,8 @@ def _selection_experiment_runtime_contract(args) -> dict:
     return {
         "decision_config": {
             "trader": str(args.trader),
-            "picks_per_day": int(args.picks),
+            "picks_per_day": (int(args.picks) if args.picks is not None
+                              else None),
             "panel_size": int(args.panel_size),
             "participation": float(args.participation),
             "max_turns_per_decision": 1,
@@ -5110,8 +5117,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="how many sessions to run (default 30).")
     parser.add_argument("--trader", default="pullback",
                         help="which trader's declared entry style to use.")
-    parser.add_argument("--picks", type=int, default=2,
-                        help="orders the placeholder decider places per day.")
+    parser.add_argument("--picks", type=int, default=None,
+                        help="cap on orders per day. Default: no cap — how "
+                             "many ideas to take is the agent's decision, "
+                             "bounded by cash and its own concentration "
+                             "judgement. The placeholder decider has no "
+                             "judgement to exercise and falls back to 2.")
     parser.add_argument("--theme", default="WALK-PLACEHOLDER",
                         help="the synthetic theme every order hangs on.")
     parser.add_argument("--stop-pct", type=float, default=8.0,

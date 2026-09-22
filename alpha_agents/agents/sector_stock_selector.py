@@ -17,7 +17,7 @@ from agents import Agent, Runner
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.agents import t1_decider
-from alpha_agents.agents.json_reply import json_body, match_offered
+from alpha_agents.agents.json_reply import picks_line, json_body, match_offered
 from alpha_agents.config import PROMPTS_DIR
 
 
@@ -41,7 +41,7 @@ def load_prompt(path: Path | None = None) -> str:
 
 def build_message(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], market: dict, book: str,
-                  knowledge: str, trader_note: str, picks: int,
+                  knowledge: str, trader_note: str, picks: int | None,
                   template: str | None = None) -> str:
     fields = {
         "day": day,
@@ -52,7 +52,7 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
         "book": book or "（空仓）",
         "knowledge": knowledge or "（还没有任何经验在生效）",
         "trader_note": trader_note or "",
-        "picks": int(picks),
+        "picks": picks_line(picks),
     }
     prompt = template if template is not None else load_prompt()
     try:
@@ -67,7 +67,7 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
     return text
 
 
-def parse(text: str, offered: set[str], *, picks: int,
+def parse(text: str, offered: set[str], *, picks: int | None,
           offered_themes: dict[str, list[str]] | None = None) -> dict:
     body = json_body(text)
     if not body:
@@ -98,7 +98,7 @@ def parse(text: str, offered: set[str], *, picks: int,
         if code in seen:
             refused.append({"code": code, "why": "duplicate", "detail": ""})
             continue
-        if len(selected) >= picks:
+        if picks is not None and len(selected) >= picks:
             refused.append({
                 "code": code, "why": "too_many", "detail": f"max={picks}"})
             continue
@@ -145,7 +145,7 @@ def parse(text: str, offered: set[str], *, picks: int,
 
 async def propose(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], market: dict, book: str = "",
-                  knowledge: str = "", trader_note: str = "", picks: int = 2,
+                  knowledge: str = "", trader_note: str = "", picks: int | None = None,
                   model=None, tools: list | None = None,
                   research_budget=None, loop=None,
                   max_turns: int | None = None) -> dict:
@@ -213,8 +213,13 @@ def propose_sync(*, loop: asyncio.AbstractEventLoop | None = None,
     return loop.run_until_complete(propose(**kwargs))
 
 
-def simple(panel: list[dict], *, picks: int) -> dict:
-    """Preregistered C-arm selector: take the first panel rows as frozen."""
+def simple(panel: list[dict], *, picks: int | None) -> dict:
+    """Preregistered C-arm selector: take the first panel rows as frozen.
+
+    ``None`` takes the whole panel. This arm is a fixed rule with no
+    judgement to exercise, so "how many" has to come from somewhere; the
+    panel itself is the honest answer once the cap is gone.
+    """
     chosen = [
         {
             "code": str(row["code"]),
@@ -222,7 +227,7 @@ def simple(panel: list[dict], *, picks: int) -> dict:
             "counterevidence": "",
             "primary_theme": str(row.get("primary_theme") or ""),
         }
-        for row in panel[:max(0, int(picks))]
+        for row in (panel if picks is None else panel[:max(0, int(picks))])
     ]
     return {
         "stocks": chosen,

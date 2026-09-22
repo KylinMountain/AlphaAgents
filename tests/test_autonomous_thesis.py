@@ -38,8 +38,7 @@ def test_saying_nothing_is_not_saying_zero():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("size_pct", 0.9),       # 90% of the book
-    ("size_pct", 0.0001),
+    ("size_pct", 0.0),       # not an order
     ("prob", 1.5),
     ("conviction", -0.2),
     ("horizon_days", 400),
@@ -47,6 +46,20 @@ def test_saying_nothing_is_not_saying_zero():
 def test_an_out_of_range_number_is_dropped_not_clamped(field, value):
     """Clamping would let a model asking for 90% read as if it asked for 50%."""
     assert field not in _thesis_fields({field: value}, "600519")
+
+
+@pytest.mark.parametrize("value", [0.0001, 0.10, 0.5, 0.9, 1.0])
+def test_size_pct_has_no_ceiling(value):
+    """How much to bet is the decision this design exists to hand over.
+
+    The ceiling was 0.5, and because out-of-range values are *dropped*, an
+    agent asking for 90% of the book silently became the trader's 3%
+    default with nothing saying its answer had been replaced. What bounds a
+    position now is cash and T+1 settlement, which reservations enforce
+    because they are facts about the account rather than opinions about
+    risk.
+    """
+    assert _thesis_fields({"size_pct": value}, "600519")["size_pct"] == value
 
 
 def test_a_non_numeric_value_is_dropped():

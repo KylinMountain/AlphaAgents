@@ -63,7 +63,12 @@ def _wanted_pct(code: str, trader_id: str = DEFAULT_TRADER) -> float:
         theses = [t for t in get_active(code=code, trader_id=trader_id)
                   if t.position_id is None]
         if theses and theses[-1].size_pct:
-            return max(0.005, min(1.0, theses[-1].size_pct))
+            # Capped at the whole book and nothing else. 1.0 is not a risk
+            # opinion — you cannot deploy capital you do not have, and cash
+            # plus T+1 settlement enforce that underneath anyway. The old
+            # floor of 0.005 quietly raised a deliberate 0.1% probe to 0.5%,
+            # which is a fivefold position the agent never asked for.
+            return min(1.0, theses[-1].size_pct)
     except Exception as e:
         logger.debug("Size lookup fallback for %s: %s", code, e)
     from alpha_agents.data.portfolio import DEFAULT_POSITION_PCT
@@ -90,3 +95,41 @@ def get_sentiment_exposure_limit(trader_id: str = DEFAULT_TRADER) -> float:
     except Exception as e:
         logger.warning("Sentiment cycle failed, defaulting to 50%%: %s", e)
         return capital * 0.50
+
+
+def _sizing_policy() -> dict:
+    """The sizing envelope in force, defaults merged in.
+
+    Read from the policy pointer the way ``theme_manager`` reads its gate:
+    "cap one idea at 10% of the book" versus "let the agent say" is a
+    difference between two frozen versions rather than a code edit, which is
+    what lets ``holdout_gate`` move it on market outcomes with nobody in the
+    loop.
+
+    Falls back to the code defaults — all off — on any failure. A broken
+    policy read must not silently reinstate a cap, because the resulting run
+    would look like a trader that chose to bet small.
+    """
+    from alpha_agents.data import scoring
+    try:
+        source = scoring.in_force_decision_params()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("Sizing policy unavailable, using defaults: %s", exc)
+        source = {}
+    return {**scoring.DEFAULT_DECISION_PARAMS["sizing"],
+            **(source.get("sizing") or {})}
+
+
+def _cluster_room(theme: str, trader_id: str = DEFAULT_TRADER) -> float:
+    """Headroom for this theme's correlated cluster, or unlimited on error.
+
+    Falling open rather than closed: a failure in the correlation lookup
+    must not silently stop the portfolio from trading. The per-theme and
+    per-stock caps still apply underneath.
+    """
+    try:
+        from alpha_agents.data.portfolio_risk import cluster_room
+        return cluster_room(theme, trader_id)
+    except Exception as e:
+        logger.warning("Cluster check unavailable for %r: %s", theme, e)
+        return float("inf")

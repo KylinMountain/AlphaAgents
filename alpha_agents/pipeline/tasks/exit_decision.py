@@ -525,16 +525,59 @@ async def run(price_map: dict[str, float], signals: list[dict],
     except asyncio.TimeoutError:
         logger.warning("Exit decision timed out after %ds — holding all",
                        _DECISION_TIMEOUT)
+        note_unanswered(signals, [])
         return []
     except Exception as e:
         logger.warning("Exit decision failed (%s) — holding all", e)
+        note_unanswered(signals, [])
         return []
 
+    note_unanswered(signals, decisions)
     if not decisions:
         return []
     logger.info("Exit decisions: %s",
                 ", ".join(f"{d['code']}={d['action']}" for d in decisions))
     return apply(decisions, positions, price_map)
+
+
+def note_unanswered(signals: list[dict] | None,
+                    decisions: list[dict] | None) -> list[str]:
+    """Woken positions the agent's reply never mentions.
+
+    A wake-up asks "还持有吗？". An answer of ``hold`` is a decision; no
+    answer at all is a different thing, and the book cannot tell them apart
+    — both leave the position open. That matters more here than anywhere
+    else, because the whole reason a crossed invalidation now wakes the
+    agent instead of closing the position is to find out whether it honours
+    its own line. Silence scored as "held on purpose" would put the answer
+    into the data without the agent ever giving it.
+
+    Seen on 2026-01-15: 600276 filled, its stated invalidation fired the
+    same session, the wake-up was handed over, and the reply covered only
+    002555. The next day it answered ``sell``.
+
+    Writes a checkpoint so the review can count it, and returns the codes.
+    """
+    woken = {s["code"]: s for s in (signals or [])
+             if s.get("type") == "signal" and s.get("thesis_id")}
+    if not woken:
+        return []
+    answered = {d.get("code") for d in (decisions or [])}
+    missing = [code for code in woken if code not in answered]
+    for code in missing:
+        signal = woken[code]
+        logger.warning("%s was woken by its own %s and the reply did not "
+                       "mention it — recorded as unanswered, not as hold",
+                       code, signal.get("kind") or "invalidation")
+        try:
+            from alpha_agents.data import thesis as T
+            T.add_checkpoint(int(signal["thesis_id"]),
+                             "唤醒后 agent 未作答（仓位因此留存，但这不是它的决定）",
+                             T.TRIGGERED, kind=signal.get("kind", ""))
+        except Exception as exc:                      # noqa: BLE001
+            logger.debug("Could not record the unanswered wake for %s: %s",
+                         code, exc)
+    return missing
 
 
 async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
@@ -579,21 +622,24 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                            news_by_theme=news_by_theme,
                            mechanical_stops=mechanical_stops,
                            phase=phase)
+    # Every exit from here notes the wake-ups that got no answer, including
+    # the failure paths — those are the cases where *nothing* was answered,
+    # and "the model timed out" must not settle into the book as "the agent
+    # decided to hold".
+    decisions: list[dict] = []
     try:
         decisions = await decide(context, trader, model=model, tools=[])
     except asyncio.TimeoutError:
         logger.warning("Replay exit decision timed out after %ds — holding all",
                        _DECISION_TIMEOUT)
-        return []
     except Exception as e:
         # Every failure path holds. Selling on an unreadable reply is how a
         # model outage becomes a liquidation.
         logger.warning("Replay exit decision failed (%s) — holding all", e)
-        return []
-    if not decisions:
-        return []
-    logger.info("%s: exit decisions %s", day,
-                ", ".join(f"{d['code']}={d['action']}" for d in decisions))
+    if decisions:
+        logger.info("%s: exit decisions %s", day,
+                    ", ".join(f"{d['code']}={d['action']}" for d in decisions))
+    note_unanswered(signals, decisions)
     return decisions
 
 

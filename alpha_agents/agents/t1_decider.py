@@ -121,6 +121,12 @@ class DeciderError(RuntimeError):
     """The decider could not produce a usable answer at all."""
 
 
+def _condition_vocabulary() -> str:
+    """The invalidation kinds an agent may write, from the evaluator's table."""
+    from alpha_agents.data.thesis import prompt_vocabulary
+    return prompt_vocabulary()
+
+
 def load_prompt(path: Path | None = None) -> str:
     """The decision prompt template."""
     return (path or (PROMPTS_DIR / PROMPT_FILE)).read_text(encoding="utf-8")
@@ -350,8 +356,63 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             "entry_high": round(high, 2), "stop_loss": round(stop, 2),
             "target_price": target,
             "reason": str(raw.get("reason") or "").strip()[:200],
+            # The thesis half. Absent means "the agent did not say", which
+            # the caller renders as its trader's default — not as zero.
+            **_thesis_fields(raw, code),
         })
     return {"orders": orders, "refused": refused, "parse_error": None}
+
+
+#: What the agent may state about a position beyond its price plan. Each is
+#: optional and each falls back to the trader's own configuration, because a
+#: plan written before sizing was a decision must keep working.
+_THESIS_BOUNDS = {
+    "size_pct": (0.005, 0.5),      # share of the whole book
+    "prob": (0.0, 1.0),
+    "conviction": (0.0, 1.0),
+    "horizon_days": (1, 60),
+}
+
+
+def _thesis_fields(raw: dict, code: str) -> dict:
+    """Size, probability, horizon and invalidations, or nothing.
+
+    These are what turn an order into a thesis, and the thesis is what makes
+    sizing and exits the agent's own decisions rather than constants in a
+    file: ``portfolio_sizing._wanted_pct`` reads ``size_pct`` from the active
+    thesis and only falls back to ``traders/*.yaml`` when there is none, and
+    ``thesis.evaluate`` is the code path that decides a claim has been
+    falsified without asking a model.
+
+    Out-of-range numbers are dropped rather than clamped. A clamp would let a
+    model asking for 90% of the book quietly become the sanity limit and read,
+    afterwards, as if it had asked for that.
+    """
+    out: dict = {}
+    for field, (lo, hi) in _THESIS_BOUNDS.items():
+        if raw.get(field) in (None, ""):
+            continue
+        try:
+            value = float(raw[field])
+        except (TypeError, ValueError):
+            logger.warning("%s: %s is not a number (%r) — ignored",
+                           code, field, raw[field])
+            continue
+        if not lo <= value <= hi:
+            logger.warning("%s: %s=%s outside [%s, %s] — ignored",
+                           code, field, value, lo, hi)
+            continue
+        out[field] = int(value) if field == "horizon_days" else value
+
+    from alpha_agents.data.thesis import validate_condition
+    conditions = []
+    for item in (raw.get("invalidations") or []):
+        cond = validate_condition(item)
+        if cond is not None:
+            conditions.append(cond.as_dict())
+    if conditions:
+        out["invalidations"] = conditions
+    return out
 
 
 #: The two moments a buy decision can be taken at, and what each may see.
@@ -423,7 +484,15 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
                   json.dumps(
                       research_packet, ensure_ascii=False, sort_keys=True,
                       indent=2)
-                  if research_packet else "（无共享研究包）")}
+                  if research_packet else "（无共享研究包）"),
+              # A rendered field rather than a replace() on the loaded file:
+              # the guard below only protects what the renderer supplies, and
+              # a template hole that bypasses it is exactly the failure this
+              # function's docstring already records for {news}. The text
+              # comes from thesis._CONDITIONS, the same table validate_condition
+              # and evaluate read, so the kinds the agent is told about cannot
+              # drift from the kinds that will actually be checked.
+              "VOCAB": _condition_vocabulary()}
     try:
         text = template.format(**fields)
     except (KeyError, IndexError) as exc:

@@ -1,0 +1,106 @@
+"""The agent decides size, exits and what counts as being wrong.
+
+Three things were not the agent's before: how much to buy, whether something
+else could force a sale, and whether its stated invalidations were ever
+checked. All three come from one missing object — the replay placed orders
+and never wrote a Thesis, and its own report said so ("no theses and no
+predictions: exits are stop/target only").
+
+Without a thesis, portfolio_sizing._wanted_pct finds nothing and every
+position is the constant in traders/*.yaml; thesis.evaluate has no conditions
+to check, so the only exits left are price ones; and the learning step can ask
+whether a trade made money but not whether its reason was right.
+"""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from alpha_agents.agents.t1_decider import _thesis_fields  # noqa: E402
+
+
+def test_the_agents_own_numbers_come_through():
+    out = _thesis_fields(
+        {"size_pct": 0.08, "prob": 0.55, "conviction": 0.7,
+         "horizon_days": 7}, "600519")
+    assert out == {"size_pct": 0.08, "prob": 0.55,
+                   "conviction": 0.7, "horizon_days": 7}
+
+
+def test_saying_nothing_is_not_saying_zero():
+    """An absent size means "use the trader's default", never "open nothing"."""
+    assert _thesis_fields({"reason": "r"}, "600519") == {}
+    assert _thesis_fields({"size_pct": None, "prob": ""}, "600519") == {}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("size_pct", 0.9),       # 90% of the book
+    ("size_pct", 0.0001),
+    ("prob", 1.5),
+    ("conviction", -0.2),
+    ("horizon_days", 400),
+])
+def test_an_out_of_range_number_is_dropped_not_clamped(field, value):
+    """Clamping would let a model asking for 90% read as if it asked for 50%."""
+    assert field not in _thesis_fields({field: value}, "600519")
+
+
+def test_a_non_numeric_value_is_dropped():
+    assert _thesis_fields({"size_pct": "大仓"}, "600519") == {}
+
+
+def test_only_conditions_the_evaluator_can_read_survive():
+    """A condition nothing will check is worse than no condition at all.
+
+    It looks like the risk was considered while nothing will ever fire.
+    """
+    out = _thesis_fields({"invalidations": [
+        {"kind": "theme_flow_negative", "value": 1, "note": "资金转净流出"},
+        {"kind": "vibes_turn_bad", "value": 3, "note": "感觉不对"},
+        {"kind": "drawdown_from_peak", "value": 8},
+    ]}, "600519")
+    kinds = [c["kind"] for c in out["invalidations"]]
+    assert kinds == ["theme_flow_negative", "drawdown_from_peak"]
+
+
+def test_no_readable_condition_means_no_key_at_all():
+    assert "invalidations" not in _thesis_fields(
+        {"invalidations": [{"kind": "made_up"}]}, "600519")
+
+
+# ── the single switch ────────────────────────────────────────────────────
+
+def _flags(**kw):
+    """The real derivation, not a copy of it."""
+    import walk_forward as wf
+    base = dict(autonomous=False, agent_exits=False,
+                mechanical_stop=True, mechanical_target=True)
+    base.update(kw)
+    out = wf.autonomy_flags(SimpleNamespace(**base))
+    out.pop("autonomous")
+    return out
+
+
+def test_autonomous_turns_off_every_mechanical_rail():
+    """Agent exits with a stop still running measures a mixture nobody chose:
+    the stop takes the hard cases and the agent takes the easy ones."""
+    assert _flags(autonomous=True) == {
+        "agent_exits": True, "mechanical_stop": False,
+        "mechanical_target": False}
+
+
+def test_the_old_default_is_unchanged():
+    """Comparability of earlier runs depends on the default not moving."""
+    assert _flags() == {
+        "agent_exits": False, "mechanical_stop": True,
+        "mechanical_target": True}
+
+
+def test_agent_exits_alone_still_keeps_the_rails():
+    assert _flags(agent_exits=True) == {
+        "agent_exits": True, "mechanical_stop": True,
+        "mechanical_target": True}

@@ -2519,6 +2519,11 @@ def _decide_llm(ctx, day: str, prev_day: str,
             str(row["primary_theme"])
             if sector_mode else ctx.theme
         )
+        # Before the order, so the order can name it: portfolio binds an
+        # order's own thesis_id exactly, and falls back to "the last unfilled
+        # idea on this code" only when there is none — which is the wrong one
+        # as soon as two orders for a code are live.
+        thesis_id = _record_thesis(ctx, order, row, order_theme)
         order_id = create_pending_order(
             code=order["code"],
             name=row["name"],
@@ -2531,6 +2536,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             source="walk_forward",
             reason=f"{t1_decider.DECIDER_NAME}: {order['reason']}",
             trader_id=ctx.trader,
+            thesis_id=thesis_id,
             risk_themes=(
                 list(row.get("supporting_themes") or [])
                 if sector_mode else []
@@ -2562,6 +2568,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
         placed.append({
             "code": order["code"],
             "order_id": order_id,
+            "thesis_id": thesis_id,
             "theme": order_theme,
             "supporting_themes": row.get("supporting_themes") or [],
             "membership_snapshot_id": row.get("membership_snapshot_id"),
@@ -2575,6 +2582,90 @@ def _decide_llm(ctx, day: str, prev_day: str,
             "reason": order["reason"],
         })
     return placed
+
+
+def autonomy_flags(args) -> dict:
+    """Who decides each thing this run: the agent, or a rule.
+
+    ``--autonomous`` adds no behaviour of its own; it turns the mechanical
+    rails off and agent exits on. It is one switch rather than three because
+    the three are only meaningful together — agent exits with a stop still
+    running means the stop takes the hard cases and the agent takes the easy
+    ones, and the window then measures a mixture nobody chose.
+
+    That mixture is also why a stop is not a neutral safety net here. A
+    position closed by a rule the agent could not overrule has an outcome
+    that measures the rule, so the learning step attributes to the agent a
+    result it did not produce.
+
+    The default is unchanged: earlier runs stay comparable, and this is a new
+    arm rather than a replacement for the old one.
+    """
+    autonomous = bool(getattr(args, "autonomous", False))
+    return {
+        "autonomous": autonomous,
+        "agent_exits": bool(getattr(args, "agent_exits", False)) or autonomous,
+        "mechanical_stop": (bool(getattr(args, "mechanical_stop", True))
+                            and not autonomous),
+        "mechanical_target": (bool(getattr(args, "mechanical_target", True))
+                              and not autonomous),
+    }
+
+
+def _trader_horizon(trader_id: str) -> int:
+    """This trader's default holding horizon, or the package default."""
+    try:
+        from alpha_agents.data.trader import get_trader
+        return int(getattr(get_trader(trader_id), "default_horizon_days", 5))
+    except Exception as exc:                          # noqa: BLE001
+        logger.debug("horizon fallback for %s: %s", trader_id, exc)
+        return 5
+
+
+def _record_thesis(ctx, order: dict, row: dict, theme: str) -> int | None:
+    """Write down the claim behind this order, or return None.
+
+    The replay used to place orders and nothing else, and its own report said
+    so: "no theses and no predictions: exits are stop/target only". Three
+    things follow from that absence, and all three read as design choices
+    rather than a missing object.
+
+    ``portfolio_sizing._wanted_pct`` reads ``size_pct`` from the active
+    thesis and only falls back to ``traders/*.yaml`` when there is none, so
+    without a thesis every position is the same constant and the agent's own
+    sizing is unreachable. ``thesis.evaluate`` is the code path that decides
+    a claim has been falsified — no thesis, nothing to falsify, so the only
+    exits available are price ones. And a closed thesis is what the learning
+    step reads to ask whether the *reason* was right rather than only whether
+    the trade made money.
+
+    Failure here does not cancel the order. An order without a thesis is the
+    old behaviour, which is worse but not wrong; losing the order as well
+    would turn a bookkeeping problem into a trading one.
+    """
+    from alpha_agents.data import thesis as T
+    conditions = [T.Condition(**c) for c in (order.get("invalidations") or [])]
+    try:
+        return T.create(T.Thesis(
+            code=order["code"],
+            name=row.get("name") or "",
+            theme=theme,
+            claim=order.get("reason") or "",
+            horizon_days=int(order.get("horizon_days")
+                             or _trader_horizon(ctx.trader)),
+            prob=float(order.get("prob", 0.5)),
+            conviction=float(order.get("conviction", 0.5)),
+            # 0.0 means "the agent said nothing", which _wanted_pct reads as
+            # "use the trader's default" — not as "open nothing".
+            size_pct=float(order.get("size_pct") or 0.0),
+            conditions=conditions,
+            created_by=f"walk_forward:{ctx.selection_architecture}",
+            trader_id=ctx.trader,
+        ))
+    except Exception as exc:                          # noqa: BLE001
+        ctx.counters["thesis_write_failed"] += 1
+        logger.warning("thesis for %s not written: %s", order["code"], exc)
+        return None
 
 
 # ── the placeholder decider ─────────────────────────────────────────────────
@@ -3743,7 +3834,9 @@ class Context:
         #: Whether the sell side gets a model call too. Off by default:
         #: it doubles the run's model calls, and that should be a choice
         #: the operator made rather than a surprise on the bill.
-        self.agent_exits = getattr(args, "agent_exits", False)
+        _rails = autonomy_flags(args)
+        self.autonomous = _rails["autonomous"]
+        self.agent_exits = _rails["agent_exits"]
         #: Whether the buy-side gets an additional synthetic close decision.
         #: Independent from sell-side agent exits: enabling one must not
         #: silently add the other decision point.
@@ -3756,14 +3849,14 @@ class Context:
         #: production would be removing the only backstop under a model.
         #: Here the book is simulated, so the question "does it sell?" can be
         #: asked without paying for the answer.
-        self.mechanical_stop = getattr(args, "mechanical_stop", True)
+        self.mechanical_stop = _rails["mechanical_stop"]
         #: Whether the mechanical **target** is enforced. Separate from the
         #: stop on purpose: they are different claims about behaviour, and
         #: "the agent never takes a profit" and "the agent never cuts a
         #: loss" are two findings that a single switch would merge into one
         #: number. The user asked to disable the take-profit as its own
         #: experiment.
-        self.mechanical_target = getattr(args, "mechanical_target", True)
+        self.mechanical_target = _rails["mechanical_target"]
         #: Whether the buy-side decider may **call tools**. On by default for
         #: the llm decider: a trader that cannot ask a question is a scorer,
         #: and the whole point of the last review's finding was that the
@@ -4818,6 +4911,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agent-exits", action="store_true",
         help="让 agent 决定卖出；只影响卖出，不再隐式增加收盘买入")
+    parser.add_argument(
+        "--autonomous", action="store_true",
+        help="全部交给 agent：等于 --agent-exits --no-stop-loss "
+             "--no-take-profit，并在回放内不执行 HARD_STOP_PCT。"
+             "机械止损会让一笔的结局衡量那条线而不是 agent 的判断，"
+             "学习信号因此不可归因")
     parser.add_argument(
         "--close-buys", action="store_true",
         help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")

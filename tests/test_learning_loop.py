@@ -239,3 +239,63 @@ class TestCloseFeedsLearning:
         from alpha_agents.data import portfolio_exit as pe
         with patch.object(pe, "_get_conn", lambda: conn):
             pe._feed_close_to_learning(999, 5.0, "止盈触发")  # must not raise
+
+
+class TestTheExcessTravelsWithTheLabel:
+    """``hit`` is derived from the excess return; both get stored.
+
+    ``review.py`` computed ``excess_pct`` on every graded row and passed only
+    the 0/1 to ``update_prediction_result``, which had no parameter for it.
+    The result is a table where 443 rows carry a hit and 59 carry the number
+    it came from — so the report's hit rate runs on one population and its
+    median excess on another, and nothing in either says so.
+
+    Measured at the same time and worth recording because it closes the
+    question rather than opening one: duplicate (code, date) rows are real
+    but small — 70 intraday rows over 60 distinct code-days, 1.17x, and 19
+    ``high`` rows over 17. They do not move the panel. What limits ``high``
+    is n=19 against this repository's n>=50 rule, not duplication.
+    """
+
+    def test_the_column_is_writable(self):
+        import inspect
+        from alpha_agents.data import memory_store
+        sig = inspect.signature(memory_store.update_prediction_result)
+        assert "excess_return" in sig.parameters
+
+    def test_the_grader_passes_the_number_it_derived_the_label_from(self):
+        import inspect
+        from alpha_agents.pipeline.tasks import review
+        src = inspect.getsource(review)
+        assert "excess_return=excess_pct" in src, (
+            "hit is 1 if excess_pct > 0; storing only the label leaves it "
+            "unaccountable")
+
+    def _a_prediction(self, ms, conn) -> int:
+        with patch.object(ms, "_get_conn", lambda: conn):
+            return ms.save_prediction(
+                date="2026-09-01", report_type="intraday", code="300308",
+                name="中际旭创", direction="看多", confidence="high",
+                theme_line="AI算力", entry_price=150.0, reason="r")
+
+    def test_a_write_lands_in_the_row(self, store):
+        ms, conn = store
+        pid = self._a_prediction(ms, conn)
+        with patch.object(ms, "_get_conn", lambda: conn):
+            ms.update_prediction_result(pid, hit=1, excess_return=-2.75)
+        row = conn.execute(
+            "SELECT hit, excess_return FROM predictions WHERE id = ?",
+            (pid,)).fetchone()
+        assert row["hit"] == 1
+        assert row["excess_return"] == -2.75
+
+    def test_omitting_it_leaves_an_existing_value_alone(self, store):
+        """A later grader must not blank what an earlier one measured."""
+        ms, conn = store
+        pid = self._a_prediction(ms, conn)
+        with patch.object(ms, "_get_conn", lambda: conn):
+            ms.update_prediction_result(pid, excess_return=1.5)
+            ms.update_prediction_result(pid, hit=0)
+        row = conn.execute("SELECT excess_return FROM predictions WHERE id = ?",
+                           (pid,)).fetchone()
+        assert row["excess_return"] == 1.5

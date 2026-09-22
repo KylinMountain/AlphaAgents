@@ -98,7 +98,11 @@ def _verify_prediction_date(pred_date: str, rt: dict) -> int:
         else:
             hit_val = 1 if excess_pct < 0 else 0
 
-        update_prediction_result(pred["id"], next_day_return=return_pct, hit=hit_val)
+        # The excess travels with the label it produced. Storing only the
+        # 0/1 is what left 384 graded rows with a hit and no number behind
+        # it, so "beat the market" could be counted but never weighed.
+        update_prediction_result(pred["id"], next_day_return=return_pct,
+                                 hit=hit_val, excess_return=excess_pct)
 
         # Phase 3: if this prediction matched an active playbook, record the trade outcome
         try:

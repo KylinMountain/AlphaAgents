@@ -645,7 +645,17 @@ def get_scored_predictions(days: int = 30, report_type: str | None = None) -> li
 
 def update_prediction_result(pred_id: int, *, next_day_return: float | None = None,
                               week_return: float | None = None, hit: int | None = None,
-                              review_note: str | None = None) -> None:
+                              review_note: str | None = None,
+                              excess_return: float | None = None) -> None:
+    """Record what a forecast turned out to be worth.
+
+    ``excess_return`` is stored because ``hit`` is derived from it and
+    throwing the number away leaves the label unaccountable. ``review.py``
+    computed it on every graded row and passed only the 0/1: 443 rows carry
+    a hit and 59 carry the excess it was derived from, so the report's hit
+    rate runs on 443 samples while its median excess runs on 59, and no one
+    reading either can tell they are different populations.
+    """
     """Fill in backtesting results for a prediction."""
     with _write_lock:
         conn = _get_conn()
@@ -656,6 +666,8 @@ def update_prediction_result(pred_id: int, *, next_day_return: float | None = No
             sets.append("week_return = ?"); vals.append(week_return)
         if hit is not None:
             sets.append("hit = ?"); vals.append(hit)
+        if excess_return is not None:
+            sets.append("excess_return = ?"); vals.append(excess_return)
         if review_note is not None:
             sets.append("review_note = ?"); vals.append(review_note)
         if sets:

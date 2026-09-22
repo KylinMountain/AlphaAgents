@@ -53,12 +53,14 @@ class TestTheViewCarriesTheFlow:
         """The 300475 case: +294.2亿 at the decision, -72.7亿 at the fill."""
         cond = [T.Condition("theme_flow_negative", 30.0, "资金逻辑破裂")]
         with patch.object(T, "get_active", return_value=[_thesis(cond)]), \
-             patch.object(T, "close") as closed, \
+             patch.object(T, "close_unlocked") as closed, \
              patch.object(PE, "get_theme_by_name", return_value=None), \
              patch("alpha_agents.data.theme_state.concept_state",
                    return_value=({"存储芯片": 348}, {"存储芯片": -72.7})):
             fired = PE.thesis_already_broken("300475", 40.5, order)
         assert fired is not None, "the order must be refused, not filled"
+        # close_unlocked, not close: this runs inside the fill loop's
+        # _write_lock and the lock is not reentrant.
         assert closed.call_args.args[1] == T.INVALIDATED
 
     def test_a_theme_still_flowing_in_is_not_refused(self, order):
@@ -72,7 +74,7 @@ class TestTheViewCarriesTheFlow:
     def test_the_rank_condition_can_fire_too(self, order):
         cond = [T.Condition("theme_rank_worse_than", 50.0, "主线易位")]
         with patch.object(T, "get_active", return_value=[_thesis(cond)]), \
-             patch.object(T, "close"), \
+             patch.object(T, "close_unlocked"), \
              patch.object(PE, "get_theme_by_name", return_value=None), \
              patch("alpha_agents.data.theme_state.concept_state",
                    return_value=({"存储芯片": 348}, {"存储芯片": -72.7})):

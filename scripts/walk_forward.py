@@ -1370,8 +1370,17 @@ def _knowledge_block(ctx, day: str) -> str:
     rather than of the loop's shape, and it is the difference between "no
     lookahead today" and "no lookahead by construction".
     """
+    # The durable journal comes from the run, not from this function. A
+    # replay swaps DATA_DIR for a sandbox so its fills touch nothing real;
+    # its memory should not be swapped with it, or the trader starts from
+    # zero every run and accumulates nothing. Deriving the path here instead
+    # would reach into the live database from every caller that did not ask
+    # — including the test suite, whose isolation guard says so out loud.
+    #
+    # `as_of=day` is what keeps reading two stores honest: a note written
+    # after this session is the future's own answer.
     from alpha_agents.evolution.journal import own_trade_notes
-    return own_trade_notes(day)
+    return own_trade_notes(day, durable=getattr(ctx, "durable_journal", None))
 
 
 def _build_model(timeout: float | None):
@@ -3875,6 +3884,9 @@ class Context:
         #: Invalidations that fired today, waiting for the agent's exit turn.
         #: Rewritten by every `_check_theses`, read once by `_agent_exits`.
         self.pending_signals: list[dict] = []
+        #: Where the trader's memory lives across runs. The sandbox holds
+        #: this run's book; the journal is what it learned before it.
+        self.durable_journal = _PRODUCTION_DIR / "memory.db"
         self.trader = args.trader
         self.picks = args.picks
         self.theme = args.theme

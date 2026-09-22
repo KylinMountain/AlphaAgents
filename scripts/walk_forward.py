@@ -165,7 +165,7 @@ _RUN_AS_SCRIPT = Path(sys.argv[0]).resolve() == Path(__file__).resolve()
 _REPLAY_DIR = _bind_to(_choose_data_dir(sys.argv[1:])) if _RUN_AS_SCRIPT else None
 
 from alpha_agents import llm_journal  # noqa: E402
-from alpha_agents.config import DATA_DIR, PROMPTS_DIR  # noqa: E402
+from alpha_agents.config import DATA_DIR, DB_PATH, PROMPTS_DIR  # noqa: E402
 from alpha_agents.data import (  # noqa: E402
     corpus_access, frozen_direction_archive, market_history as mh,
     market_rules, order_theme_exposure, portfolio as P, security_eligibility,
@@ -1371,6 +1371,7 @@ def _learn(ctx, day: str) -> dict:
     closed_today = [t for t in trades if t["close_date"] == day]
     distilled = _distil(ctx, day, trades) if closed_today else None
     ctx.counters["learning_days"] += 1
+    ctx.review = _review(ctx, day)
     if distilled is not None:
         ctx.counters["learning_candidates"] += 1
         logger.info("%s: observation #%d over n=%d (%d support / %d oppose)",
@@ -1378,6 +1379,62 @@ def _learn(ctx, day: str) -> dict:
                     distilled["supporting"], distilled["opposing"])
     return {"date": day, "labels": labels, "closed_total": len(trades),
             "closed_today": len(closed_today), "distilled": distilled}
+
+
+def _review(ctx, day: str) -> list:
+    """Five measurements of the day's own decisions, sealed at ``day``.
+
+    ``evidence.analyse`` asks one question of closed trades, and this window
+    closed three. The same run recorded 8,599 rows of what it saw and did not
+    take — every direction offered, every candidate on the panel, every exit
+    leg with its reason — and the learning step read none of them.
+
+    Sealed at ``day`` because the result is read back into the next session's
+    prompt: a percentile computed from bars the agent has not seen yet is
+    lookahead arriving through the feedback channel.
+    """
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.evolution import review as RV
+
+    try:
+        hist = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+        hist.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        logger.warning("%s: review needs market history: %s", day, exc)
+        return []
+    try:
+        return RV.review(_get_conn(), hist, _review_members(ctx),
+                         run_id=ctx.run_id, trader_id=ctx.trader, as_of=day)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("%s: review failed: %s", day, exc)
+        return []
+    finally:
+        hist.close()
+
+
+def _review_members(ctx) -> dict:
+    """Concept membership, read once per run.
+
+    The same current-only snapshot the panel was built from, so the review
+    scores a direction against the members the agent could have bought.
+    """
+    cached = getattr(ctx, "_review_members_cache", None)
+    if cached is not None:
+        return cached
+    members: dict[str, list[str]] = {}
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute(
+                "SELECT c.name AS sector, cs.stock_code AS code "
+                "FROM concept_stocks cs JOIN concepts c ON c.id = cs.concept_id"):
+            members.setdefault(row["sector"], []).append(row["code"])
+        conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("review membership unavailable: %s", exc)
+    ctx._review_members_cache = members
+    return members
 
 
 def _knowledge_block(ctx, day: str) -> str:
@@ -1413,7 +1470,13 @@ def _knowledge_block(ctx, day: str) -> str:
     # `as_of=day` is what keeps reading two stores honest: a note written
     # after this session is the future's own answer.
     from alpha_agents.evolution.journal import own_trade_notes
-    return own_trade_notes(day, durable=getattr(ctx, "durable_journal", None))
+    from alpha_agents.evolution import review as RV
+
+    notes = own_trade_notes(day, durable=getattr(ctx, "durable_journal", None))
+    # The numbers come first: a note is this trader's account of itself, and
+    # the review is the part of that account market data can contradict.
+    measured = RV.as_text(getattr(ctx, "review", []) or [])
+    return "\n\n".join(x for x in (measured, notes) if x)
 
 
 def _build_model(timeout: float | None):
@@ -4484,12 +4547,18 @@ def _run_window(ctx, args) -> dict:
     # The sessions are done; the report is not a stall.
     faulthandler.cancel_dump_traceback_later()
 
+    #: The last day's review, sealed at that day — the window's own verdict on
+    #: the five things a trader asks itself. Carried on the result rather than
+    #: recomputed, so the report states the number the agent was actually given.
+    window_review = [f.as_dict() for f in (getattr(ctx, "review", None) or [])]
+
     journal_after = _journal_records(_REPLAY_DIR)
     tools_after = _journal_tool_calls(_REPLAY_DIR)
     prod_hash_after = _sha256(_PRODUCTION_DIR / "memory.db")
     corpus_after = _corpus_fingerprint(_REPLAY_DIR)
 
     return {
+        "review": window_review,
         "ctx": ctx, "window": window, "initial_account": initial_account,
         "equity": equity_rows, "fills": fill_rows,
         "settlement": settle_rows, "events": event_rows,
@@ -4955,6 +5024,19 @@ def _learning_lines(result: dict) -> list[str]:
     meta = _learning_meta(result["learning"])
     days = "（" + "、".join(meta["observation_days"]) + "）" if meta["observation_days"] else ""
     lines = [
+        "",
+        "— 复盘（数由行情算，不是模型的自评）—",
+    ]
+    review = result.get("review") or []
+    if not review:
+        lines.append("  未计算（缺行情或本次未运行学习步）")
+    for f in review:
+        if f["too_thin"]:
+            lines.append(f"  {f['dimension']:<10} n={f['n']:<4} 样本不足，只记不判")
+        else:
+            lines.append(f"  {f['dimension']:<10} n={f['n']:<4} "
+                         f"中位 {f['value']}{f['unit']}    {f['question']}")
+    lines += [
         "",
         "— 学习闭环 —",
         f"  平仓并打标的仓位            {meta['closed_trades_total']} 笔"

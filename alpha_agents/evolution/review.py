@@ -142,6 +142,30 @@ def _bar(hist: sqlite3.Connection, code: str, day: str) -> sqlite3.Row | None:
         "WHERE code = ? AND date = ?", (code, day)).fetchone()
 
 
+def _sessions_from(hist: sqlite3.Connection, day: str, n: int,
+                   as_of: str | None = None) -> str | None:
+    """The market's ``n``-th session at or after ``day``, or None."""
+    rows = hist.execute(
+        "SELECT DISTINCT date FROM daily_kline WHERE date >= ?"
+        + (" AND date <= ?" if as_of else "")
+        + " ORDER BY date LIMIT ?",
+        ((day, as_of, n + 1) if as_of else (day, n + 1))).fetchall()
+    return rows[n]["date"] if len(rows) > n else None
+
+
+def _market_window_median(hist: sqlite3.Connection, d0: str,
+                          dn: str) -> float | None:
+    """Median return of every name that traded on both dates. The benchmark
+    leg, taken as a median for the reason stated at the top of this file."""
+    rows = hist.execute(
+        "SELECT a.close AS c0, b.close AS cn FROM daily_kline a "
+        "JOIN daily_kline b ON a.code = b.code AND b.date = ? "
+        "WHERE a.date = ? AND a.close > 0", (dn, d0)).fetchall()
+    rets = [(r["cn"] - r["c0"]) / r["c0"] * 100
+            for r in rows if r["c0"] and r["cn"]]
+    return statistics.median(rets) if len(rets) >= 50 else None
+
+
 def _pct_rank(value: float, population: list[float]) -> float | None:
     """value 在 population 里的百分位，0 = 最差，100 = 最好。
 
@@ -298,7 +322,8 @@ def stock_choice(book: sqlite3.Connection, hist: sqlite3.Connection, *,
 
 def entry_pricing(book: sqlite3.Connection, hist: sqlite3.Connection, *,
                   trader_id: str | None = None,
-                  as_of: str | None = None) -> Finding:
+                  as_of: str | None = None,
+                  horizon: int = DEFAULT_HORIZON) -> Finding:
     """要的价，对得上当天实际开出来的价吗。
 
     单位是**百分点**，不是百分位：这一段问的不是排名而是距离——挂单
@@ -308,14 +333,16 @@ def entry_pricing(book: sqlite3.Connection, hist: sqlite3.Connection, *,
     证据，而且没有幸存者偏差——被筛掉的恰恰是幸存者偏差挡在门外的那批。
     """
     rows = book.execute(
-        "SELECT code, order_date, entry_high, status FROM virtual_portfolio "
+        "SELECT code, order_date, entry_high, status, open_date, shares "
+        "FROM virtual_portfolio "
         "WHERE order_date IS NOT NULL AND entry_high IS NOT NULL"
         + (" AND trader_id = ?" if trader_id else "")
         + (" AND order_date <= ?" if as_of else "")
         + " ORDER BY order_date",
         tuple(x for x in (trader_id, as_of) if x)).fetchall()
 
-    samples, detail = [], []
+    samples, detail, missed = [], [], []
+    filled = 0
     for r in rows:
         prev = _prev_close(hist, r["code"], r["order_date"])
         bar = _bar(hist, r["code"], r["order_date"])
@@ -325,15 +352,46 @@ def entry_pricing(book: sqlite3.Connection, hist: sqlite3.Connection, *,
         opened = float(bar["open"]) / prev
         gap_pp = (ask - opened) * 100
         samples.append(gap_pp)
+        got_in = bool(r["open_date"]) and (r["shares"] or 0) > 0
+        filled += 1 if got_in else 0
+        # What the pass cost, measured from the price it was looking at when
+        # it priced the order — the T-1 close, not the gap-up open. Measuring
+        # from the open would build the answer into the question: a name that
+        # is missed *because* it gapped up is scored from the top of that gap.
+        excess = None
+        if not got_in:
+            dn = _sessions_from(hist, r["order_date"], horizon, as_of)
+            end = (hist.execute(
+                "SELECT close FROM daily_kline WHERE code = ? AND date = ?",
+                (r["code"], dn)).fetchone() if dn else None)
+            mkt = _market_window_median(hist, r["order_date"], dn) if dn else None
+            if end and end["close"] and mkt is not None:
+                excess = (float(end["close"]) - prev) / prev * 100 - mkt
+                missed.append(excess)
         detail.append({"day": r["order_date"], "code": r["code"],
                        "ask_x_prev_close": round(ask, 3),
                        "open_x_prev_close": round(opened, 3),
                        "gap_pp": round(gap_pp, 2),
-                       "status": r["status"]})
-    return _finding(
+                       "status": r["status"], "filled": got_in,
+                       "missed_excess_pct": (None if excess is None
+                                             else round(excess, 2))})
+    out = _finding(
         "entry",
         "挂单上沿减当天开盘，占 T-1 收盘的百分点（负 = 要价低于开盘，买不到）",
         "百分点", samples, detail)
+    # A gap with no consequence attached reads as a statistic, and the trader
+    # persona on the other side of the prompt says 宁可错过. The trade-off is
+    # the thing it can weigh: this many never filled, and this is what they
+    # then did. If the misses had outperformed, the same line would argue the
+    # other way — which is what makes it a measurement and not an instruction.
+    if samples:
+        cost = (f"，未成交那批 {horizon} 日超额中位 "
+                f"{statistics.median(missed):+.2f}%（n={len(missed)}）"
+                if missed else "")
+        note = (f"{len(samples)} 单里成交 {filled} 单{cost}")
+        out = Finding(**{**out.as_dict(),
+                         "note": out.note + ("；" if out.note else "") + note})
+    return out
 
 
 # ── ④ 卖出 ──────────────────────────────────────────────────────────────
@@ -439,7 +497,8 @@ def review(book: sqlite3.Connection, hist: sqlite3.Connection,
         direction_choice(book, hist, members, run_id=run_id, horizon=horizon,
                          as_of=as_of),
         stock_choice(book, hist, run_id=run_id, horizon=horizon, as_of=as_of),
-        entry_pricing(book, hist, trader_id=trader_id, as_of=as_of),
+        entry_pricing(book, hist, trader_id=trader_id, as_of=as_of,
+                      horizon=horizon),
         exit_timing(book, hist, horizon=horizon, as_of=as_of),
         absence(book, hist, run_id=run_id, as_of=as_of),
     ]
@@ -454,7 +513,8 @@ def as_text(findings: list[Finding]) -> str:
         if f.too_thin:
             lines.append(f"· {f.question}\n    样本 {f.n}，不足以判断（{f.note}）")
             continue
-        lines.append(f"· {f.question}\n    中位 {f.value}{f.unit}（n={f.n}）")
+        tail = f"；{f.note}" if f.note else ""
+        lines.append(f"· {f.question}\n    中位 {f.value}{f.unit}（n={f.n}）{tail}")
     lines.append("每一条都可以回溯到具体的日期与代码；说不清的就说不清，"
                  "不要把样本不足写成结论。")
     return "\n".join(lines)

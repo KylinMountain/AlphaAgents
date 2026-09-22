@@ -388,3 +388,71 @@ class TestTheWindowIsSealedAtAsOf:
         import inspect
         src = inspect.getsource(RV.review)
         assert src.count("as_of=as_of") == 5
+
+
+class TestTheEntryGapCarriesItsCost:
+    """A gap with no consequence attached reads as a statistic.
+
+    On the other side of the same prompt the pullback persona says 宁可错过，
+    不可追高 — and a bare "-2.4pp" does not contradict it. Measured on the
+    20-day window: the persona was right on the median (the names it missed
+    went on to -4.47% excess) and the strategy still filled 3 of 17, which is
+    the fact the learning loop actually chokes on. Both halves have to be in
+    the line or the agent cannot weigh them.
+    """
+
+    def _world(self, *, filled: bool):
+        book, hist = _book(), _hist()
+        # 60 names so the benchmark leg has a cross-section to take a median of
+        for i in range(60):
+            for day, close in zip(
+                    ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
+                     "2026-01-09", "2026-01-12", "2026-01-13"],
+                    [10, 10, 10, 10, 10, 10, 10]):
+                hist.execute("INSERT INTO daily_kline (code, date, open, high,"
+                             " low, close, change_pct) VALUES (?,?,?,?,?,?,0)",
+                             (f"M{i:04d}", day, close, close, close, close))
+        book.execute(
+            "INSERT INTO virtual_portfolio (id, code, order_date, entry_high,"
+            " status, trader_id, open_date, shares) VALUES "
+            "(1,'CCC','2026-01-06',9.5,?,'pullback',?,?)",
+            ("open" if filled else "cancelled",
+             "2026-01-06" if filled else None, 100 if filled else 0))
+        return book, hist
+
+    def test_a_missed_name_reports_what_the_pass_cost(self):
+        book, hist = self._world(filled=False)
+        f = RV.entry_pricing(book, hist, trader_id="pullback", horizon=5)
+        assert "1 单里成交 0 单" in f.note
+        # CCC from the 01-05 close of 10 to the 01-13 close of 5, while the
+        # market sat flat: -50%.
+        assert "-50" in f.note
+
+    def test_a_filled_order_costs_nothing_to_report(self):
+        book, hist = self._world(filled=True)
+        f = RV.entry_pricing(book, hist, trader_id="pullback", horizon=5)
+        assert "1 单里成交 1 单" in f.note
+        assert "超额" not in f.note
+
+    def test_the_cost_is_measured_from_the_price_it_was_looking_at(self):
+        """From the T-1 close, not the gap-up open.
+
+        Measuring from the open builds the answer into the question: a name
+        missed *because* it gapped up is then scored from the top of that gap
+        and looks bad for a reason that has nothing to do with the decision.
+        """
+        book, hist = self._world(filled=False)
+        f = RV.entry_pricing(book, hist, trader_id="pullback", horizon=5)
+        row = f.detail[0]
+        # prev close 10 (01-05) → end 5 (01-13), market flat: -50%. The
+        # per-order figure is in the detail so a note can cite this one name.
+        assert row["missed_excess_pct"] == pytest.approx(-50.0)
+        assert row["filled"] is False
+
+    def test_the_cost_reaches_the_text_the_agent_reads(self):
+        """Computed and not rendered is the same as not computed."""
+        f = RV.Finding("entry", "q", 17, -2.1, "百分点", False,
+                       note="17 单里成交 3 单，未成交那批 5 日超额中位 -4.47%")
+        text = RV.as_text([f])
+        assert "成交 3 单" in text
+        assert "-4.47%" in text

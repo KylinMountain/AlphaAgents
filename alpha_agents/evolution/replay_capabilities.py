@@ -26,7 +26,10 @@ _SOURCE_CAPABILITIES = {
     "news": ("market_snapshots.db", "news_items", "published_at"),
     "market_regime": (
         "market_snapshots.db", "market_breadth_snapshots", "captured_at"),
-    "theme_state": (
+    # Named for what it probes. It was "theme_state", which now collides
+    # with data/theme_state.py and made the report read "theme_state 0.0%"
+    # for a module that had in fact produced every ranking the run used.
+    "limit_pool": (
         "market_snapshots.db", "limit_pool_snapshots", "captured_at"),
     "intraday_shape": (
         "market_snapshots.db", "all_quote_snapshots", "captured_at"),

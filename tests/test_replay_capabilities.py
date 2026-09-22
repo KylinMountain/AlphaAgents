@@ -57,7 +57,10 @@ class TestCapabilityMatrix:
         assert caps["daily_price"]["coverage_pct"] == 100.0
         assert caps["news"]["coverage_pct"] == 66.7
         assert caps["market_regime"]["observed_days"] == 1
-        assert caps["theme_state"]["status"] == "no_rows_in_window"
+        assert caps["limit_pool"]["status"] == "no_rows_in_window"
+        assert "theme_state" not in caps, (
+            "the key collided with data/theme_state.py and made the report "
+            "read 0% for a module that produced every ranking the run used")
         assert caps["intraday_shape"]["coverage_pct"] == 66.7
 
     def test_current_concepts_are_never_reported_as_historical_coverage(

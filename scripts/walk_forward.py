@@ -257,7 +257,12 @@ LIMITATIONS = (
     "capacity is measured from pre-decision ADV20 and enforced as a hard "
     "share cap on open-time fills; close-time synthetic buys remain a separate "
     "execution path and are reported separately",
-    "no theses and no predictions: exits are stop/target only",
+    "every order now carries the agent's own thesis and its own "
+    "invalidations, and a crossed invalidation wakes the agent rather than "
+    "closing the position — so an exit here is the agent's decision and the "
+    "run says nothing about what a mechanical rule would have done. A "
+    "position still open after its stated line was crossed is a choice the "
+    "agent made, not an oversight, and the checkpoint records it",
     "the learning step **records** observations, it does not promote them: "
     "every candidate stays in the ``observation`` state because n is far below "
     "the 50 this repository requires, and ``advance_candidate`` is deliberately "

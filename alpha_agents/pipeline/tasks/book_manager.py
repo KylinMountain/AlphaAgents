@@ -21,7 +21,7 @@ from alpha_agents.data.portfolio import (
     get_pending_orders,
 )
 from alpha_agents.notify import notify_all
-from alpha_agents.pipeline.tasks import exit_decision, thesis_monitor
+from alpha_agents.pipeline.tasks import exit_decision, order_review, thesis_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +46,18 @@ async def manage_book(trader, price_map: dict, today_str: str,
 
     try:
         if pending:
+            wake = exit_decision.enabled()
             fill_alerts = check_pending_orders(realtime_prices=price_map,
                                                today=today_str,
-                                               trader_id=trader.id)
+                                               trader_id=trader.id,
+                                               wake_agent=wake)
+            # A weakened theme on an order that carries a thesis is put to
+            # the agent rather than cancelled for it — see order_review.
+            signals = [a for a in fill_alerts if a.get("type") == "order_signal"]
+            fill_alerts = [a for a in fill_alerts if a.get("type") != "order_signal"]
+            if signals:
+                fill_alerts += await order_review.run(
+                    signals, price_map, today_str, trader_id=trader.id)
             for alert in fill_alerts:
                 msg = f"[{trader.name}] " + _format_order_alert(alert)
                 logger.info("Order alert: %s", msg)

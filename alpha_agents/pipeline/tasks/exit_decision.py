@@ -300,6 +300,41 @@ async def decide(context: str, trader=None, *, model=None,
     return parse_decisions(result.final_output or "")
 
 
+def extract_json_array(output: str) -> str | None:
+    """The JSON array a reply ends with, as text, or ``None``.
+
+    Shared by every reader of an agent's decision list, because the shapes a
+    model answers in are a fact about the model, not about the question.
+    See :func:`parse_decisions` for why all three are accepted.
+    """
+    text = output or ""
+    payload = None
+
+    m = _JSON_BLOCK.search(text)
+    if m:
+        payload = m.group(1)
+    else:
+        # The last fenced block wins: a model that thinks out loud often
+        # shows an example early and its real answer at the end.
+        fences = _FENCED.findall(text)
+        for body in reversed(fences):
+            if body.lstrip().startswith("["):
+                payload = body
+                break
+        if payload is None:
+            # An array with no fence around it. Anchored on the last `[` that
+            # closes at the end of the text, so an example array quoted in the
+            # prose is not mistaken for the answer.
+            start = text.rfind("[")
+            while start != -1:
+                candidate = text[start:]
+                if candidate.rstrip().endswith("]"):
+                    payload = candidate[: candidate.rfind("]") + 1]
+                    break
+                start = text.rfind("[", 0, start)
+    return payload
+
+
 def parse_decisions(output: str) -> list[dict]:
     """Pull the decisions out of the agent's report.
 
@@ -327,31 +362,7 @@ def parse_decisions(output: str) -> list[dict]:
     hard stop is underneath, so holding on an unreadable reply cannot run the
     account down.
     """
-    text = output or ""
-    payload = None
-
-    m = _JSON_BLOCK.search(text)
-    if m:
-        payload = m.group(1)
-    else:
-        # The last fenced block wins: a model that thinks out loud often
-        # shows an example early and its real answer at the end.
-        fences = _FENCED.findall(text)
-        for body in reversed(fences):
-            if body.lstrip().startswith("["):
-                payload = body
-                break
-        if payload is None:
-            # An array with no fence around it. Anchored on the last `[` that
-            # closes at the end of the text, so an example array quoted in the
-            # prose is not mistaken for the answer.
-            start = text.rfind("[")
-            while start != -1:
-                candidate = text[start:]
-                if candidate.rstrip().endswith("]"):
-                    payload = candidate[: candidate.rfind("]") + 1]
-                    break
-                start = text.rfind("[", 0, start)
+    payload = extract_json_array(output)
     if payload is None:
         logger.warning("Exit agent returned no readable decision list — "
                        "holding all")

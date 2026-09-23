@@ -485,8 +485,14 @@ def check_pending_orders(
     today: str,
     trader_id: str | None = None,
     max_shares_by_code: dict[str, int] | None = None,
+    wake_agent: bool = False,
 ) -> list[dict]:
     """Check pending orders against realtime prices. Fill if price in entry zone.
+
+    ``wake_agent``: a themed order that carries the agent's own thesis is not
+    pulled by the lifecycle gate; it comes back as an ``order_signal`` for
+    ``order_review`` to put to the agent. Without a thesis there is no plan to
+    consult, so those orders are still cancelled as before.
 
     One trader at a time. The conviction sort below spends finite capital
     in order, so running two books through one pass would let whichever
@@ -588,20 +594,27 @@ def check_pending_orders(
         theme_name = order.get("theme", "")
         if theme_name:
             theme = get_theme_by_name(theme_name)
-            if theme is None:
-                # Theme not found in DB → no logical basis, cancel
-                _cancel_order(order["id"], f"关联主线'{theme_name}'不存在")
-                alerts.append({"type": "cancelled", "code": code,
-                               "name": order.get("name", ""), "reason": "主线不存在"})
-                continue
             # The cancel bar is deliberately lower than the admission bar: an
             # order that was admitted on a strong theme must not be pulled for
             # a wobble back to the level it was admitted at.
-            reason = theme_gate(theme_name, "cancel")
-            if reason:
+            reason = (f"关联主线'{theme_name}'不存在" if theme is None
+                      else theme_gate(theme_name, "cancel"))
+            if reason and wake_agent and order.get("thesis_id"):
+                # Evidence, not a verdict. Live 2026-09-10 → 09-23 about 25
+                # orders died here, some minutes after placement: the direction
+                # stage chose the line on fund flow while the lifecycle table
+                # had already archived a theme of the same name, and the rule
+                # nobody asked won. The agent's own theme invalidation still
+                # runs below, in its own words.
+                alerts.append({"type": "order_signal", "order_id": order["id"],
+                               "thesis_id": order["thesis_id"], "code": code,
+                               "name": order.get("name", ""),
+                               "theme": theme_name, "reason": reason})
+            elif reason:
                 _cancel_order(order["id"], reason)
                 alerts.append({"type": "cancelled", "code": code,
-                               "name": order.get("name", ""), "reason": reason})
+                               "name": order.get("name", ""),
+                               "reason": "主线不存在" if theme is None else reason})
                 continue
         else:
             # No theme at all → no logical basis, cancel

@@ -5267,8 +5267,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="first simulated session, YYYY-MM-DD.")
     parser.add_argument("--days", type=int, default=30,
                         help="how many sessions to run (default 30).")
-    parser.add_argument("--trader", default="pullback",
-                        help="which trader's declared entry style to use.")
+    parser.add_argument("--trader", default="default",
+                        help="which trader to run. The default trader carries "
+                             "no persona: how it buys and sells is its own.")
     parser.add_argument("--no-keep-notes", action="store_true",
                         help="do not merge this run's observations into the "
                              "trader's durable journal. The default keeps "

@@ -1,5 +1,5 @@
 import { DASH } from '../lib/format'
-import { CodeFact, WorkspaceCard, WorkspaceHead } from '../components/WorkspaceSection'
+import { WorkspaceCard, WorkspaceHead } from '../components/WorkspaceSection'
 
 /* The evolve laboratory: what is in force, what is under test, what was decided.
  *
@@ -27,7 +27,7 @@ function Integrity({ items }) {
   if (!items?.length) return null
   return (
     <div className="ws-integrity">
-      <b>结构性问题 {items.length} 条</b>
+      <b>{`结构性问题 ${items.length} 条`}</b>
       <ul>{(items || []).map((i, n) => <li key={n}>{i}</li>)}</ul>
     </div>
   )
@@ -39,54 +39,44 @@ function ts(v) {
 
 /* The fact the database cannot express: can this build promote anything?
  *
- * A `WorkspaceCard` like every sibling, not a hand-built `card pad`. It was
- * the one card on the page with its own wrapper, and the difference is
- * visible: `.card.pad` insets its title at 16px plus the 3px accent border
- * (19px), while every other card insets its title at 14px and its body at
- * 12px. So this card's heading sat 5px right of the heading below it and its
- * body 7px right — the "风格不一致" a reader notices without being able to
- * name. The accent border is kept; it is the card's own marker, not a
- * different layout.
+ * Laid out exactly like "什么在生效" below it: the sentence is the card's
+ * subtitle and the facts are label/value rows of the same `.table`. It used
+ * to carry its own accent border and a monospace label grid (`ws-codefacts`),
+ * which made it the one card on the page with a different anatomy. The
+ * verdict stays in the title badge, where every card states its state.
  */
 function Reachability({ code }) {
   if (!code) return null
   const open = code.reachable
+  const list = (xs) => (xs?.length ? xs.join(' · ') : '无')
   return (
     <WorkspaceCard
       title="晋升路径是否可达"
       sec={{ state: 'present', schema: 'complete' }}
-      tone={`ws-reach ${open ? 'ws-reach-open' : ''}`}
       badge={(
         <span className={`ws-reach-verdict${open ? '' : ' is-closed'}`}>
           {open ? '可达' : '本构建不可达'}
         </span>
-      )}>
-      <div className="card-body">
-        <p className={open ? 'soft' : 'thesis-warn'}>
-          {open
-            ? '至少有一个候选生产者已登记，闸门可以产出候选级证据。'
-            : '这不来自数据库，来自代码：闸门只接受 candidate_policy 证据，'
-              + '而当前登记的生产者全是基线 —— 所以这个构建能产出的每一份裁决'
-              + '都是 baseline_only，并会在晋升时被拒绝。补它要先回答「候选策略是什么」，'
-              + '那是设计决定，不是缺函数。'}
-        </p>
-        <div className="ws-codefacts">
-          <CodeFact label="已登记生产者">
-            {(code.producers || []).map((p) => (
-              <code key={p} style={{ marginRight: 6 }}>{p}</code>
-            ))}
-          </CodeFact>
-          <CodeFact label="其中候选生产者">
-            {code.candidate_producers?.length
-              ? code.candidate_producers.map((p) => <code key={p}>{p}</code>)
-              : <span className="soft">无</span>}
-          </CodeFact>
-          <CodeFact label="晋升接受的证据等级">
-            <code>{code.promotion_accepts}</code>
-          </CodeFact>
-          <CodeFact label="基线名称"><code>{code.baseline}</code></CodeFact>
-        </div>
-      </div>
+      )}
+      subtitle={open
+        ? '至少有一个候选生产者已登记，闸门可以产出候选级证据。'
+        : '这不来自数据库，来自代码：闸门只接受 candidate_policy 证据，'
+          + '而当前登记的生产者全是基线 —— 所以这个构建能产出的每一份裁决'
+          + '都是 baseline_only，并会在晋升时被拒绝。补它要先回答「候选策略是什么」，'
+          + '那是设计决定，不是缺函数。'}>
+      <table className="table">
+        <tbody>
+          <tr><td>已登记生产者</td><td className="num">{list(code.producers)}</td></tr>
+          <tr>
+            <td>其中候选生产者</td>
+            <td className={`num${code.candidate_producers?.length ? '' : ' down'}`}>
+              {list(code.candidate_producers)}
+            </td>
+          </tr>
+          <tr><td>晋升接受的证据等级</td><td className="num">{code.promotion_accepts || DASH}</td></tr>
+          <tr><td>基线名称</td><td className="num">{code.baseline || DASH}</td></tr>
+        </tbody>
+      </table>
     </WorkspaceCard>
   )
 }

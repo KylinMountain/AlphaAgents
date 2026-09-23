@@ -144,14 +144,4 @@ export function WorkspaceHead({ title, blurb, payload }) {
   )
 }
 
-/* A one-line note that a fact comes from the code, not the database. */
-export function CodeFact({ label, children }) {
-  return (
-    <div className="ws-codefact">
-      <span className="name">{label}</span>
-      <span>{children}</span>
-    </div>
-  )
-}
-
 export default WorkspaceCard

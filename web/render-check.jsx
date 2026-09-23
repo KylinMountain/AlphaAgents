@@ -384,8 +384,10 @@ const CASES = [
    * The check is deliberately "one wrapper class for every card on the page"
    * rather than a pixel rule: `check:render` runs in Node with no layout
    * engine, so the class list is the strongest thing it can honestly assert.
-   * The tone modifier (`ws-reach`) is allowed to sit on top; a second wrapper
-   * is not. */
+   * A second wrapper is not allowed, and since 2026-09-23 neither is a tone
+   * modifier: the accent border and the monospace fact grid were the second
+   * "风格不一致" on the same card, so its facts are `.table` rows now, the
+   * same anatomy as 什么在生效 beneath it. */
   ['evolve · every card shares one wrapper', EvolveView,
    { evolve: { workspace: 'evolve', generated_at: '2026-09-17T04:30:00+00:00',
                states: {}, sections: evolveSections,
@@ -394,8 +396,9 @@ const CASES = [
                        candidate_producers: ['remap_confidence'],
                        promotion_accepts: 'candidate_policy',
                        reachable: true } } },
-   { want: ['card table-wrap ws-reach ws-reach-open', '晋升路径是否可达'],
-     reject: ['card pad ws-reach'] }],
+   { want: ['<article class="card table-wrap" style="margin-bottom:14px"><div class="card-title" style="padding:14px 14px 0"><h3>晋升路径是否可达',
+            '<td>其中候选生产者</td>'],
+     reject: ['card pad ws-reach', 'ws-reach ', 'ws-codefact'] }],
   ['evolve · absent + partial', EvolveView,
    { evolve: { workspace: 'evolve', generated_at: '2026-09-13T04:30:00+00:00',
                states: {},

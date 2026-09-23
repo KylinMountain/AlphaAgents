@@ -176,36 +176,24 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .ws-missing{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
 .ws-missing li{font-size:11.5px;padding:3px 8px;border-radius:999px;background:var(--amber-soft);color:var(--amber)}
 .ws-missing code{font-size:11.5px}
-.ws-integrity{margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);background:var(--red-soft)}
-.ws-integrity b{font-size:12.5px;color:var(--red)}
-.ws-integrity ul{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.6;color:var(--text-2)}
-.ws-integrity p{margin:6px 0 0}
+/* Read like the table rows around it, not like an alert: a header cell in
+ * the `.table th` row style, one row per item. Red text is the only signal
+ * it keeps — the pink block was the one filled callout on these pages. */
+.ws-integrity{margin-top:12px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.ws-integrity b{display:block;font-size:11.5px;font-weight:600;color:var(--red);background:var(--surface-2);padding:10px 12px;border-bottom:1px solid var(--border)}
+.ws-integrity ul{margin:0;padding:0;list-style:none;font-size:12.5px;line-height:1.6;color:var(--text-2)}
+.ws-integrity li{padding:11px 12px;border-bottom:1px solid var(--border)}
+.ws-integrity li:last-child{border-bottom:0}
+.ws-integrity p{margin:0;padding:11px 12px;font-size:12.5px;color:var(--text-2)}
 
-/* The fact that comes from the code rather than the database: can this
- * build promote anything at all. The database cannot express it — zero
- * verdicts reads the same whether the gate is quiet or unreachable. */
-/* The accent is an inset shadow, not a wider border. `border-left:3px` made
- * this the one card whose content edge differed from every other card's —
- * 2px further right, on top of the 16px padding it had from `.card.pad`
- * instead of the 14px/12px the shared wrapper uses. A reader notices the
- * misalignment without being able to name it, which is what "风格不一致"
- * was. A shadow paints the same stripe and changes no geometry. */
-.ws-reach{box-shadow:inset 3px 0 0 var(--amber),var(--shadow)}
-.ws-reach.ws-reach-open{box-shadow:inset 3px 0 0 var(--green),var(--shadow)}
-/* The verdict in the card's own header, in the colour of the border under
- * it. It used to carry `.up` — the A-share *rise* token, which is red — so
- * a positive verdict rendered red inside a green-bordered card. `.up` and
+/* The verdict in the card's own header — the only colour this card carries
+ * now that the accent border is gone. It used to carry `.up` — the A-share *rise* token, which is red — so
+ * a positive verdict rendered red. `.up` and
  * `.down` mean market direction and nothing else; a verdict is not a price.
  * Specificity is deliberate: `.card-title span` sets the muted colour. */
 .card-title .ws-reach-verdict{font-weight:650;color:var(--green)}
 .card-title .ws-reach-verdict.is-closed{color:var(--amber)}
-.ws-codefacts{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;margin-top:10px}
-.ws-codefact{display:contents}
-.ws-codefact .name{font-size:12.5px;color:var(--text-2)}
-.ws-codefact span:last-child{font-size:12.5px}
-.ws-codefact code{font-size:12px}
 /* The workspace payload never arrived. Distinct from "every section is
  * unavailable": here we cannot even name the sections. */
 .ws-head-missing{max-width:340px;color:var(--amber)}
 .ws-head-missing b{color:var(--amber)}
-@media (max-width:700px){.ws-codefacts{grid-template-columns:1fr}}

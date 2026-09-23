@@ -365,6 +365,20 @@ def save_realtime_quotes(quotes: dict, captured_at: str | None = None) -> int:
     return len(rows)
 
 
+def latest_quote_price(code: str) -> tuple[float, str] | None:
+    """The newest captured price for ``code`` and when it was captured.
+
+    For readers that want "the last price on disk", not an as-of cut — the
+    portfolio card. ``None`` when no snapshot holds the code.
+    """
+    row = _get_conn().execute(
+        "SELECT price, captured_at FROM realtime_quote_snapshots "
+        "WHERE code = ? AND price > 0 ORDER BY captured_at DESC LIMIT 1",
+        (code,),
+    ).fetchone()
+    return (float(row["price"]), row["captured_at"]) if row else None
+
+
 def read_realtime_quotes(codes: list[str], as_of: str,
                           require_complete: bool = False) -> dict | None:
     """Read latest quote per code <= as_of.

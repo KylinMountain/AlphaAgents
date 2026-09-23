@@ -102,13 +102,23 @@ function TraderBooks({ traders }) {
  * numbers without the exit conditions hides the only part that is a
  * decision — everything else is arithmetic.
  */
+/* Where the price came from, in the reader's terms. A snapshot carries a
+ * time ("2026-09-23 14:57"), a K-line close only a date. */
+function priceSource(asOf) {
+  const v = String(asOf || '')
+  if (v.length > 10) return `按 ${v.slice(5, 10)} ${v.slice(11, 16)} 快照`
+  if (v) return `按 ${v.slice(5, 10)} 收盘`
+  return '按最近价'
+}
+
 function PositionCard({ pos }) {
   const th = pos.thesis
   // An open row has no ``return_pct``: that column is written when the
   // position *ends*, so the headline read 0.0% on every card and a book
   // holding winners and losers looked break-even. While the position is open
-  // the return is the unrealized one, priced at the last close on disk — and
-  // the card says which, because a number without its as-of reads as live.
+  // the return is the unrealized one, priced at the newest print on disk (the
+  // day's snapshot, else the last close) — and the card says which, because a
+  // number without its as-of reads as live.
   const unrealized = pos.unrealized_pct != null
   const ret = unrealized ? pos.unrealized_pct : Number(pos.return_pct ?? 0)
   const pnl = pos.unrealized_amount
@@ -126,7 +136,7 @@ function PositionCard({ pos }) {
           <div className="soft" style={{ fontSize: 11 }}>
             {pnl != null
               ? `${pnl > 0 ? '+' : ''}${Math.round(pnl).toLocaleString()} 元 · ` : ''}
-            {unrealized ? '按最近收盘' : '无市价'}
+            {unrealized ? priceSource(pos.price_as_of) : '无市价'}
           </div>
         </div>
       </div>

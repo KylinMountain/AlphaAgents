@@ -39,23 +39,40 @@ def _trader_names() -> dict[str, str]:
         return {}
 
 
-def _last_close(code: str) -> float | None:
-    """The latest close this repository has for ``code``, or ``None``.
+def _last_price(code: str) -> tuple[float, str] | None:
+    """The newest price on disk for ``code`` and its as-of, or ``None``.
 
-    Read from the local K-line store and never from the network: a read model
-    answers from what is on disk, and reaching for a feed here would turn the
-    portfolio page into a scrape. Stale is honest — the card names the day the
-    price is from — a hang is not.
+    Read from local stores and never from the network: a read model answers
+    from what is on disk, and reaching for a feed here would turn the
+    portfolio page into a scrape.
+
+    Both stores are asked and the newer wins. This read only the daily
+    K-line, which the provider fills at 17:30 — so all session long, and after
+    the close until then, the card priced a position at *yesterday's* close.
+    On 2026-09-23 光智科技, bought today at 259.66 with the 14:57 snapshot at
+    263.31, read −4.1% off the 09-22 close of 249.01. The intraday snapshot
+    is what the monitor itself trades on; the K-line is the fallback.
     """
+    best = None
     try:
         from alpha_agents.data.market_history import get_local_history
         bars = get_local_history(code, days=1)
+        if bars and bars[-1].get("close"):
+            best = (float(bars[-1]["close"]), str(bars[-1].get("date") or ""))
     except Exception as e:
-        logger.warning("No local price for %s: %s", code, e)
-        return None
-    if not bars:
-        return None
-    return bars[-1].get("close")
+        logger.warning("No local K-line for %s: %s", code, e)
+    try:
+        from alpha_agents.data.snapshot_store import latest_quote_price
+        snap = latest_quote_price(code)
+    except Exception as e:
+        logger.warning("No quote snapshot for %s: %s", code, e)
+        snap = None
+    # A snapshot stamped "YYYY-MM-DD HH:MM" sorts after a bare close date of
+    # the same day — right, since an intraday print is newer than the prior
+    # close and the K-line only holds a day once it is over.
+    if snap and (best is None or snap[1] > best[1]):
+        best = snap
+    return best
 
 
 def _attach_unrealized(positions: list[dict]) -> list[dict]:
@@ -70,9 +87,11 @@ def _attach_unrealized(positions: list[dict]) -> list[dict]:
     """
     names = _trader_names()
     for p in positions:
-        last = _last_close(p["code"])
+        got = _last_price(p["code"])
+        last, as_of = got if got else (None, None)
         open_price = p.get("open_price") or 0
         shares = p.get("shares") or 0
+        p["price_as_of"] = as_of
         if last and open_price > 0:
             p["last_price"] = last
             p["unrealized_pct"] = round((last - open_price) / open_price * 100, 2)

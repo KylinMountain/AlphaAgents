@@ -361,6 +361,40 @@ class TestOpenPositionsCarryTheReturnAndTheName:
         assert pos["unrealized_pct"] == 10.0
         assert pos["unrealized_amount"] == 100.0
 
+    def _seed_snapshot(self, code, price, at):
+        from alpha_agents.data import snapshot_store
+        sconn = snapshot_store._get_conn()
+        sconn.execute(
+            "INSERT INTO realtime_quote_snapshots (captured_at, code, name, price) "
+            "VALUES (?, ?, '测试股', ?)", (at, code, price))
+        sconn.commit()
+
+    def test_todays_snapshot_beats_yesterdays_close(self):
+        """光智科技 on 2026-09-23: bought today at 259.66, snapshot 263.31 at
+        14:57, and the card read −4.1% off the 09-22 close of 249.01 because
+        the K-line is only filled at 17:30."""
+        from alpha_agents.server.readmodels.trade import book
+        self._seed_position(code="300489", open_price=259.66, shares=300)
+        self._seed_kline("300489", 249.01, date="2026-09-22")
+        self._seed_snapshot("300489", 263.31, "2026-09-23 14:57")
+
+        pos = book()["positions"][0]
+
+        assert pos["last_price"] == 263.31
+        assert pos["price_as_of"] == "2026-09-23 14:57"
+        assert pos["unrealized_pct"] == 1.41
+
+    def test_a_newer_close_beats_an_older_snapshot(self):
+        from alpha_agents.server.readmodels.trade import book
+        self._seed_position(code="300490", open_price=10.0, shares=100)
+        self._seed_snapshot("300490", 10.5, "2026-09-22 14:57")
+        self._seed_kline("300490", 11.0, date="2026-09-23")
+
+        pos = book()["positions"][0]
+
+        assert pos["last_price"] == 11.0
+        assert pos["price_as_of"] == "2026-09-23"
+
     def test_no_local_price_is_none_not_a_confident_zero(self):
         """'没有市价' and '没有涨跌' are different answers; only one is honest."""
         from alpha_agents.server.readmodels.trade import book

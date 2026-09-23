@@ -48,6 +48,7 @@ const bookValue = {
       trader_id: 'default', trader_name: '默认交易员',
       shares: 100, return_pct: null, return_amount: null,
       last_price: 31.4, unrealized_pct: 4.67, unrealized_amount: 140,
+      price_as_of: "2026-09-23 14:57",
       peak_return_pct: 6.1, max_drawdown_pct: -2.0, holding_days: 3,
       stop_loss: 28,
       thesis: { claim: '功率半导体涨价', prob: 0.6, horizon_days: 30,
@@ -284,7 +285,7 @@ const CASES = [
             /* The two unrealized branches must both render: a card priced at
              * the last close says which day it is from, and a card with no
              * price at all must not print a confident 0.0% in its place. */
-            '按最近收盘', '无市价',
+            '按 09-23 14:57 快照', '无市价',
             /* Who owns the row — the pending table and the position card. */
             '交易员', '回调派', '默认交易员',
             /* Attribution with no rows yet: the ledger's total is still

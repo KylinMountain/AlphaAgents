@@ -1400,12 +1400,22 @@ def _review_trades(ctx, day: str, conn) -> int:
     except sqlite3.Error as exc:
         logger.warning("%s: trade review needs market history: %s", day, exc)
         return 0
+    from alpha_agents.evolution import handbook
+
+    trader = get_trader(ctx.trader)
+    loop = getattr(ctx, "loop", None)
+    run = (loop.run_until_complete if loop is not None else asyncio.run)
     try:
-        job = TRV.review_closed(conn, hist, trader_id=ctx.trader, as_of=day,
-                                model=ctx.model, trader=get_trader(ctx.trader))
-        loop = getattr(ctx, "loop", None)
-        return (loop.run_until_complete(job) if loop is not None
-                else asyncio.run(job))
+        # The handbook in force while these trades were held is the one
+        # written before today; the rewrite below is dated today and is
+        # first read by tomorrow's morning.
+        n = run(TRV.review_closed(conn, hist, trader_id=ctx.trader, as_of=day,
+                                  model=ctx.model, trader=trader,
+                                  handbook_before=day))
+        if n and run(handbook.consolidate(conn, ctx.trader, as_of=day,
+                                          model=ctx.model, trader=trader)):
+            ctx.counters["handbook_rewrites"] += 1
+        return n
     except Exception as exc:                          # noqa: BLE001
         logger.warning("%s: trade review failed: %s", day, exc)
         return 0

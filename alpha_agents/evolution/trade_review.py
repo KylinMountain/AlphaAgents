@@ -37,13 +37,17 @@ logger = logging.getLogger(__name__)
 
 #: How many recent reviews a decision reads. Enough to see a pattern across
 #: trades, few enough that the decision's own facts are not drowned.
-RECENT = 8
+RECENT = 5
 
 _TIMEOUT = 120
 
 #: A review that could not be written (no model, a timeout, an unreadable
 #: reply) still stores the facts, so the summary line counts every trade.
-NO_WORDS = {"verdict": "", "right": "", "wrong": "", "next_time": ""}
+NO_WORDS = {"verdict": "", "right": "", "wrong": "", "next_time": "",
+            "followed": [], "broke": []}
+
+#: The text fields of a review; ``followed`` / ``broke`` are rule-id lists.
+_TEXT = ("verdict", "right", "wrong", "next_time")
 
 
 def _bars(hist: sqlite3.Connection, code: str, start: str, end: str) -> list:
@@ -132,8 +136,12 @@ _INSTRUCTIONS = """你是这笔交易的交易员。它刚刚平仓，现在由�
 
 不要写空话（"需要更加谨慎"这种等于没写）。这份复盘会在你之后每一次决策前被你自己读到。
 
+如果下面附了你当时在用的交易守则，请如实标出这笔交易**遵守了**哪几条、**违反了**
+哪几条（用编号，如 R2）；和这笔无关的不要列。系统会用这些标记统计每条守则的效果。
+
 只输出一个 JSON 对象：
-{"verdict": "对/错/运气", "right": "...", "wrong": "...", "next_time": "..."}"""
+{"verdict": "对/错/运气", "right": "...", "wrong": "...", "next_time": "...",
+ "followed": ["R1"], "broke": ["R3"]}"""
 
 
 def _parse(text: str) -> dict:
@@ -147,11 +155,19 @@ def _parse(text: str) -> dict:
         return dict(NO_WORDS)
     if not isinstance(raw, dict):
         return dict(NO_WORDS)
-    return {k: str(raw.get(k) or "").strip()[:400] for k in NO_WORDS}
+    out = {k: str(raw.get(k) or "").strip()[:400] for k in _TEXT}
+    for k in ("followed", "broke"):
+        ids = raw.get(k) if isinstance(raw.get(k), list) else []
+        out[k] = [str(i).strip().upper() for i in ids if str(i).strip()][:10]
+    return out
 
 
-async def write_words(f: dict, *, model, trader=None) -> dict:
-    """Ask the trader for its review of one trade. Never raises."""
+async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
+    """Ask the trader for its review of one trade. Never raises.
+
+    ``rules`` is the handbook that was in force while it held the trade, so
+    it can say which rules it followed and which it broke.
+    """
     if model is None:
         return dict(NO_WORDS)
     from agents import Agent, Runner
@@ -161,7 +177,8 @@ async def write_words(f: dict, *, model, trader=None) -> dict:
         instructions += f"\n\n## 你是谁\n\n{trader.extra_prompt.strip()}\n"
     message = (f"事实：{facts_line(f)}\n\n"
                f"你当时的买入理由：{f['buy_reason'] or '未记录'}\n\n"
-               f"你当时的卖出理由：{f['sell_reason'] or '未记录'}")
+               f"你当时的卖出理由：{f['sell_reason'] or '未记录'}"
+               + (f"\n\n你当时在用的交易守则：\n{rules}" if rules else ""))
     try:
         agent = Agent(name="trade_review", instructions=instructions,
                       model=model, tools=[])
@@ -195,25 +212,35 @@ def save(conn: sqlite3.Connection, f: dict, words: dict, trader_id: str) -> None
 
 
 async def review_closed(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
-                        trader_id: str, as_of: str, model, trader=None) -> int:
+                        trader_id: str, as_of: str, model, trader=None,
+                        handbook_before: str | None = None) -> int:
     """Review every closed, unreviewed position of this trader. Returns count.
 
     ``hist`` must hold no bar later than ``as_of`` that :func:`facts` would
     read; facts reads only up to each position's own close date, which is on
     or before ``as_of`` by construction.
     """
+    from alpha_agents.evolution import handbook
+    rules = handbook.load(trader_id, before=handbook_before)
     n = 0
     for pos in unreviewed(conn, trader_id, as_of):
         f = facts(pos, hist)
         if f is None:
             continue
-        words = await write_words(f, model=model, trader=trader)
+        words = await write_words(f, model=model, trader=trader, rules=rules)
         save(conn, f, words, trader_id)
         conn.commit()
         n += 1
         logger.info("Trade review [%s] %s: %s | 下次: %s", trader_id,
                     f["code"], facts_line(f), words.get("next_time") or "—")
     return n
+
+
+def reviews_for(conn: sqlite3.Connection, trader_id: str, *,
+                up_to: str) -> list[tuple[dict, dict]]:
+    """Every review of trades closed on or before ``up_to``, oldest first."""
+    rows = _rows(conn, trader_id, None)
+    return [r for r in reversed(rows) if r[0]["close_date"] <= up_to]
 
 
 def _rows(conn: sqlite3.Connection, trader_id: str, before: str | None):
@@ -252,10 +279,17 @@ def inject(conn: sqlite3.Connection, trader_id: str, *,
     ``before`` excludes reviews of trades closed on or after that date, so a
     replay's morning never reads a review written at a later close.
     """
+    from alpha_agents.evolution import handbook
+    rules = handbook.load(trader_id, before=before)
     rows = _rows(conn, trader_id, before)
-    if not rows:
+    if not rows and not rules:
         return ""
-    lines = ["【你自己的逐笔复盘】", summary_line([f for f, _ in rows]), ""]
+    lines = []
+    if rules:
+        lines += [rules, ""]
+    if not rows:
+        return "\n".join(lines).strip()
+    lines += ["【你自己的逐笔复盘】", summary_line([f for f, _ in rows]), ""]
     for f, w in rows[:limit]:
         lines.append("● " + facts_line(f))
         if w.get("verdict") or w.get("wrong") or w.get("next_time"):

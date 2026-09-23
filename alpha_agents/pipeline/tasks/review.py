@@ -1002,11 +1002,19 @@ async def _review_closed_trades(today: str) -> int:
     hist = sqlite3.connect(
         f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
     n = 0
+    from alpha_agents.evolution import handbook
     try:
         for trader in load_traders():
-            n += await trade_review.review_closed(
+            written = await trade_review.review_closed(
                 _get_conn(), hist, trader_id=trader.id, as_of=today,
                 model=model, trader=trader)
+            # New reviews, new handbook: the trader rewrites its own rules
+            # from everything it has reviewed (data/traders/<id>/MEMORY.md).
+            if written:
+                await handbook.consolidate(_get_conn(), trader.id,
+                                           as_of=today, model=model,
+                                           trader=trader)
+            n += written
     finally:
         hist.close()
     logger.info("Trade reviews written: %d", n)

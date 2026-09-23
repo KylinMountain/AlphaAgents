@@ -97,7 +97,7 @@ class TestWritingAReview:
     def test_the_traders_words_are_shown_with_the_numbers(self, conn, hist, monkeypatch):
         _close(conn)
 
-        async def words(f, *, model, trader=None):
+        async def words(f, *, model, trader=None, rules=""):
             return {"verdict": "错", "right": "", "wrong": "买入当天+6.9%没走",
                     "next_time": "买入当天冲高超过1个ATR先兑现一半"}
         monkeypatch.setattr(TR, "write_words", words)

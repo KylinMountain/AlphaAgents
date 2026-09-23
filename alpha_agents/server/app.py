@@ -98,12 +98,50 @@ async def get_activity_api(limit: int = 100, since_id: int | None = None):
     return JSONResponse({"activity": rows, "count": len(rows)})
 
 
+#: How many of today's strongest-inflow concepts to name when the lifecycle
+#: table is not tracking them. Enough to show what the tape is doing, few
+#: enough to stay a strip rather than a second list.
+_UNTRACKED_LEADERS = 8
+
+
+def _themes_with_today() -> dict:
+    """Themes, each with *today's* board print beside its lifecycle.
+
+    The card used to show ``catalyst`` — the sentence written the day the
+    line was discovered — as though it were current. On 2026-09-23 小金属概念
+    read "净流入57.1亿" while its board was −53.0亿 at 14:57, and 机器人概念
+    read "+208.6亿" at −138.3亿. The lifecycle (strength, stage) is a slow
+    variable on purpose; the page has to show the fast one next to it, or a
+    slow variable reads as a stale one.
+    """
+    from alpha_agents.data.memory_store import get_active_themes
+    from alpha_agents.data.snapshot_store import read_latest_sector_flow
+
+    themes = get_active_themes()
+    boards = read_latest_sector_flow(scope="concept", limit=5000)
+    by_name = {b["sector_name"]: b for b in boards}
+    snapshot_at = boards[0]["captured_at"] if boards else None
+    for t in themes:
+        b = by_name.get(t.get("name"))
+        t["today"] = ({"change_pct": b["change_pct"],
+                       "net_flow_yi": b["net_flow_yi"],
+                       "leader": b.get("leader") or "",
+                       "leader_change_pct": b.get("leader_change_pct")}
+                      if b else None)
+    tracked = {t.get("name") for t in themes}
+    untracked = [{"name": b["sector_name"], "change_pct": b["change_pct"],
+                  "net_flow_yi": b["net_flow_yi"]}
+                 for b in boards  # already ordered by net inflow
+                 if b["sector_name"] not in tracked
+                 and (b["net_flow_yi"] or 0) > 0][:_UNTRACKED_LEADERS]
+    return {"themes": themes, "count": len(themes),
+            "snapshot_at": snapshot_at, "untracked_leaders": untracked}
+
+
 @app.get("/api/themes")
 async def get_themes_api():
-    """Investment themes with their lifecycle stage and strength."""
-    from alpha_agents.data.memory_store import get_active_themes
-    themes = await asyncio.to_thread(get_active_themes)
-    return JSONResponse({"themes": themes, "count": len(themes)})
+    """Investment themes: lifecycle stage and strength, and today's board."""
+    return JSONResponse(await asyncio.to_thread(_themes_with_today))
 
 
 @app.get("/api/prediction-stats")

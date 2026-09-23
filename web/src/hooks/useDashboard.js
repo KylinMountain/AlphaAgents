@@ -38,7 +38,7 @@ async function getJson(url) {
 export function useDashboard(intervalMs = 20000) {
   const [data, setData] = useState({
     reports: [], reviews: [], sources: [], activity: [], news: [],
-    themes: [], stats: null, signals: [], market: null, graph: null,
+    themes: [], themesMeta: null, stats: null, signals: [], market: null, graph: null,
     trade: null, learn: null, evolve: null,
     calibration: null, version: null, usage: null,
   })
@@ -63,7 +63,11 @@ export function useDashboard(intervalMs = 20000) {
       else if (key === 'sources') next.sources = v.sources || []
       else if (key === 'activity') next.activity = v.activity || []
       else if (key === 'news') next.news = v.news || []
-      else if (key === 'themes') next.themes = v.themes || []
+      else if (key === 'themes') {
+        next.themes = v.themes || []
+        next.themesMeta = { snapshot_at: v.snapshot_at,
+                            untracked_leaders: v.untracked_leaders || [] }
+      }
       else if (key === 'signals') next.signals = v.signals || []
       else next[key] = v
     })

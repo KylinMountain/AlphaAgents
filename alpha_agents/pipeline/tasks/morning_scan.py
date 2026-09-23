@@ -25,8 +25,6 @@ from alpha_agents.pipeline.tasks import (
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
 from alpha_agents.tools.sector_ranking import get_concept_ranking_fn
-from alpha_agents.tools.stock_search import search_stocks_fn
-from alpha_agents.tools.stock_filter import filter_stocks_fn
 from alpha_agents.tools.global_market import get_global_overview_fn
 from alpha_agents.tools.futures_quotes import get_futures_quotes_fn
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
@@ -43,60 +41,41 @@ from alpha_agents.data.trader import load_traders
 logger = logging.getLogger(__name__)
 
 
-def _fill_theme_stocks(theme_name: str, leader_name: str = "") -> None:
-    """Fill core stocks for a newly discovered theme.
+def fill_missing_core_stocks() -> int:
+    """Refresh the core stocks of every active theme. Returns how many changed.
 
-    Uses the concept ranking's leader as the confirmed leader,
-    then searches for related stocks via semantic + keyword matching.
+    Every theme, not only empty ones: where the money goes inside a line moves
+    from week to week, and a list written on the day a theme was found is the
+    same stale-origin problem the themes page already had with ``catalyst``.
     """
+    n = 0
+    for t in get_active_themes():
+        if _fill_theme_stocks(t["name"]):
+            n += 1
+    return n
+
+
+def _fill_theme_stocks(theme_name: str, leader_name: str = "") -> bool:
+    """Set a theme's core stocks to its members ranked by recent money.
+
+    See ``data.theme_members``. The semantic-search fill this replaced took
+    the first matches in code order, which is how PCB概念's "core" came to be
+    TCL科技 and 格力电器. A theme that is not a concept on file gets an empty
+    list — "no core stocks recorded" is true; a list in code order is not.
+    ``leader_name`` is kept for the callers' signature and not used: the
+    leader is the member with the most money in, not the board's top gainer.
+    """
+    from alpha_agents.data.theme_members import core_stocks
     try:
-        # Search for stocks related to this concept
-        result = json.loads(search_stocks_fn(keyword=theme_name))
-        all_codes = []
-        for concept in result.get("matches", []):
-            for stock in concept.get("stocks", [])[:5]:
-                all_codes.append({"code": stock["code"], "name": stock["name"]})
-
-        # If search found nothing, try to at least record the leader
-        if not all_codes and leader_name:
-            # Search by leader name
-            leader_result = json.loads(search_stocks_fn(keyword=leader_name))
-            for concept in leader_result.get("matches", []):
-                for stock in concept.get("stocks", [])[:3]:
-                    all_codes.append({"code": stock["code"], "name": stock["name"]})
-
-        if not all_codes:
-            logger.debug("No stocks found for theme '%s'", theme_name)
-            return
-
-        # Deduplicate
-        seen = set()
-        unique = []
-        for s in all_codes:
-            if s["code"] not in seen:
-                seen.add(s["code"])
-                unique.append(s)
-
-        # Filter out ST/suspended
-        codes = [s["code"] for s in unique[:20]]
-        filtered = json.loads(filter_stocks_fn(stock_codes=codes))
-        kept = filtered.get("stocks", [])
-
-        core_stocks = []
-        for i, s in enumerate(kept[:10]):
-            core_stocks.append({
-                "code": s["code"],
-                "name": s["name"],
-                "role": "龙头" if i == 0 else "核心",
-            })
-
-        leader_code = core_stocks[0]["code"] if core_stocks else None
-        upsert_theme(theme_name, core_stocks=core_stocks, leader_code=leader_code)
-        logger.info("  Filled %d stocks for '%s', leader=%s",
-                     len(core_stocks), theme_name,
-                     core_stocks[0]["name"] if core_stocks else "无")
+        core = core_stocks(theme_name)
+        upsert_theme(theme_name, core_stocks=core,
+                     leader_code=core[0]["code"] if core else None)
+        logger.info("  Core stocks for '%s': %s", theme_name,
+                    ", ".join(s["name"] for s in core[:5]) or "none on file")
+        return True
     except Exception as e:
-        logger.debug("Failed to fill stocks for '%s': %s", theme_name, e)
+        logger.warning("Failed to fill stocks for '%s': %s", theme_name, e)
+        return False
 
 
 def _format_themes(themes: list[dict]) -> str:
@@ -241,6 +220,14 @@ async def run_morning_scan() -> str | None:
                 _fill_theme_stocks(concept_name, leader_name=leader)
     except Exception as e:
         logger.debug("Morning scan theme discovery failed: %s", e)
+
+    # 2b. Every live theme gets its core stocks, whoever created it. Only the
+    # discovery above used to fill them, so the lines the intraday monitor
+    # and the review create — 28 of 32 on 2026-09-23 — never had any.
+    try:
+        await asyncio.to_thread(fill_missing_core_stocks)
+    except Exception as e:
+        logger.warning("Core-stock fill failed: %s", e)
 
     # 3. Read memory
     themes = get_active_themes()

@@ -536,6 +536,10 @@ async def run_intraday_monitor() -> str | None:
             if theme and not get_theme_by_name(theme):
                 upsert_theme(theme, catalyst=f"盘中异动发现 {now_str}")
                 logger.info("Auto-created theme '%s' from intraday anomaly", theme)
+                # With its core stocks, as a discovered theme gets them —
+                # otherwise it stays an empty line until someone fills it.
+                from alpha_agents.pipeline.tasks.morning_scan import _fill_theme_stocks
+                await asyncio.to_thread(_fill_theme_stocks, theme)
 
     # ── Step 3: Code computes theme changes ──
     theme_changes = []

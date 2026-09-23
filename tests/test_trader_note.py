@@ -59,8 +59,20 @@ def test_the_shipped_pullback_trader_actually_carries_a_note():
     """Guards the real file, not only the lookup.
 
     The lookup can be correct while the config it reads is empty, and an empty
-    note is exactly the state this bug produced for months.
+    note is exactly the state this bug produced for months. Read from the file
+    itself: since 2026-09-23 the persona is switched off (the default trader
+    runs without one), and its text stays on file so it can be switched back.
     """
-    note = wf._trader_note(_Ctx("pullback"))
+    import yaml
+    raw = yaml.safe_load((trader_mod.TRADERS_DIR / "pullback.yaml").read_text("utf-8"))
+    note = raw.get("extra_prompt") or ""
     assert len(note) > 200, f"pullback extra_prompt is {len(note)} chars"
     assert "get_price_levels" in note
+
+
+def test_a_switched_off_persona_is_not_loaded_into_a_replay():
+    import yaml
+    raw = yaml.safe_load((trader_mod.TRADERS_DIR / "pullback.yaml").read_text("utf-8"))
+    if raw.get("enabled", True):
+        return  # switched back on; the lookup test above covers it
+    assert wf._trader_note(_Ctx("pullback")) == ""

@@ -72,14 +72,45 @@ class TestAMalformedOrderIsNamedNotDropped:
          '"stop_loss":10.5}]}', "stop_not_below_entry"),
         ('{"orders":[{"code":"600001","entry_low":0,"entry_high":1.0,'
          '"stop_loss":-1.0}]}', "non_positive_price"),
-        ('{"orders":[{"code":"600001","entry_high":10.2,"stop_loss":9.2}]}',
+        # entry_high is the one price an order cannot do without: it is the
+        # most the trader will pay. (entry_low became optional on 2026-09-23.)
+        ('{"orders":[{"code":"600001","entry_low":10.0,"stop_loss":9.2}]}',
          "bad_prices"),
+        ('{"orders":[{"code":"600001","entry_low":null,"entry_high":10.0,'
+         '"stop_loss":10.0}]}', "stop_not_below_entry"),
         ('{"orders":["600001"]}', "not_an_object"),
     ])
     def test_the_reason_is_returned(self, body, why):
         verdict = D.parse_orders(body, CODES)
         assert verdict["orders"] == []
         assert [r["why"] for r in verdict["refused"]] == [why]
+
+
+class TestAnOrderIsTheMostItWillPay:
+    """No forced band. The two-sided zone was a shape the system imposed, and
+    it refused the cheapest fills: a gap *down* under the floor did not buy.
+    "Not above X" is a whole order; a floor is the trader's choice."""
+
+    @pytest.mark.parametrize("low", ['null', '""', None])
+    def test_a_ceiling_alone_is_accepted(self, low):
+        field = '' if low is None else f'"entry_low":{low},'
+        body = ('{"orders":[{"code":"600001",' + field +
+                '"entry_high":10.2,"stop_loss":9.2}]}')
+        verdict = D.parse_orders(body, CODES)
+        assert verdict["refused"] == []
+        [order] = verdict["orders"]
+        assert order["entry_low"] is None and order["entry_high"] == 10.2
+
+    def test_a_gap_down_fills_a_ceiling_only_order(self):
+        from alpha_agents.data.t1_execution import in_entry_zone
+        assert in_entry_zone(9.5, None, 10.2)
+        assert not in_entry_zone(10.3, None, 10.2)
+
+    def test_a_floor_the_trader_chose_is_still_honoured(self):
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":9.5}]}', CODES)
+        assert verdict["orders"][0]["entry_low"] == 10.0
 
 
 class TestAnUnreadableReplyIsNotAnEmptyOne:

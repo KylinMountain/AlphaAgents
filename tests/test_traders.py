@@ -290,6 +290,43 @@ class TestLegacyBook:
         assert [t.id for t in TR.load_traders()] == ["slow"]
 
 
+class TestASwitchedOffTraderWindsDown:
+    """Turning a persona off must not strand its book (2026-09-23: both
+    personas were switched off with live positions and resting orders)."""
+
+    def _hold(self, tid="slow"):
+        P.create_pending_order(code="600000", name="A", theme="t",
+                               order_date="2026-01-05", trader_id=tid)
+
+    def test_it_keeps_managing_what_it_holds(self, store, traders_dir, theme):
+        write(traders_dir, "slow", BREAKOUT.replace("id: fast", "id: slow")
+              + "enabled: false\n")
+        self._hold()
+        by_id = {t.id: t for t in TR.load_traders()}
+        assert by_id["slow"].legacy is True
+        assert "仅清理旧仓" in by_id["slow"].name
+        assert by_id["slow"].extra_prompt == "", "a switched-off persona is not loaded"
+
+    def test_but_opens_nothing(self, store, traders_dir, theme):
+        write(traders_dir, "slow", PULLBACK + "enabled: false\n")
+        self._hold()
+        assert [t.id for t in TR.load_traders(scanning=True)] == [
+            TR.DEFAULT_TRADER]
+
+    def test_and_the_default_trades_again_with_no_persona(
+            self, store, traders_dir, theme):
+        write(traders_dir, "slow", PULLBACK + "enabled: false\n")
+        write(traders_dir, "fast", BREAKOUT + "enabled: false\n")
+        [default] = TR.load_traders(scanning=True)
+        assert default.id == TR.DEFAULT_TRADER
+        assert default.legacy is False and default.extra_prompt == ""
+
+    def test_an_empty_switched_off_book_is_simply_gone(self, store,
+                                                       traders_dir):
+        write(traders_dir, "slow", PULLBACK + "enabled: false\n")
+        assert [t.id for t in TR.load_traders()] == [TR.DEFAULT_TRADER]
+
+
 class TestPredictionAttribution:
     """An order names its forecast, and a fill keeps that name.
 

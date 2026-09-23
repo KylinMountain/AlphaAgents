@@ -111,7 +111,7 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
 - `code` 必须逐字出现在上面的候选池里。
 - **一只票同时只能有一笔**：如果你已经持有它，或它还在挂单中，再下单会被
   系统直接拒掉。下单前先看上面的【我的账本】。
-- `entry_low` < `entry_high`，且 `stop_loss` < `entry_low`。
+- `entry_high` 是你最多愿意付的价；`entry_low` 可以写 null（不高于 entry_high 就买）。写了 `entry_low` 就要 `entry_low` < `entry_high`。`stop_loss` 低于买入下沿（没写 entry_low 就低于 entry_high）。
 {fills_how}
 - `target_price` **强烈建议给**，且必须 `> entry_high`：这是你打算在哪里止盈。
   不给的话这个仓位就只剩止损一条出路。**止损距离和止盈距离一起决定赔率，

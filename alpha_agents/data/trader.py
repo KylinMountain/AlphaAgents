@@ -157,6 +157,7 @@ def load_traders(scanning: bool = False) -> list[Trader]:
         return [_DEFAULT]
 
     out = []
+    retired = []
     for path in configs:
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -166,9 +167,23 @@ def load_traders(scanning: bool = False) -> list[Trader]:
         trader = _coerce(raw, path)
         if trader and trader.enabled:
             out.append(trader)
+        elif trader:
+            retired.append(trader)
+
+    # A trader switched off with positions still open winds its book down,
+    # exactly as the built-in default does below: its stops and theses keep
+    # being evaluated, and it opens nothing. Dropping it outright would leave
+    # real positions with no monitor and no exit.
+    # Without its persona: switching a trader off means its instructions stop
+    # being loaded, including for the exits it still has to make.
+    winding = [replace(t, legacy=True, name=f"{t.name}（仅清理旧仓）",
+                       extra_prompt="")
+               for t in retired
+               if not scanning and _still_holds(t.id)]
 
     if not out:
-        return [_DEFAULT]
+        return [_DEFAULT] + winding
+    out += winding
     if not scanning and _default_still_holds():
         # The first config file must not orphan the book that existed
         # before it. Those positions carry real stops and live theses, and
@@ -183,8 +198,8 @@ def load_traders(scanning: bool = False) -> list[Trader]:
     return out
 
 
-def _default_still_holds() -> bool:
-    """Does the built-in trader still have anything open?
+def _still_holds(trader_id: str) -> bool:
+    """Does this trader still have anything open or resting?
 
     Errs toward yes on failure: managing an empty book costs one query a
     cycle, and not managing a live one costs money.
@@ -193,12 +208,17 @@ def _default_still_holds() -> bool:
         from alpha_agents.data.memory_store import _get_conn
         row = _get_conn().execute(
             "SELECT 1 FROM virtual_portfolio WHERE trader_id = ? "
-            "AND status IN ('pending', 'open') LIMIT 1", (DEFAULT_TRADER,)
+            "AND status IN ('pending', 'open') LIMIT 1", (trader_id,)
         ).fetchone()
         return row is not None
     except Exception as e:
-        logger.debug("Default-book check failed (%s) — keeping it", e)
+        logger.debug("Book check for %s failed (%s) — keeping it", trader_id, e)
         return True
+
+
+def _default_still_holds() -> bool:
+    """Does the built-in trader still have anything open?"""
+    return _still_holds(DEFAULT_TRADER)
 
 
 def get_trader(trader_id: str) -> Trader:

@@ -45,8 +45,8 @@ time column in ``trader_tools.AS_OF_FIELDS``.
 
 What it refuses
 ---------------
-A code outside the panel, a malformed zone (``entry_low`` not below
-``entry_high``), a stop that is not below the entry, or a reply that is not
+A code outside the panel, a malformed zone (``entry_low``, when given, not
+below ``entry_high``), a stop that is not below the entry, or a reply that is not
 JSON. Every refusal is **returned as a value**, not swallowed: the runner
 counts them and the report prints them, because a decider that quietly
 returns fewer orders looks identical to a decider that found nothing.
@@ -311,25 +311,34 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             # The one that matters: a security the decision was not shown.
             refused.append({"code": code, "why": "outside_panel", "detail": ""})
             continue
+        # ``entry_low`` is optional. An order is "the most I will pay"; a
+        # floor under it is a choice the trader may make (a breakout that only
+        # counts above a level), not a shape the system imposes. The forced
+        # two-sided band was the rule that kept orders out: a gap *down*,
+        # cheaper than the trader asked for, fell under the floor and did
+        # not fill.
         try:
-            low = float(raw["entry_low"])
+            raw_low = raw.get("entry_low")
+            low = (None if raw_low is None or raw_low == ""
+                   else float(raw_low))
             high = float(raw["entry_high"])
             stop = float(raw["stop_loss"])
         except (KeyError, TypeError, ValueError) as exc:
             refused.append({"code": code, "why": "bad_prices",
                             "detail": f"{type(exc).__name__}: {exc}"})
             continue
-        if not low < high:
+        if low is not None and not low < high:
             refused.append({"code": code, "why": "inverted_zone",
                             "detail": f"{low} !< {high}"})
             continue
-        if not stop < low:
+        floor = low if low is not None else high
+        if not stop < floor:
             refused.append({"code": code, "why": "stop_not_below_entry",
-                            "detail": f"{stop} !< {low}"})
+                            "detail": f"{stop} !< {floor}"})
             continue
-        if low <= 0:
+        if min(floor, high) <= 0 or stop <= 0:
             refused.append({"code": code, "why": "non_positive_price",
-                            "detail": str(low)})
+                            "detail": str(floor)})
             continue
         # ``target_price`` is optional, and its absence is meaningful rather
         # than an error: a position with no target has exactly one exit, the
@@ -354,7 +363,8 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         else:
             target = None
         orders.append({
-            "code": code, "entry_low": round(low, 2),
+            "code": code,
+            "entry_low": round(low, 2) if low is not None else None,
             "entry_high": round(high, 2), "stop_loss": round(stop, 2),
             "target_price": target,
             # Whole. This string becomes the Thesis ``claim`` — the thing a
@@ -455,8 +465,8 @@ _SESSIONS = {
         "news_cutoff": "{day} 09:00",
         "news_window": "昨夜到今早（{prev_day} 收盘后 → {day} 09:00）",
         "fills_how": (
-            "  挂单价是限价：今天开盘价必须落在 `[entry_low, entry_high]` 里"
-            "才会成交。"),
+            "  `entry_high` 是你今天最多愿意付的价：开盘价不高于它就按开盘价成交。"
+            "`entry_low` 可以不写；写了就表示开盘低于它你也不买。"),
     },
     "close": {
         "session": "现在站在 **{day} 收盘前 14:55**。",
@@ -467,8 +477,8 @@ _SESSIONS = {
         "news_cutoff": "{day} 14:55",
         "news_window": "今日盘中（{day} 09:00 → 14:55）",
         "fills_how": (
-            "  `entry_low`/`entry_high` 仍然要写：它们记录你**愿意接受的价位区间**，"
-            "系统会用今日收盘价对照这个区间来判定是否成交——收盘价落在区间内才买。"),
+            "  `entry_high` 是你最多愿意付的价，系统用今日收盘价对照它判定是否成交；"
+            "`entry_low` 可以不写，写了就表示收盘低于它你也不买。"),
     },
 }
 

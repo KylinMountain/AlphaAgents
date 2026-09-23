@@ -489,7 +489,9 @@ def _create_pending_order_impl(
             code=code, themes=related_themes, amount=reservation_amount)
         conn.commit()
 
-        zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
+        zone = (f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high
+                else f"≤{entry_high:.2f}" if entry_high
+                else f"≥{entry_low:.2f}" if entry_low else "市价")
         logger.info("Pending order: %s %s 介入区间%s 止损%s (%s)",
                      code, name, zone, stop_loss or "无", source)
         placed = cursor.lastrowid

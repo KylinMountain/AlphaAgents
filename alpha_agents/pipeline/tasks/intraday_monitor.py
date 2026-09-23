@@ -1011,6 +1011,9 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
             # know which thesis this fill belongs to, and the result has to
             # land on that thesis rather than on whichever one is nearest.
             thesis_id=thesis_id,
+            # The theme lifecycle advises; the agent that wrote the thesis
+            # decides — see order_review.
+            wake_agent=exit_decision.enabled(),
         )
     except Exception as e:
         logger.debug("Failed to create pending order for %s: %s", code, e)

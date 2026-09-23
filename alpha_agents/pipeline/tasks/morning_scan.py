@@ -20,7 +20,7 @@ from alpha_agents.data.decision_context import (
     build_decision_context, merge_features,
 )
 from alpha_agents.pipeline.tasks import (
-    safe_active_themes, safe_market_regime, safe_sentiment_phase,
+    exit_decision, safe_active_themes, safe_market_regime, safe_sentiment_phase,
 )
 from alpha_agents.pipeline.monitor import NEWS_SOURCES
 from alpha_agents.pipeline.theme_manager import evaluate_theme_signals, maybe_discover_theme
@@ -795,9 +795,14 @@ def _save_recommendations_list(
                     # to it rather than to "the nearest live idea on this
                     # stock".
                     thesis_id=thesis_id,
+                    # The theme lifecycle advises; the agent that wrote the thesis
+                    # decides — see order_review.
+                    wake_agent=exit_decision.enabled(),
                 )
             except Exception as e:
-                logger.debug("Failed to create pending order for %s: %s", code, e)
+                # warning, not debug: at debug a broken call here stops every
+                # morning order while the log reads like a quiet day.
+                logger.warning("Failed to create pending order for %s: %s", code, e)
         except Exception as e:
             logger.debug("Failed to save prediction for %s: %s", code, e)
 

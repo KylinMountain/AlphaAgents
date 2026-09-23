@@ -172,6 +172,9 @@ class TradeIntent:
     #: Sizing policy flag: recompute the stop to hold its original distance
     #: from the new average. Only the automated pullback top-up sets it.
     recalc_stop: bool = False
+    #: The agent, not the theme lifecycle, has the last word on an order that
+    #: carries its thesis: the admission bar is recorded, not enforced.
+    wake_agent: bool = False
     # ── life ──
     expire_days: int | None = None
     # ── evidence: what this decision rests on ──
@@ -291,7 +294,7 @@ def _dispatch(intent: TradeIntent):
             source=intent.source or "intent", reason=intent.reason,
             trader_id=intent.trader_id,
             prediction_id=intent.prediction_id, thesis_id=intent.thesis_id,
-            risk_themes=intent.risk_themes)
+            risk_themes=intent.risk_themes, wake_agent=intent.wake_agent)
         return order_id, {"order_id": order_id}
 
     if intent.action == OPEN_NOW:

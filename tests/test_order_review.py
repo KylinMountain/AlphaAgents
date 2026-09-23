@@ -190,3 +190,52 @@ class TestOncePerDay:
         OR._asked.clear()
         OR._asked.add((1, "d", OR._kind(a["reason"])))
         assert OR.due([b], "d") == []
+
+
+class TestTheAdmissionBarIsAdvice:
+    """Same rule at the other end: creation refused an order whose theme
+    the lifecycle had archived, before the agent's thesis was consulted."""
+
+    def _place(self, wake, with_thesis=True):
+        tid = (T.create(T.Thesis(code="600000", name="A", theme="t",
+                                 claim="主线在流入", trader_id="slow"))
+               if with_thesis else None)
+        with _Patched(ARCHIVED):
+            oid = P.create_pending_order(
+                code="600000", name="A", theme="t", order_date="2026-01-05",
+                entry_low=9.0, entry_high=9.5, stop_loss=8.5, source="morning",
+                reason="A", trader_id="slow", thesis_id=tid, wake_agent=wake)
+        return oid, tid
+
+    def test_a_thesis_order_is_placed_and_the_bar_is_noted(self, book):
+        oid, tid = self._place(wake=True)
+        assert oid is not None and _status(oid)["status"] == "pending"
+        point = T.get_by_id(tid).checkpoints[-1]
+        assert point["kind"] == "theme_gate"
+        assert "主线已archived" in point["observation"]
+
+    def test_and_the_first_cycle_asks_the_agent(self, book):
+        oid, _ = self._place(wake=True)
+        sig = [a for a in _check(wake=True) if a["type"] == "order_signal"]
+        assert [s["order_id"] for s in sig] == [oid]
+
+    def test_without_wake_it_is_refused_as_before(self, book):
+        assert self._place(wake=False)[0] is None
+
+    def test_without_a_thesis_it_is_refused_as_before(self, book):
+        assert self._place(wake=True, with_thesis=False)[0] is None
+
+
+class TestTheLiveCallersPassTheFlag:
+    def test_both_order_paths_hand_the_agent_the_last_word(self):
+        # A NameError here is swallowed by the caller's except and every
+        # order silently stops — so the wiring is pinned, not assumed.
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1] / "alpha_agents/pipeline/tasks"
+        for f in ("morning_scan.py", "intraday_monitor.py"):
+            src = (root / f).read_text(encoding="utf-8")
+            assert "wake_agent=exit_decision.enabled()" in src, f
+        import alpha_agents.pipeline.tasks.morning_scan as m
+        import alpha_agents.pipeline.tasks.intraday_monitor as i
+        assert callable(m.exit_decision.enabled)
+        assert callable(i.exit_decision.enabled)

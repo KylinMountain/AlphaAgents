@@ -313,8 +313,14 @@ def _create_pending_order_impl(
     prediction_id: int | None = None,
     thesis_id: int | None = None,
     risk_themes: list[str] | None = None,
+    wake_agent: bool = False,
 ) -> int | None:
     """Create a pending order (挂单). Triggered when price enters entry zone.
+
+    ``wake_agent`` with a ``thesis_id``: the theme admission bar is noted on
+    the thesis instead of refusing the order. The agent chose this line with
+    a stated plan; the lifecycle's view reaches it on the first cycle as an
+    ``order_signal`` (see ``check_pending_orders``), where it is asked.
 
     ``prediction_id`` names the call this order came from. It is optional
     because a manual order has no forecast behind it, but when the caller
@@ -333,6 +339,7 @@ def _create_pending_order_impl(
 
     Returns order id, or None if duplicate/rejected.
     """
+    admission_note = None
     with _write_lock:
         conn = _get_conn()
         if not portfolio_book._valid_prediction(
@@ -411,7 +418,15 @@ def _create_pending_order_impl(
         # placement below, because "what it would have ordered" and "what it
         # refused to order" are the same intent with a different action.
         weak = theme_admits(theme)
-        if weak:
+        if weak and wake_agent and thesis_id:
+            # Not refused, and not silent either: the note goes on the thesis
+            # once the order exists, below, so the review can read the
+            # lifecycle's call against what the order went on to do.
+            admission_note = weak
+            logger.info("Order %s %s placed over the admission bar (%s) — "
+                        "the thesis is the agent's; it will be asked", code,
+                        name, weak)
+        elif weak:
             attribution.record_refusal(
                 conn, trader_id=trader_id, code=code, order_date=order_date,
                 refused_by=weak, theme=theme, thesis_id=thesis_id,
@@ -477,7 +492,17 @@ def _create_pending_order_impl(
         zone = f"{entry_low:.2f}-{entry_high:.2f}" if entry_low and entry_high else "市价"
         logger.info("Pending order: %s %s 介入区间%s 止损%s (%s)",
                      code, name, zone, stop_loss or "无", source)
-        return cursor.lastrowid
+        placed = cursor.lastrowid
+    # Outside the lock: add_checkpoint takes the same non-reentrant lock.
+    if admission_note and placed:
+        try:
+            thesis.add_checkpoint(int(thesis_id),
+                                  f"下单时主线系统判断: {admission_note}；按 agent 的论点照下",
+                                  thesis.ACTIVE, kind="theme_gate")
+        except Exception as e:
+            logger.warning("Could not note the admission bar on thesis #%s: %s",
+                           thesis_id, e)
+    return placed
 
 
 def check_pending_orders(

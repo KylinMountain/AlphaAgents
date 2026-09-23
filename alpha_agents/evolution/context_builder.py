@@ -115,6 +115,25 @@ def build_morning_context(themes: list[dict], stats: str,
         reviews = ""
     if reviews:
         sections.append(reviews)
+    # Its own read of yesterday's close and the watchlist it wrote, with the
+    # market's grade of every earlier list (evolution.market_review).
+    try:
+        import sqlite3
+
+        from alpha_agents.config import DATA_DIR
+        from alpha_agents.evolution import market_review
+        hist = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+        try:
+            read = market_review.inject(_get_conn(), hist,
+                                        trader_id or DEFAULT_TRADER)
+        finally:
+            hist.close()
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Yesterday's market review unavailable: %s", e)
+        read = ""
+    if read:
+        sections.append(read)
     if mode != "baseline":
         # ``knowledge`` lets the caller render once and hand the *same string*
         # back for hashing. Without it the caller would have to re-render, and

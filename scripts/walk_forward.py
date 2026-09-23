@@ -44,7 +44,7 @@ What it refuses
 The honest ceiling
 ------------------
 This is **mechanistic walk-forward, not a point-in-time model backtest** (plan
-§6): today's model weights have already seen these dates. M1 calls no model at
+§6): whether today's model saw these dates in training is unknown. M1 calls no model at
 all, so what it can show is that the clock, the isolation, the T+1 settlement
 and the book work end to end over a real window. The decider below is a
 **placeholder whose only job is to produce orders** — it is not a claim about
@@ -248,8 +248,8 @@ ENTRY_ZONES = {
 #: not run is not a hedge, it is a false statement, and the previous round's
 #: summary kept saying "no news" over a run that read news.
 LIMITATIONS = (
-    "mechanistic walk-forward, not a point-in-time model backtest: today's "
-    "model weights have already seen these dates",
+    "mechanistic walk-forward, not a point-in-time model backtest: whether "
+    "today's model saw these dates in training is not known to this run",
     "the theme is a synthetic line with no score, so the theme gate passes "
     "every order by design — this window does not test the gate",
     "ST status comes from stocks.db, which holds the current name rather than "
@@ -280,9 +280,10 @@ PLACEHOLDER_LIMITATIONS = (
 
 #: What a model-backed run additionally cannot show.
 LLM_LIMITATIONS = (
-    "the model's weights have already read these dates, so a strong result "
-    "is at least as likely to be recall as signal — this is the reason "
-    "historical replay screens candidates and never promotes them",
+    "the model's training cutoff is not recorded here, so whether it saw "
+    "these dates cannot be ruled in or out; a strong result could be recall "
+    "as well as signal — this is the reason historical replay screens "
+    "candidates and never promotes them, and forward (live) days decide",
     "the news feed is the free flash stream only; the paid columns are not "
     "replayable, so nothing here speaks for them",
     "the model chooses *within* a fixed panel of the previous session's "

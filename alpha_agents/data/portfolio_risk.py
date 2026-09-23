@@ -160,11 +160,21 @@ def record_equity_mark(date: str, price_map: dict[str, float] | None = None,
     # included) subtracted by ``get_available_capital``, so equity is cash
     # plus the mark. Adding a separately-computed unrealized here would
     # credit that slippage straight back.
-    cash = get_available_capital(trader_id)
+    #
+    # But ``get_available_capital`` is *buying power*: it also subtracts what
+    # pending orders have earmarked. An earmark is still the trader's money.
+    # Marking without it made every resting order a loss — on 2026-09-22 the
+    # breakout book, with no position and +1,498 realised, marked 601,298
+    # (four pending orders × 100,050), the 12% drawdown gate fired, and every
+    # order after that was cancelled for a drawdown made of its own orders.
+    from alpha_agents.data import reservations
+    reserved = reservations.unconsumed_total(_get_conn(), trader_id)
+    cash = get_available_capital(trader_id) + reserved
     equity = round(cash + market_value, 2)
     mark = {
         "date": date, "trader_id": trader_id,
         "equity": equity, "cash": round(cash, 2),
+        "reserved": round(reserved, 2),
         "market_value": round(market_value, 2), "positions": len(positions),
         # Recorded so a later reader knows which marks are soft. A day
         # marked at cost basis understates both gains and drawdown.

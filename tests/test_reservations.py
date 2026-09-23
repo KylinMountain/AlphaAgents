@@ -557,3 +557,43 @@ class TestReservationsFollowTheOrderLifecycle:
         assert row["state"] == R.RELEASED
         assert row["reason"] == "第一遍", \
             "the first finisher's reason is the record"
+
+
+class TestAnEarmarkIsNotALoss:
+    """Buying power subtracts what pending orders have earmarked; equity must
+    not. On 2026-09-22 the live breakout book — no position, +1,498 realised —
+    marked 601,298 because four resting orders each held 100,050. The 12%
+    drawdown gate read that curve and cancelled every order after it, so the
+    more the trader tried to buy the deeper its "drawdown" went."""
+
+    def test_resting_orders_do_not_move_the_equity_mark(
+            self, store, traders_dir, theme):
+        from alpha_agents.data.portfolio_risk import record_equity_mark
+        _write_trader(traders_dir, "slow", SLOW)
+        flat = record_equity_mark("2026-01-05", trader_id="slow")
+        for code in ("600000", "000001", "000002"):
+            assert P.create_pending_order(
+                code=code, name="A", theme="t", order_date="2026-01-06",
+                entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+                source="morning", reason="A", trader_id="slow") is not None
+        assert P.get_available_capital("slow") < flat["cash"], \
+            "precondition: the earmarks did reduce buying power"
+        mark = record_equity_mark("2026-01-06", trader_id="slow")
+        assert mark["equity"] == flat["equity"] == 500_000
+        assert mark["reserved"] > 0
+
+    def test_resting_orders_are_not_a_drawdown(
+            self, store, traders_dir, theme):
+        from alpha_agents.data.portfolio_risk import (
+            current_drawdown, record_equity_mark)
+        _write_trader(traders_dir, "slow", SLOW)
+        record_equity_mark("2026-01-05", trader_id="slow")
+        for code in ("600000", "000001", "000002"):
+            P.create_pending_order(
+                code=code, name="A", theme="t", order_date="2026-01-06",
+                entry_low=9.0, entry_high=11.0, stop_loss=8.5,
+                source="morning", reason="A", trader_id="slow")
+        record_equity_mark("2026-01-06", trader_id="slow")
+        dd = current_drawdown("slow")
+        assert dd["drawdown_pct"] == 0.0
+        assert dd["blocked"] is False

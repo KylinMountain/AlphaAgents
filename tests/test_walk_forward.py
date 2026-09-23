@@ -919,27 +919,42 @@ class TestTheObservationIsAttributable:
         assert cited["supporting"] and cited["opposing"]
         assert LC.candidates_citing(102)[0]["cited_as"] == ["opposing"]
 
-    def test_the_note_reaches_the_next_day_and_not_the_day_it_was_written(self):
-        """The loop's last arrow, and its one lookahead guard.
-
-        An observation written at the close of D has to be visible to the
-        decision on D+1 and invisible on D. Without the second half, a re-run
-        of a day could decide using knowledge distilled from that day's own
-        result — which is the leak the whole as-of apparatus exists to stop.
-        """
+    def test_the_note_is_recorded_but_no_longer_shown(self):
+        """Since 2026-09-23 the fixed-formula observation stays in
+        learning_candidates and is not read into the prompt: read 81 times
+        over 16 sessions, it changed nothing the trader bought."""
         ctx = self._ctx()
         out = walk_forward._distil(ctx, _START, self._trades(
             [(5.0, -3.0), (4.0, -2.0), (0.5, 2.0), (0.2, 1.0)]))
         assert out is not None
+        assert LC.get_candidate(out["candidate_id"]) is not None
+        assert "T-1" not in walk_forward._knowledge_block(ctx, _SESSIONS[22])
 
-        assert walk_forward._knowledge_block(ctx, _START) == "", (
+    def test_a_trade_review_reaches_the_next_day_and_not_the_day_it_was_written(self):
+        """The loop's last arrow, and its one lookahead guard.
+
+        A review written at the close of D has to be visible to the decision
+        on D+1 and invisible on D. Without the second half, a re-run of a day
+        could decide using its own result — the leak the as-of apparatus
+        exists to stop.
+        """
+        from alpha_agents.data.memory_store import _get_conn
+        from alpha_agents.evolution import trade_review as TRV
+        ctx = self._ctx()
+        facts = {"position_id": 9001, "code": "600000", "name": "测试",
+                 "open_date": _SESSIONS[0], "close_date": _START, "sessions": 3,
+                 "t1_change_pct": 4.0, "peak_pct": 6.9, "peak_session": 0,
+                 "worst_pct": -5.0, "return_pct": -4.8, "giveback_pp": 11.7}
+        TRV.save(_get_conn(), facts, {"verdict": "错", "right": "",
+                                      "wrong": "冲高没走", "next_time": "先兑现一半"},
+                 ctx.trader)
+        _get_conn().commit()
+
+        assert "逐笔复盘" not in walk_forward._knowledge_block(ctx, _START), (
             "the day it was written can see it")
-
         block = walk_forward._knowledge_block(ctx, _SESSIONS[22])
-        assert "【你自己的交易记录" in block
-        assert "n=4" in block
-        assert "#101" in block and "#104" in block, (
-            f"the block did not name the episodes it rests on:\n{block}")
+        assert "【你自己的逐笔复盘】" in block
+        assert "吐回11.7个点" in block and "下次：先兑现一半" in block
 
 
 class TestASupportCountMustBeAboutReturnsNotGroupMembership:

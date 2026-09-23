@@ -884,6 +884,23 @@ CREATE TABLE IF NOT EXISTS playbooks (
 );
 CREATE INDEX IF NOT EXISTS idx_playbooks_status ON playbooks(status);
 
+-- One review per closed position, written by the trader that held it.
+-- ``facts_json`` is computed from daily_kline, sealed at close_date; the
+-- trader's words are in ``lesson_json``. The numbers in the prompt's summary
+-- line come from facts_json only, never from the words.
+CREATE TABLE IF NOT EXISTS trade_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER NOT NULL UNIQUE,
+    trader_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    close_date TEXT NOT NULL,
+    facts_json TEXT NOT NULL,
+    lesson_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_trade_reviews_trader
+    ON trade_reviews(trader_id, close_date);
+
 CREATE TABLE IF NOT EXISTS evolution_metrics (
     date TEXT PRIMARY KEY,
     intraday_hit_rate_7d REAL,

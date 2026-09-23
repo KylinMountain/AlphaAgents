@@ -905,6 +905,15 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Sentiment cycle computation failed: %s", e)
 
+    # Each trader reviews every trade it has closed and not yet reviewed —
+    # its own words over numbers computed from daily_kline, read back before
+    # its next decisions (see evolution.trade_review). A trade closed today is
+    # skipped until its day's bar is on disk (17:30), and picked up tomorrow.
+    try:
+        await _review_closed_trades(today)
+    except Exception as e:
+        logger.warning("Trade reviews failed: %s", e)
+
     # Phase 2: extract lessons + consolidate principles
     try:
         from alpha_agents.evolution import post_review
@@ -977,3 +986,29 @@ async def run_review() -> str | None:
         logger.warning("Review archive failed: %s", e)
 
     return report
+
+
+async def _review_closed_trades(today: str) -> int:
+    """Write the missing per-trade reviews for every trader. Returns count."""
+    import sqlite3
+
+    from alpha_agents.config import DATA_DIR
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.data.trader import load_traders
+    from alpha_agents.evolution import trade_review
+    from alpha_agents.model_factory import create_model
+
+    model = create_model()
+    hist = sqlite3.connect(
+        f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+    n = 0
+    try:
+        for trader in load_traders():
+            n += await trade_review.review_closed(
+                _get_conn(), hist, trader_id=trader.id, as_of=today,
+                model=model, trader=trader)
+    finally:
+        hist.close()
+    logger.info("Trade reviews written: %d", n)
+    return n
+

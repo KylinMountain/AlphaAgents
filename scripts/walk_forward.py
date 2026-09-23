@@ -1373,6 +1373,7 @@ def _learn(ctx, day: str) -> dict:
     distilled = _distil(ctx, day, trades) if closed_today else None
     ctx.counters["learning_days"] += 1
     ctx.review = _review(ctx, day)
+    ctx.counters["trade_reviews"] += _review_trades(ctx, day, conn)
     if distilled is not None:
         ctx.counters["learning_candidates"] += 1
         logger.info("%s: observation #%d over n=%d (%d support / %d oppose)",
@@ -1380,6 +1381,36 @@ def _learn(ctx, day: str) -> dict:
                     distilled["supporting"], distilled["opposing"])
     return {"date": day, "labels": labels, "closed_total": len(trades),
             "closed_today": len(closed_today), "distilled": distilled}
+
+
+def _review_trades(ctx, day: str, conn) -> int:
+    """The trader's own review of each trade it closed today.
+
+    Facts from bars sealed at ``day`` (each trade reads only up to its own
+    close); the words from the run's journaled model, so the review is
+    recorded and replayable like every other call. A placeholder run has no
+    model and stores the facts alone, which still feed the summary line.
+    """
+    from alpha_agents.data.trader import get_trader
+    from alpha_agents.evolution import trade_review as TRV
+
+    try:
+        hist = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("%s: trade review needs market history: %s", day, exc)
+        return 0
+    try:
+        job = TRV.review_closed(conn, hist, trader_id=ctx.trader, as_of=day,
+                                model=ctx.model, trader=get_trader(ctx.trader))
+        loop = getattr(ctx, "loop", None)
+        return (loop.run_until_complete(job) if loop is not None
+                else asyncio.run(job))
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("%s: trade review failed: %s", day, exc)
+        return 0
+    finally:
+        hist.close()
 
 
 def _review(ctx, day: str) -> list:
@@ -1470,14 +1501,21 @@ def _knowledge_block(ctx, day: str) -> str:
     #
     # `as_of=day` is what keeps reading two stores honest: a note written
     # after this session is the future's own answer.
-    from alpha_agents.evolution.journal import own_trade_notes
     from alpha_agents.evolution import review as RV
 
-    notes = own_trade_notes(day, durable=getattr(ctx, "durable_journal", None))
-    # The numbers come first: a note is this trader's account of itself, and
-    # the review is the part of that account market data can contradict.
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.evolution import trade_review as TRV
+
+    # The trader's own review of each trade it closed, before ``day``. This
+    # replaced ``own_trade_notes`` in the prompt: those were one fixed-formula
+    # statistic ("T-1 涨幅高于中位数的 6 笔…") restated daily, read 81 times
+    # over 16 sessions with no change in what the trader bought. The notes
+    # are still written to learning_candidates; they are no longer shown.
+    trades = TRV.inject(_get_conn(), ctx.trader, before=day)
+    # The numbers come first: the review is the part of this trader's account
+    # of itself that market data can contradict.
     measured = RV.as_text(getattr(ctx, "review", []) or [])
-    return "\n\n".join(x for x in (measured, notes) if x)
+    return "\n\n".join(x for x in (measured, trades) if x)
 
 
 def _build_model(timeout: float | None):

@@ -541,7 +541,8 @@ async def run(price_map: dict[str, float], signals: list[dict],
     if not positions:
         return []
 
-    context = build_context(positions, price_map, signals)
+    context = _with_reviews(build_context(positions, price_map, signals),
+                            trader_id)
     trader = None
     if trader_id:
         from alpha_agents.data.trader import get_trader
@@ -564,6 +565,27 @@ async def run(price_map: dict[str, float], signals: list[dict],
     logger.info("Exit decisions: %s",
                 ", ".join(f"{d['code']}={d['action']}" for d in decisions))
     return apply(decisions, positions, price_map)
+
+
+def _with_reviews(context: str, trader_id: str | None,
+                  before: str | None = None) -> str:
+    """The trader's own trade reviews above the positions it must decide on.
+
+    The sell decision is where the give-back is made — 13 replay trades ran to
+    a median peak of several percent and were closed near flat — so it is the
+    decision that most needs the trader's record of how its exits went.
+    ``before`` keeps a replay from reading a review of a later close.
+    """
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.data.trader import DEFAULT_TRADER
+    from alpha_agents.evolution import trade_review
+    try:
+        block = trade_review.inject(_get_conn(), trader_id or DEFAULT_TRADER,
+                                    before=before)
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Trade reviews unavailable for the exit: %s", e)
+        return context
+    return f"{block}\n\n{context}" if block else context
 
 
 def note_unanswered(signals: list[dict] | None,
@@ -648,6 +670,7 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                            news_by_theme=news_by_theme,
                            mechanical_stops=mechanical_stops,
                            phase=phase)
+    context = _with_reviews(context, getattr(trader, "id", None), before=day)
     # Every exit from here notes the wake-ups that got no answer, including
     # the failure paths — those are the cases where *nothing* was answered,
     # and "the model timed out" must not settle into the book as "the agent

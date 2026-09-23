@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from alpha_agents.evolution.feedback import (
     inject_cognition,
     inject_sentiment,
@@ -11,6 +13,8 @@ from alpha_agents.evolution.feedback import (
     inject_recent_lessons,
     inject_playbooks,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def knowledge_in_force() -> str:
@@ -97,10 +101,20 @@ def build_morning_context(themes: list[dict], stats: str,
     # to remember. Until 2026-09-22 the review had this and the morning scan
     # did not, so the decision that could act on the memory was the one
     # without it.
-    from alpha_agents.evolution.journal import own_trade_notes
-    notes = own_trade_notes()
-    if notes:
-        sections.append(notes)
+    #
+    # Since 2026-09-23 that memory is the trader's review of each trade it
+    # closed (``trade_review``), not ``own_trade_notes`` — which was one
+    # fixed-formula statistic restated daily, with nothing in it to act on.
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.data.trader import DEFAULT_TRADER
+    from alpha_agents.evolution import trade_review
+    try:
+        reviews = trade_review.inject(_get_conn(), trader_id or DEFAULT_TRADER)
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Trade reviews unavailable: %s", e)
+        reviews = ""
+    if reviews:
+        sections.append(reviews)
     if mode != "baseline":
         # ``knowledge`` lets the caller render once and hand the *same string*
         # back for hashing. Without it the caller would have to re-render, and

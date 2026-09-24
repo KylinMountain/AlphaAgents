@@ -33,7 +33,10 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
     """Run all three steps for one trader. Never raises; returns counts."""
     from alpha_agents.evolution import handbook, market_review, trade_review
 
-    counts = {"trade_reviews": 0, "market_review": 0, "handbook": 0}
+    # The *_failed counts are what a replay's report checks before it shows a
+    # number: a day whose review timed out is a day the trader did not learn.
+    counts = {"trade_reviews": 0, "market_review": 0, "handbook": 0,
+              "market_review_failed": 0, "handbook_failed": 0}
     try:
         counts["trade_reviews"] = await trade_review.review_closed(
             conn, hist, trader_id=trader_id, as_of=day, model=model,
@@ -49,11 +52,18 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                                      facts=facts_text, model=model,
                                      record=record_text, context=context):
             counts["market_review"] = 1
+        elif model is not None:
+            # write() returns None without a model or facts; both are ruled
+            # out here, so None is an error or an unreadable reply.
+            counts["market_review_failed"] = 1
 
     opportunity = "\n".join(x for x in (
         exposure_text, market_review.missed(conn, trader_id, up_to=day)) if x)
     if counts["trade_reviews"] or counts["market_review"]:
-        if await handbook.consolidate(conn, trader_id, as_of=day, model=model,
-                                      trader=trader, opportunity=opportunity):
+        got = await handbook.consolidate(conn, trader_id, as_of=day, model=model,
+                                         trader=trader, opportunity=opportunity)
+        if got:
             counts["handbook"] = 1
+        elif got is False:
+            counts["handbook_failed"] = 1
     return counts

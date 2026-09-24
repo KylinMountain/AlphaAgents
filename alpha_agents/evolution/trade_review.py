@@ -27,7 +27,6 @@ review task builds one. This module never builds a client of its own.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sqlite3
@@ -170,7 +169,9 @@ async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
     """
     if model is None:
         return dict(NO_WORDS)
-    from agents import Agent, Runner
+    from agents import Agent
+
+    from alpha_agents.model_factory import run_agent
 
     instructions = _INSTRUCTIONS
     if trader is not None and getattr(trader, "extra_prompt", ""):
@@ -182,8 +183,8 @@ async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
     try:
         agent = Agent(name="trade_review", instructions=instructions,
                       model=model, tools=[])
-        result = await asyncio.wait_for(Runner.run(agent, message, max_turns=2),
-                                        timeout=_TIMEOUT)
+        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+                                  label="trade_review")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Trade review for %s failed (%s) — facts only",
                        f.get("code"), e)

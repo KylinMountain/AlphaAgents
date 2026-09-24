@@ -64,6 +64,8 @@ import time
 from pathlib import Path
 
 from agents import Agent, Runner
+
+from alpha_agents.model_factory import run_agent
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.config import PROMPTS_DIR
@@ -606,10 +608,12 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     started = time.monotonic()
     try:
         if budget is None:
-            result = await Runner.run(agent, message, max_turns=max_turns)
+            result = await run_agent(agent, message, max_turns=max_turns,
+                                         label="t1_decide")
         else:
             with use_research_budget(budget):
-                result = await Runner.run(agent, message, max_turns=max_turns)
+                result = await run_agent(agent, message, max_turns=max_turns,
+                                         label="t1_decide")
     except MaxTurnsExceeded as exc:
         # A model that spends its whole turn budget asking questions has not
         # said what to buy, and "it did not answer" is not "buy nothing" — the

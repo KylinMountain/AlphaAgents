@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 
 from agents import Agent, Runner
+
+from alpha_agents.model_factory import run_agent
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.agents import t1_decider
@@ -181,10 +183,12 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     started = time.monotonic()
     try:
         if budget is None:
-            result = await Runner.run(agent, message, max_turns=turns)
+            result = await run_agent(agent, message, max_turns=turns,
+                                         label="sector_stock_select")
         else:
             with use_research_budget(budget):
-                result = await Runner.run(agent, message, max_turns=turns)
+                result = await run_agent(agent, message, max_turns=turns,
+                                         label="sector_stock_select")
     except MaxTurnsExceeded as exc:
         return {
             "stocks": [], "refused": [], "raw": "",

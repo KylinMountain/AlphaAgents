@@ -194,3 +194,32 @@ def test_the_live_search_is_bounded_above(monkeypatch):
                         lambda texts: [[0.0]] * len(texts))
     NI.search_news("光伏")
     assert seen["until"] is not None
+
+
+def test_a_lost_review_step_is_counted(tmp_path, monkeypatch, hist):
+    """A timeout used to cost the day's lesson with nothing counted."""
+    from alpha_agents import config
+    from alpha_agents.data import memory_store
+    from alpha_agents.evolution import close_day, handbook, market_review
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(memory_store, "MEMORY_DB_PATH", tmp_path / "m.db", raising=False)
+    monkeypatch.setattr(memory_store._local, "conn", None, raising=False)
+    conn = memory_store._get_conn()
+
+    async def write(conn, **kw):
+        return None                      # the model timed out
+    rewrites = []
+
+    async def consolidate(conn, trader_id, **kw):
+        rewrites.append(1)
+        return False
+    monkeypatch.setattr(market_review, "write", write)
+    monkeypatch.setattr(handbook, "consolidate", consolidate)
+    got = asyncio.run(close_day.review_day(
+        conn, hist, trader_id="default", trader=None, day="2026-01-07",
+        model=object(), facts_text="事实"))
+    assert got["market_review_failed"] == 1
+    assert got["handbook_failed"] == 0 and not rewrites, "nothing new to rewrite from"
+    conn.close()
+    memory_store._local.conn = None

@@ -25,7 +25,6 @@ sandbox, because ``DATA_DIR`` is the sandbox there.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sqlite3
@@ -199,24 +198,29 @@ def _review_listing(reviews) -> str:
 
 
 async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
-                      model, trader=None, opportunity: str = "") -> bool:
+                      model, trader=None, opportunity: str = "") -> bool | None:
     """Rewrite the handbook from every review up to ``as_of``. Never raises.
 
-    Returns whether a new version was written. Nothing is written without a
-    model, or when the reply is unreadable — the previous handbook stands.
+    ``True`` when a new version was written; ``None`` when there was nothing
+    to do (no model, nothing reviewed and nothing missed); ``False`` when a
+    rewrite was attempted and failed — the model errored or its reply was
+    unreadable — and the previous handbook stands. The caller counts the last
+    case: a replay that lost rewrites is not the replay it claims to be.
     """
     from alpha_agents.evolution.trade_review import reviews_for
 
     if model is None:
-        return False
+        return None
     reviews = reviews_for(conn, trader_id, up_to=as_of)
     # What it missed is reason enough: "the market rose and I was out" is a
     # lesson before the first trade has closed.
     if not reviews and not opportunity:
-        return False
+        return None
     current = load(trader_id)
     previous = {r["id"]: r for r in _rules(trader_id)}
-    from agents import Agent, Runner
+    from agents import Agent
+
+    from alpha_agents.model_factory import run_agent
     message = (f"## 现在的守则\n\n{current or '（还没有）'}\n\n"
                f"## 你的逐笔复盘（{len(reviews)} 笔，编号是交易编号）\n\n"
                f"{_review_listing(reviews) or '（还没有平仓的交易）'}"
@@ -224,8 +228,8 @@ async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
     try:
         agent = Agent(name="handbook", instructions=_INSTRUCTIONS,
                       model=model, tools=[])
-        result = await asyncio.wait_for(Runner.run(agent, message, max_turns=2),
-                                        timeout=_TIMEOUT)
+        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+                                  label="handbook")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Handbook rewrite for %s failed (%s: %s) — keeping the old one",
                        trader_id, type(e).__name__, e)

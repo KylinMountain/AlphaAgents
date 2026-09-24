@@ -16,6 +16,8 @@ window") a comparison of the filter rather than of two samples.
     ALPHAAGENTS_LLM_MODE=live             the default; nothing is written
     ALPHAAGENTS_LLM_MODE=record           call the provider, write down the exchange
     ALPHAAGENTS_LLM_MODE=replay-recorded  never call the provider; answer from the file
+    ALPHAAGENTS_LLM_MODE=resume           answer from the file while it lasts, then
+                                          call the provider and keep recording
 
 A different axis from ``evolution.replay_mode``
 -----------------------------------------------
@@ -35,10 +37,19 @@ What it deliberately does not do
   (``Runner.run``, never ``run_streamed``); a journal that captured the first
   chunk and stopped would replay a truncated answer. In ``record`` and
   ``replay-recorded`` a streaming call raises; ``live`` is untouched.
-* **It does not resume.** The first write of a process replaces the run's
-  journal, naming how many lines it dropped. Appending would let a second run of
-  the same window serve the *first* run's answers — evidence that is wrong
-  rather than absent, which is the one failure worth being illiberal about.
+* **``record`` does not resume.** Its first write replaces the run's journal,
+  naming how many lines it dropped. Appending would let a second run of the same
+  window serve the *first* run's answers — evidence that is wrong rather than
+  absent, which is the one failure worth being illiberal about.
+* **``resume`` is a replay that is allowed to run past the end.** A run that
+  stopped — the provider ran out of credit, the machine went down — is re-run
+  from its first session in a fresh sandbox: every call it already made is
+  answered from the recording, *verified* request by request exactly as in
+  ``replay-recorded``, so the rebuilt state is the state the run had. At the
+  first call the recording cannot answer — its end, or a call that had failed —
+  the tail is set aside and the run goes back to the provider, recording as it
+  goes. A request that differs from the recording still raises: a resume that
+  answered anyway would splice two different runs into one.
 * **It covers the agent model only** (``model_factory.create_model``). The digest,
   embedding and VPA clients have their own call paths and are not journaled. They
   are named here rather than implied, so no one reads a recording as complete.
@@ -66,7 +77,7 @@ from alpha_agents import config
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LIVE", "RECORD", "REPLAY", "MODES", "RECORDING_MODES", "MODE_ENV",
+__all__ = ["LIVE", "RECORD", "REPLAY", "RESUME", "MODES", "RECORDING_MODES", "MODE_ENV",
            "RUN_ID_ENV", "Journal", "LlmJournalError", "RecordedCallFailed",
            "ReplayDivergence", "ReplayExhausted", "StreamingNotRecorded",
            "digest", "journal", "journal_path", "journaled", "policy_binding",
@@ -80,12 +91,13 @@ RUN_ID_ENV = "ALPHAAGENTS_RUN_ID"
 LIVE = "live"
 RECORD = "record"
 REPLAY = "replay-recorded"
-MODES = (LIVE, RECORD, REPLAY)
+RESUME = "resume"
+MODES = (LIVE, RECORD, REPLAY, RESUME)
 
 #: The modes a journal can exist in. ``live`` is not among them: a live run has
 #: no journal, which is the whole content of the word. Refusing it here means an
 #: object that could only ever be silently inert cannot be built.
-RECORDING_MODES = (RECORD, REPLAY)
+RECORDING_MODES = (RECORD, REPLAY, RESUME)
 
 DEFAULT_RUN_ID = "default"
 JOURNAL_DIRNAME = "llm_journal"
@@ -391,7 +403,10 @@ class Journal:
         self.mode = mode
         self.run_id = run_id
         self.path = Path(path)
-        self._replace = replace
+        self._replace = replace and mode != RESUME
+        #: In ``resume``: whether the recording has run out and calls now go
+        #: to the provider.
+        self.live = mode == RECORD
         self._lock = threading.Lock()
         self._handle = None
         self._seq = 0
@@ -522,6 +537,13 @@ class Journal:
 
         actual = digest(payload)
         if record.get("request_hash") != actual:
+            # The first differing path names *where*; the request itself says
+            # *what*. Saved beside the journal so the two can be diffed.
+            try:
+                self.path.with_name(f"{self.path.stem}.divergence-{seq}.json").write_text(
+                    _canonical(payload), encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Could not save the diverging request: %s", exc)
             raise ReplayDivergence(
                 f"call #{seq} asks something the recording does not have.\n"
                 f"    recorded {record.get('request_hash')}\n"
@@ -533,6 +555,43 @@ class Journal:
 
         self._cursor += 1
         return ChatCompletion.model_validate(record["response_json"])
+
+    def resume(self, request: dict) -> ChatCompletion | None:
+        """The recorded answer while the recording lasts; ``None`` once it has not.
+
+        ``None`` means the caller must go to the provider — and by then the
+        unanswerable tail (a failed call and everything after it) has been set
+        aside and the journal is appending from this call on.
+        """
+        if self.live:
+            return None
+        if self._records is None:
+            self._records = self._read() if self.path.exists() else []
+        if (self._cursor < len(self._records)
+                and self._records[self._cursor].get("kind") != "llm_error"):
+            return self.replay(request)
+        self._go_live()
+        return None
+
+    def _go_live(self) -> None:
+        kept = self._cursor
+        with self.path.open(encoding="utf-8") if self.path.exists() else _Empty() as h:
+            lines = [ln for ln in h if ln.strip()]
+        if len(lines) > kept:
+            aside = self.path.with_name(
+                f"{self.path.stem}.resume-tail-{datetime.now():%Y%m%d%H%M%S}.jsonl")
+            aside.write_text("".join(lines[kept:]), encoding="utf-8")
+            self.path.write_text("".join(lines[:kept]), encoding="utf-8")
+            logger.warning("Resume: %d recorded call(s) answered, %d set aside in %s "
+                           "(a failed call and what followed it); the provider "
+                           "answers from call #%d on", kept, len(lines) - kept,
+                           aside.name, kept)
+        else:
+            logger.warning("Resume: all %d recorded call(s) answered; the provider "
+                           "answers from call #%d on", kept, kept)
+        with self._lock:
+            self._seq = kept
+        self.live = True
 
     def _read(self) -> list[dict]:
         if not self.path.exists():
@@ -580,6 +639,16 @@ def _capture_response(response: Any) -> Any:
 
 # ── the client ──────────────────────────────────────────────────────────────
 
+class _Empty:
+    """A missing file read as no lines."""
+
+    def __enter__(self):
+        return iter(())
+
+    def __exit__(self, *exc):
+        return False
+
+
 class _JournalCompletions:
     """``chat.completions`` with the journal in front of it."""
 
@@ -604,6 +673,10 @@ class _JournalCompletions:
                 f"set {MODE_ENV}={LIVE} if this one is deliberate")
         if self._journal.mode == REPLAY:
             return self._journal.replay(kwargs)
+        if self._journal.mode == RESUME:
+            recorded = self._journal.resume(kwargs)
+            if recorded is not None:
+                return recorded
         try:
             response = await self._inner.create(**kwargs)
         except BaseException as exc:

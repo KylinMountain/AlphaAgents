@@ -22,6 +22,7 @@ string invites exactly the retry that just burned the budget.
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import contextvars
 import functools
@@ -333,7 +334,10 @@ def with_timeout(fn, timeout: int | None = None):
                 return result
 
         started = time.monotonic()
-        future = _POOL.submit(fn, *args, **kwargs)
+        # The worker thread must see this call's context — the replay's
+        # as-of lives in a contextvar, and a thread without it read "now".
+        ctx = contextvars.copy_context()
+        future = _POOL.submit(ctx.run, fn, *args, **kwargs)
         try:
             result = future.result(timeout=limit)
             if active is not None:
@@ -374,3 +378,69 @@ def with_timeout(fn, timeout: int | None = None):
             return result
 
     return wrapper
+
+
+def _async_with_timeout(fn, timeout: int | None = None):
+    """:func:`with_timeout` for the agent loop, with the budget taken in call order.
+
+    The agents SDK runs a turn's parallel tool calls at once, a sync tool on a
+    thread each. The budget was claimed and refunded on those threads, so which
+    of two parallel calls got the last slot — and the ``denied`` count echoed
+    back to the model — depended on thread timing. Measured 2026-09-24: a
+    replay of a recorded run diverged at call #6 on ``"denied": 2`` vs ``1``,
+    and a replay that diverges cannot resume.
+
+    Here the claim runs on the event loop, before the first ``await``. The SDK
+    starts a turn's tool tasks in the model's order and the loop runs them in
+    that order, so the claims do too. Only the data read goes to a thread.
+    """
+    limit = timeout or TOOL_TIMEOUT
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        active = current_research_budget()
+        if active is not None:
+            allowed, reason = active.claim(fn.__name__, args, kwargs)
+            if not allowed:
+                logger.info("Research budget refused %s: %s", fn.__name__, reason)
+                result = _budget_refusal(fn.__name__, reason, active)
+                active.record_tool(fn.__name__, args, kwargs, result, status="denied")
+                return result
+        started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        # The budget is a contextvar; the worker thread must see the same one.
+        ctx = contextvars.copy_context()
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(_POOL, lambda: ctx.run(fn, *args, **kwargs)),
+                timeout=limit)
+        except asyncio.TimeoutError:
+            logger.warning("Tool %s exceeded %ds — reported as unavailable "
+                           "so the run continues", fn.__name__, limit)
+            result = (f'{{"error": "数据源 {fn.__name__} 超过 {limit}秒未响应，'
+                      f'本次不可用。不要重试这个工具，用你已有的信息继续，'
+                      f'并在报告里说明缺了什么。"}}')
+            status = "timeout"
+        except Exception as e:                        # noqa: BLE001
+            logger.warning("Tool %s failed after %.1fs: %s", fn.__name__,
+                           time.monotonic() - started, e)
+            result = (f'{{"error": "数据源 {fn.__name__} 调用失败：'
+                      f'{str(e)[:120]}。不要重试，用已有信息继续。"}}')
+            status = "error"
+        else:
+            status = "ok"
+            if active is not None and _is_no_data(result):
+                active.refund(fn.__name__, args, kwargs)
+                status = "no_data"
+        if active is not None:
+            active.record_tool(fn.__name__, args, kwargs, result, status=status,
+                               elapsed_ms=int((time.monotonic() - started) * 1000))
+        return result
+
+    return wrapper
+
+
+def budgeted_tool(fn):
+    """An agent tool: a deadline, the research budget, claimed in call order."""
+    from agents import function_tool
+    return function_tool(_async_with_timeout(fn))

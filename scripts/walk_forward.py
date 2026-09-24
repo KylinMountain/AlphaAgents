@@ -181,6 +181,7 @@ from alpha_agents.evolution import (  # noqa: E402
     world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
+from alpha_agents.evolution.replay_mode import mark_replay_process  # noqa: E402
 
 
 def _assert_actually_bound(replay: Path) -> None:
@@ -1438,6 +1439,11 @@ def _review_trades(ctx, day: str, conn) -> int:
         flows.close()
     ctx.counters["market_reviews"] += got.get("market_review", 0)
     ctx.counters["handbook_rewrites"] += got.get("handbook", 0)
+    ctx.counters["market_review_failed"] += got.get("market_review_failed", 0)
+    ctx.counters["handbook_failed"] += got.get("handbook_failed", 0)
+    for kind in ("market_review_failed", "handbook_failed"):
+        if got.get(kind):
+            ctx.failed_learning.append((day, kind))
     return got.get("trade_reviews", 0)
 
 
@@ -4362,6 +4368,8 @@ class Context:
                      if args.decider == "llm" else None)
         self.capacity: dict[str, int] = {}
         self.counters: Counter = Counter()
+        #: (day, kind) for every close-review step that failed; see integrity().
+        self.failed_learning: list[tuple[str, str]] = []
         self.last_world_read_set: dict | None = None
         self.world_read_set_hashes: list[str] = []
 
@@ -4553,6 +4561,16 @@ def _run_window(ctx, args) -> dict:
                              day)
             errors.append({"date": day, "stage": "decide",
                            "error": f"{type(exc).__name__}: {exc}"})
+            stop = _model_stop_reason(exc, errors, window, day)
+            if stop:
+                # Skipping on would fill the rest of the window with empty
+                # sessions and report them as a result. Stop instead: the
+                # journal holds every call so far, and a resume re-runs to here
+                # from the recording and carries on with the provider.
+                logger.error("%s: %s — the replay stops here. When the model is "
+                             "back: .venv/bin/python scripts/walk_resume.py "
+                             "--target %s", day, stop, _REPLAY_DIR)
+                raise SystemExit(EXIT_MODEL_DOWN) from exc
             if not args.keep_going:
                 raise
             placed = []
@@ -5112,6 +5130,8 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"回放目录      {_REPLAY_DIR}",
         f"本金          {start_capital:,.0f}",
         "",
+        *_integrity_lines(result),
+        "",
         "— 净值 —",
         f"期末 equity   {last['equity']:,.2f}",
         f"区间收益      {metrics['net_return_pct']:+.3f}%",
@@ -5253,6 +5273,82 @@ def _tool_call_lines(result: dict) -> list[str]:
         f"（买入 {buys} 笔，约 {per} 次/笔；只有它们能让"
         f"「结果」和「代价」一起被判断）",
     ]
+
+
+#: The file a run's arguments are saved to, for scripts/walk_resume.py.
+RUN_ARGS = "run-args.json"
+#: Exit status when the model is down and the run stopped to be resumed.
+EXIT_MODEL_DOWN = 3
+#: Consecutive sessions without a decision before a run stops.
+MAX_UNDECIDED_IN_A_ROW = 3
+
+
+def _model_stop_reason(exc: BaseException, errors: list[dict], window: list[str],
+                       day: str) -> str:
+    """Why this failure should stop the run, or ``""`` to carry on."""
+    from alpha_agents.model_factory import ModelsUnavailable
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, ModelsUnavailable):
+            return f"no model of the family can answer ({cause})"
+        cause = cause.__cause__ or cause.__context__
+    failed = {e["date"] for e in errors if e.get("stage") == "decide"}
+    upto = window[:window.index(day) + 1] if day in window else []
+    run = 0
+    for d in reversed(upto):
+        if d not in failed:
+            break
+        run += 1
+    if run >= MAX_UNDECIDED_IN_A_ROW:
+        return f"{run} sessions in a row without a decision"
+    return ""
+
+
+def integrity(result: dict) -> dict:
+    """Did every session decide, and every close review land?
+
+    A replay whose model timed out still produces a return and a direction
+    score, and the 2026-09-24 run showed them as if nothing had happened:
+    5 of 24 sessions had no decision, 4 market reviews and 4 handbook
+    rewrites were lost. Its numbers measured the gateway, not the trader.
+    """
+    ctx = result["ctx"]
+    decide = sorted({e["date"] for e in result["errors"] if e.get("stage") == "decide"})
+    learning = list(getattr(ctx, "failed_learning", []))
+    from alpha_agents.model_factory import SWITCHES
+    return {
+        "sessions": len(result["window"]),
+        "switched_calls": len(SWITCHES),
+        "decide_failed": decide,
+        "market_review_failed": sorted(d for d, k in learning if k == "market_review_failed"),
+        "handbook_failed": sorted(d for d, k in learning if k == "handbook_failed"),
+        "complete": not decide and not learning,
+    }
+
+
+def _integrity_lines(result: dict) -> list[str]:
+    i = integrity(result)
+    switched = (f"（另有 {i['switched_calls']} 次调用由同系列备用模型回答）"
+                if i.get("switched_calls") else "")
+    if i["complete"]:
+        return ["— 本轮是否完整 —",
+                f"完整：{i['sessions']}/{i['sessions']} 个交易日都做了决策，"
+                f"收盘复盘与守则改写没有失败{switched}"]
+
+    def days(xs):
+        return "、".join(d[5:] for d in xs[:8]) + ("…" if len(xs) > 8 else "")
+    lines = ["— 本轮是否完整 —",
+             "**不完整：下面的收益和复盘分数不能和完整的轮次比较**" + switched]
+    if i["decide_failed"]:
+        lines.append(f"  决策失败 {len(i['decide_failed'])}/{i['sessions']} 个交易日"
+                     f"（{days(i['decide_failed'])}）——这些天没有下单")
+    if i["market_review_failed"]:
+        lines.append(f"  盘面复盘失败 {len(i['market_review_failed'])} 次"
+                     f"（{days(i['market_review_failed'])}）")
+    if i["handbook_failed"]:
+        lines.append(f"  守则改写失败 {len(i['handbook_failed'])} 次"
+                     f"（{days(i['handbook_failed'])}）")
+    return lines
 
 
 def _error_kinds(errors: list[dict]) -> str:
@@ -5570,6 +5666,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         force=True)
+    # Every tool call from here on either knows the replay's instant or fails.
+    mark_replay_process()
+    # What a resume needs to re-run this window (scripts/walk_resume.py).
+    try:
+        (_REPLAY_DIR / RUN_ARGS).write_text(json.dumps(
+            {"argv": list(sys.argv[1:] if argv is None else argv)},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not save the run's arguments: %s", exc)
     result = run(args)
     report = write_report(result, args.out)
     print(report["summary"])

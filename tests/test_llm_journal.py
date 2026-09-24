@@ -548,3 +548,54 @@ class TestProcessJournal:
                     _records(first._journal.path)] == [0, 1]
         finally:
             llm_journal.reset_journal()
+
+
+class TestResume:
+    """A stopped run re-runs from its recording, then carries on live."""
+
+    def _record(self, tmp_path, replies):
+        j = _journal(tmp_path, RECORD)
+        client = journaled(_FakeClient(_Box(*replies)), j)
+        for _ in replies:
+            try:
+                asyncio.run(client.chat.completions.create(**ASK))
+            except RuntimeError:
+                pass
+        j.close()
+        return j.path
+
+    def test_recorded_calls_are_served_then_the_provider_answers(self, tmp_path):
+        from alpha_agents.llm_journal import RESUME
+        path = self._record(tmp_path, [completion("a"), completion("b")])
+        box = _Box(completion("c"))
+        j = Journal(mode=RESUME, run_id=RUN_ID, path=path)
+        client = journaled(_FakeClient(box), j)
+        got = [asyncio.run(client.chat.completions.create(**ASK)).choices[0].message.content
+               for _ in range(3)]
+        j.close()
+        assert got == ["a", "b", "c"]
+        assert len(box.requests) == 1, "only the unrecorded call reached the provider"
+        assert [r["seq"] for r in _records(path)] == [0, 1, 2]
+
+    def test_a_failed_call_is_asked_again_not_replayed(self, tmp_path):
+        from alpha_agents.llm_journal import RESUME
+        path = self._record(tmp_path, [completion("a"), RuntimeError("402 欠费"),
+                                       completion("never")])
+        box = _Box(completion("fresh"))
+        j = Journal(mode=RESUME, run_id=RUN_ID, path=path)
+        client = journaled(_FakeClient(box), j)
+        got = [asyncio.run(client.chat.completions.create(**ASK)).choices[0].message.content
+               for _ in range(2)]
+        j.close()
+        assert got == ["a", "fresh"]
+        assert [r["kind"] for r in _records(path)] == ["llm_call", "llm_call"]
+        assert list(tmp_path.glob("*.resume-tail-*.jsonl")), "the dropped tail is kept"
+
+    def test_a_different_request_still_refuses(self, tmp_path):
+        from alpha_agents.llm_journal import RESUME
+        path = self._record(tmp_path, [completion("a")])
+        j = Journal(mode=RESUME, run_id=RUN_ID, path=path)
+        client = journaled(_RefusingClient(), j)
+        other = {"model": "qwen-plus", "messages": [{"role": "user", "content": "changed"}]}
+        with pytest.raises(ReplayDivergence):
+            asyncio.run(client.chat.completions.create(**other))

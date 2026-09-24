@@ -27,7 +27,6 @@ passed in, as everywhere in this layer.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -136,15 +135,17 @@ async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: s
     ensure(conn)
     if model is None or not facts.strip():
         return None
-    from agents import Agent, Runner
+    from agents import Agent
+
+    from alpha_agents.model_factory import run_agent
     message = (f"## 今日盘面（{date}）\n\n{facts}"
                + (f"\n\n## 你今天的记录\n\n{record}" if record else "")
                + (f"\n\n{context}" if context else ""))
     try:
         agent = Agent(name="market_review", instructions=_INSTRUCTIONS,
                       model=model, tools=[])
-        result = await asyncio.wait_for(Runner.run(agent, message, max_turns=2),
-                                        timeout=_TIMEOUT)
+        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+                                  label="market_review")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Market review for %s failed (%s: %s)", trader_id,
                        type(e).__name__, e)

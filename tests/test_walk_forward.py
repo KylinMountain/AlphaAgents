@@ -1409,3 +1409,29 @@ class TestTheReviewIsNotTomorrowsShortlist:
         assert "今天没有下单" in text
         conn.close()
         memory_store._local.conn = None
+
+
+class TestAReplaySaysWhetherItIsComplete:
+    """2026-09-24: a run with 5 undecided sessions and 8 lost close-review
+    steps reported its return as if nothing had happened."""
+
+    def _result(self, errors=(), learning=()):
+        class _Ctx:
+            failed_learning = list(learning)
+        return {"ctx": _Ctx(), "window": ["2026-01-05", "2026-01-06", "2026-01-07"],
+                "errors": list(errors)}
+
+    def test_a_complete_run(self):
+        lines = walk_forward._integrity_lines(self._result())
+        assert "完整：3/3 个交易日都做了决策" in lines[1]
+
+    def test_lost_decisions_and_reviews_are_named(self):
+        r = self._result(errors=[{"date": "2026-01-06", "stage": "decide"},
+                                 {"date": "2026-01-06", "stage": "settle"}],
+                         learning=[("2026-01-05", "handbook_failed")])
+        i = walk_forward.integrity(r)
+        assert i["decide_failed"] == ["2026-01-06"] and not i["complete"]
+        text = "\n".join(walk_forward._integrity_lines(r))
+        assert "不能和完整的轮次比较" in text
+        assert "决策失败 1/3 个交易日（01-06）" in text
+        assert "守则改写失败 1 次（01-05）" in text

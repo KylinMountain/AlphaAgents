@@ -38,6 +38,23 @@ def set_replay_as_of(as_of: str | None) -> None:
     _as_of.set(as_of)
 
 
+#: Set once by a replay runner. Inside a replay process, "no as-of" is never
+#: "live" — it means the as-of was lost on the way (a worker thread without
+#: the context), and falling back to *now* serves the future. Measured
+#: 2026-09-24: 7% of get_stock_context calls in four 30-day replays answered
+#: with September 2026 bars for January 2026 decisions.
+_REPLAY_PROCESS = False
+
+
+def mark_replay_process() -> None:
+    global _REPLAY_PROCESS
+    _REPLAY_PROCESS = True
+
+
+def replay_process() -> bool:
+    return _REPLAY_PROCESS
+
+
 def get_replay_as_of() -> str | None:
     """Current replay as-of string, or None for live mode."""
     return _as_of.get()

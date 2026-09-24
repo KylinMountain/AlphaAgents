@@ -63,9 +63,17 @@ AS_OF_FIELDS = {
 
 
 def _as_of() -> str | None:
-    """当前回放时刻，None 表示实盘。"""
-    from alpha_agents.evolution.replay_mode import get_replay_as_of
-    return get_replay_as_of()
+    """当前回放时刻，None 表示实盘。
+
+    回放进程里拿到 None 不是实盘，是时间点在路上丢了（比如工具在没带上下文的
+    线程里跑）——这时按"今天"回答就是把未来喂给决策。2026-09-24 实测四轮 30 天
+    回放里 7% 的 get_stock_context 就是这样返回了 2026-09 的日线。所以抛错。
+    """
+    from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_process
+    as_of = get_replay_as_of()
+    if as_of is None and replay_process():
+        raise RuntimeError("回放中工具读不到回放时刻——拒绝按今天的数据回答")
+    return as_of
 
 
 def _snapshot_cut() -> str:
@@ -766,13 +774,10 @@ def get_my_state_fn(as_of: str = "") -> str:
 # 把"问题"写成它能判断何时该调用的描述。描述里**只写这个工具回答什么
 # 问题**，不写"什么时候该买"——那会变成 policy（见 lint_policy.py）。
 
-from agents import function_tool  # noqa: E402
-
-from alpha_agents.tools.budget import with_timeout  # noqa: E402
+from alpha_agents.tools.budget import budgeted_tool  # noqa: E402
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_market_regime(as_of: str = "") -> str:
     """今天这个市场能不能做——涨跌家数、涨停/跌停、炸板率、最高连板、
     昨日涨停股今日平均表现、板块集中度。
@@ -783,8 +788,7 @@ def get_market_regime(as_of: str = "") -> str:
     return get_market_regime_fn(as_of)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_theme_state(theme: str, as_of: str = "") -> str:
     """这条线在生命周期哪一段：该板块的涨停梯队、最高连板、龙头及其
     封单与炸板次数、板块资金流。
@@ -795,8 +799,7 @@ def get_theme_state(theme: str, as_of: str = "") -> str:
     return get_theme_state_fn(theme, as_of)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_stock_context(code: str, as_of: str = "") -> str:
     """这只票是什么状态：20/60 日价格结构、ATR 与日均波动、换手、
     近期资金流序列、连续涨停天数。
@@ -807,8 +810,7 @@ def get_stock_context(code: str, as_of: str = "") -> str:
     return get_stock_context_fn(code, as_of)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_intraday_shape(code: str, as_of: str = "") -> str:
     """今天分时怎么走的：开高低、VWAP、上下半场成交占比、冲高回落幅度、
     当前相对昨收的涨幅。
@@ -992,8 +994,7 @@ def get_event_context_fn(code: str, as_of: str = "",
         conn.close()
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_event_context(code: str, as_of: str = "",
                       days_back: int = 30, days_ahead: int = 30) -> str:
     """这只票附近有什么可知的事件：披露日历、当时 consensus/隐含预期、
@@ -1005,8 +1006,7 @@ def get_event_context(code: str, as_of: str = "",
     return get_event_context_fn(code, as_of, days_back, days_ahead)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_stock_memory(code: str) -> str:
     """我认识这只票吗：我自己过去看过它几次、买过几次、每次的理由与结果、
     我对它写过什么论点。
@@ -1017,8 +1017,7 @@ def get_stock_memory(code: str) -> str:
     return get_stock_memory_fn(code)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_my_state() -> str:
     """我今天手顺不顺：今日/本周已实现盈亏、最近 10 笔、连续亏损笔数、
     今天已经做了几个决策、当前敞口与主线集中度。
@@ -1041,8 +1040,7 @@ def _without_keys(raw: str, *keys: str) -> str:
     return _json(payload)
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_theme_state_no_flow(theme: str, as_of: str = "") -> str:
     """Theme state without any sector-flow fields.
 
@@ -1053,8 +1051,7 @@ def get_theme_state_no_flow(theme: str, as_of: str = "") -> str:
     return _without_keys(get_theme_state_fn(theme, as_of), "sector_flow")
 
 
-@function_tool
-@with_timeout
+@budgeted_tool
 def get_stock_context_no_flow(code: str, as_of: str = "") -> str:
     """Stock context without any fund-flow series."""
     return _without_keys(get_stock_context_fn(code, as_of), "fund_flow")

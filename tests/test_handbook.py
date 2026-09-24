@@ -122,7 +122,7 @@ class TestRewriting:
     def test_no_model_writes_nothing(self, conn):
         _review(conn, 1, "2026-01-05", -4.8, 6.9)
         assert asyncio.run(HB.consolidate(conn, "default", as_of="2026-01-05",
-                                          model=None)) is False
+                                          model=None)) is None
         assert HB.load("default") == ""
 
 

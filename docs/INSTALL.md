@@ -304,6 +304,24 @@ ALPHAAGENTS_DATA_DIR=/tmp/wf-test ALPHAAGENTS_LLM_MODE=record \
 - `ALPHAAGENTS_LLM_MODE=record` 会把每一次模型调用记录下来；之后用 `replay-recorded`
   可以不花 token 原样重放。
 - 30 天回放大约要 4 个小时，主要花在模型调用上。
+- **模型出问题时**：超时、限流、普通 5xx 会自动重试。模型不可用或费用不足
+  （`no_healthy_account`、402、额度不足）时，会自动切换到网关 `/models` 列表里
+  同一系列的模型（比如 `global:deepseek-v4.1-flash-sg` → `global:deepseek-v4.1-flash`
+  → `cn:deepseek-v4.1-flash`）。也可以用 `AGENT_FALLBACK_MODELS=a,b` 手动指定顺序。
+- **全部模型都不可用，或者连续 3 天没能做出决策**时，回放会停下（退出码 3），
+  而不是把剩下的交易日都空跑完。恢复后续跑：
+
+  ```bash
+  uv run python scripts/walk_resume.py --target /tmp/wf-test
+  ```
+
+  续跑会从第一天重新开始：已经记录的调用直接用记录里的回答，并逐条核对请求，
+  不花 token，几分钟就能走到断点；之后再切回真实调用，继续往下记录。
+  如果中间改过代码或数据，导致请求对不上，续跑会报错并指出哪里不同，
+  不会把两次不同的运行拼在一起。
+- 报告开头有一段「本轮是否完整」：有交易日没做成决策、复盘或守则改写失败，
+  或者有调用是由备用模型回答的，都会写在这里。标注为不完整的轮次，
+  不要拿来和其他轮比较。
 - 结果要和**等权大盘**比较超额，而不是只看绝对收益；样本少于 50 的结论不要当真。
   更多判断规则见 [`AGENTS.md`](../AGENTS.md) 的「Evidence rules」。
 - 回放有已知局限：概念成分股用的是现在的名单，不是当时的；模型的训练截止时间未知。

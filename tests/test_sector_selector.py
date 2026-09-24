@@ -90,3 +90,23 @@ def test_prompt_renders_all_fields():
     assert "{sector_cards}" not in got
     assert "AI" in got
     assert "2026-01-29" in got
+
+
+class TestTheDirectionStageReadsWhatTheTraderLearned:
+    """Until 2026-09-24 the one stage choosing directions read neither the
+    handbook nor the last review: three replays with different handbooks
+    picked the same directions on 16 of 30 days."""
+
+    def test_the_shipped_prompt_carries_the_knowledge(self):
+        got = S.build_message(day="2026-01-30", as_of_session="2026-01-29",
+                              sectors=SECTORS, knowledge="R2 主线内必须建仓")
+        assert "R2 主线内必须建仓" in got
+
+    def test_no_knowledge_says_so(self):
+        got = S.build_message(day="2026-01-30", as_of_session="2026-01-29",
+                              sectors=SECTORS)
+        assert "（还没有）" in got
+
+    def test_a_board_the_review_named_is_marked(self):
+        rows = [dict(SECTORS[0], source="复盘点名")]
+        assert "|复盘点名|" in S.format_sector_cards(rows)

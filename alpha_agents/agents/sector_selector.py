@@ -45,8 +45,8 @@ def format_sector_cards(rows: list[dict]) -> str:
     if not rows:
         return "（没有可评估方向）"
     lines = [
-        "|排名|方向|5日相对中位收益|上涨广度|5日广度变化|剔除头1后5日中位|资金覆盖|近5日净额合计(万元)|",
-        "|---|---|---|---|---|---|---|---|",
+        "|排名|方向|来源|5日相对中位收益|上涨广度|5日广度变化|剔除头1后5日中位|资金覆盖|近5日净额合计(万元)|",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         fund = row.get("fund_flow") or {}
@@ -55,6 +55,7 @@ def format_sector_cards(rows: list[dict]) -> str:
         coverage = "-" if covered is None or members is None else f"{covered}/{members}"
         lines.append(
             f"|{_show(row.get('rank'))}|{row.get('sector_id', '')}|"
+            f"{row.get('source') or '排名前列'}|"
             f"{_show((row.get('relative_returns_pct') or {}).get('5d'), '%')}|"
             f"{_show(row.get('advancers_pct'), '%')}|"
             f"{_show(row.get('breadth_improvement_5d_pp'), 'pp')}|"
@@ -65,7 +66,7 @@ def format_sector_cards(rows: list[dict]) -> str:
 
 def build_message(*, day: str, as_of_session: str, sectors: list[dict],
                   market: dict | None = None, news: list[dict] | None = None,
-                  template: str | None = None) -> str:
+                  template: str | None = None, knowledge: str = "") -> str:
     prompt = template if template is not None else load_prompt()
     fields = {
         "day": day,
@@ -76,6 +77,11 @@ def build_message(*, day: str, as_of_session: str, sectors: list[dict],
             f"• {row.get('time', '')} {row.get('title', '')}"
             for row in (news or [])) or "（无）",
         "max_selected": MAX_SELECTED,
+        # The trader's handbook and its last close review. This stage chooses
+        # the direction every later stage works inside, and until 2026-09-24
+        # it was the one stage that read neither: three 30-day replays with
+        # different handbooks picked the same directions on 16 of 30 days.
+        "knowledge": knowledge.strip() or "（还没有）",
     }
     try:
         text = prompt.format(**fields)
@@ -150,14 +156,15 @@ def parse_selection(text: str, offered: set[str],
 async def propose(*, day: str, as_of_session: str, sectors: list[dict],
                   market: dict | None = None, news: list[dict] | None = None,
                   model=None, template: str | None = None, tools: list | None = None,
-                  research_budget=None, max_turns: int | None = None) -> dict:
+                  research_budget=None, max_turns: int | None = None,
+                  knowledge: str = "") -> dict:
     if model is None:
         from alpha_agents.model_factory import create_model
         model = create_model()
     max_turns = max_turns or DEFAULT_MAX_TURNS
     message = build_message(
         day=day, as_of_session=as_of_session, sectors=sectors,
-        market=market, news=news, template=template)
+        market=market, news=news, template=template, knowledge=knowledge)
 
     # A tool-less stage may still carry the shared decision budget.
     from alpha_agents.tools.budget import ResearchBudget, use_research_budget

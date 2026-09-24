@@ -1697,7 +1697,36 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
     shortlist = [
         row for row in cards if row.get("rank") is not None
     ][:8]
+    # Discovery the trader can move. The top 8 is a fixed formula, so a board
+    # its close review said it never saw could not reach it the next morning
+    # however well the lesson was written. The boards that review named join
+    # the list — sealed before ``day``, so it is yesterday's word.
+    in_list = {row["sector_id"] for row in shortlist}
+    by_id = {row["sector_id"]: row for row in cards}
+    for name in _review_named_boards(ctx, day):
+        if name in by_id and name not in in_list and len(shortlist) < 8 + _REVIEW_ADDS:
+            shortlist.append(dict(by_id[name], source="复盘点名"))
+            in_list.add(name)
     return membership, cards, shortlist
+
+
+#: How many boards the last close review may add to the direction shortlist.
+_REVIEW_ADDS = 5
+
+
+def _review_named_boards(ctx, day: str) -> list[str]:
+    from alpha_agents.data.memory_store import _get_conn
+    from alpha_agents.evolution import market_review as MR
+    try:
+        MR.ensure(_get_conn())
+        row = _get_conn().execute(
+            "SELECT review_json FROM market_reviews WHERE trader_id = ? "
+            "AND date < ? ORDER BY date DESC LIMIT 1", (ctx.trader, day)).fetchone()
+        boards = (json.loads(row[0]).get("boards") or []) if row else []
+    except (sqlite3.Error, json.JSONDecodeError) as exc:
+        logger.warning("%s: last review's boards unavailable: %s", day, exc)
+        return []
+    return [b["name"] for b in boards if b.get("name")]
 
 
 def _build_sector_panel(ctx, day: str, ranking_day: str, membership,
@@ -2076,6 +2105,7 @@ def _sector_first_stage(ctx, day: str, ranking_day: str,
             tools=[],
             research_budget=budget,
             max_turns=sector_selector.DEFAULT_MAX_TURNS,
+            knowledge=_knowledge_block(ctx, day),
         )
         selected = [
             row["sector_id"] for row in verdict.get("themes") or []

@@ -1366,3 +1366,28 @@ class TestInitialAccountPerformanceMark:
             f"区间最大回撤  {metrics['max_drawdown_pct']:.3f}%"
             in report["summary"]
         )
+
+
+class TestTheReviewCanWidenTheShortlist:
+    """A board the close review said it never saw must be able to reach the
+    next morning's direction list; the top 8 alone is a fixed formula."""
+
+    def test_named_boards_are_read_from_before_the_day(self, tmp_path, monkeypatch):
+        from alpha_agents.data import memory_store
+        from alpha_agents.evolution import market_review as MR
+        monkeypatch.setattr(memory_store, "MEMORY_DB_PATH", tmp_path / "m.db",
+                            raising=False)
+        monkeypatch.setattr(memory_store._local, "conn", None, raising=False)
+        conn = memory_store._get_conn()
+        MR.ensure(conn)
+        conn.execute("INSERT INTO market_reviews (trader_id, date, facts, review_json) "
+                     "VALUES ('default', '2026-01-05', 'f', ?)",
+                     ('{"boards": [{"name": "PET铜箔"}], "watchlist": []}',))
+        conn.commit()
+
+        class _C:
+            trader = "default"
+        assert walk_forward._review_named_boards(_C(), "2026-01-06") == ["PET铜箔"]
+        assert walk_forward._review_named_boards(_C(), "2026-01-05") == []
+        conn.close()
+        memory_store._local.conn = None

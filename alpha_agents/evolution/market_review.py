@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import statistics
 
@@ -72,6 +73,21 @@ _INSTRUCTIONS = f"""你是这个账户的交易员。现在是收盘后，今天
   "watchlist": [{{"code": "600000", "name": "...", "why": "...", "buy_if": "...", "drop_if": "..."}}]}}"""
 
 
+def board_name(raw: str) -> str:
+    """The board's name as the concept table spells it.
+
+    The model echoes the facts line back — "脑机接口 +10.67%", "PCB概念（+1.4%）"
+    — and a name with its move attached matches no concept, so a board the
+    review named could not join the next morning's shortlist.
+    """
+    # Only a signed-or-bare number ending in % is a move; "中国AI 50" is a
+    # concept's own name and keeps its number.
+    move = r"[+\-−]?\d+(?:\.\d+)?\s*%"
+    name = re.sub(rf"\s*[（(]\s*{move}\s*[)）]\s*$", "", raw.strip())
+    name = re.sub(rf"\s+{move}.*$", "", name)
+    return name.strip()
+
+
 def _parse(text: str) -> dict | None:
     t = (text or "").strip()
     start, end = t.find("{"), t.rfind("}")
@@ -97,8 +113,10 @@ def _parse(text: str) -> dict | None:
     boards = []
     for b in raw.get("boards") or []:
         if isinstance(b, dict) and str(b.get("name") or "").strip():
-            boards.append({k: str(b.get(k) or "").strip()[:300] for k in
-                           ("name", "driver", "evidence", "why_missed", "next_time")})
+            row = {k: str(b.get(k) or "").strip()[:300] for k in
+                   ("name", "driver", "evidence", "why_missed", "next_time")}
+            row["name"] = board_name(row["name"])
+            boards.append(row)
     return {"market": str(raw.get("market") or "").strip()[:800],
             "themes": str(raw.get("themes") or "").strip()[:800],
             "boards": boards[:20],

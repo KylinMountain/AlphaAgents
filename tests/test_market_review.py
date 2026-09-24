@@ -143,3 +143,19 @@ class TestTheFactsComeFromTheSnapshots:
              patch("alpha_agents.data.snapshot_store.read_limit_pool",
                    return_value=None):
             assert CR.market_facts("2026-01-05") == ""
+
+
+class TestBoardNamesMatchTheConceptTable:
+    """The 2026-01 replay's review named "脑机接口 +10.67%": no concept is
+    called that, so none of the boards it named reached the shortlist."""
+
+    @pytest.mark.parametrize("raw,want", [
+        ("脑机接口 +10.67%", "脑机接口"),
+        ("海南自贸区 -2.93%", "海南自贸区"),
+        ("PCB概念（+1.42%）", "PCB概念"),
+        ("共封装光学(CPO)", "共封装光学(CPO)"),
+        ("中国AI 50", "中国AI 50"),   # a concept's own number stays
+    ])
+    def test_the_move_is_stripped(self, raw, want):
+        assert MR.board_name(raw) == want
+

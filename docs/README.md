@@ -58,6 +58,7 @@ the one place the exit side was measured against market history.
 
 | Question | Document | Role |
 |---|---|---|
+| How do I install, configure and run it, and write my own trader? | [`INSTALL.md`](INSTALL.md) | Operator guide: setup, every env var, traders, replays. Follows the code. |
 | What is this system supposed to become? | [`TRADER_CORE_DESIGN.md`](TRADER_CORE_DESIGN.md) | Normative target. Asserts nothing about what is built. |
 | **What actually exists in the code?** | [`TRADER_CORE_IMPLEMENTATION.md`](TRADER_CORE_IMPLEMENTATION.md) | Status record. Code is the source of truth; this file follows it. |
 | What are the non-negotiable invariants, and what enforces them? | [`GOLDEN_PRINCIPLES.md`](GOLDEN_PRINCIPLES.md) | Invariants + the mechanism that checks each. |

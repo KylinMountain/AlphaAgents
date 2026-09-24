@@ -282,55 +282,16 @@ web/              # React + Vite 前端
 
 ---
 
-<details>
-<summary><b>Quick Start</b></summary>
-
-### 1. 安装
+## Quick Start
 
 ```bash
-git clone git@github.com:KylinMountain/AlphaAgents.git
-cd AlphaAgents
-
-uv sync
-cp .env.example .env
+git clone https://github.com/KylinMountain/AlphaAgents.git && cd AlphaAgents
+uv sync && cp .env.example .env      # 填入 AGENT_* 模型凭证
+uv run python main.py run-v2         # 交易日调度器
 ```
 
-### 2. 配置模型
-
-一个用途一套凭证，命名只有一种形状 `<ROLE>_API_KEY / _BASE_URL / _MODEL`：
-
-```env
-SILICONFLOW_API_KEY=sk-xxx          # 兜底 embedding 与 digest
-
-# 决策与分析 Agent —— 要聪明
-AGENT_API_KEY=sk-xxx
-AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-AGENT_MODEL=qwen-plus
-
-# 新闻过滤与事件链接 —— 可以便宜
-DIGEST_API_KEY=sk-xxx
-DIGEST_BASE_URL=https://api.siliconflow.cn/v1
-DIGEST_MODEL=Qwen/Qwen2.5-7B-Instruct
-```
-
-`SUMMARY`（周报 / 复盘 / 上下文压缩）不写就继承 `DIGEST`，所以只想让摘要变便宜，
-单独写 `SUMMARY_*` 即可，不动任何决策路径。查看每个用途实际解析到哪个模型：
-
-```bash
-uv run python main.py llm-roles
-```
-
-兼容 OpenAI API 风格的模型服务。完整角色表与示例见 [`.env.example`](.env.example)。
-
-### 3. 构建新闻索引
-
-```bash
-uv run python main.py build-index
-```
-
-然后启动系统即可。
-
-</details>
+**完整的安装、配置、环境变量说明，以及怎么写自己的交易员、怎么用历史回放验证，见
+[`docs/INSTALL.md`](docs/INSTALL.md)。**
 
 ---
 

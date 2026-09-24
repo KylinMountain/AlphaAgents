@@ -37,7 +37,11 @@ from alpha_agents import config
 logger = logging.getLogger(__name__)
 
 MAX_RULES = 10
-_TIMEOUT = 180
+#: Measured 2026-09-24 on the live reasoning model: 180 s timed out on a
+#: ~10k-character input for both traders, with an empty message (a timeout's
+#: str() is ""), so the log said "failed ()". The close review task allows
+#: 1800 s in all.
+_TIMEOUT = 600
 
 
 def _dir(trader_id: str) -> Path:
@@ -223,8 +227,8 @@ async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
         result = await asyncio.wait_for(Runner.run(agent, message, max_turns=2),
                                         timeout=_TIMEOUT)
     except Exception as e:                            # noqa: BLE001
-        logger.warning("Handbook rewrite for %s failed (%s) — keeping the old one",
-                       trader_id, e)
+        logger.warning("Handbook rewrite for %s failed (%s: %s) — keeping the old one",
+                       trader_id, type(e).__name__, e)
         return False
     rules = _parse(result.final_output or "", set(previous))
     if not rules:

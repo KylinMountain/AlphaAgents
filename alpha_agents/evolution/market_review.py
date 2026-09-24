@@ -35,7 +35,11 @@ import sqlite3
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 180
+#: Measured 2026-09-24 on the live reasoning model: 180 s timed out on a
+#: ~10k-character input for both traders, with an empty message (a timeout's
+#: str() is ""), so the log said "failed ()". The close review task allows
+#: 1800 s in all.
+_TIMEOUT = 420
 
 #: What a board is to the trader today.
 KINDS = ("错过", "踩坑", "转向", "做对")
@@ -142,7 +146,8 @@ async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: s
         result = await asyncio.wait_for(Runner.run(agent, message, max_turns=2),
                                         timeout=_TIMEOUT)
     except Exception as e:                            # noqa: BLE001
-        logger.warning("Market review for %s failed: %s", trader_id, e)
+        logger.warning("Market review for %s failed (%s: %s)", trader_id,
+                       type(e).__name__, e)
         return None
     review = _parse(result.final_output or "")
     if review is None:

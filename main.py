@@ -412,7 +412,9 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.close_review import run_close_review
     scheduler.add_task(Task(
         "close_review", run_close_review,
-        dtime(19, 0), timeout_seconds=1800, catch_up_grace_minutes=240,
+        # Per trader: trade reviews, a 420 s market review, a 600 s handbook
+        # rewrite. Two traders on a slow reasoning model need the hour.
+        dtime(19, 0), timeout_seconds=3600, catch_up_grace_minutes=240,
     ))
 
     # Night scan: 20:00, every day (monitors foreign markets)

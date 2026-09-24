@@ -110,6 +110,7 @@ class TestSearch:
              patch.object(news_index, "datetime") as dt:
             dt.now.return_value.__sub__ = lambda *a: type(
                 "X", (), {"strftime": lambda self, f: "2026-09-08 00:00:00"})()
+            dt.now.return_value.strftime.return_value = "2026-09-09 00:00:00"
             hits = news_index.search_news("原油", hours=24)
 
         assert hits and hits[0]["source"] == "新浪7x24"
@@ -125,6 +126,7 @@ class TestSearch:
              patch.object(news_index, "datetime") as dt:
             dt.now.return_value.__sub__ = lambda *a: type(
                 "X", (), {"strftime": lambda self, f: "2026-09-08 00:00:00"})()
+            dt.now.return_value.strftime.return_value = "2026-09-09 00:00:00"
             hits = news_index.search_news("完全无关的东西", hours=24,
                                           min_score=0.9)
         assert hits == []

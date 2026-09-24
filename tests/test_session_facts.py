@@ -176,3 +176,20 @@ class TestTheWindowSearchRechecksStamps:
                             lambda texts: [[0.0]] * len(texts))
         got = NI.search_window("x", "2026-01-01 00:00:00", "2026-01-06 15:00:00")
         assert [h["title"] for h in got] == ["当天的新闻"]
+
+
+def test_the_live_search_is_bounded_above(monkeypatch):
+    """search_news had a since and no until: a mis-dated flash in the future
+    (two in the live index on 2026-09-24) answered every search."""
+    from alpha_agents.data import news_index as NI
+    seen = {}
+
+    class _Store:
+        def query(self, v, top_k, since=None, until=None):
+            seen["until"] = until
+            return []
+    monkeypatch.setattr(NI, "get_store", lambda: _Store())
+    monkeypatch.setattr("alpha_agents.data.embeddings.embed_texts",
+                        lambda texts: [[0.0]] * len(texts))
+    NI.search_news("光伏")
+    assert seen["until"] is not None

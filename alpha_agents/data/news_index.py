@@ -257,8 +257,13 @@ def search_news(query: str, hours: int = 24, top_k: int = 8,
         logger.warning("News search unavailable (embedding failed): %s", e)
         raise NewsSearchUnavailable(str(e)) from e
 
-    since = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-    hits = get_store().query(vector, top_k=top_k * 2, since=since)
+    now = datetime.now()
+    since = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    # Bounded above as well: a flash stamped in the future (a mis-parsed date;
+    # the index held two on 2026-09-24, one dated 2026-12-16) would otherwise
+    # answer every live search until that date came.
+    until = now.strftime("%Y-%m-%d %H:%M:%S")
+    hits = get_store().query(vector, top_k=top_k * 2, since=since, until=until)
 
     out = []
     for hit in hits:

@@ -211,3 +211,48 @@ button,input{font:inherit}.app{display:grid;grid-template-columns:218px minmax(0
 .theme-untracked{margin-bottom:12px}
 .theme-untracked .watchlist{margin-top:6px}
 .theme-untracked .sector-chip{font-size:12px;padding:4px 8px}
+/* Settings and traders (views/SettingsView.jsx, views/TradersView.jsx). The global
+   input reset is borderless for the search box; these fields need a frame. */
+.set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px;margin-top:14px}
+.set-field{margin-bottom:14px}
+.set-label{display:flex;flex-wrap:wrap;align-items:center;gap:7px;font-size:13px;font-weight:650;color:var(--text);margin-bottom:6px}
+.set-label code,.page-head code,.set-banner code,.set-help code,.card-title code{font-size:11.5px;font-weight:500;color:var(--muted);background:var(--surface-2);border-radius:5px;padding:1px 5px}
+.set-input{display:block;width:100%;box-sizing:border-box;height:34px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);padding:0 10px;font:inherit;font-size:13px}
+.set-input:focus{border-color:var(--blue);outline:0}
+select.set-input{padding-right:6px}
+.set-area{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
+.set-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+.set-narrow{display:inline-block;width:auto;min-width:130px}
+.set-input-row{display:flex;gap:8px;align-items:center}
+.set-help{margin:5px 0 0;font-size:12px;color:var(--muted);line-height:1.6}
+.set-src{font-size:11px;font-weight:500;border-radius:999px;padding:1px 7px;background:var(--surface-3);color:var(--muted)}
+.set-src.src-file{background:var(--blue-soft);color:var(--blue)}
+.set-src.src-environment{background:var(--violet-soft);color:var(--violet)}
+.set-flag{font-size:11px;font-weight:650;border-radius:999px;padding:1px 7px}
+.set-flag.warn{background:var(--amber-soft);color:var(--amber)}
+.set-switch{display:inline-flex;align-items:center;gap:7px;font-size:13px;cursor:pointer}
+.set-switch input{width:auto;padding:0}
+.set-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
+.btn.set-mini{height:28px;font-size:12px;white-space:nowrap;flex-shrink:0}
+.set-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:2px}
+.btn:disabled{opacity:.45;cursor:default}
+.set-effective{font-size:12.5px;color:var(--text-2);margin:0 0 12px;line-height:1.6;word-break:break-all}
+.set-ok{color:var(--green)!important;font-weight:650}
+.set-bad{color:var(--red)!important;font-weight:650}
+.set-result{margin-top:10px;font-size:12.5px;border-radius:8px;padding:8px 10px;background:var(--surface-2);line-height:1.6}
+.set-result.ok{background:var(--green-soft)}.set-result.ok b{color:var(--green)}
+.set-result.bad{background:var(--red-soft)}.set-result.bad b{color:var(--red)}
+.set-reply{margin-top:3px;word-break:break-all;color:var(--text)}
+.set-banner{border-radius:var(--radius);padding:11px 14px;margin-bottom:14px;font-size:13px;line-height:1.7;background:var(--blue-soft);color:var(--text)}
+.set-banner.warn{background:var(--amber-soft)}.set-banner.bad{background:var(--red-soft)}
+.set-banner a{color:var(--blue);font-weight:650}
+.set-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:0 14px}
+.set-traders{display:grid;grid-template-columns:240px minmax(0,1fr);gap:14px;align-items:start}
+.set-trader{display:block;width:100%;text-align:left;border:1px solid transparent;background:transparent;border-radius:8px;padding:8px 10px;cursor:pointer;color:var(--text)}
+.set-trader span{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+.set-trader:hover{background:var(--surface-2)}.set-trader.active{background:var(--blue-soft);border-color:var(--blue-soft)}
+.set-new .btn{white-space:nowrap;flex-shrink:0}
+.set-new{display:flex;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.set-diff{margin:8px 0 0;max-height:560px;overflow:auto;font-size:12px;line-height:1.55;background:var(--surface-2);border-radius:8px;padding:8px 10px;white-space:pre-wrap;word-break:break-all}
+.set-diff .add{background:var(--green-soft);color:var(--green)}.set-diff .del{background:var(--red-soft);color:var(--red)}
+@media (max-width:760px){.set-traders{grid-template-columns:1fr}.set-grid{grid-template-columns:1fr}}

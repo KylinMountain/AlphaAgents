@@ -1,5 +1,8 @@
 """Push notification support — Feishu (飞书), DingTalk, WeCom (企业微信), Telegram.
 
+Each sender takes an optional endpoint override so the settings page can
+send a test message to a webhook that is not saved yet.
+
 Configure via env vars:
   NOTIFY_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
   NOTIFY_DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
@@ -37,9 +40,10 @@ def _post(url: str, payload: dict, timeout: int = 10) -> bool:
         return False
 
 
-def send_feishu(title: str, text: str) -> bool:
+def send_feishu(title: str, text: str, webhook: str | None = None) -> bool:
     """Send a Feishu (飞书) robot message (rich text format)."""
-    if not _FEISHU_WEBHOOK:
+    webhook = webhook or _FEISHU_WEBHOOK
+    if not webhook:
         return False
     # Feishu rich text supports bold title + content
     content = f"**{title}**\n\n{text}"
@@ -49,12 +53,13 @@ def send_feishu(title: str, text: str) -> bool:
         "msg_type": "text",
         "content": {"text": content},
     }
-    return _post(_FEISHU_WEBHOOK, payload)
+    return _post(webhook, payload)
 
 
-def send_dingtalk(title: str, text: str) -> bool:
+def send_dingtalk(title: str, text: str, webhook: str | None = None) -> bool:
     """Send a DingTalk robot message (Markdown format)."""
-    if not _DINGTALK_WEBHOOK:
+    webhook = webhook or _DINGTALK_WEBHOOK
+    if not webhook:
         return False
     payload = {
         "msgtype": "markdown",
@@ -63,12 +68,13 @@ def send_dingtalk(title: str, text: str) -> bool:
             "text": f"## {title}\n\n{text}",
         },
     }
-    return _post(_DINGTALK_WEBHOOK, payload)
+    return _post(webhook, payload)
 
 
-def send_wecom(title: str, text: str) -> bool:
+def send_wecom(title: str, text: str, webhook: str | None = None) -> bool:
     """Send a WeCom (企业微信) robot message (Markdown format)."""
-    if not _WECOM_WEBHOOK:
+    webhook = webhook or _WECOM_WEBHOOK
+    if not webhook:
         return False
     # WeCom markdown has a 4096 char limit
     content = f"## {title}\n\n{text}"
@@ -78,20 +84,23 @@ def send_wecom(title: str, text: str) -> bool:
         "msgtype": "markdown",
         "markdown": {"content": content},
     }
-    return _post(_WECOM_WEBHOOK, payload)
+    return _post(webhook, payload)
 
 
-def send_telegram(title: str, text: str) -> bool:
+def send_telegram(title: str, text: str, bot_token: str | None = None,
+                  chat_id: str | None = None) -> bool:
     """Send a Telegram bot message (Markdown format)."""
-    if not _TELEGRAM_BOT_TOKEN or not _TELEGRAM_CHAT_ID:
+    bot_token = bot_token or _TELEGRAM_BOT_TOKEN
+    chat_id = chat_id or _TELEGRAM_CHAT_ID
+    if not bot_token or not chat_id:
         return False
-    url = f"https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     # Telegram MarkdownV2 needs escaping, use HTML instead
     message = f"<b>{title}</b>\n\n{text}"
     if len(message) > 4000:
         message = message[:3997] + "..."
     payload = {
-        "chat_id": _TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML",
     }

@@ -28,6 +28,12 @@ FRONTEND_DIR = _REPO_ROOT / "web" / "dist"
 
 app = FastAPI(title="AlphaAgents", docs_url=None, redoc_url=None)
 
+# The settings page: .env, trader files, handbooks. Included before the SPA
+# catch-all at the bottom of this file, which would otherwise answer first.
+from alpha_agents.server.settings_api import router as _settings_router  # noqa: E402
+
+app.include_router(_settings_router)
+
 # Reference to monitor (set by main.py cmd_web)
 _monitor = None
 

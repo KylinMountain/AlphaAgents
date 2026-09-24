@@ -30,29 +30,30 @@ DB_PATH = DATA_DIR / "stocks.db"
 CHROMA_PATH = DATA_DIR / "chroma"
 MEMORY_DB_PATH = DATA_DIR / "memory.db"
 
-# ---------------------------------------------------------------------------
-# Embedding model (OpenAI-compatible, for concept vector search)
-# Default: SiliconFlow free BGE-M3
-# ---------------------------------------------------------------------------
-EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
-EMBEDDING_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
+#: Endpoint and model each LLM role falls back to when ``.env`` leaves it
+#: unset. One table, read here and by the settings page, so the page's "in
+#: effect" line cannot drift from what the code does. A role's key falls back
+#: to ``SILICONFLOW_API_KEY``.
+LLM_DEFAULTS = {
+    # Concept vector search. SiliconFlow's free BGE-M3.
+    "EMBEDDING": ("https://api.siliconflow.cn/v1", "BAAI/bge-m3"),
+    # News filtering: a cheap model. SiliconFlow's free Qwen.
+    "DIGEST": ("https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-7B-Instruct"),
+    # The deciders. Any OpenAI-compatible provider.
+    "AGENT": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+}
 
-# ---------------------------------------------------------------------------
-# Digest LLM (OpenAI-compatible, cheap model for news filtering)
-# Default: SiliconFlow free Qwen
-# ---------------------------------------------------------------------------
-DIGEST_API_KEY = os.environ.get("DIGEST_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
-DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "https://api.siliconflow.cn/v1")
-DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
-# ---------------------------------------------------------------------------
-# Agent LLM (OpenAI-compatible, for strategist & geopolitical agents)
-# Works with any OpenAI-compatible provider: DashScope, DeepSeek, SiliconFlow, etc.
-# ---------------------------------------------------------------------------
-AGENT_API_KEY = os.environ.get("AGENT_API_KEY", os.environ.get("SILICONFLOW_API_KEY", ""))
-AGENT_BASE_URL = os.environ.get("AGENT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen-plus")
+def _llm(role: str) -> tuple[str, str, str]:
+    url, model = LLM_DEFAULTS[role]
+    return (os.environ.get(f"{role}_API_KEY", os.environ.get("SILICONFLOW_API_KEY", "")),
+            os.environ.get(f"{role}_BASE_URL", url),
+            os.environ.get(f"{role}_MODEL", model))
+
+
+EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL = _llm("EMBEDDING")
+DIGEST_API_KEY, DIGEST_BASE_URL, DIGEST_MODEL = _llm("DIGEST")
+AGENT_API_KEY, AGENT_BASE_URL, AGENT_MODEL = _llm("AGENT")
 
 # ---------------------------------------------------------------------------
 # DeepSeek LLM (backup for VPA analysis — prompt caching saves cost)

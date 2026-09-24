@@ -15,6 +15,8 @@ import LearnView from './views/LearnView'
 import EvolveView from './views/EvolveView'
 import SystemView from './views/SystemView'
 import UsageView from './views/UsageView'
+import SettingsView from './views/SettingsView'
+import TradersView from './views/TradersView'
 
 const NAV = [
   { group: 'Workspace', items: [
@@ -38,6 +40,10 @@ const NAV = [
     { id: 'memory', icon: '◎', label: '记忆与验证' },
     { id: 'usage', icon: '◐', label: 'Token 消耗' },
     { id: 'system', icon: '⚙', label: '系统状态' },
+  ] },
+  { group: 'Settings', items: [
+    { id: 'settings', icon: '⚒', label: '系统设置' },
+    { id: 'traders', icon: '☰', label: '交易员' },
   ] },
 ]
 
@@ -77,6 +83,19 @@ export default function App() {
   const { connected } = useWebSocket()
   const [view, setView] = useState(viewFromHash)
   const [now, setNow] = useState(() => new Date())
+  // First run: with no decision model configured nothing downstream can work,
+  // so say so on every page and open the settings when no page was asked for.
+  const [needsModel, setNeedsModel] = useState(false)
+  useEffect(() => {
+    fetch('/api/settings').then((r) => (r.ok ? r.json() : null)).then((s) => {
+      if (!s || s.onboarding?.agent_configured) return
+      setNeedsModel(true)
+      if (!window.location.hash) {
+        window.location.hash = '#/settings'
+        setView('settings')
+      }
+    }).catch(() => {})
+  }, [])
   const [dark, setDark] = useState(() => {
     try {
       const saved = localStorage.getItem('aa-theme')
@@ -210,6 +229,12 @@ export default function App() {
         </header>
 
         <main className="content">
+          {needsModel && view !== 'settings' && (
+            <div className="set-banner warn">
+              <b>还没有配置决策模型</b>，晨扫、选股和复盘都跑不起来。
+              {' '}<a href="#/settings">去系统设置</a>
+            </div>
+          )}
           {d.loading ? (
             <div className="card pad"><p className="empty-note">加载中…</p></div>
           ) : (
@@ -226,6 +251,8 @@ export default function App() {
               {view === 'memory' && <MemoryView {...d} />}
               {view === 'usage' && <UsageView {...d} />}
               {view === 'system' && <SystemView {...d} />}
+              {view === 'settings' && <SettingsView />}
+              {view === 'traders' && <TradersView />}
             </>
           )}
           <div className="footer-note">

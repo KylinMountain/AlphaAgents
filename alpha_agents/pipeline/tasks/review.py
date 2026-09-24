@@ -905,16 +905,6 @@ async def run_review() -> str | None:
     except Exception as e:
         logger.warning("Sentiment cycle computation failed: %s", e)
 
-    # Each trader reviews its own trades, rewrites its handbook, and writes
-    # its read of today's market with a watchlist for tomorrow — see
-    # pipeline.tasks.close_review. A trade closed today is skipped until its
-    # day's bar is on disk (17:30), and picked up by the next run.
-    try:
-        from alpha_agents.pipeline.tasks import close_review
-        await close_review.run(today)
-    except Exception as e:
-        logger.warning("Close review failed: %s", e)
-
     # Phase 2: extract lessons + consolidate principles
     try:
         from alpha_agents.evolution import post_review

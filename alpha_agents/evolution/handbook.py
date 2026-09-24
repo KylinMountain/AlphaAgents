@@ -129,9 +129,12 @@ _INSTRUCTIONS = f"""你是这个账户的交易员。下面是你现在的交易
 
 请重写你的守则：
 - 最多 {MAX_RULES} 条。每条都要是你下次交易时**能照着执行**的一句话，带具体的数（比例、ATR 倍数、天数）。
-- 每条必须写明来自哪几笔复盘（用复盘前面的编号 #数字），至少 1 笔。
+- 每条写明来自哪几笔复盘（用复盘前面的编号 #数字）；来自「你错过了什么」的守则可以不引用交易。
 - 保留仍然成立的守则，并**沿用它原来的编号**（R1、R2…）；复盘不再支持的就删掉；新守则用新编号。
 - 守则之间不能互相矛盾。宁少勿滥：说不清楚的不要写。
+- **错过和亏损一样是代价。** 下面若附了你的仓位与大盘对比、你错过的板块和观察名单的成绩，
+  写守则时要同时看：每一条"不买/否决"类守则，都要想清楚它会让你错过什么；
+  证据显示遵守反而更差的守则，要改或删。只会让你越来越少出手的守则，不是好守则。
 - 目标只有一个：盈利。守则是为这个服务的。
 
 只输出一个 JSON 对象：
@@ -189,7 +192,7 @@ def _review_listing(reviews) -> str:
 
 
 async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
-                      model, trader=None) -> bool:
+                      model, trader=None, opportunity: str = "") -> bool:
     """Rewrite the handbook from every review up to ``as_of``. Never raises.
 
     Returns whether a new version was written. Nothing is written without a
@@ -200,14 +203,17 @@ async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
     if model is None:
         return False
     reviews = reviews_for(conn, trader_id, up_to=as_of)
-    if not reviews:
+    # What it missed is reason enough: "the market rose and I was out" is a
+    # lesson before the first trade has closed.
+    if not reviews and not opportunity:
         return False
     current = load(trader_id)
     previous = {r["id"]: r for r in _rules(trader_id)}
     from agents import Agent, Runner
     message = (f"## 现在的守则\n\n{current or '（还没有）'}\n\n"
                f"## 你的逐笔复盘（{len(reviews)} 笔，编号是交易编号）\n\n"
-               f"{_review_listing(reviews)}")
+               f"{_review_listing(reviews) or '（还没有平仓的交易）'}"
+               + (f"\n\n## 你错过了什么\n\n{opportunity}" if opportunity else ""))
     try:
         agent = Agent(name="handbook", instructions=_INSTRUCTIONS,
                       model=model, tools=[])

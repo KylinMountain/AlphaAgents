@@ -49,17 +49,27 @@ def ensure(conn: sqlite3.Connection) -> None:
 
 _INSTRUCTIONS = f"""你是这个账户的交易员。现在是收盘后，今天全天的数据你都能看到（下面的数据由系统整理）。
 
-请写今天的盘面复盘：
-1. market：今天的盘面是什么样的？赚钱效应、情绪、资金主攻方向，两三句话，引用数据。
+请像职业短线交易员一样写今天的复盘：
+1. market：今天的盘面是什么样的？赚钱效应、情绪（涨停/跌停/炸板率/连板高度）、资金主攻方向，引用数据。
 2. themes：哪些主线是真的（资金+涨停+龙头都在），哪些只是一日游？为什么？
-3. watchlist：明天你会考虑的票，最多 {MAX_WATCH} 只（没有就空着，宁缺毋滥）。每只写：
+3. boards：对数据里列出的每一个「涨得最好」和「跌得最多」的板块，逐个回答：
+   - driver：驱动是什么——消息催化 / 利好落地（兑现） / 情绪（涨停、连板带动） / 资金（主力持续流入） / 超跌反弹 / 其他，可以多选但要分主次
+   - evidence：支持这个判断的数据（快讯条数、涨停数、连板高度、主力净额、上涨占比）
+   - why_missed：数据里标了你今天对它是「选中」「看到没选」还是「没看到」。选中的，说做得怎样；
+     看到没选的，说当时为什么没选、事后看对不对；没看到的，说你的发现环节缺了什么
+   - next_time：下次遇到同样的迹象，你具体怎么做才能在前面
+   跌的板块同样要回答：是不是你持有或看好过的，是什么让它跌。
+4. watchlist：明天你会考虑的票，最多 {MAX_WATCH} 只（没有就空着，宁缺毋滥）。每只写：
    - why：为什么看好，引用今天的数据
    - buy_if：明天出现什么情况你才会买（具体到价格或盘面条件）
    - drop_if：出现什么情况你就放弃
-如果附了你过去观察名单的成绩和你的交易守则，参考它们。目标只有一个：盈利。
+如果附了你的仓位与大盘的对比、过去观察名单的成绩和你的交易守则，参考它们。
+别只想着少亏：大盘涨而你不在场，也是亏。目标只有一个：盈利。
 
 只输出一个 JSON 对象：
-{{"market": "...", "themes": "...", "watchlist": [{{"code": "600000", "name": "...", "why": "...", "buy_if": "...", "drop_if": "..."}}]}}"""
+{{"market": "...", "themes": "...",
+  "boards": [{{"name": "...", "driver": "...", "evidence": "...", "why_missed": "...", "next_time": "..."}}],
+  "watchlist": [{{"code": "600000", "name": "...", "why": "...", "buy_if": "...", "drop_if": "..."}}]}}"""
 
 
 def _parse(text: str) -> dict | None:
@@ -84,8 +94,14 @@ def _parse(text: str) -> dict | None:
             continue
         watch.append({k: str(w.get(k) or "").strip()[:300]
                       for k in ("name", "why", "buy_if", "drop_if")} | {"code": code})
+    boards = []
+    for b in raw.get("boards") or []:
+        if isinstance(b, dict) and str(b.get("name") or "").strip():
+            boards.append({k: str(b.get(k) or "").strip()[:300] for k in
+                           ("name", "driver", "evidence", "why_missed", "next_time")})
     return {"market": str(raw.get("market") or "").strip()[:800],
             "themes": str(raw.get("themes") or "").strip()[:800],
+            "boards": boards[:20],
             "watchlist": watch}
 
 
@@ -205,11 +221,14 @@ def inject(conn: sqlite3.Connection, hist: sqlite3.Connection | None,
     if not row:
         return ""
     day, rj = row[0], json.loads(row[1])
-    lines = [f"【你昨天收盘后写的盘面复盘（{day}）】"]
+    lines = [f"【你上一个交易日收盘后写的复盘（{day}）】"]
     if rj.get("market"):
         lines.append(f"盘面：{rj['market']}")
     if rj.get("themes"):
         lines.append(f"主线：{rj['themes']}")
+    for b in rj.get("boards") or []:
+        lines.append(f"◆ {b['name']}｜驱动：{b.get('driver', '')}｜"
+                     f"为什么没选中：{b.get('why_missed', '')}｜下次：{b.get('next_time', '')}")
     for w in rj.get("watchlist") or []:
         lines.append(f"● 观察 {w['code']} {w.get('name', '')}：{w.get('why', '')}"
                      f"｜买入条件：{w.get('buy_if', '')}｜放弃条件：{w.get('drop_if', '')}")
@@ -218,3 +237,29 @@ def inject(conn: sqlite3.Connection, hist: sqlite3.Connection | None,
         if g:
             lines.append(g)
     return "\n".join(lines)
+
+
+def missed(conn: sqlite3.Connection, trader_id: str, *, up_to: str,
+           days: int = 5) -> str:
+    """The boards the trader's recent reviews say it missed, in its own words.
+
+    Read by the handbook rewrite, so a rule that keeps it out of the market
+    is weighed against what being out cost.
+    """
+    ensure(conn)
+    rows = conn.execute(
+        "SELECT date, review_json FROM market_reviews WHERE trader_id = ? "
+        "AND date <= ? ORDER BY date DESC LIMIT ?", (trader_id, up_to, days)
+    ).fetchall()
+    lines = []
+    for day, rj in reversed(rows):
+        try:
+            boards = json.loads(rj).get("boards") or []
+        except json.JSONDecodeError:
+            continue
+        for b in boards:
+            if b.get("why_missed") or b.get("next_time"):
+                lines.append(f"{day} {b['name']}（{b.get('driver', '')}）："
+                             f"{b.get('why_missed', '')}｜下次：{b.get('next_time', '')}")
+    return "\n".join(lines)
+

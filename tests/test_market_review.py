@@ -80,7 +80,7 @@ class TestTheMorningReadsIt:
     def test_yesterdays_read_and_watchlist(self, conn, hist):
         _store(conn)
         text = MR.inject(conn, hist, "default", before="2026-01-06")
-        assert "【你昨天收盘后写的盘面复盘（2026-01-05）】" in text
+        assert "【你上一个交易日收盘后写的复盘（2026-01-05）】" in text
         assert "买入条件：回踩不破10" in text
 
     def test_nothing_from_the_same_day(self, conn, hist):

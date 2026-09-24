@@ -1384,43 +1384,97 @@ def _learn(ctx, day: str) -> dict:
 
 
 def _review_trades(ctx, day: str, conn) -> int:
-    """The trader's own review of each trade it closed today.
+    """The trader's close of day: trade reviews, market review, handbook.
 
-    Facts from bars sealed at ``day`` (each trade reads only up to its own
-    close); the words from the run's journaled model, so the review is
-    recorded and replayable like every other call. A placeholder run has no
-    model and stores the facts alone, which still feed the summary line.
+    ``evolution.close_day`` in the order a trader does it, from facts sealed
+    at ``day``: the market history a replay reads is the full live database,
+    so every step here reads bars on or before ``day`` and nothing later. The
+    words come from the run's journaled model, so they are recorded and
+    replayable; a placeholder run has no model and stores facts alone.
+
+    Returns the number of trade reviews written (the counter's old meaning);
+    the market review and handbook rewrite are counted separately.
     """
     from alpha_agents.data.trader import get_trader
-    from alpha_agents.evolution import trade_review as TRV
+    from alpha_agents.evolution import close_day
+    from alpha_agents.evolution import session_facts as SF
 
     try:
         hist = sqlite3.connect(
             f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+        flows = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
     except sqlite3.Error as exc:
-        logger.warning("%s: trade review needs market history: %s", day, exc)
+        logger.warning("%s: close review needs market history: %s", day, exc)
         return 0
-    from alpha_agents.evolution import handbook
-
-    trader = get_trader(ctx.trader)
     loop = getattr(ctx, "loop", None)
     run = (loop.run_until_complete if loop is not None else asyncio.run)
     try:
-        # The handbook in force while these trades were held is the one
-        # written before today; the rewrite below is dated today and is
-        # first read by tomorrow's morning.
-        n = run(TRV.review_closed(conn, hist, trader_id=ctx.trader, as_of=day,
-                                  model=ctx.model, trader=trader,
-                                  handbook_before=day))
-        if n and run(handbook.consolidate(conn, ctx.trader, as_of=day,
-                                          model=ctx.model, trader=trader)):
-            ctx.counters["handbook_rewrites"] += 1
-        return n
+        members = _review_members(ctx)
+        prev = hist.execute("SELECT MAX(date) FROM daily_kline WHERE date < ?",
+                            (day,)).fetchone()[0] or day
+        news = [n.get("title", "") for n in
+                _news_window(day, prev, 2000, phase="close")]
+        facts = SF.compute(hist, day=day, members=members,
+                           names=_review_names(ctx), flows=flows,
+                           news_titles=news, ours=_ours_today(ctx, day, conn))
+        log = getattr(ctx, "exposure_log", [])[-10:]
+        exposure = (SF.exposure_line(
+            [(d, e) for d, e, _ in log],
+            SF.market_move(hist, log[0][0], day),
+            (log[-1][2] / log[0][2] - 1) * 100 if log[0][2] else None)
+            if log else "")
+        got = run(close_day.review_day(
+            conn, hist, trader_id=ctx.trader, trader=get_trader(ctx.trader),
+            day=day, model=ctx.model, facts_text=SF.render(facts),
+            exposure_text=exposure, handbook_before=day))
     except Exception as exc:                          # noqa: BLE001
-        logger.warning("%s: trade review failed: %s", day, exc)
+        logger.warning("%s: close review failed: %s", day, exc)
         return 0
     finally:
         hist.close()
+        flows.close()
+    ctx.counters["market_reviews"] += got.get("market_review", 0)
+    ctx.counters["handbook_rewrites"] += got.get("handbook", 0)
+    return got.get("trade_reviews", 0)
+
+
+def _ours_today(ctx, day: str, conn) -> dict[str, str]:
+    """What the trader did with each concept today, from its own records.
+
+    The direction stage's shortlist is what it saw; the selected set is what
+    it took. Everything else was never in front of it — which is the
+    difference between a discovery miss and a judgement miss.
+    """
+    from alpha_agents.evolution.session_facts import SEEN, SELECTED
+    out: dict[str, str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT shortlist_json, selected_json FROM theme_opportunity_sets "
+            "WHERE trader_id = ? AND day = ?", (ctx.trader, day)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    for shortlist, selected in rows:
+        for name in json.loads(shortlist or "[]"):
+            out.setdefault(name, SEEN)
+        for name in json.loads(selected or "[]"):
+            out[name] = SELECTED
+    return out
+
+
+def _review_names(ctx) -> dict[str, str]:
+    cached = getattr(ctx, "_review_names_cache", None)
+    if cached is not None:
+        return cached
+    names: dict[str, str] = {}
+    try:
+        c = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        names = dict(c.execute("SELECT code, name FROM stocks"))
+        c.close()
+    except sqlite3.Error as exc:
+        logger.warning("stock names unavailable: %s", exc)
+    ctx._review_names_cache = names
+    return names
 
 
 def _review(ctx, day: str) -> list:
@@ -1522,6 +1576,20 @@ def _knowledge_block(ctx, day: str) -> str:
     # over 16 sessions with no change in what the trader bought. The notes
     # are still written to learning_candidates; they are no longer shown.
     trades = TRV.inject(_get_conn(), ctx.trader, before=day)
+    # And the last close's market review — boards, drivers, what it missed,
+    # its watchlist and that list's grade — sealed before ``day``.
+    from alpha_agents.evolution import market_review as MR
+    try:
+        hist = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
+        try:
+            read = MR.inject(_get_conn(), hist, ctx.trader, before=day)
+        finally:
+            hist.close()
+    except sqlite3.Error as exc:
+        logger.warning("%s: market review unavailable: %s", day, exc)
+        read = ""
+    trades = "\n\n".join(x for x in (trades, read) if x)
     # The numbers come first: the review is the part of this trader's account
     # of itself that market data can contradict.
     measured = RV.as_text(getattr(ctx, "review", []) or [])
@@ -4548,6 +4616,12 @@ def _run_window(ctx, args) -> dict:
                 # labels are derived from the ledger, so they have to be
                 # written at a moment where "today" is the day that just
                 # closed rather than the day about to open.
+                # The day's exposure, for the close review's "what did being
+                # out cost" line — the input the handbook rewrite lacked.
+                eq = float(equity["equity"] or 0)
+                ctx.exposure_log = getattr(ctx, "exposure_log", []) + [(
+                    day, float(equity.get("market_value") or 0) / eq * 100
+                    if eq else 0.0, eq)]
                 learning = _learn(ctx, day)
             logger.info("%s: equity %s (open %d, pending %d)", day,
                         equity["equity"], equity["open_positions"],

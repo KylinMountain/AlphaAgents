@@ -1,16 +1,14 @@
-"""After the close: each trader reviews its trades, its rules and the market.
+"""The trader's close of day, live: 19:00, once the day's bars are on disk.
 
-Three steps per trader, in this order because each reads the one before:
+The steps are ``evolution.close_day`` — trade reviews, the market review,
+the handbook rewrite — shared with the replay. This module assembles what the
+live side knows: the day's facts from ``daily_kline`` via
+``evolution.session_facts`` (limit-ups, streaks, failed limit-ups, each
+concept's move, money and news), which boards the trader tracked or held,
+and its exposure against the market from its equity marks.
 
-1. the per-trade reviews of everything it closed (``evolution.trade_review``);
-2. its handbook rewritten from those reviews (``evolution.handbook``);
-3. its read of today's market and a watchlist for tomorrow
-   (``evolution.market_review``), written with its handbook in front of it.
-
-The market facts are assembled here from the day's snapshots and handed to
-the model as text. The analyst review that runs before this used tools to
-fetch them and timed out at 300 s every day from 09-18 to 09-23; a read of
-data already on disk cannot.
+When the day's K-line is not on disk yet, :func:`market_facts` reads the
+intraday snapshots instead, so the review still has the tape.
 """
 
 from __future__ import annotations
@@ -64,6 +62,77 @@ def market_facts(today: str) -> str:
     return "\n".join(lines)
 
 
+def _members() -> tuple[dict[str, list[str]], dict[str, str]]:
+    from alpha_agents.config import DB_PATH
+    members: dict[str, list[str]] = {}
+    names: dict[str, str] = {}
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        for concept, code in conn.execute(
+                "SELECT c.name, cs.stock_code FROM concept_stocks cs "
+                "JOIN concepts c ON c.id = cs.concept_id"):
+            members.setdefault(concept, []).append(code)
+        names = dict(conn.execute("SELECT code, name FROM stocks"))
+        conn.close()
+    except sqlite3.Error as e:
+        logger.warning("Concept membership unavailable: %s", e)
+    return members, names
+
+
+def _ours(trader_id: str, today: str) -> dict[str, str]:
+    """Live: a tracked theme was seen; one it holds or ordered today, selected."""
+    from alpha_agents.data.memory_store import _get_conn, get_active_themes
+    from alpha_agents.evolution.session_facts import SEEN, SELECTED
+    out = {t["name"]: SEEN for t in get_active_themes()}
+    rows = _get_conn().execute(
+        "SELECT DISTINCT theme FROM virtual_portfolio WHERE trader_id = ? AND "
+        "(status = 'open' OR order_date = ?)", (trader_id, today)).fetchall()
+    for (theme,) in rows:
+        if theme:
+            out[theme] = SELECTED
+    return out
+
+
+def _exposure(trader_id: str, hist: sqlite3.Connection, today: str) -> str:
+    from alpha_agents.data.portfolio_risk import equity_curve
+    from alpha_agents.evolution.session_facts import exposure_line, market_move
+    marks = [m for m in equity_curve(days=20, trader_id=trader_id)
+             if m.get("equity")][-10:]
+    if not marks:
+        return ""
+    pairs = [(m["date"], float(m.get("market_value") or 0) / float(m["equity"]) * 100)
+             for m in marks]
+    own = (float(marks[-1]["equity"]) / float(marks[0]["equity"]) - 1) * 100
+    return exposure_line(pairs, market_move(hist, marks[0]["date"], today), own)
+
+
+def _day_facts(hist: sqlite3.Connection, today: str, trader_id: str) -> str:
+    from alpha_agents.config import DATA_DIR
+    from alpha_agents.data.snapshot_store import read_news
+    from alpha_agents.evolution import session_facts as SF
+
+    has_today = hist.execute("SELECT 1 FROM daily_kline WHERE date = ? LIMIT 1",
+                             (today,)).fetchone()
+    if not has_today:
+        logger.warning("No %s bars on disk — market review from snapshots", today)
+        return market_facts(today)
+    members, names = _members()
+    try:
+        news = [n.get("title", "") for n in read_news(
+            None, as_of=f"{today} 15:00:00", since=f"{today} 00:00:00", limit=2000)]
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("News for the close review unavailable: %s", e)
+        news = []
+    flows = sqlite3.connect(
+        f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
+    try:
+        f = SF.compute(hist, day=today, members=members, names=names,
+                       flows=flows, news_titles=news, ours=_ours(trader_id, today))
+    finally:
+        flows.close()
+    return SF.render(f)
+
+
 def _book(trader_id: str) -> str:
     from alpha_agents.data.portfolio import get_open_positions
     rows = get_open_positions(trader_id)
@@ -74,47 +143,47 @@ def _book(trader_id: str) -> str:
 
 
 async def run(today: str) -> dict:
-    """All three steps for every trader. Returns counts, never raises."""
+    """Every trader's close of day. Returns counts, never raises."""
+    import asyncio
+
     from alpha_agents.config import DATA_DIR
     from alpha_agents.data.memory_store import _get_conn
     from alpha_agents.data.trader import load_traders
-    from alpha_agents.evolution import handbook, market_review, trade_review
+    from alpha_agents.evolution import close_day
     from alpha_agents.model_factory import create_model
 
+    try:
+        from alpha_agents.data.market_history import update_daily
+        await asyncio.to_thread(update_daily)
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("K-line update before the close review failed: %s", e)
     model = create_model()
     hist = sqlite3.connect(
         f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
-    counts = {"trade_reviews": 0, "handbooks": 0, "market_reviews": 0}
-    try:
-        facts = market_facts(today)
-    except Exception as e:                            # noqa: BLE001
-        logger.warning("Market facts unavailable: %s", e)
-        facts = ""
+    totals: dict[str, int] = {}
     try:
         for trader in load_traders():
-            conn = _get_conn()
             try:
-                n = await trade_review.review_closed(
-                    conn, hist, trader_id=trader.id, as_of=today,
-                    model=model, trader=trader)
-                counts["trade_reviews"] += n
-                if n and await handbook.consolidate(
-                        conn, trader.id, as_of=today, model=model, trader=trader):
-                    counts["handbooks"] += 1
+                facts = "" if trader.legacy else _day_facts(hist, today, trader.id)
+                facts = "\n\n".join(x for x in (facts, _book(trader.id)) if x)
+                got = await close_day.review_day(
+                    _get_conn(), hist, trader_id=trader.id, trader=trader,
+                    day=today, model=model, facts_text=facts,
+                    exposure_text=_exposure(trader.id, hist, today),
+                    watch=not trader.legacy)
             except Exception as e:                    # noqa: BLE001
-                logger.warning("Trade review step failed for %s: %s", trader.id, e)
-            if trader.legacy:
-                continue  # winding down: nothing new to watch for
-            context = "\n\n".join(x for x in (
-                _book(trader.id),
-                market_review.grade_line(
-                    market_review.grade(conn, hist, trader.id)),
-                handbook.load(trader.id)) if x)
-            if await market_review.write(conn, trader_id=trader.id, date=today,
-                                         facts=facts, model=model,
-                                         context=context):
-                counts["market_reviews"] += 1
+                logger.warning("Close review failed for %s: %s", trader.id, e)
+                continue
+            for k, v in got.items():
+                totals[k] = totals.get(k, 0) + v
     finally:
         hist.close()
-    logger.info("Close review: %s", counts)
-    return counts
+    logger.info("Close review %s: %s", today, totals)
+    return totals
+
+
+async def run_close_review() -> str | None:
+    """Scheduler entry point."""
+    from datetime import datetime
+    totals = await run(datetime.now().strftime("%Y-%m-%d"))
+    return f"收盘复盘：{totals}" if totals else None

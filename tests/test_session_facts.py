@@ -52,8 +52,8 @@ def test_limit_ups_streaks_and_broken_come_from_bars(hist):
 
 def test_a_board_carries_its_evidence_and_what_we_did(hist):
     f = SF.compute(hist, day="2026-01-07", members=MEMBERS,
-                   names={"300001": "甲"},  # +20% leads the board
-                   news_titles=["算力租赁再获订单", "甲公司公告", "无关"],
+                   names={"300001": "甲科技"},  # +20% leads the board
+                   news_titles=["算力租赁再获订单", "甲科技公告", "无关"],
                    ours={"算力": SF.SEEN})
     top = f["top"][0]
     assert top["name"] == "算力" and top["limit_up"] == 2
@@ -111,3 +111,68 @@ class TestTheHandbookSeesWhatWasMissed:
         assert "算力（情绪）：没看到｜下次：看涨停扩散" in seen["opportunity"]
         conn.close()
         memory_store._local.conn = None
+
+
+class TestTheNewsHasAStory:
+    """"Is it a fresh catalyst or a realised one" needs the headlines and the
+    run-up, not a count: the close review was given '快讯 13 条' and nothing
+    it could read."""
+
+    def test_headlines_and_a_run_up(self, hist):
+        f = SF.compute(hist, day="2026-01-07", members=MEMBERS,
+                       news_titles=["算力租赁今日正式签约"],
+                       news_history=[("2026-01-05", "算力租赁传闻"),
+                                     ("2026-01-06", "算力租赁发酵"),
+                                     ("2026-01-06", "算力需求大增"),
+                                     ("2026-01-07", "same-day history is not a run-up")])
+        top = f["top"][0]
+        assert top["headlines"] == ["算力租赁今日正式签约"]
+        assert top["timeline"]["first"] == "2026-01-05"
+        assert top["timeline"]["days_before"] == 2
+        text = SF.render(f)
+        assert "最早 01-05 就被提到" in text and "· 算力租赁今日正式签约" in text
+
+    def test_a_story_that_starts_today_says_so(self, hist):
+        f = SF.compute(hist, day="2026-01-07", members=MEMBERS,
+                       news_titles=["算力突发利好"])
+        assert "今天是新消息" in SF.render(f)
+
+
+class TestSemanticNewsNeverSeesTheFuture:
+    """The close review may use the embedding index, and must not see a flash
+    stamped after the session's close — the live index held one stamped
+    2026-12-16 on 2026-09-24."""
+
+    def test_every_window_ends_at_or_before_the_close(self, hist):
+        asked = []
+
+        def search(q, since, until, k):
+            asked.append((since, until))
+            return [{"title": f"{q} 相关", "time": until}]
+        f = SF.compute(hist, day="2026-01-07", members=MEMBERS, search=search)
+        assert asked and all(u <= "2026-01-07 15:00:00" for _, u in asked)
+        assert f["top"][0]["headlines"] == ["算力 相关"]
+
+    def test_a_failed_search_leaves_the_text_match(self, hist):
+        def search(q, since, until, k):
+            raise RuntimeError("index down")
+        f = SF.compute(hist, day="2026-01-07", members=MEMBERS,
+                       news_titles=["算力大涨"], search=search)
+        assert f["top"][0]["news"] == 1
+
+
+class TestTheWindowSearchRechecksStamps:
+    def test_a_hit_outside_the_window_is_dropped(self, monkeypatch):
+        from alpha_agents.data import news_index as NI
+
+        class _Store:
+            def query(self, v, top_k, since, until):
+                return [{"score": 0.9, "stamp": "2026-12-16 20:00:00",
+                         "document": "未来", "meta": {"title": "未来的新闻"}},
+                        {"score": 0.9, "stamp": "2026-01-06 10:00:00",
+                         "document": "当天", "meta": {"title": "当天的新闻"}}]
+        monkeypatch.setattr(NI, "get_store", lambda: _Store())
+        monkeypatch.setattr("alpha_agents.data.embeddings.embed_texts",
+                            lambda texts: [[0.0]] * len(texts))
+        got = NI.search_window("x", "2026-01-01 00:00:00", "2026-01-06 15:00:00")
+        assert [h["title"] for h in got] == ["当天的新闻"]

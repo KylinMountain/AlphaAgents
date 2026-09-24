@@ -1413,11 +1413,12 @@ def _review_trades(ctx, day: str, conn) -> int:
         members = _review_members(ctx)
         prev = hist.execute("SELECT MAX(date) FROM daily_kline WHERE date < ?",
                             (day,)).fetchone()[0] or day
-        news = [n.get("title", "") for n in
-                _news_window(day, prev, 2000, phase="close")]
+        news, news_history = SF.load_news(day, prev)
         facts = SF.compute(hist, day=day, members=members,
                            names=_review_names(ctx), flows=flows,
-                           news_titles=news, ours=_ours_today(ctx, day, conn))
+                           news_titles=news, ours=_ours_today(ctx, day, conn),
+                           news_history=news_history,
+                           search=_news_search(day))
         log = getattr(ctx, "exposure_log", [])[-10:]
         exposure = (SF.exposure_line(
             [(d, e) for d, e, _ in log],
@@ -1437,6 +1438,27 @@ def _review_trades(ctx, day: str, conn) -> int:
     ctx.counters["market_reviews"] += got.get("market_review", 0)
     ctx.counters["handbook_rewrites"] += got.get("handbook", 0)
     return got.get("trade_reviews", 0)
+
+
+def _news_search(day: str):
+    """Semantic news search for the close review, sealed at ``day`` 15:00.
+
+    The live index keeps 30 days, so a historical window has no vectors; the
+    replay embeds its own (``DATA_DIR`` is the sandbox, so this is the
+    sandbox's index) for the two weeks up to the close, incrementally.
+    ``search_window`` rechecks every hit's stamp against its window.
+    """
+    from datetime import date, timedelta
+
+    from alpha_agents.data import news_index as NI
+    from alpha_agents.evolution.session_facts import NEWS_LOOKBACK_DAYS
+    back = (date.fromisoformat(day) - timedelta(days=NEWS_LOOKBACK_DAYS)).isoformat()
+    try:
+        NI.index_window(f"{back} 00:00:00", f"{day} 15:00:00")
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("%s: news index unavailable, using text match: %s", day, exc)
+        return None
+    return lambda q, since, until, k: NI.search_window(q, since, until, top_k=k)
 
 
 def _ours_today(ctx, day: str, conn) -> dict[str, str]:

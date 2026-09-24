@@ -108,7 +108,6 @@ def _exposure(trader_id: str, hist: sqlite3.Connection, today: str) -> str:
 
 def _day_facts(hist: sqlite3.Connection, today: str, trader_id: str) -> str:
     from alpha_agents.config import DATA_DIR
-    from alpha_agents.data.snapshot_store import read_news
     from alpha_agents.evolution import session_facts as SF
 
     has_today = hist.execute("SELECT 1 FROM daily_kline WHERE date = ? LIMIT 1",
@@ -117,20 +116,37 @@ def _day_facts(hist: sqlite3.Connection, today: str, trader_id: str) -> str:
         logger.warning("No %s bars on disk — market review from snapshots", today)
         return market_facts(today)
     members, names = _members()
+    prev = hist.execute("SELECT MAX(date) FROM daily_kline WHERE date < ?",
+                        (today,)).fetchone()[0]
     try:
-        news = [n.get("title", "") for n in read_news(
-            None, as_of=f"{today} 15:00:00", since=f"{today} 00:00:00", limit=2000)]
+        news, news_history = SF.load_news(today, prev)
     except Exception as e:                            # noqa: BLE001
         logger.warning("News for the close review unavailable: %s", e)
-        news = []
+        news, news_history = [], []
     flows = sqlite3.connect(
         f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
     try:
         f = SF.compute(hist, day=today, members=members, names=names,
-                       flows=flows, news_titles=news, ours=_ours(trader_id, today))
+                       flows=flows, news_titles=news, ours=_ours(trader_id, today),
+                       news_history=news_history, search=_news_search(today))
     finally:
         flows.close()
     return SF.render(f)
+
+
+def _news_search(today: str):
+    """The news index, windowed to the two weeks up to today's close."""
+    from datetime import date, timedelta
+
+    from alpha_agents.data import news_index as NI
+    from alpha_agents.evolution.session_facts import NEWS_LOOKBACK_DAYS
+    back = (date.fromisoformat(today) - timedelta(days=NEWS_LOOKBACK_DAYS)).isoformat()
+    try:
+        NI.index_window(f"{back} 00:00:00", f"{today} 15:00:00")
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("News index unavailable, close review uses text match: %s", e)
+        return None
+    return lambda q, since, until, k: NI.search_window(q, since, until, top_k=k)
 
 
 def _book(trader_id: str) -> str:

@@ -92,7 +92,11 @@ def index_recent_news(hours: int = 24, limit: int = 2000) -> dict:
         return {"scanned": 0, "indexed": 0, "skipped": 0, "pruned": 0}
 
     cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-    fresh = [r for r in rows if (r.get("time") or "") >= cutoff]
+    # A stamp in the future is a mis-parsed date, not news from the future —
+    # but indexed, it would answer every later window it falls in. The live
+    # index held one stamped 2026-12-16 on 2026-09-24.
+    horizon = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    fresh = [r for r in rows if cutoff <= (r.get("time") or "") <= horizon]
 
     candidates = []
     for row in fresh:
@@ -140,6 +144,82 @@ def index_recent_news(hours: int = 24, limit: int = 2000) -> dict:
                 pruned, store.count())
     return {"scanned": len(fresh), "indexed": indexed,
             "skipped": len(candidates) - len(todo), "pruned": pruned}
+
+
+def _embed_and_store(store: VectorStore, rows: list[dict]) -> int:
+    from alpha_agents.data.embeddings import embed_texts
+    candidates = [(_row_id(r), _document(r), r) for r in rows
+                  if len(_document(r)) >= MIN_TEXT_LENGTH]
+    known = store.existing_ids([c[0] for c in candidates]) if candidates else set()
+    todo = [c for c in candidates if c[0] not in known]
+    indexed = 0
+    for i in range(0, len(todo), BATCH_SIZE):
+        batch = todo[i:i + BATCH_SIZE]
+        try:
+            vectors = embed_texts([b[1] for b in batch])
+        except Exception as e:
+            logger.error("News embedding failed for batch %d (%d items): %s",
+                         i // BATCH_SIZE + 1, len(batch), e)
+            continue
+        if len(vectors) != len(batch):
+            logger.error("Embedding returned %d vectors for %d items — skipping",
+                         len(vectors), len(batch))
+            continue
+        indexed += store.upsert(
+            ids=[b[0] for b in batch], embeddings=vectors,
+            documents=[b[1] for b in batch],
+            stamps=[b[2].get("time") or "" for b in batch],
+            metas=[{"source": b[2].get("source", ""),
+                    "title": b[2].get("title", ""),
+                    "url": b[2].get("url", "")} for b in batch])
+    return indexed
+
+
+def index_window(since: str, until: str, limit: int = 100000) -> int:
+    """Embed every flash published in [since, until] that is not indexed yet.
+
+    For a replay: the live index keeps 30 days, so a 2026-01 window has no
+    vectors at all. A replay runs with its own ``DATA_DIR``, so this writes to
+    its own index. Nothing is pruned here — pruning is by wall clock and would
+    delete the whole historical window.
+    """
+    from alpha_agents.data.snapshot_store import read_news
+    rows = read_news(None, as_of=until, since=since, limit=limit)
+    rows = [r for r in rows if since <= (r.get("time") or "") <= until]
+    n = _embed_and_store(get_store(), rows)
+    if n:
+        logger.info("News index window %s → %s: %d newly embedded", since, until, n)
+    return n
+
+
+def search_window(query: str, since: str, until: str, top_k: int = 5,
+                  min_score: float = 0.45) -> list[dict]:
+    """Flashes semantically closest to ``query`` published in [since, until].
+
+    The window is the whole as-of statement, and it is checked twice: the
+    store filters on it before scoring, and every hit's stamp is compared
+    again here, so no flash stamped after ``until`` can reach a caller.
+    """
+    if not query:
+        return []
+    from alpha_agents.data.embeddings import embed_texts
+    try:
+        vector = embed_texts([query])[0]
+    except Exception as e:
+        logger.warning("News search unavailable (embedding failed): %s", e)
+        raise NewsSearchUnavailable(str(e)) from e
+    hits = get_store().query(vector, top_k=top_k * 2, since=since, until=until)
+    out = []
+    for hit in hits:
+        stamp = str(hit.get("stamp") or "")
+        if hit["score"] < min_score or not stamp or not (since <= stamp <= until):
+            continue
+        meta = hit.get("meta") or {}
+        out.append({"title": meta.get("title") or hit["document"][:60],
+                    "time": stamp, "score": round(hit["score"], 3)})
+        if len(out) >= top_k:
+            break
+    return out
 
 
 def prune_old(days: int | None = None) -> int:

@@ -1368,26 +1368,44 @@ class TestInitialAccountPerformanceMark:
         )
 
 
-class TestTheReviewCanWidenTheShortlist:
-    """A board the close review said it never saw must be able to reach the
-    next morning's direction list; the top 8 alone is a fixed formula."""
+class TestTheReviewIsNotTomorrowsShortlist:
+    """2026-01 replays: the directions a close review had named ran −1.4%
+    over five sessions against +0.2% for the rest, and the direction score
+    fell 43.8 → 34.6 once they were added to the shortlist. A review
+    diagnoses the day; the direction stage reads today's data."""
 
-    def test_named_boards_are_read_from_before_the_day(self, tmp_path, monkeypatch):
+    def test_the_shortlist_does_not_read_the_close_review(self):
+        import inspect
+        assert not hasattr(walk_forward, "_review_named_boards")
+        assert "market_review" not in inspect.getsource(walk_forward._sector_cards)
+
+    def test_the_close_review_is_handed_the_days_decisions(self, tmp_path,
+                                                          monkeypatch):
+        import sqlite3 as sq
         from alpha_agents.data import memory_store
-        from alpha_agents.evolution import market_review as MR
         monkeypatch.setattr(memory_store, "MEMORY_DB_PATH", tmp_path / "m.db",
                             raising=False)
         monkeypatch.setattr(memory_store._local, "conn", None, raising=False)
         conn = memory_store._get_conn()
-        MR.ensure(conn)
-        conn.execute("INSERT INTO market_reviews (trader_id, date, facts, review_json) "
-                     "VALUES ('default', '2026-01-05', 'f', ?)",
-                     ('{"boards": [{"name": "PET铜箔"}], "watchlist": []}',))
+        from alpha_agents.data import theme_opportunity_journal
+        theme_opportunity_journal.init_schema(conn)
+        conn.execute(
+            "INSERT INTO theme_opportunity_sets (run_id, trader_id, day, phase, "
+            "information_cutoff, architecture, policy_ref, shortlist_json, "
+            "selected_json, research_json, refusals_json, content_hash, created_at) "
+            "VALUES ('r', 'default', '2026-01-06', 'open', 'c', 'a', 'p', ?, ?, ?, "
+            "'[]', 'h', 'now')",
+            ('["算力", "地产"]', '["算力"]',
+             '{"themes": [{"sector_id": "算力", "thesis": "资金连续三天流入"}]}'))
         conn.commit()
+        hist = sq.connect(":memory:")
+        hist.execute("CREATE TABLE daily_kline (code TEXT, date TEXT, close REAL)")
 
         class _C:
             trader = "default"
-        assert walk_forward._review_named_boards(_C(), "2026-01-06") == ["PET铜箔"]
-        assert walk_forward._review_named_boards(_C(), "2026-01-05") == []
+        text = walk_forward._day_record(_C(), "2026-01-06", conn, hist)
+        assert "算力：资金连续三天流入" in text
+        assert "早盘看到但没选：地产" in text
+        assert "今天没有下单" in text
         conn.close()
         memory_store._local.conn = None

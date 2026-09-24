@@ -5,7 +5,8 @@ the handbook rewrite — shared with the replay. This module assembles what the
 live side knows: the day's facts from ``daily_kline`` via
 ``evolution.session_facts`` (limit-ups, streaks, failed limit-ups, each
 concept's move, money and news), which boards the trader tracked or held,
-and its exposure against the market from its equity marks.
+the day's own record (``evolution.day_record``: orders, fills, holdings,
+sells) and its exposure against the market from its equity marks.
 
 When the day's K-line is not on disk yet, :func:`market_facts` reads the
 intraday snapshots instead, so the review still has the tape.
@@ -149,13 +150,19 @@ def _news_search(today: str):
     return lambda q, since, until, k: NI.search_window(q, since, until, top_k=k)
 
 
-def _book(trader_id: str) -> str:
-    from alpha_agents.data.portfolio import get_open_positions
-    rows = get_open_positions(trader_id)
-    if not rows:
-        return "你当前空仓。"
-    return "你当前持仓：" + "；".join(
-        f"{p['code']} {p.get('name', '')} 成本{p.get('open_price')}" for p in rows)
+def _record(hist: sqlite3.Connection, trader_id: str, today: str) -> str:
+    """The day's own record. Live has no direction stage: the themes it
+    tracked are what it had in front of it at the open."""
+    from alpha_agents.data.memory_store import _get_conn, get_active_themes
+    from alpha_agents.evolution import day_record
+    try:
+        tracked = [t["name"] for t in get_active_themes()]
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Tracked themes unavailable: %s", e)
+        tracked = []
+    directions = ("早盘你在跟踪的主线：" + "、".join(tracked[:20])) if tracked else ""
+    return day_record.render(_get_conn(), hist, trader_id=trader_id, day=today,
+                             directions=directions)
 
 
 async def run(today: str) -> dict:
@@ -181,12 +188,12 @@ async def run(today: str) -> dict:
         for trader in load_traders():
             try:
                 facts = "" if trader.legacy else _day_facts(hist, today, trader.id)
-                facts = "\n\n".join(x for x in (facts, _book(trader.id)) if x)
                 got = await close_day.review_day(
                     _get_conn(), hist, trader_id=trader.id, trader=trader,
                     day=today, model=model, facts_text=facts,
                     exposure_text=_exposure(trader.id, hist, today),
-                    watch=not trader.legacy)
+                    record_text=_record(hist, trader.id, today),
+                    review_market=not trader.legacy)
             except Exception as e:                    # noqa: BLE001
                 logger.warning("Close review failed for %s: %s", trader.id, e)
                 continue

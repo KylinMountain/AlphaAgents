@@ -87,13 +87,14 @@ class TestTheHandbookSeesWhatWasMissed:
         monkeypatch.setattr(memory_store._local, "conn", None, raising=False)
         conn = memory_store._get_conn()
 
-        async def write(conn, *, trader_id, date, facts, model, context=""):
+        async def write(conn, *, trader_id, date, facts, model, record="",
+                        context=""):
             market_review.ensure(conn)
             conn.execute(
                 "INSERT INTO market_reviews (trader_id, date, facts, review_json) "
                 "VALUES (?, ?, ?, ?)", (trader_id, date, facts,
-                '{"boards": [{"name": "算力", "driver": "情绪", '
-                '"why_missed": "没看到", "next_time": "看涨停扩散"}], "watchlist": []}'))
+                '{"boards": [{"name": "算力", "kind": "错过", "driver": "情绪", '
+                '"verdict": "没看到", "lesson": "看涨停扩散"}]}'))
             return {"boards": []}
         seen = {}
 
@@ -108,7 +109,7 @@ class TestTheHandbookSeesWhatWasMissed:
             model=None, facts_text="事实", exposure_text="平均仓位 3.2%"))
         assert got["market_review"] == 1 and got["handbook"] == 1
         assert "平均仓位 3.2%" in seen["opportunity"]
-        assert "算力（情绪）：没看到｜下次：看涨停扩散" in seen["opportunity"]
+        assert "[错过]算力（情绪）：没看到｜下次：看涨停扩散" in seen["opportunity"]
         conn.close()
         memory_store._local.conn = None
 

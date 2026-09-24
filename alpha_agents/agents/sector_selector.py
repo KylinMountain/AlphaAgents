@@ -45,8 +45,8 @@ def format_sector_cards(rows: list[dict]) -> str:
     if not rows:
         return "（没有可评估方向）"
     lines = [
-        "|排名|方向|来源|5日相对中位收益|上涨广度|5日广度变化|剔除头1后5日中位|资金覆盖|近5日净额合计(万元)|",
-        "|---|---|---|---|---|---|---|---|---|",
+        "|排名|方向|5日相对中位收益|上涨广度|5日广度变化|剔除头1后5日中位|资金覆盖|近5日净额合计(万元)|",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         fund = row.get("fund_flow") or {}
@@ -55,7 +55,6 @@ def format_sector_cards(rows: list[dict]) -> str:
         coverage = "-" if covered is None or members is None else f"{covered}/{members}"
         lines.append(
             f"|{_show(row.get('rank'))}|{row.get('sector_id', '')}|"
-            f"{row.get('source') or '排名前列'}|"
             f"{_show((row.get('relative_returns_pct') or {}).get('5d'), '%')}|"
             f"{_show(row.get('advancers_pct'), '%')}|"
             f"{_show(row.get('breadth_improvement_5d_pp'), 'pp')}|"

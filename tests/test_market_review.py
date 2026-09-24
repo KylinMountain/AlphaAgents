@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from unittest.mock import patch
 
 import pandas as pd
@@ -25,67 +24,39 @@ def conn(tmp_path, monkeypatch):
     memory_store._local.conn = None
 
 
-@pytest.fixture()
-def hist():
-    h = sqlite3.connect(":memory:")
-    h.execute("CREATE TABLE daily_kline (code TEXT, date TEXT, open REAL, "
-              "high REAL, low REAL, close REAL)")
-    closes = {  # AAA is watched; BBB and CCC are the rest of the market
-        "600001": [10.0, 11.0, 11.0, 12.0],
-        "600002": [10.0, 10.0, 10.1, 10.2],
-        "600003": [10.0, 10.0, 9.9, 10.0],
-    }
-    days = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
-    for code, cs in closes.items():
-        for d, c in zip(days, cs):
-            h.execute("INSERT INTO daily_kline VALUES (?,?,?,?,?,?)",
-                      (code, d, c, c, c, c))
-    yield h
-    h.close()
-
-
-def _store(conn, day="2026-01-05", codes=("600001",)):
+def _store(conn, day="2026-01-05"):
     MR.ensure(conn)
     conn.execute(
         "INSERT INTO market_reviews (trader_id, date, facts, review_json) VALUES "
         "('default', ?, 'f', ?)",
-        (day, json.dumps({"market": "普涨", "themes": "算力",
-                          "watchlist": [{"code": c, "name": "甲", "why": "资金最强",
-                                         "buy_if": "回踩不破10", "drop_if": "跌破9.8"}
-                                        for c in codes]}, ensure_ascii=False)))
+        (day, json.dumps({"market": "普涨", "themes": "算力", "boards": [
+            {"name": "算力", "kind": "错过", "driver": "资金",
+             "verdict": "看到了但嫌涨多了没选", "lesson": "资金连续3天流入就先买半仓"}]},
+            ensure_ascii=False)))
     conn.commit()
 
 
-class TestTheWatchlistIsGradedByTheMarket:
-    def test_one_and_three_session_excess(self, conn, hist):
+class TestTheMorningReadsItAsYesterdays:
+    def test_labelled_as_yesterdays_diagnosis_not_todays_list(self, conn):
         _store(conn)
-        [g] = MR.grade(conn, hist, "default")
-        # AAA +10% next day; market median of the three that day is 0%.
-        assert g["d1"] == 10.0 and g["d1_excess"] == 10.0
-        # 3 sessions: AAA +20%, BBB +2%, CCC 0% → median +2%.
-        assert g["d3"] == 20.0 and g["d3_excess"] == 18.0
+        text = MR.inject(conn, "default", before="2026-01-06")
+        assert "【昨日复盘（2026-01-05 收盘后你自己写的）】" in text
+        assert "不是今天的买入名单" in text
+        assert "◆ [错过] 算力" in text and "教训：资金连续3天流入就先买半仓" in text
+        assert "观察" not in text
 
-    def test_a_replay_morning_grades_only_seen_sessions(self, conn, hist):
+    def test_nothing_from_the_same_day(self, conn):
         _store(conn)
-        [g] = MR.grade(conn, hist, "default", before="2026-01-07")
-        assert "d1" in g and "d3" not in g
-        assert MR.grade(conn, hist, "default", before="2026-01-06") == []
+        assert MR.inject(conn, "default", before="2026-01-05") == ""
 
-    def test_the_grade_line_counts_winners(self, conn, hist):
-        _store(conn)
-        assert "次日跑赢大盘 1/1" in MR.grade_line(MR.grade(conn, hist, "default"))
-
-
-class TestTheMorningReadsIt:
-    def test_yesterdays_read_and_watchlist(self, conn, hist):
-        _store(conn)
-        text = MR.inject(conn, hist, "default", before="2026-01-06")
-        assert "【你上一个交易日收盘后写的复盘（2026-01-05）】" in text
-        assert "买入条件：回踩不破10" in text
-
-    def test_nothing_from_the_same_day(self, conn, hist):
-        _store(conn)
-        assert MR.inject(conn, hist, "default", before="2026-01-05") == ""
+    def test_an_old_review_still_reads(self, conn):
+        MR.ensure(conn)
+        conn.execute("INSERT INTO market_reviews (trader_id, date, facts, review_json) "
+                     "VALUES ('default', '2026-01-05', 'f', ?)",
+                     ('{"boards": [{"name": "PCB", "why_missed": "没看到", '
+                      '"next_time": "看涨停扩散"}], "watchlist": [{"code": "600001"}]}',))
+        text = MR.inject(conn, "default", before="2026-01-06")
+        assert "诊断：没看到｜教训：看涨停扩散" in text and "600001" not in text
 
 
 class TestWriting:
@@ -103,12 +74,30 @@ class TestWriting:
         assert got is None
         assert conn.execute("SELECT COUNT(*) FROM market_reviews").fetchone()[0] == 0
 
-    def test_a_bad_code_is_dropped_and_the_list_is_capped(self):
-        reply = json.dumps({"market": "m", "themes": "t", "watchlist": [
-            {"code": "abc"}] + [{"code": f"60000{i}"} for i in range(8)]})
+    def test_no_watchlist_and_an_unknown_kind_is_blank(self):
+        reply = json.dumps({"market": "m", "themes": "t",
+                            "boards": [{"name": "算力 +3.2%", "kind": "瞎猜"}],
+                            "watchlist": [{"code": "600001"}]})
         got = MR._parse(reply)
-        assert len(got["watchlist"]) == MR.MAX_WATCH
-        assert all(w["code"].isdigit() for w in got["watchlist"])
+        assert "watchlist" not in got
+        assert got["boards"][0]["name"] == "算力" and got["boards"][0]["kind"] == ""
+
+    def test_the_days_record_reaches_the_model(self, conn, monkeypatch):
+        import agents
+        seen = {}
+
+        class _R:
+            final_output = '{"market": "m", "boards": []}'
+
+        async def run(agent, message, max_turns=2):
+            seen["message"] = message
+            return _R()
+        monkeypatch.setattr(agents.Runner, "run", staticmethod(run))
+        asyncio.run(MR.write(conn, trader_id="default", date="2026-01-05",
+                             facts="宽度", model="stub-model",
+                             record="早盘选中的方向：\n- 算力：资金流入"))
+        assert "## 你今天的记录" in seen["message"]
+        assert "算力：资金流入" in seen["message"]
 
 
 class TestTheFactsComeFromTheSnapshots:

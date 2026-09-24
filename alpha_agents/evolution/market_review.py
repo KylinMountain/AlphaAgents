@@ -1,21 +1,28 @@
-"""The trader's end-of-day read of the market, and a watchlist the market grades.
+"""The trader's end-of-day review of its own day against the market's.
 
-At the close every number of the session is known. The trader reads them —
-breadth, where the money went by concept, the limit-up ladder — and writes
-what the day was, which lines it believes, and at most :data:`MAX_WATCH`
-names it would consider tomorrow, each with why, what would make it buy and
-what would make it drop the idea. The next morning it reads that back.
+At the close every number of the session is known, and so is what the
+trader did with it: the directions it chose at the open and why, the ones it
+saw and passed on, its orders, its fills, what it held. The review sets the
+two side by side, board by board:
 
-The watchlist is the half of this that can be wrong, so it is graded: for
-every name, the next session's and the next three sessions' return against
-the market median of the same days, from ``daily_kline``. The grade is the
-code's (GOLDEN_PRINCIPLES #2); the trader sees it the next time it writes a
-watchlist, so "the kind of name I like at the close" becomes something it
-can learn about without waiting for a fill.
+* 错过 — a board that rose without us: why did the morning not buy it
+  (never saw it / saw it and passed / bought too little)?
+* 踩坑 — something we bought or held that fell: what did we believe, what
+  was wrong?
+* 转向 — a direction we were in turned: did we get out, keep holding, add?
+* 做对 — what worked, so it is not unlearned.
 
-The facts are assembled by the caller — live from the day's snapshots — and
-handed in as text, so no tool call can run the review past its timeout. The
-model is passed in, as everywhere in this layer.
+It is a diagnosis of **today's decisions**, not tomorrow's shortlist. The
+2026-01 replays that carried the review's boards forward as candidates
+chose worse directions for it (percentile 43.8 → 34.6; the named boards
+ran −1.4% over five sessions against +0.2% for the rest): the boards a
+review talks about are the day's biggest movers, and buying them the next
+morning is chasing. The lessons reach the morning through the handbook and
+through yesterday's review, labelled as yesterday's.
+
+The facts and the day's record are assembled by the caller and handed in
+as text, so no tool call can run the review past its timeout. The model is
+passed in, as everywhere in this layer.
 """
 
 from __future__ import annotations
@@ -25,12 +32,13 @@ import json
 import logging
 import re
 import sqlite3
-import statistics
 
 logger = logging.getLogger(__name__)
 
-MAX_WATCH = 5
 _TIMEOUT = 180
+
+#: What a board is to the trader today.
+KINDS = ("错过", "踩坑", "转向", "做对")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_reviews (
@@ -48,31 +56,33 @@ def ensure(conn: sqlite3.Connection) -> None:
     conn.execute(_SCHEMA)
 
 
-_INSTRUCTIONS = f"""你是这个账户的交易员。现在是收盘后，今天全天的数据你都能看到（下面的数据由系统整理）。
+_INSTRUCTIONS = """你是这个账户的交易员。现在是收盘后。下面有两份材料：今天全天的盘面数据，和你自己今天的记录
+（早盘选了哪些方向、当时的理由、看到但没选的、下了哪些单、成交没有、持仓今天怎么走、今天卖了什么）。都由系统整理。
 
-请像职业短线交易员一样写今天的复盘：
+复盘的对象是**你今天的决策**，不是给明天选票。请像职业短线交易员一样写：
 1. market：今天的盘面是什么样的？赚钱效应、情绪（涨停/跌停/炸板率/连板高度）、资金主攻方向，引用数据。
 2. themes：哪些主线是真的（资金+涨停+龙头都在），哪些只是一日游？为什么？
-3. boards：对数据里列出的每一个「涨得最好」和「跌得最多」的板块，逐个回答：
-   - driver：驱动是什么——消息催化 / 利好落地（兑现） / 情绪（涨停、连板带动） / 资金（主力持续流入） / 超跌反弹 / 其他，可以多选但要分主次。
-     判断消息时看快讯原文和「消息时间线」：今天才出现的是新催化；传了好几天、今天正式发布或兑现的，
-     要考虑是不是利好落地（见光死风险），两者对明天的含义相反
-   - evidence：支持这个判断的数据（快讯条数、涨停数、连板高度、主力净额、上涨占比）
-   - why_missed：数据里标了你今天对它是「选中」「看到没选」还是「没看到」。选中的，说做得怎样；
-     看到没选的，说当时为什么没选、事后看对不对；没看到的，说你的发现环节缺了什么
-   - next_time：下次遇到同样的迹象，你具体怎么做才能在前面
-   跌的板块同样要回答：是不是你持有或看好过的，是什么让它跌。
-4. watchlist：明天你会考虑的票，最多 {MAX_WATCH} 只（没有就空着，宁缺毋滥）。每只写：
-   - why：为什么看好，引用今天的数据
-   - buy_if：明天出现什么情况你才会买（具体到价格或盘面条件）
-   - drop_if：出现什么情况你就放弃
-如果附了你的仓位与大盘的对比、过去观察名单的成绩和你的交易守则，参考它们。
-别只想着少亏：大盘涨而你不在场，也是亏。目标只有一个：盈利。
+3. boards：逐个诊断，每个板块归到一类（kind）：
+   - 错过：涨得好、你没参与或参与太少。对照你早盘的记录：是根本没看到（发现环节缺了什么），
+     还是看到了没选（当时的理由是什么，事后看错在哪），还是选了但没买到/买少了（价格、仓位）？
+   - 踩坑：你买了或持有的、跌了的。你当时相信什么（引用早盘的理由），哪一条被证伪了，早盘能不能看出来？
+   - 转向：你在里面的方向今天变了（资金转出、涨停缩、龙头断板）。你撤了、没撤、还是在加仓？该怎么做？
+   - 做对：做对的，说清是哪个判断对了，免得下次丢掉。
+   每个板块写：
+   - driver：驱动——消息催化 / 利好落地（兑现） / 情绪（涨停、连板带动） / 资金（主力持续流入） / 超跌反弹 / 其他，
+     可以多选但要分主次。判断消息时看快讯原文和「消息时间线」：今天才出现的是新催化；传了好几天、今天正式发布或兑现的，
+     要考虑是不是利好落地（见光死），两者含义相反
+   - evidence：支持这个判断的数据（快讯、涨停数、连板高度、主力净额、上涨占比）
+   - morning：你早盘对它是怎么想、怎么做的（从你的记录里引用；记录里没有就写「没看到」）
+   - verdict：事后看，早盘那个决定对不对，错在哪
+   - lesson：一句你下次早盘或持仓时**能执行**的做法。你每天开盘前决定买什么、最多付多少、止损和失效条件，
+     按开盘价成交；卖出在开盘和收盘两个时点决定。你看不到盘中分时和封单，写不了「盘中盯着」
+别只想着少亏：大盘涨而你不在场，也是亏。如果附了你的仓位与大盘的对比和你的交易守则，参考它们。目标只有一个：盈利。
 
 只输出一个 JSON 对象：
-{{"market": "...", "themes": "...",
-  "boards": [{{"name": "...", "driver": "...", "evidence": "...", "why_missed": "...", "next_time": "..."}}],
-  "watchlist": [{{"code": "600000", "name": "...", "why": "...", "buy_if": "...", "drop_if": "..."}}]}}"""
+{"market": "...", "themes": "...",
+ "boards": [{"name": "...", "kind": "错过", "driver": "...", "evidence": "...",
+             "morning": "...", "verdict": "...", "lesson": "..."}]}"""
 
 
 def board_name(raw: str) -> str:
@@ -101,38 +111,31 @@ def _parse(text: str) -> dict | None:
         return None
     if not isinstance(raw, dict):
         return None
-    watch = []
-    for w in raw.get("watchlist") or []:
-        if len(watch) == MAX_WATCH:
-            break
-        if not isinstance(w, dict):
-            continue
-        code = str(w.get("code") or "").strip()
-        if not (len(code) == 6 and code.isdigit()):
-            continue
-        watch.append({k: str(w.get(k) or "").strip()[:300]
-                      for k in ("name", "why", "buy_if", "drop_if")} | {"code": code})
     boards = []
     for b in raw.get("boards") or []:
         if isinstance(b, dict) and str(b.get("name") or "").strip():
             row = {k: str(b.get(k) or "").strip()[:300] for k in
-                   ("name", "driver", "evidence", "why_missed", "next_time")}
+                   ("name", "kind", "driver", "evidence", "morning", "verdict",
+                    "lesson")}
             row["name"] = board_name(row["name"])
+            if row["kind"] not in KINDS:
+                row["kind"] = ""
             boards.append(row)
     return {"market": str(raw.get("market") or "").strip()[:800],
             "themes": str(raw.get("themes") or "").strip()[:800],
-            "boards": boards[:20],
-            "watchlist": watch}
+            "boards": boards[:20]}
 
 
 async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: str,
-                model, context: str = "") -> dict | None:
-    """Ask the trader for today's read and store it. Never raises."""
+                model, record: str = "", context: str = "") -> dict | None:
+    """Ask the trader to review its day and store it. Never raises."""
     ensure(conn)
     if model is None or not facts.strip():
         return None
     from agents import Agent, Runner
-    message = f"## 今日数据（{date}）\n\n{facts}" + (f"\n\n{context}" if context else "")
+    message = (f"## 今日盘面（{date}）\n\n{facts}"
+               + (f"\n\n## 你今天的记录\n\n{record}" if record else "")
+               + (f"\n\n{context}" if context else ""))
     try:
         agent = Agent(name="market_review", instructions=_INSTRUCTIONS,
                       model=model, tools=[])
@@ -150,89 +153,23 @@ async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: s
         "VALUES (?, ?, ?, ?)",
         (trader_id, date, facts, json.dumps(review, ensure_ascii=False)))
     conn.commit()
-    logger.info("Market review [%s] %s: %d watch names", trader_id, date,
-                len(review["watchlist"]))
+    logger.info("Market review [%s] %s: %d boards", trader_id, date,
+                len(review["boards"]))
     return review
 
 
-# ── grading ────────────────────────────────────────────────────
-
-def _sessions_after(hist: sqlite3.Connection, day: str, n: int,
-                    up_to: str | None) -> list[str]:
-    sql = ("SELECT DISTINCT date FROM daily_kline WHERE date > ?"
-           + (" AND date < ?" if up_to else "") + " ORDER BY date LIMIT ?")
-    args = (day, up_to, n) if up_to else (day, n)
-    return [r[0] for r in hist.execute(sql, args).fetchall()]
+def _lesson(b: dict) -> str:
+    # Reviews written before 2026-09-24 carry why_missed/next_time.
+    return b.get("lesson") or b.get("next_time") or ""
 
 
-def _close(hist, code, day):
-    r = hist.execute("SELECT close FROM daily_kline WHERE code=? AND date=?",
-                     (code, day)).fetchone()
-    return r[0] if r and r[0] else None
+def _diagnosis(b: dict) -> str:
+    return b.get("verdict") or b.get("why_missed") or ""
 
 
-def _market_median(hist, d0: str, d1: str) -> float | None:
-    rows = hist.execute(
-        "SELECT a.close, b.close FROM daily_kline a JOIN daily_kline b "
-        "ON a.code = b.code WHERE a.date = ? AND b.date = ? AND a.close > 0",
-        (d0, d1)).fetchall()
-    moves = [(b / a - 1) * 100 for a, b in rows if b]
-    return statistics.median(moves) if moves else None
-
-
-def grade(conn: sqlite3.Connection, hist: sqlite3.Connection, trader_id: str, *,
-          before: str | None = None) -> list[dict]:
-    """Every watch name with its 1- and 3-session return and excess.
-
-    Only sessions strictly before ``before`` are used, so a replay morning
-    grades yesterday's list on nothing it has not seen. A name whose window
-    is not complete yet is left out rather than graded on part of it.
-    """
-    ensure(conn)
-    sql = ("SELECT date, review_json FROM market_reviews WHERE trader_id = ?"
-           + (" AND date < ?" if before else "") + " ORDER BY date")
-    args = (trader_id, before) if before else (trader_id,)
-    out = []
-    for day, rj in conn.execute(sql, args).fetchall():
-        try:
-            watch = json.loads(rj).get("watchlist") or []
-        except json.JSONDecodeError:
-            continue
-        nxt = _sessions_after(hist, day, 3, before)
-        for w in watch:
-            base = _close(hist, w["code"], day)
-            if not base:
-                continue
-            row = {"date": day, "code": w["code"], "name": w.get("name", "")}
-            for k, n in (("d1", 1), ("d3", 3)):
-                if len(nxt) < n:
-                    continue
-                c = _close(hist, w["code"], nxt[n - 1])
-                mkt = _market_median(hist, day, nxt[n - 1])
-                if c and mkt is not None:
-                    row[k] = round((c / base - 1) * 100, 2)
-                    row[f"{k}_excess"] = round(row[k] - mkt, 2)
-            if "d1" in row:
-                out.append(row)
-    return out
-
-
-def grade_line(graded: list[dict]) -> str:
-    if not graded:
-        return ""
-    d1 = [g["d1_excess"] for g in graded]
-    line = (f"你过去的观察名单（系统按日线算）：{len(graded)} 只，次日超额中位 "
-            f"{statistics.median(d1):+.1f}%，次日跑赢大盘 {sum(x > 0 for x in d1)}/{len(d1)}")
-    d3 = [g["d3_excess"] for g in graded if "d3_excess" in g]
-    if d3:
-        line += (f"；3 日超额中位 {statistics.median(d3):+.1f}%，"
-                 f"跑赢 {sum(x > 0 for x in d3)}/{len(d3)}")
-    return line + "。"
-
-
-def inject(conn: sqlite3.Connection, hist: sqlite3.Connection | None,
-           trader_id: str, *, before: str | None = None) -> str:
-    """Yesterday's read and watchlist, with the grade of every earlier list."""
+def inject(conn: sqlite3.Connection, trader_id: str, *,
+           before: str | None = None) -> str:
+    """Yesterday's review, labelled as yesterday's diagnosis."""
     ensure(conn)
     sql = ("SELECT date, review_json FROM market_reviews WHERE trader_id = ?"
            + (" AND date < ?" if before else "") + " ORDER BY date DESC LIMIT 1")
@@ -241,30 +178,28 @@ def inject(conn: sqlite3.Connection, hist: sqlite3.Connection | None,
     if not row:
         return ""
     day, rj = row[0], json.loads(row[1])
-    lines = [f"【你上一个交易日收盘后写的复盘（{day}）】"]
+    lines = [f"【昨日复盘（{day} 收盘后你自己写的）】",
+             "这是你对昨天自己决策的诊断：哪里错过、哪里踩坑、哪里没跟上转向。"
+             "它不是今天的买入名单——昨天涨得最好的板块，今天未必还该买；"
+             "今天买什么，看今天的数据。"]
     if rj.get("market"):
-        lines.append(f"盘面：{rj['market']}")
+        lines.append(f"昨日盘面：{rj['market']}")
     if rj.get("themes"):
-        lines.append(f"主线：{rj['themes']}")
+        lines.append(f"昨日主线：{rj['themes']}")
     for b in rj.get("boards") or []:
-        lines.append(f"◆ {b['name']}｜驱动：{b.get('driver', '')}｜"
-                     f"为什么没选中：{b.get('why_missed', '')}｜下次：{b.get('next_time', '')}")
-    for w in rj.get("watchlist") or []:
-        lines.append(f"● 观察 {w['code']} {w.get('name', '')}：{w.get('why', '')}"
-                     f"｜买入条件：{w.get('buy_if', '')}｜放弃条件：{w.get('drop_if', '')}")
-    if hist is not None:
-        g = grade_line(grade(conn, hist, trader_id, before=before))
-        if g:
-            lines.append(g)
+        kind = f"[{b['kind']}] " if b.get("kind") else ""
+        lines.append(f"◆ {kind}{b['name']}｜驱动：{b.get('driver', '')}｜"
+                     f"诊断：{_diagnosis(b)}｜教训：{_lesson(b)}")
     return "\n".join(lines)
 
 
 def missed(conn: sqlite3.Connection, trader_id: str, *, up_to: str,
            days: int = 5) -> str:
-    """The boards the trader's recent reviews say it missed, in its own words.
+    """The recent reviews' diagnoses, in the trader's own words.
 
     Read by the handbook rewrite, so a rule that keeps it out of the market
-    is weighed against what being out cost.
+    is weighed against what being out cost, and one that kept it in a
+    turning direction against what that cost.
     """
     ensure(conn)
     rows = conn.execute(
@@ -278,8 +213,8 @@ def missed(conn: sqlite3.Connection, trader_id: str, *, up_to: str,
         except json.JSONDecodeError:
             continue
         for b in boards:
-            if b.get("why_missed") or b.get("next_time"):
-                lines.append(f"{day} {b['name']}（{b.get('driver', '')}）："
-                             f"{b.get('why_missed', '')}｜下次：{b.get('next_time', '')}")
+            if _diagnosis(b) or _lesson(b):
+                kind = f"[{b['kind']}]" if b.get("kind") else ""
+                lines.append(f"{day} {kind}{b['name']}（{b.get('driver', '')}）："
+                             f"{_diagnosis(b)}｜下次：{_lesson(b)}")
     return "\n".join(lines)
-

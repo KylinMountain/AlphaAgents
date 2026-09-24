@@ -1428,7 +1428,8 @@ def _review_trades(ctx, day: str, conn) -> int:
         got = run(close_day.review_day(
             conn, hist, trader_id=ctx.trader, trader=get_trader(ctx.trader),
             day=day, model=ctx.model, facts_text=SF.render(facts),
-            exposure_text=exposure, handbook_before=day))
+            exposure_text=exposure, record_text=_day_record(ctx, day, conn, hist),
+            handbook_before=day))
     except Exception as exc:                          # noqa: BLE001
         logger.warning("%s: close review failed: %s", day, exc)
         return 0
@@ -1459,6 +1460,36 @@ def _news_search(day: str):
         logger.warning("%s: news index unavailable, using text match: %s", day, exc)
         return None
     return lambda q, since, until, k: NI.search_window(q, since, until, top_k=k)
+
+
+def _day_record(ctx, day: str, conn, hist) -> str:
+    """The day's own record for the close review: the direction stage's
+    choices with their thesis and what it passed on, then orders, fills,
+    holdings and sells (``evolution.day_record``)."""
+    from alpha_agents.evolution import day_record
+    selected: list[tuple[str, str]] = []
+    passed: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT shortlist_json, selected_json, research_json "
+            "FROM theme_opportunity_sets WHERE trader_id = ? AND day = ?",
+            (ctx.trader, day)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    for shortlist, chosen, research in rows:
+        try:
+            theses = {t.get("sector_id"): t.get("thesis", "")
+                      for t in (json.loads(research or "{}").get("themes") or [])
+                      if isinstance(t, dict)}
+            chosen = json.loads(chosen or "[]")
+            selected += [(name, theses.get(name, "")) for name in chosen]
+            passed += [n for n in json.loads(shortlist or "[]") if n not in chosen]
+        except (json.JSONDecodeError, AttributeError) as exc:
+            logger.warning("%s: direction record unreadable: %s", day, exc)
+    directions = (day_record.directions_text(selected, passed)
+                  if rows else "")
+    return day_record.render(conn, hist, trader_id=ctx.trader, day=day,
+                             directions=directions)
 
 
 def _ours_today(ctx, day: str, conn) -> dict[str, str]:
@@ -1598,16 +1629,11 @@ def _knowledge_block(ctx, day: str) -> str:
     # over 16 sessions with no change in what the trader bought. The notes
     # are still written to learning_candidates; they are no longer shown.
     trades = TRV.inject(_get_conn(), ctx.trader, before=day)
-    # And the last close's market review — boards, drivers, what it missed,
-    # its watchlist and that list's grade — sealed before ``day``.
+    # And yesterday's close review — its diagnosis of yesterday's decisions,
+    # labelled as such — sealed before ``day``.
     from alpha_agents.evolution import market_review as MR
     try:
-        hist = sqlite3.connect(
-            f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
-        try:
-            read = MR.inject(_get_conn(), hist, ctx.trader, before=day)
-        finally:
-            hist.close()
+        read = MR.inject(_get_conn(), ctx.trader, before=day)
     except sqlite3.Error as exc:
         logger.warning("%s: market review unavailable: %s", day, exc)
         read = ""
@@ -1719,36 +1745,7 @@ def _sector_cards(ctx, day: str, ranking_day: str) -> tuple:
     shortlist = [
         row for row in cards if row.get("rank") is not None
     ][:8]
-    # Discovery the trader can move. The top 8 is a fixed formula, so a board
-    # its close review said it never saw could not reach it the next morning
-    # however well the lesson was written. The boards that review named join
-    # the list — sealed before ``day``, so it is yesterday's word.
-    in_list = {row["sector_id"] for row in shortlist}
-    by_id = {row["sector_id"]: row for row in cards}
-    for name in _review_named_boards(ctx, day):
-        if name in by_id and name not in in_list and len(shortlist) < 8 + _REVIEW_ADDS:
-            shortlist.append(dict(by_id[name], source="复盘点名"))
-            in_list.add(name)
     return membership, cards, shortlist
-
-
-#: How many boards the last close review may add to the direction shortlist.
-_REVIEW_ADDS = 5
-
-
-def _review_named_boards(ctx, day: str) -> list[str]:
-    from alpha_agents.data.memory_store import _get_conn
-    from alpha_agents.evolution import market_review as MR
-    try:
-        MR.ensure(_get_conn())
-        row = _get_conn().execute(
-            "SELECT review_json FROM market_reviews WHERE trader_id = ? "
-            "AND date < ? ORDER BY date DESC LIMIT 1", (ctx.trader, day)).fetchone()
-        boards = (json.loads(row[0]).get("boards") or []) if row else []
-    except (sqlite3.Error, json.JSONDecodeError) as exc:
-        logger.warning("%s: last review's boards unavailable: %s", day, exc)
-        return []
-    return [b["name"] for b in boards if b.get("name")]
 
 
 def _build_sector_panel(ctx, day: str, ranking_day: str, membership,

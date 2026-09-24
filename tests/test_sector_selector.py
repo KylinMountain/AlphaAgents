@@ -106,7 +106,3 @@ class TestTheDirectionStageReadsWhatTheTraderLearned:
         got = S.build_message(day="2026-01-30", as_of_session="2026-01-29",
                               sectors=SECTORS)
         assert "（还没有）" in got
-
-    def test_a_board_the_review_named_is_marked(self):
-        rows = [dict(SECTORS[0], source="复盘点名")]
-        assert "|复盘点名|" in S.format_sector_cards(rows)

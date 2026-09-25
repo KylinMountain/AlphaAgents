@@ -58,7 +58,9 @@ def _candidate_observations(
             for key in (
                 "name", "close", "change_pct", "adv20", "turnover_rate",
                 "consecutive_limits", "net_amount", "primary_theme",
-                "supporting_themes",
+                "supporting_themes", "concepts", "membership_snapshot_id",
+                "membership_hash", "primary_theme_relation_evidence_id",
+                "supporting_theme_relation_evidence_ids",
             )
             if row.get(key) is not None
         }
@@ -70,6 +72,36 @@ def _candidate_observations(
             data=data,
             source="walk_forward_panel",
             evidence_refs=[f"walk:{day}:{phase}:{code}"],
+            timeframe=Timeframe.DAILY,
+        ))
+    return out
+
+
+def _price_observations(
+    state: TraderState, panel: list[dict], marks: dict[str, dict],
+    *, day: str, phase: str, ctx: DecisionContext,
+) -> list[Observation]:
+    codes = {str(row.get("code") or "") for row in panel if row.get("code")}
+    codes.update(
+        item.code for item in state.watchlist
+        if item.status.value in {"watching", "triggered"})
+    out = []
+    for code in sorted(codes):
+        mark = marks.get(code) or {}
+        price = mark.get("price")
+        if price is None:
+            continue
+        data = {"price": float(price)}
+        if mark.get("change_pct") is not None:
+            data["change_pct"] = float(mark["change_pct"])
+        out.append(Observation.create(
+            observed_at=ctx.information_cutoff,
+            available_at=ctx.information_cutoff,
+            type=ObservationType.PRICE_MOVE,
+            subjects=[code],
+            data=data,
+            source="walk_forward_mark",
+            evidence_refs=[f"walk-mark:{day}:{phase}:{code}"],
             timeframe=Timeframe.DAILY,
         ))
     return out
@@ -95,7 +127,8 @@ def _market_observation(
 async def prepare(
     *, run_id: str, trader_id: str, day: str, phase: str,
     panel: list[dict], market: dict | None = None,
-) -> tuple[TraderState, DecisionContext]:
+    marks: dict[str, dict] | None = None,
+) -> tuple[TraderState, DecisionContext, tuple[str, ...]]:
     """Persist replay observations before the provider is invoked."""
     dctx = context(day, phase)
     state = trader_state_store.load_latest(
@@ -110,6 +143,8 @@ async def prepare(
 
     observations = _candidate_observations(
         panel, day=day, phase=phase, ctx=dctx)
+    observations.extend(_price_observations(
+        state, panel, marks or {}, day=day, phase=phase, ctx=dctx))
     market_obs = _market_observation(
         market, day=day, phase=phase, ctx=dctx)
     if market_obs is not None:
@@ -118,7 +153,7 @@ async def prepare(
     result = await TraderRuntime().step(state, observations, dctx)
     if result.changed:
         trader_state_store.save(result.state, run_id=run_id)
-    return result.state, dctx
+    return result.state, dctx, result.reevaluate_subjects
 
 
 async def commit(

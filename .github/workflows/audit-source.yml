@@ -1,0 +1,24 @@
+name: Audit source snapshot
+
+# Temporary review-branch utility; not part of the main-branch repair.
+on:
+  push:
+    branches: [audit/decision-learning-20260925]
+    paths: [.github/workflows/audit-source.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive tracked source
+        run: git archive --format=tar.gz --output=/tmp/alphaagents-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alphaagents-source
+          path: /tmp/alphaagents-source.tar.gz
+          retention-days: 1

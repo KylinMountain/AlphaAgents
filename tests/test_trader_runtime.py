@@ -461,12 +461,12 @@ def test_daily_replay_wait_carries_into_next_session_and_triggers():
 
     next_day = obs(
         price=29.7,
-        available=at(day=26),
+        available=at(day=28),
         kind=ObservationType.DAILY_BAR,
         timeframe=Timeframe.DAILY)
     triggered = run(
         waited, [next_day],
-        context(cutoff=at(day=26)))
+        context(cutoff=at(day=28)))
     assert triggered.state.watchlist[0].status == WatchStatus.TRIGGERED
     assert triggered.reevaluate_subjects == ("600001",)
 

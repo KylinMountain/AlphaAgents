@@ -2856,8 +2856,10 @@ def _decide_llm(ctx, day: str, prev_day: str,
         ctx, runtime_state, runtime_context, verdict)
 
     if sector_mode and not verdict.get("parse_error"):
+        relation_panel = _merge_runtime_rows(
+            planner_panel, runtime_watch_rows)
         valid_orders, relation_refusals = _validate_sector_order_relations(
-            ctx, planner_panel, verdict.get("orders") or [])
+            ctx, relation_panel, verdict.get("orders") or [])
         verdict["orders"] = valid_orders
         if relation_refusals:
             verdict["refused"] = (
@@ -2924,6 +2926,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "planner_panel": [
                     row["code"] for row in planner_panel
                 ] if sector_mode else None,
+                "trader_runtime_watch_rechecks": [
+                    row["code"] for row in runtime_watch_rows
+                ],
                 "event_snapshot_refs": (
                     [] if minimal_mode
                     else _event_snapshot_refs(panel, cutoff)
@@ -2992,7 +2997,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     day, refusal.get("code") or "", why,
                     refusal.get("detail") or "")
 
-    execution_panel = planner_panel if sector_mode else panel
+    execution_panel = (
+        _merge_runtime_rows(planner_panel, runtime_watch_rows)
+        if sector_mode else panel)
     by_code = {row["code"]: row for row in execution_panel}
     placed = []
     for order in verdict["orders"]:

@@ -271,8 +271,9 @@ class TraderDecision:
             require_text(self.thesis_id, "decision thesis_id")
         if not 0 <= float(self.confidence) <= 1:
             raise TraderRuntimeError("decision confidence must be in [0, 1]")
-        if self.size_pct is not None and not 0 <= self.size_pct <= 1:
-            raise TraderRuntimeError("size_pct must be in [0, 1]")
+        if self.size_pct is not None:
+            if not isinstance(self.size_pct, (int, float)) or self.size_pct <= 0:
+                raise TraderRuntimeError("size_pct must be positive when provided")
         if (self.entry_low is not None and self.entry_high is not None
                 and self.entry_low > self.entry_high):
             raise TraderRuntimeError("entry_low cannot exceed entry_high")

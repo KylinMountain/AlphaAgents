@@ -29,8 +29,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import statistics
+from datetime import date, timedelta
+
+from alpha_agents.data import trade_review_store as store
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +71,15 @@ def _t1_change(hist: sqlite3.Connection, code: str, order_date: str):
 
 
 def facts(pos: dict, hist: sqlite3.Connection) -> dict | None:
-    """The trade in numbers, from bars dated no later than its close.
+    """Use actual fills and interior sessions when boundary-day phases are unknown.
 
-    ``peak_session`` counts trading sessions from the buy: 0 is the day it
-    bought. The peak is the session *high*, which the close-priced exit could
-    not necessarily have reached — the give-back is therefore an upper bound,
-    and the words say so rather than the number pretending otherwise.
+    Whole-span intraday potential is diagnostic, never an achievable exit.
     """
     code, open_date, close_date = pos["code"], pos["open_date"], pos["close_date"]
     entry = pos.get("open_price") or 0
-    if not (code and open_date and close_date and entry > 0):
+    exit_price = pos.get("close_price") or 0
+    if not (code and open_date and close_date and entry > 0 and exit_price > 0
+            and math.isfinite(entry) and math.isfinite(exit_price)):
         return None
     bars = _bars(hist, code, open_date, close_date)
     # The close day's own bar must be on disk. Live, the review runs at 15:30
@@ -85,9 +88,16 @@ def facts(pos: dict, hist: sqlite3.Connection) -> dict | None:
     # rather than scored on a window missing its final session.
     if not bars or bars[-1][0] < close_date:
         return None
-    peak_i = max(range(len(bars)), key=lambda i: bars[i][2])
-    low = min(b[3] for b in bars)
-    peak_pct = round((bars[peak_i][2] / entry - 1) * 100, 2)
+    if bars[0][0] != open_date:
+        return None
+    observed = [(open_date, entry, entry, "entry_fill"),
+                *[(b[0], b[2], b[3], "interior_daily_bar") for b in bars
+                  if open_date < b[0] < close_date],
+                (close_date, exit_price, exit_price, "exit_fill")]
+    peak = max(observed, key=lambda b: b[1])
+    peak_i = next(i for i, b in enumerate(bars) if b[0] == peak[0])
+    low = min(b[2] for b in observed)
+    peak_pct = round((peak[1] / entry - 1) * 100, 2)
     got = pos.get("return_pct")
     got = round(float(got), 2) if got is not None else round(
         ((pos.get("close_price") or entry) / entry - 1) * 100, 2)
@@ -101,7 +111,11 @@ def facts(pos: dict, hist: sqlite3.Connection) -> dict | None:
         "sessions": len(bars),
         "t1_change_pct": _t1_change(hist, code, pos.get("order_date") or open_date),
         "peak_pct": peak_pct,
-        "peak_date": bars[peak_i][0],
+        "peak_date": peak[0], "peak_source": peak[3],
+        "extrema_scope": "interior_sessions_and_fills",
+        "boundary_extrema_excluded": True,
+        "potential_intraday_high_pct": round((max(b[2] for b in bars) / entry - 1) * 100, 2),
+        "achievable_exit": None,
         "peak_session": peak_i,
         "worst_pct": round((low / entry - 1) * 100, 2),
         "return_pct": got,
@@ -119,13 +133,19 @@ def facts_line(f: dict) -> str:
     return (f"{f['name'] or f['code']} {f['open_date'][5:]}买→{f['close_date'][5:]}卖"
             f"（{f['sessions']}个交易日）："
             + (f"买前一日涨{t1:+.1f}%，" if t1 is not None else "")
-            + f"持有期最高{f['peak_pct']:+.1f}%（{when}），最深{f['worst_pct']:+.1f}%，"
-            f"到手{f['return_pct']:+.1f}%，吐回{f['giveback_pp']:.1f}个点")
+            + f"观察峰值{f['peak_pct']:+.1f}%（{when}），观察低点{f['worst_pct']:+.1f}%，"
+            f"到手{f['return_pct']:+.1f}%，峰值差{f['giveback_pp']:.1f}个点（非可达利润）"
+            + ("；已排除买卖当日未知时序高低点，可执行退出未知"
+               if f.get("boundary_extrema_excluded") else
+               "；旧数据为整日范围上界，不能认定为真实持有期极值"))
 
 
 _INSTRUCTIONS = """你是这笔交易的交易员。它刚刚平仓，现在由你自己复盘。
 
-下面的数字由系统从日线算出，是事实（最高价是盘中价，收盘卖出未必卖得到）。
+观察峰值不等于可成交退出价，峰值差不是本应赚到的利润。
+将决策质量与结果质量分开：先根据当时记录判断，再评论盈亏。
+未保存的当时信息就写信息不足，不要补写动机或假定可卖在高点。
+T+1、停牌、涨跌停及成交时点限制下不可执行的动作，不能被写成改进经验。
 你当时买入和卖出的理由是你自己写的原话。
 
 请像一个职业交易员一样复盘这一笔：
@@ -162,7 +182,7 @@ def _parse(text: str) -> dict:
 
 
 async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
-    """Ask the trader for its review of one trade. Never raises.
+    """Ask for an interpretation; only temporal-integrity faults propagate.
 
     ``rules`` is the handbook that was in force while it held the trade, so
     it can say which rules it followed and which it broke.
@@ -188,98 +208,132 @@ async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
     except Exception as e:                            # noqa: BLE001
         logger.warning("Trade review for %s failed (%s) — facts only",
                        f.get("code"), e)
-        return dict(NO_WORDS)
+        from alpha_agents.data.clock import LookAheadError
+        if isinstance(e, LookAheadError):
+            raise
+        return {**NO_WORDS, "_error": f"{type(e).__name__}: {e}"}
     return _parse(result.final_output or "")
 
 
 def unreviewed(conn: sqlite3.Connection, trader_id: str, as_of: str) -> list[dict]:
-    """Positions this trader closed on or before ``as_of`` with no review yet."""
+    """Missing explanations, not just missing rows, remain pending work."""
     rows = conn.execute(
-        "SELECT p.* FROM virtual_portfolio p "
-        "LEFT JOIN trade_reviews r ON r.position_id = p.id "
-        "WHERE p.trader_id = ? AND p.close_date IS NOT NULL "
-        "AND p.close_date <= ? AND p.open_price > 0 AND r.id IS NULL "
-        "ORDER BY p.close_date, p.id", (trader_id, as_of)).fetchall()
-    return [dict(r) for r in rows]
+        "SELECT p.* FROM virtual_portfolio p LEFT JOIN trade_reviews r ON r.position_id=p.id "
+        "WHERE p.trader_id=? AND p.close_date IS NOT NULL AND p.close_date<=? "
+        "AND p.open_price>0 AND (r.id IS NULL OR r.review_status<>'complete') "
+        "ORDER BY p.close_date,p.id", (trader_id, as_of)).fetchall()
+    return [dict(row) for row in rows]
 
 
-def save(conn: sqlite3.Connection, f: dict, words: dict, trader_id: str) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO trade_reviews "
-        "(position_id, trader_id, code, close_date, facts_json, lesson_json) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (f["position_id"], trader_id, f["code"], f["close_date"],
-         json.dumps(f, ensure_ascii=False), json.dumps(words, ensure_ascii=False)))
+def save(conn: sqlite3.Connection, f: dict, words: dict, trader_id: str, *,
+         as_of: str | None = None) -> None:
+    """Import a dated record; default visibility is now, not the old close date."""
+    from alpha_agents.data import clock
+    available = as_of or clock.today()
+    if store.save_facts(conn, f, trader_id, available) and store.complete(words):
+        conn.execute("UPDATE trade_reviews SET lesson_json=?,review_status='complete',"
+                     "review_available_on=? WHERE position_id=?", (
+                         json.dumps(words, ensure_ascii=False), available, f["position_id"]))
 
 
 async def review_closed(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                         trader_id: str, as_of: str, model, trader=None,
-                        handbook_before: str | None = None) -> int:
-    """Review every closed, unreviewed position of this trader. Returns count.
+                        handbook_before: str | None = None,
+                        stats: dict | None = None) -> int:
+    """Persist facts first. Return COMPLETED interpretations, not processed rows.
 
-    ``hist`` must hold no bar later than ``as_of`` that :func:`facts` would
-    read; facts reads only up to each position's own close date, which is on
-    or before ``as_of`` by construction.
+    Availability is conservative at day granularity. The claim is committed
+    before asking; after a crash it can be retried on a later processing day.
     """
     from alpha_agents.evolution import handbook
+    from alpha_agents.data import trader_session
+    processing_day = max(as_of, trader_session.instant()[:10])
+    counts = {"trade_review_facts": 0, "trade_review_attempted": 0,
+              "trade_review_failed": 0, "trade_review_waiting_data": 0}
     n = 0
-    for pos in unreviewed(conn, trader_id, as_of):
-        f = facts(pos, hist)
-        if f is None:
-            continue
-        before = f.get("order_date") or f["open_date"]
-        if handbook_before and handbook_before < before:
-            before = handbook_before
-        rules = handbook.load(trader_id, before=before)
-        versions = handbook.bindings(trader_id, before=before)
-        words = await write_words(f, model=model, trader=trader, rules=rules)
-        words = dict(words)
-        # The model may classify compliance, but it cannot name its own version.
-        words["rule_versions"] = versions
-        for field in ("followed", "broke"):
-            words[field] = [rid for rid in words.get(field) or [] if rid in versions]
-        save(conn, f, words, trader_id)
-        conn.commit()
-        n += 1
-        logger.info("Trade review [%s] %s: %s | 下次: %s", trader_id,
-                    f["code"], facts_line(f), words.get("next_time") or "—")
+    try:
+        for pos in unreviewed(conn, trader_id, as_of):
+            row = conn.execute("SELECT facts_json FROM trade_reviews WHERE position_id=?",
+                               (pos["id"],)).fetchone()
+            f = json.loads(row[0]) if row else facts(pos, hist)
+            if f is None:
+                counts["trade_review_waiting_data"] += 1
+                continue
+            counts["trade_review_facts"] += int(store.save_facts(conn, f, trader_id, processing_day))
+            conn.commit()
+            if model is None:
+                continue
+            attempt = store.claim(conn, pos["id"], processing_day)
+            conn.commit()
+            if attempt is None:
+                continue
+            counts["trade_review_attempted"] += 1
+            before = f.get("order_date") or f["open_date"]
+            if handbook_before and handbook_before < before:
+                before = handbook_before
+            rules = handbook.load(trader_id, before=before)
+            versions = handbook.bindings(trader_id, before=before)
+            words = dict(await write_words(f, model=model, trader=trader, rules=rules))
+            words["rule_versions"] = versions
+            for field in ("followed", "broke"):
+                words[field] = [rid for rid in words.get(field) or [] if rid in versions]
+            done = store.finish(conn, pos["id"], attempt, words, processing_day,
+                                words.get("_error") or ("" if store.complete(words) else "incomplete_reply"),
+                                completed_on=trader_session.instant()[:10])
+            conn.commit()
+            n += int(done)
+            counts["trade_review_failed"] += int(not done)
+            logger.info("Trade review [%s] %s attempt=%d complete=%s", trader_id,
+                        f["code"], attempt, done)
+    finally:
+        counts.update(store.pending_counts(conn, trader_id, as_of))
+        counts["trade_review_pending"] += counts["trade_review_waiting_data"]
+        if stats is not None:
+            stats.update(counts)
     return n
 
 
 def reviews_for(conn: sqlite3.Connection, trader_id: str, *,
                 up_to: str) -> list[tuple[dict, dict]]:
-    """Every review of trades closed on or before ``up_to``, oldest first."""
-    rows = _rows(conn, trader_id, None)
-    return [r for r in reversed(rows) if r[0]["close_date"] <= up_to]
+    """Only facts and explanations available by this processing day."""
+    before = (date.fromisoformat(up_to) + timedelta(days=1)).isoformat()
+    return list(reversed(_rows(conn, trader_id, before)))
 
 
 def _rows(conn: sqlite3.Connection, trader_id: str, before: str | None):
-    sql = ("SELECT facts_json, lesson_json FROM trade_reviews WHERE trader_id = ?"
-           + (" AND close_date < ?" if before else "")
-           + " ORDER BY close_date DESC, id DESC")
-    args = (trader_id, before) if before else (trader_id,)
+    before = before[:10] if before else None
+    sql = ("SELECT facts_json,lesson_json,review_status,review_available_on "
+           "FROM trade_reviews WHERE trader_id=?"
+           + (" AND close_date<? AND facts_available_on<?" if before else "")
+           + " ORDER BY close_date DESC,id DESC")
+    args = (trader_id, before, before) if before else (trader_id,)
     out = []
-    for fj, lj in conn.execute(sql, args).fetchall():
+    for fj, lj, status, available in conn.execute(sql, args):
         try:
-            out.append((json.loads(fj), json.loads(lj or "{}")))
-        except json.JSONDecodeError:
-            continue
+            visible = status == "complete" and available and (before is None or available < before)
+            out.append((json.loads(fj), json.loads(lj or "{}") if visible else dict(NO_WORDS)))
+        except json.JSONDecodeError as exc:
+            logger.warning("Stored review unreadable for %s: %s", trader_id, exc)
     return out
 
 
 def summary_line(facts_list: list[dict]) -> str:
-    """Across the trades: how far they ran, what was kept, what was handed back."""
+    """Do not mix legacy whole-day upper bounds with observed held-period extrema."""
     if not facts_list:
         return ""
     n = len(facts_list)
-    med = lambda k: statistics.median(f[k] for f in facts_list)   # noqa: E731
-    top_day = sum(1 for f in facts_list if f["peak_session"] == 0)
-    lost_after_up = sum(1 for f in facts_list
-                        if f["peak_pct"] > 0 and f["return_pct"] < 0)
-    return (f"你已平仓 {n} 笔（系统按日线算，中位数）：持有期最高 {med('peak_pct'):+.1f}%，"
-            f"到手 {med('return_pct'):+.1f}%，吐回 {med('giveback_pp'):.1f} 个点；"
-            f"{top_day}/{n} 笔的最高点就在买入当天；"
-            f"{lost_after_up}/{n} 笔曾经浮盈、最后亏着卖出。")
+    realized = statistics.median(f["return_pct"] for f in facts_list)
+    observed = [f for f in facts_list if f.get("boundary_extrema_excluded")]
+    text = f"你已平仓 {n} 笔（系统计算）：到手中位 {realized:+.1f}%。"
+    if observed:
+        peak = statistics.median(f["peak_pct"] for f in observed)
+        gap = statistics.median(f["giveback_pp"] for f in observed)
+        text += (f"其中 {len(observed)} 笔已排除买卖日未知时序极值："
+                 f"观察峰值中位 {peak:+.1f}%，峰值差中位 {gap:.1f} 个点（非可达利润）。")
+    if len(observed) != n:
+        text += (f"{n-len(observed)} 笔旧记录仅有整日上界，"
+                 "不纳入持有期极值统计，不据此判断错过利润。")
+    return text
 
 
 def inject(conn: sqlite3.Connection, trader_id: str, *,
@@ -302,6 +356,8 @@ def inject(conn: sqlite3.Connection, trader_id: str, *,
     lines += ["【你自己的逐笔复盘】", summary_line([f for f, _ in rows]), ""]
     for f, w in rows[:limit]:
         lines.append("● " + facts_line(f))
+        if not any(w.get(k) for k in _TEXT):
+            lines.append("  仅事实：复盘解释尚未完成或在该时点不可见。")
         if w.get("verdict") or w.get("wrong") or w.get("next_time"):
             if w.get("verdict"):
                 lines.append(f"  你的判断：{w['verdict']}")

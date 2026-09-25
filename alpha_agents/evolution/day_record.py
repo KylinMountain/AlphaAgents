@@ -27,11 +27,11 @@ def _clip(text: str | None, n: int = _CLIP) -> str:
 def _bar(hist: sqlite3.Connection, code: str, day: str) -> tuple[float, float] | None:
     """(close on day, change vs the previous close) — nothing after ``day``."""
     rows = hist.execute(
-        "SELECT close FROM daily_kline WHERE code = ? AND date <= ? "
+        "SELECT date, close FROM daily_kline WHERE code = ? AND date <= ? "
         "ORDER BY date DESC LIMIT 2", (code, day)).fetchall()
-    if len(rows) < 2 or not rows[1][0]:
+    if len(rows) < 2 or rows[0][0] != day or not rows[1][1] or not rows[0][1]:
         return None
-    return rows[0][0], (rows[0][0] / rows[1][0] - 1) * 100
+    return rows[0][1], (rows[0][1] / rows[1][1] - 1) * 100
 
 
 def directions_text(selected: list[tuple[str, str]], passed: list[str]) -> str:

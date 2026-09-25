@@ -1,9 +1,6 @@
 """Per-trade reviews: numbers from bars, words from the trader, read back.
 
-The case is 三六零 from the 2026-01 default-trader replay: bought 13.19, the
-session high on the buy day +6.9%, closed −4.8%. The review has to say that
-the peak came on the buy day and that 11.7 points were handed back — the
-number the trader had never been shown.
+Boundary-day highs are diagnostic potential, not necessarily held or executable.
 """
 
 from __future__ import annotations
@@ -40,7 +37,9 @@ def hist():
         ("601360", "2026-01-19", 13.2, 13.3, 12.5, 12.56),
     ]
     h.executemany("INSERT INTO daily_kline VALUES (?,?,?,?,?,?)", rows)
-    yield h
+    from alpha_agents.evolution.replay_mode import replay_as_of
+    with replay_as_of("2026-01-19 19:00"):
+        yield h
     h.close()
 
 
@@ -66,8 +65,10 @@ class TestTheFactsAreTheBars:
         _close(conn)
         f = TR.facts(_pos(conn), hist)
         assert f["peak_session"] == 0, "the high came on the buy day"
-        assert f["peak_pct"] == pytest.approx(6.9, abs=0.01)
-        assert f["giveback_pp"] == pytest.approx(6.9 + 4.78, abs=0.01)
+        assert f["peak_pct"] == 0.0
+        assert f["potential_intraday_high_pct"] == pytest.approx(6.9, abs=0.01)
+        assert f["achievable_exit"] is None
+        assert f["giveback_pp"] == pytest.approx(4.78, abs=0.01)
         assert f["t1_change_pct"] == pytest.approx(3.31, abs=0.01)
         assert f["worst_pct"] < 0
         assert "买入当天" in TR.facts_line(f)
@@ -83,9 +84,9 @@ class TestWritingAReview:
         _close(conn)
         n = asyncio.run(TR.review_closed(conn, hist, trader_id="default",
                                          as_of="2026-01-19", model=None))
-        assert n == 1
+        assert n == 0, "facts alone is not a completed interpretation"
         block = TR.inject(conn, "default")
-        assert "吐回" in block and "1/1 笔的最高点就在买入当天" in block
+        assert "非可达利润" in block and "已排除买卖日" in block
 
     def test_a_position_is_reviewed_once(self, conn, hist):
         _close(conn)

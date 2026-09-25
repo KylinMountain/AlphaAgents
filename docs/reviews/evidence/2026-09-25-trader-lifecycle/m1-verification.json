@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-25",
+  "scope": "Trader lifecycle M1 factual integrity (AL-05 through AL-08), not M2/M3 or performance validation",
+  "base_commit": "00023d5fdb7e8c6f7a98851d70843763ea48259e",
+  "tested_source_commit": "00164a020be3953d8ae9c665fb852a2d3ea89e9d",
+  "workflow_run_id": 36092747709,
+  "workflow_job_id": 107938413732,
+  "workflow_url": "https://github.com/KylinMountain/AlphaAgents/actions/runs/36092747709",
+  "validation_artifact_id": 10846103986,
+  "dependencies": "uv sync --frozen --extra dev",
+  "targeted": {
+    "command": "uv run pytest tests/test_trader_lifecycle_m1.py tests/test_decision_learning_integrity.py tests/test_trade_review.py tests/test_handbook.py tests/test_day_record.py tests/test_entry_pricing.py tests/test_session_facts.py tests/test_morning_position_calls.py tests/test_kernel_clock.py -q --no-header",
+    "passed": 164,
+    "seconds": 13.38
+  },
+  "full_suite": {
+    "command": "uv run pytest tests/ -q --no-header",
+    "passed": 3471,
+    "skipped": 20,
+    "warnings": 2,
+    "seconds": 174.64,
+    "new_cases_vs_prior_3435_pass_baseline": 36,
+    "warning_detail": "Existing test_build_lock multithreaded multiprocessing fork deprecation warnings"
+  },
+  "checks": {
+    "harness": {"passed": true, "files": 243, "existing_debt": 13},
+    "docs": {"passed": true},
+    "policy": {"passed": true, "existing_debt": 14}
+  },
+  "source_verification": {
+    "method": "Compared every entry in the successful runner's verified-files.json with local SHA-256 and git hash-object",
+    "matched_tested_files": 21,
+    "application_and_test_blobs_reused_unchanged": 20,
+    "plan_handling": "The tested in-progress plan is replaced by a completed delivery record; this verification JSON is added separately",
+    "temporary_audit_workflows_or_payloads_in_main": false
+  },
+  "initial_validation_findings": [
+    {"run_id": 36092016351, "full_passed": 3467, "full_failed": 1, "finding": "Historical-review fixture omitted the simulated write date; it now explicitly supplies as_of=_START without weakening production availability checks"},
+    {"run_id": 36092361406, "full_passed": 3470, "full_failed": 1, "finding": "The same fixture asserted the old giveback wording; it now asserts non-achievable peak-gap labeling and exclusion of legacy extrema from held-period aggregates"}
+  ],
+  "important_semantics": {
+    "review_attempts": "At most one logical interpretation attempt per processing day, three total; provider transport retries remain separate",
+    "missing_model": "Facts are saved, no attempt is consumed, no completed interpretation is claimed",
+    "availability": "Conservative processing-day visibility; not a minute-level point-in-time guarantee",
+    "extrema": "Actual fills plus strictly interior daily bars; unknown boundary-day paths excluded, achievable_exit remains unknown",
+    "memory": "Persistent and isolated by run, trader, exchange day and security; a prior view is not a trading filter",
+    "existing_rules": "Not automatically cleared or validated by these repairs"
+  },
+  "not_verified": [
+    "User's original seven local historical runs",
+    "Real model responses to revised prompts",
+    "Historical-corpus-dependent scenarios outside fixtures",
+    "Minute-level executable exits or complete historical data availability",
+    "Profitability, improved drawdown, or out-of-sample alpha",
+    "M2 unified decision engine and experiments",
+    "M3 end-to-end behavioral evolution and promotion"
+  ],
+  "force_push_used": false
+}

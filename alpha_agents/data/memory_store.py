@@ -94,6 +94,8 @@ def _get_conn() -> sqlite3.Connection:
         # before the ALTER loop below so the loop's own position_exits ALTERs
         # (thesis_id) find the rebuilt table.
         _migrate_position_exits_command(conn)
+        from alpha_agents.data.trade_review_store import migrate as migrate_reviews
+        migrate_reviews(conn)
         # Schema migrations for older DBs — CREATE IF NOT EXISTS doesn't add
         # columns to existing tables. Each ALTER is wrapped in try/except to
         # ignore "duplicate column" errors on already-migrated DBs.

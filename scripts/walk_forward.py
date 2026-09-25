@@ -1393,7 +1393,7 @@ def _review_trades(ctx, day: str, conn) -> int:
     words come from the run's journaled model, so they are recorded and
     replayable; a placeholder run has no model and stores facts alone.
 
-    Returns the number of trade reviews written (the counter's old meaning);
+    Returns completed interpretations, not facts-only records;
     the market review and handbook rewrite are counted separately.
     """
     from alpha_agents.data.trader import get_trader
@@ -1432,6 +1432,9 @@ def _review_trades(ctx, day: str, conn) -> int:
             exposure_text=exposure, record_text=_day_record(ctx, day, conn, hist),
             handbook_before=day))
     except Exception as exc:                          # noqa: BLE001
+        from alpha_agents.data.clock import LookAheadError
+        if isinstance(exc, LookAheadError):
+            raise
         logger.warning("%s: close review failed: %s", day, exc)
         return 0
     finally:
@@ -1441,8 +1444,12 @@ def _review_trades(ctx, day: str, conn) -> int:
     ctx.counters["handbook_rewrites"] += got.get("handbook", 0)
     ctx.counters["market_review_failed"] += got.get("market_review_failed", 0)
     ctx.counters["handbook_failed"] += got.get("handbook_failed", 0)
-    for kind in ("market_review_failed", "handbook_failed"):
-        if got.get(kind):
+    for key in ("trade_review_facts", "trade_review_attempted", "trade_review_failed",
+                "trade_review_pending", "trade_review_exhausted", "trade_review_waiting_data"):
+        ctx.counters[key] += got.get(key, 0)
+    for kind in ("market_review_failed", "handbook_failed", "trade_review_failed",
+                 "trade_review_pending"):
+        if got.get(kind) and (kind != "trade_review_pending" or ctx.model is not None):
             ctx.failed_learning.append((day, kind))
     return got.get("trade_reviews", 0)
 
@@ -5328,6 +5335,8 @@ def integrity(result: dict) -> dict:
         "decide_failed": decide,
         "market_review_failed": sorted(d for d, k in learning if k == "market_review_failed"),
         "handbook_failed": sorted(d for d, k in learning if k == "handbook_failed"),
+        "trade_review_failed": sorted({d for d, k in learning if k == "trade_review_failed"}),
+        "trade_review_pending": sorted({d for d, k in learning if k == "trade_review_pending"}),
         "complete": not decide and not learning,
     }
 
@@ -5351,6 +5360,9 @@ def _integrity_lines(result: dict) -> list[str]:
     if i["market_review_failed"]:
         lines.append(f"  盘面复盘失败 {len(i['market_review_failed'])} 次"
                      f"（{days(i['market_review_failed'])}）")
+    if i["trade_review_failed"] or i["trade_review_pending"]:
+        lines.append(f"  逐笔复盘解释失败 {len(i['trade_review_failed'])} 天，"
+                     f"存在待完成解释 {len(i['trade_review_pending'])} 天；仅保存事实不算完成学习")
     if i["handbook_failed"]:
         lines.append(f"  守则改写失败 {len(i['handbook_failed'])} 次"
                      f"（{days(i['handbook_failed'])}）")

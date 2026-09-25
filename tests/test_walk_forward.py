@@ -947,14 +947,15 @@ class TestTheObservationIsAttributable:
                  "worst_pct": -5.0, "return_pct": -4.8, "giveback_pp": 11.7}
         TRV.save(_get_conn(), facts, {"verdict": "错", "right": "",
                                       "wrong": "冲高没走", "next_time": "先兑现一半"},
-                 ctx.trader)
+                 ctx.trader, as_of=_START)
         _get_conn().commit()
 
         assert "逐笔复盘" not in walk_forward._knowledge_block(ctx, _START), (
             "the day it was written can see it")
         block = walk_forward._knowledge_block(ctx, _SESSIONS[22])
         assert "【你自己的逐笔复盘】" in block
-        assert "吐回11.7个点" in block and "下次：先兑现一半" in block
+        assert "峰值差11.7个点（非可达利润）" in block and "下次：先兑现一半" in block
+        assert "不纳入持有期极值统计" in block
 
 
 class TestASupportCountMustBeAboutReturnsNotGroupMembership:

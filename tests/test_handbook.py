@@ -39,7 +39,7 @@ def _review(conn, pid, close, ret, peak, followed=(), broke=()):
     TR.save(conn, f, {"verdict": "错", "right": "", "wrong": "冲高没走",
                       "next_time": "冲高先兑现一半", "followed": list(followed),
                       "broke": list(broke),
-                      "rule_versions": HB.bindings("default", before=close)}, "default")
+                      "rule_versions": HB.bindings("default", before=close)}, "default", as_of=close)
     conn.commit()
 
 

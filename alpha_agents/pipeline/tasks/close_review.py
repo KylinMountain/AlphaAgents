@@ -80,18 +80,17 @@ def _members() -> tuple[dict[str, list[str]], dict[str, str]]:
     return members, names
 
 
+def _morning_inputs(trader_id: str, today: str) -> list[dict]:
+    from alpha_agents.data import trader_session
+    return [row for row in trader_session.read(trader_id=trader_id,
+            kind="morning_input", day=today) if row["observed_at"][11:16] < "09:30"]
+
+
 def _ours(trader_id: str, today: str) -> dict[str, str]:
-    """Live: a tracked theme was seen; one it holds or ordered today, selected."""
-    from alpha_agents.data.memory_store import _get_conn, get_active_themes
-    from alpha_agents.evolution.session_facts import SEEN, SELECTED
-    out = {t["name"]: SEEN for t in get_active_themes()}
-    rows = _get_conn().execute(
-        "SELECT DISTINCT theme FROM virtual_portfolio WHERE trader_id = ? AND "
-        "(status = 'open' OR order_date = ?)", (trader_id, today)).fetchall()
-    for (theme,) in rows:
-        if theme:
-            out[theme] = SELECTED
-    return out
+    """Visibility is an observed input, not selection or inferred hindsight."""
+    return {name: "早盘材料中可见（不等于选中）"
+            for row in _morning_inputs(trader_id, today)
+            for name in row["payload"].get("themes", [])}
 
 
 def _exposure(trader_id: str, hist: sqlite3.Connection, today: str) -> str:
@@ -124,15 +123,30 @@ def _day_facts(hist: sqlite3.Connection, today: str, trader_id: str) -> str:
     except Exception as e:                            # noqa: BLE001
         logger.warning("News for the close review unavailable: %s", e)
         news, news_history = [], []
-    flows = sqlite3.connect(
-        f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
+    try:
+        flows = sqlite3.connect(
+            f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        logger.warning("Close review flow database unavailable: %s", exc)
+        flows = None
     try:
         f = SF.compute(hist, day=today, members=members, names=names,
                        flows=flows, news_titles=news, ours=_ours(trader_id, today),
-                       news_history=news_history, search=_news_search(today))
+                       news_history=news_history, search=_news_search(today),
+                       unseen_label="是否看到未记录")
     finally:
-        flows.close()
-    return SF.render(f)
+        if flows is not None:
+            flows.close()
+    from alpha_agents.data.memory_store import _get_conn
+    relevant = {row[0] for row in _get_conn().execute(
+        "SELECT DISTINCT code FROM virtual_portfolio WHERE trader_id=? AND "
+        "(status='open' OR order_date=? OR close_date=?)", (trader_id, today, today))}
+    present = {row[0] for row in hist.execute(
+        "SELECT code FROM daily_kline WHERE date=? AND close>0", (today,))}
+    missing = sorted(relevant - present)
+    coverage = (f"账户相关股票当日行情覆盖 {len(relevant & present)}/{len(relevant)}；"
+                f"缺失：{','.join(missing) or '无'}。缺失不表示停牌或零涨跌。")
+    return coverage + "\n" + SF.render(f)
 
 
 def _news_search(today: str):
@@ -151,18 +165,18 @@ def _news_search(today: str):
 
 
 def _record(hist: sqlite3.Connection, trader_id: str, today: str) -> str:
-    """The day's own record. Live has no direction stage: the themes it
-    tracked are what it had in front of it at the open."""
-    from alpha_agents.data.memory_store import _get_conn, get_active_themes
+    """Use recorded pre-open inputs, never current active themes."""
+    from alpha_agents.data.memory_store import _get_conn
     from alpha_agents.evolution import day_record
-    try:
-        tracked = [t["name"] for t in get_active_themes()]
-    except Exception as e:                            # noqa: BLE001
-        logger.warning("Tracked themes unavailable: %s", e)
-        tracked = []
-    directions = ("早盘你在跟踪的主线：" + "、".join(tracked[:20])) if tracked else ""
+    rows = _morning_inputs(trader_id, today)
+    lines = ["早盘材料快照（仅证明可见，不推定选择或拒绝）："]
+    for row in rows:
+        names = "、".join(row["payload"].get("themes", [])) or "（主线列表为空）"
+        lines.append(f"- {row['observed_at']} {names}")
+    if not rows:
+        lines = ["早盘材料未记录；不能用收盘主线补写早盘所见。"]
     return day_record.render(_get_conn(), hist, trader_id=trader_id, day=today,
-                             directions=directions)
+                             directions="\n".join(lines))
 
 
 async def run(today: str) -> dict:

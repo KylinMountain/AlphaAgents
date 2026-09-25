@@ -246,3 +246,13 @@ def test_existing_trader_state_is_resumed_not_reseeded(monkeypatch):
     assert got["state_version"] == 2
     assert saved[0].parent_state_hash == previous.state_hash
     assert saved[-1].recent_decisions[-1].action == Action.HOLD
+
+
+def test_risk_calendar_failure_is_fail_closed(monkeypatch):
+    from alpha_agents.pipeline import scheduler as S
+
+    monkeypatch.setattr(
+        S.ak, "tool_trade_date_hist_sina",
+        lambda: (_ for _ in ()).throw(RuntimeError("calendar down")))
+    assert S._is_trading_day(
+        datetime(2026, 10, 1, 9, 0), fail_closed=True) is False

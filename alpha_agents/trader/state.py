@@ -404,6 +404,20 @@ class TraderState:
         if any(not isinstance(value, str) or not value.strip()
                for value in self.pending_orders):
             raise TraderRuntimeError("pending order ids must be non-empty strings")
+        for item in self.watchlist:
+            if item.created_at > self.as_of:
+                raise TraderRuntimeError("watch item cannot come from state future")
+            if item.last_checked_at is not None and item.last_checked_at > self.as_of:
+                raise TraderRuntimeError("watch check cannot come from state future")
+        for item in self.theses:
+            if item.created_at > self.as_of or item.updated_at > self.as_of:
+                raise TraderRuntimeError("thesis cannot come from state future")
+        for item in self.recent_decisions:
+            if item.made_at > self.as_of:
+                raise TraderRuntimeError("decision cannot come from state future")
+        for item in self.recent_observations:
+            if item.available_at > self.as_of:
+                raise TraderRuntimeError("observation cannot come from state future")
 
     @staticmethod
     def _unique(values, field: str) -> None:

@@ -209,16 +209,55 @@ async def run_intraday_monitor() -> str | None:
     pending = get_pending_orders()
     open_pos = get_open_positions()
     price_alerts = get_active_price_alerts()
-    all_codes = list({p["code"] for p in pending + open_pos} | {a["code"] for a in price_alerts})
+
+    # Persistent WAIT plans are risk-relevant even on a quiet market cycle.
+    # They must be checked before the anomaly early-return below.
+    from alpha_agents.data import trader_state_store
+    from alpha_agents.data.trader_session import namespace as run_namespace
+    runtime_traders = load_traders()
+    watch_codes: set[str] = set()
+    for _trader in runtime_traders:
+        try:
+            state = trader_state_store.load_latest(
+                run_id=run_namespace(), trader_id=_trader.id)
+            if state is not None:
+                watch_codes.update(
+                    item.code for item in state.watchlist
+                    if item.status.value in {"watching", "triggered"})
+        except Exception as e:
+            logger.warning(
+                "Trader Runtime state unavailable for %s: %s", _trader.id, e)
+
+    all_codes = list(
+        {p["code"] for p in pending + open_pos}
+        | {a["code"] for a in price_alerts}
+        | watch_codes)
 
     if all_codes:
         rt_prices = await asyncio.to_thread(get_realtime_quotes, all_codes)
         if rt_prices:
             price_map = {code: data["price"] for code, data in rt_prices.items()}
+            trader_prices = {}
+            for code, data in rt_prices.items():
+                trader_prices[code] = data["price"]
+                trader_prices[code + "_chg"] = data.get("change_pct", 0)
             world = await asyncio.to_thread(_market_view)
 
-            for _trader in load_traders():
+            for _trader in runtime_traders:
                 await manage_book(_trader, price_map, today_str, world)
+                # A watch crossing its condition wakes the same Trader even
+                # when the market as a whole has no anomaly.
+                try:
+                    result = await plan_intraday(
+                        [], _trader, prices=trader_prices)
+                    if result.get("decisions"):
+                        logger.info(
+                            "Trader Runtime watch recheck [%s]: %s",
+                            _trader.id, result.get("status"))
+                except Exception as e:
+                    logger.exception(
+                        "Trader Runtime watch check [%s] failed: %s",
+                        _trader.id, e)
 
             # Check price alerts
             if price_alerts:

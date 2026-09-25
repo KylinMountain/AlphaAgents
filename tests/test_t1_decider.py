@@ -164,6 +164,37 @@ class TestThePromptCannotShipAHole:
         assert "没有读到任何快讯" in message
         assert "空仓" in message
 
+    def test_a_toolless_decision_does_not_advertise_unavailable_tools(self):
+        message = D.build_message(
+            day="2025-07-01", prev_day="2025-06-30", panel=PANEL, news=[],
+            book="", knowledge="", trader_note="", picks=2,
+            template=D.load_prompt(), tools_enabled=False)
+
+        assert "本轮没有可调用工具" in message
+        assert "get_market_regime" not in message
+
+    def test_the_runner_timeout_reaches_the_decision_call(self, monkeypatch):
+        seen = {}
+
+        async def fake_run(frame, *, model, tools, budget, timeout=None,
+                           attempts=None):
+            seen["timeout"] = timeout
+            return {"orders": [], "watch": [], "rejected": [],
+                    "refused": [], "parse_error": None,
+                    "no_trade_reason": "没有足够的入场证据"}
+
+        monkeypatch.setattr(D, "_run_frame", fake_run)
+        import asyncio
+        from types import SimpleNamespace
+
+        asyncio.run(D.propose(
+            day="2025-07-01", prev_day="2025-06-30", panel=PANEL, news=[],
+            book="", knowledge="", trader_note="", picks=2,
+            template=D.load_prompt(), model=SimpleNamespace(model="stub"),
+            timeout=17.5))
+
+        assert seen["timeout"] == 17.5
+
     def test_the_news_actually_reaches_the_prompt(self):
         """The template claimed "news up to 09:00 today" and then did not
         contain the news: ``format_news`` was never called, so the model chose

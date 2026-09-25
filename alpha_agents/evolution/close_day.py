@@ -29,7 +29,9 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                      trader_id: str, trader, day: str, model, facts_text: str,
                      exposure_text: str = "", record_text: str = "",
                      handbook_before: str | None = None,
-                     review_market: bool = True) -> dict:
+                     review_market: bool = True,
+                     run_id: str | None = None,
+                     model_timeout: float | None = None) -> dict:
     """Return completion counts; temporal-integrity faults propagate."""
     from alpha_agents.evolution import handbook, market_review, trade_review
     from alpha_agents.evolution import trader_review
@@ -48,9 +50,15 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
     }
     review_stats = {}
     try:
+        trade_options = {
+            "trader_id": trader_id, "as_of": day, "model": model,
+            "trader": trader, "handbook_before": handbook_before,
+            "stats": review_stats,
+        }
+        if model_timeout is not None:
+            trade_options["timeout"] = model_timeout
         counts["trade_reviews"] = await trade_review.review_closed(
-            conn, hist, trader_id=trader_id, as_of=day, model=model,
-            trader=trader, handbook_before=handbook_before, stats=review_stats)
+            conn, hist, **trade_options)
     except Exception as e:                            # noqa: BLE001
         from alpha_agents.data.clock import LookAheadError
         if isinstance(e, LookAheadError):
@@ -60,18 +68,17 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
     counts.update(review_stats)
 
     try:
-        got = await trader_review.review_decisions(
-            conn,
-            trader_id=trader_id,
-            day=day,
-            model=model,
-            facts=facts_text,
-            record=record_text,
-        )
+        decision_options = {
+            "trader_id": trader_id, "day": day, "model": model,
+            "facts": facts_text, "record": record_text, "run_id": run_id,
+        }
+        if model_timeout is not None:
+            decision_options["timeout"] = model_timeout
+        got = await trader_review.review_decisions(conn, **decision_options)
         counts["decision_reviews"] += got["decision_reviews"]
         counts["lesson_candidates"] += got["lesson_candidates"]
         counts["lesson_candidates"] += trader_review.lessons_from_trade_reviews(
-            conn, trader_id=trader_id, day=day)
+            conn, trader_id=trader_id, day=day, run_id=run_id)
     except Exception as e:                            # noqa: BLE001
         from alpha_agents.data.clock import LookAheadError
         if isinstance(e, LookAheadError):
@@ -83,13 +90,17 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
         context = "\n\n".join(x for x in (
             exposure_text,
             handbook.load(trader_id, before=handbook_before)) if x)
-        if await market_review.write(conn, trader_id=trader_id, date=day,
-                                     facts=facts_text, model=model,
-                                     record=record_text, context=context):
+        market_options = {
+            "trader_id": trader_id, "date": day, "facts": facts_text,
+            "model": model, "record": record_text, "context": context,
+        }
+        if model_timeout is not None:
+            market_options["timeout"] = model_timeout
+        if await market_review.write(conn, **market_options):
             counts["market_review"] = 1
             counts["lesson_candidates"] += (
                 trader_review.lessons_from_market_review(
-                    conn, trader_id=trader_id, day=day))
+                    conn, trader_id=trader_id, day=day, run_id=run_id))
         elif model is not None:
             # write() returns None without a model or facts; both are ruled
             # out here, so None is an error or an unreadable reply.
@@ -97,7 +108,7 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
 
     try:
         learned = trader_learning.advance(
-            trader_id=trader_id, as_of=day, conn=conn)
+            trader_id=trader_id, as_of=day, run_id=run_id, conn=conn)
         counts["lessons_created"] += learned["lessons_created"]
         counts["rules_created"] += learned["rules_created"]
     except Exception as e:                            # noqa: BLE001

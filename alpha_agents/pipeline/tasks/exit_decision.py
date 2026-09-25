@@ -40,9 +40,10 @@ from alpha_agents.data.portfolio import (
 # A-share board lot. Imported from the module that already owns the constant
 # rather than re-declared, so a market-rule change moves one place.
 from alpha_agents.data.portfolio_exit import LOT_SIZE
+from alpha_agents.evolution.trader_positions import position_observations
 from alpha_agents.trader import (
-    Action, DecisionContext, DecisionHorizon, EvidenceScope, Observation,
-    ObservationType, Session, Timeframe, TraderDecision, TraderRuntime,
+    Action, DecisionContext, DecisionHorizon, EvidenceScope, Session,
+    Timeframe, TraderDecision, TraderRuntime,
     TraderRuntimeError, TraderState,
 )
 
@@ -433,65 +434,6 @@ def _runtime_context(cutoff: datetime) -> DecisionContext:
     )
 
 
-def _position_observations(
-    state: TraderState, positions: list[dict], cutoff: datetime,
-    timeframe: Timeframe,
-) -> list[Observation]:
-    """Emit only actual book changes, never infer a fill from a quote."""
-    before = {item.code: item for item in state.positions}
-    now = {str(pos.get("code") or ""): pos for pos in positions
-           if pos.get("code")}
-    observations: list[Observation] = []
-
-    for code, pos in sorted(now.items()):
-        shares = int(pos.get("shares") or 0)
-        avg_price = float(
-            pos.get("avg_price") or pos.get("open_price") or 0)
-        thesis_id = pos.get("thesis_id")
-        previous = before.get(code)
-        if (previous is not None and previous.shares == shares
-                and abs(previous.avg_price - avg_price) < 1e-12
-                and previous.thesis_id == (
-                    str(thesis_id) if thesis_id is not None else None)):
-            continue
-        observations.append(Observation.create(
-            observed_at=cutoff,
-            available_at=cutoff,
-            type=ObservationType.POSITION_CHANGED,
-            subjects=[code],
-            data={
-                "code": code,
-                "shares": shares,
-                "avg_price": avg_price,
-                "thesis_id": thesis_id,
-            },
-            source="portfolio_book",
-            evidence_refs=[
-                f"position:{pos.get('id', code)}:{shares}:{avg_price}"
-            ],
-            timeframe=timeframe,
-        ))
-
-    for code, previous in sorted(before.items()):
-        if code in now:
-            continue
-        observations.append(Observation.create(
-            observed_at=cutoff,
-            available_at=cutoff,
-            type=ObservationType.POSITION_CHANGED,
-            subjects=[code],
-            data={
-                "code": code, "shares": 0,
-                "avg_price": previous.avg_price,
-                "thesis_id": previous.thesis_id,
-            },
-            source="portfolio_book",
-            evidence_refs=[f"position-closed:{code}:{cutoff.isoformat()}"],
-            timeframe=timeframe,
-        ))
-    return observations
-
-
 def _confidence(value: str) -> float:
     return {
         "high": 0.8, "medium": 0.6, "low": 0.4,
@@ -547,18 +489,19 @@ def to_runtime_decisions(
 async def commit_runtime_decisions(
     decisions: list[dict], positions: list[dict], *,
     trader_id: str, decision_key: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[TraderDecision, ...]:
     """Seal position observations and decisions before execution is attempted."""
     from alpha_agents.data import trader_session, trader_state_store
 
     cutoff = _runtime_cutoff()
     context = _runtime_context(cutoff)
-    run_id = trader_session.namespace()
+    run = trader_session.namespace(run_id)
     state = trader_state_store.load_latest(
-        run_id=run_id, trader_id=trader_id)
+        run_id=run, trader_id=trader_id)
     if state is None:
         state = TraderState.create(trader_id=trader_id, as_of=cutoff)
-        trader_state_store.save(state, run_id=run_id)
+        trader_state_store.save(state, run_id=run)
     if state.as_of > cutoff:
         raise TraderRuntimeError(
             "persisted TraderState is ahead of position decision cutoff")
@@ -566,23 +509,23 @@ async def commit_runtime_decisions(
     runtime = TraderRuntime()
     observed = await runtime.step(
         state,
-        _position_observations(
+        position_observations(
             state, positions, cutoff, context.observation_resolution),
         context,
     )
     state = observed.state
     if observed.changed:
-        trader_state_store.save(state, run_id=run_id)
+        trader_state_store.save(state, run_id=run)
 
     key = decision_key or (
-        f"position:{run_id}:{cutoff.isoformat(timespec='seconds')}")
+        f"position:{run}:{cutoff.isoformat(timespec='seconds')}")
     runtime_decisions = to_runtime_decisions(
         decisions, context, decision_key=key)
     if not runtime_decisions:
         return ()
     committed = await runtime.commit_decisions(
         state, runtime_decisions, context)
-    trader_state_store.save(committed.state, run_id=run_id)
+    trader_state_store.save(committed.state, run_id=run)
     return runtime_decisions
 
 

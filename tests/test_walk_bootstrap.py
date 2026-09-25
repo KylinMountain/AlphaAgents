@@ -94,8 +94,13 @@ class TestTheBoundaryIsReal:
                 "SELECT name FROM sqlite_master WHERE type='table'")}
         finally:
             con.close()
-        assert "virtual_portfolio" in tables and "predictions" in tables, \
-            "the fresh state must carry the live schema, or a run has no tables"
+        expected = {
+            "virtual_portfolio", "predictions",
+            "opportunity_sets", "opportunity_items",
+            "theme_opportunity_sets", "theme_opportunity_items",
+        }
+        assert expected <= tables, (
+            "the fresh state must carry every first-day review journal table")
 
     def test_memory_db_is_never_a_link_to_the_corpus(self, tmp_path):
         corpus = _corpus(tmp_path)

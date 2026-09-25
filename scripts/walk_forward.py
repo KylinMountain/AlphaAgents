@@ -1459,7 +1459,8 @@ def _review_trades(ctx, day: str, conn) -> int:
             conn, hist, trader_id=ctx.trader, trader=get_trader(ctx.trader),
             day=day, model=ctx.model, facts_text=SF.render(facts),
             exposure_text=exposure, record_text=_day_record(ctx, day, conn, hist),
-            handbook_before=day))
+            handbook_before=day, run_id=getattr(ctx, "run_id", None),
+            model_timeout=getattr(ctx, "model_timeout", None)))
     except Exception as exc:                          # noqa: BLE001
         from alpha_agents.data.clock import LookAheadError
         if isinstance(exc, LookAheadError):
@@ -2349,6 +2350,7 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
         phase="open",
         tools=[],
         max_turns=ctx.max_turns,
+        timeout=getattr(ctx, "model_timeout", None),
         research_budget=None,
         research_packet=research_packet_payload,
         information_cutoff=information_cutoff,
@@ -2844,6 +2846,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
             phase=phase,
             tools=[] if minimal_mode else _trader_tools(ctx),
             max_turns=1 if minimal_mode else ctx.max_turns,
+            timeout=getattr(ctx, "model_timeout", None),
             research_budget=None if minimal_mode else shared_budget,
             information_cutoff=runtime_context.information_cutoff.isoformat(
                 sep=" ", timespec="seconds"),
@@ -3626,6 +3629,21 @@ def _check_theses(ctx, day: str) -> list[dict]:
             for row in closed]
 
 
+def _sync_replay_positions(ctx, day: str, phase: str) -> None:
+    """Append the booked replay position snapshot to its Trader Runtime."""
+    if ctx.decider != "llm":
+        return
+    from alpha_agents.evolution import trader_replay
+
+    ctx.loop.run_until_complete(trader_replay.sync_positions(
+        run_id=ctx.run_id,
+        trader_id=ctx.trader,
+        day=day,
+        phase=phase,
+        positions=P.get_open_positions(ctx.trader),
+    ))
+
+
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
     """Ask the agent what to do with the positions the rules left open.
 
@@ -3757,6 +3775,23 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
                              phase=phase,
                              signals=ctx.pending_signals))
     if not decisions:
+        return []
+
+    # Seal the position decision against the same run-local state before its
+    # executor can change the book. A failed state write holds rather than
+    # silently executing a decision the replay cannot later review.
+    try:
+        ctx.loop.run_until_complete(ED.commit_runtime_decisions(
+            decisions,
+            positions,
+            trader_id=ctx.trader,
+            decision_key=f"walk:{ctx.run_id}:{day}:{phase}",
+            run_id=ctx.run_id,
+        ))
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning(
+            "%s: could not seal agent exit decisions (%s: %s) — holding",
+            day, type(exc).__name__, exc)
         return []
 
     # `apply` is the live executor and is reused deliberately: the buy side
@@ -4818,6 +4853,7 @@ def _run_window(ctx, args) -> dict:
                             dict(entries["counts"]))
                 exits = _settle_exits(ctx, day)
                 logger.info("%s: settled exits %s", day, dict(exits["counts"]))
+                _sync_replay_positions(ctx, day, "settle")
             # The conditions the agent itself wrote, checked before it is
             # asked anything. A replay created theses and then never evaluated
             # them: `thesis.evaluate` had three callers — thesis_monitor,
@@ -4891,6 +4927,8 @@ def _run_window(ctx, args) -> dict:
                                    day, type(exc).__name__, exc)
                     errors.append({"date": day, "stage": "close_buy",
                                    "error": f"{type(exc).__name__}: {exc}"})
+            with replay_as_of(f"{day} 14:55"):
+                _sync_replay_positions(ctx, day, "close")
             with replay_as_of(day):
                 equity = _value(ctx, day)
                 close_marks = {

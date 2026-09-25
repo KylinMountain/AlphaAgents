@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from alpha_agents.data import trader_state_store
 from alpha_agents.evolution import trader_learning
+from alpha_agents.evolution.trader_positions import position_observations
 from alpha_agents.trader import (
     DecisionContext, DecisionHorizon, EvidenceScope, Observation,
     ObservationType, Session, Timeframe, TraderDecision, TraderRuntime,
@@ -24,6 +25,9 @@ _TZ = ZoneInfo("Asia/Shanghai")
 def context(day: str, phase: str) -> DecisionContext:
     if phase == "open":
         stamp = datetime.fromisoformat(day + " 09:00:00").replace(tzinfo=_TZ)
+        session = Session.OPEN
+    elif phase == "settle":
+        stamp = datetime.fromisoformat(day + " 09:30:00").replace(tzinfo=_TZ)
         session = Session.OPEN
     elif phase == "close":
         # Deliberately synthetic, matching walk_forward's existing close
@@ -166,6 +170,34 @@ async def commit(
     """Seal the replay decision before existing execution simulates a fill."""
     result = await TraderRuntime().commit_decisions(
         state, tuple(decisions), context)
+    if result.changed:
+        trader_state_store.save(result.state, run_id=run_id)
+    return result.state
+
+
+async def sync_positions(
+    *, run_id: str, trader_id: str, day: str, phase: str,
+    positions: list[dict],
+) -> TraderState:
+    """Persist the book snapshot that resulted from replay execution."""
+    dctx = context(day, phase)
+    state = trader_state_store.load_latest(
+        run_id=run_id, trader_id=trader_id)
+    if state is None:
+        state = TraderState.create(
+            trader_id=trader_id, as_of=dctx.information_cutoff)
+        trader_state_store.save(state, run_id=run_id)
+    if state.as_of > dctx.information_cutoff:
+        raise TraderRuntimeError(
+            "replay TraderState is ahead of the execution cutoff")
+
+    result = await TraderRuntime().step(
+        state,
+        position_observations(
+            state, positions, dctx.information_cutoff,
+            dctx.observation_resolution),
+        dctx,
+    )
     if result.changed:
         trader_state_store.save(result.state, run_id=run_id)
     return result.state

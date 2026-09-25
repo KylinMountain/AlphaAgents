@@ -59,9 +59,12 @@ def wait_decision(dctx):
 
 def test_open_and_close_have_explicit_replay_cutoffs():
     open_ctx = R.context("2026-09-25", "open")
+    settle_ctx = R.context("2026-09-25", "settle")
     close_ctx = R.context("2026-09-25", "close")
     assert open_ctx.information_cutoff == datetime(
         2026, 9, 25, 9, 0, tzinfo=TZ)
+    assert settle_ctx.information_cutoff == datetime(
+        2026, 9, 25, 9, 30, tzinfo=TZ)
     assert close_ctx.information_cutoff == datetime(
         2026, 9, 25, 14, 55, tzinfo=TZ)
     assert open_ctx.evidence_scope == EvidenceScope.REPLAY_DAILY
@@ -118,6 +121,37 @@ def test_runs_with_same_initial_fact_do_not_share_state(isolated):
             marks={"600001": {"price": 31.0}}))[0],
         [hold], run_id="a", context=ctx_a))
     assert changed.state_hash != b.state_hash
+
+
+def test_replay_syncs_open_resize_and_close_positions(isolated):
+    opened = asyncio.run(R.sync_positions(
+        run_id="replay-1", trader_id="default",
+        day="2026-09-25", phase="settle",
+        positions=[{
+            "id": 1, "code": "600001", "shares": 1000,
+            "open_price": 10.0, "thesis_id": 7,
+        }],
+    ))
+    assert opened.positions[0].shares == 1000
+    assert opened.positions[0].avg_price == 10.0
+    assert opened.positions[0].thesis_id == "7"
+
+    resized = asyncio.run(R.sync_positions(
+        run_id="replay-1", trader_id="default",
+        day="2026-09-25", phase="close",
+        positions=[{
+            "id": 1, "code": "600001", "shares": 1500,
+            "avg_price": 10.2, "thesis_id": 7,
+        }],
+    ))
+    assert resized.positions[0].shares == 1500
+
+    closed = asyncio.run(R.sync_positions(
+        run_id="replay-1", trader_id="default",
+        day="2026-09-28", phase="open", positions=[],
+    ))
+    assert closed.positions == ()
+    assert closed.recent_observations[-1].data["shares"] == 0
 
 
 def test_walk_forward_prepares_state_before_provider_and_commits_before_execution():

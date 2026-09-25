@@ -1,8 +1,10 @@
 """The opt-in sector-first path owns stock themes without changing incumbent defaults."""
 
 from collections import Counter
+from datetime import datetime
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +61,14 @@ def _wire_common(monkeypatch):
     monkeypatch.setattr(wf, "_trader_tools", lambda *a, **k: [])
     monkeypatch.setattr(wf, "_event_snapshot_refs", lambda *a, **k: [])
     monkeypatch.setattr(wf, "capacity_shares", lambda *a, **k: 1000)
+    # These tests isolate the Sector-First selection/intent seam. The shared
+    # Trader Runtime has focused replay tests; a fake here keeps this fixture
+    # from needing a real event loop and persistent state store.
+    monkeypatch.setattr(
+        wf, "_trader_runtime_prepare",
+        lambda *a, **k: (
+            None, SimpleNamespace(information_cutoff=datetime(2026, 1, 30, 9)), []))
+    monkeypatch.setattr(wf, "_trader_runtime_commit", lambda *a, **k: None)
     monkeypatch.setattr(OJ, "record_decision", lambda **k: 1)
     monkeypatch.setattr(
         t1_decider,

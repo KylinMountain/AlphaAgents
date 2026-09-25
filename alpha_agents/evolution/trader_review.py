@@ -93,6 +93,7 @@ async def review_decisions(
     facts: str = "",
     record: str = "",
     run_id: str | None = None,
+    timeout: float | None = None,
 ) -> dict:
     """Review today's persisted TraderDecisions and quarantine lessons."""
     run = trader_session.namespace(run_id)
@@ -117,7 +118,7 @@ async def review_decisions(
             ),
             _review_message(decisions, facts=facts, record=record),
             max_turns=2,
-            timeout=_TIMEOUT,
+            timeout=timeout if timeout is not None else _TIMEOUT,
             label="trader_decision_review",
         )
     except Exception as exc:  # noqa: BLE001

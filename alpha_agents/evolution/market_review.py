@@ -130,7 +130,8 @@ def _parse(text: str) -> dict | None:
 
 
 async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: str,
-                model, record: str = "", context: str = "") -> dict | None:
+                model, record: str = "", context: str = "",
+                timeout: float | None = None) -> dict | None:
     """Ask the trader to review its day and store it. Never raises."""
     ensure(conn)
     if model is None or not facts.strip():
@@ -144,7 +145,8 @@ async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: s
     try:
         agent = Agent(name="market_review", instructions=_INSTRUCTIONS,
                       model=model, tools=[])
-        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+        result = await run_agent(agent, message, max_turns=2,
+                                 timeout=timeout if timeout is not None else _TIMEOUT,
                                   label="market_review")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Market review for %s failed (%s: %s)", trader_id,

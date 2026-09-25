@@ -87,3 +87,5 @@ if 'def test_attempted_but_uncaptured_intervention_is_not_applied' not in p.read
 change('docs/walk_branch.md',
        'The changed frame stores its parent\nhash and intervention.',
        'The changed frame stores its parent\nhash and intervention. Application is reported only from a verified captured\ninput, not from the fact that an edit was attempted.')
+change('scripts/walk_branch.py', 'provenance.get("interventions", [])[-1:] == [expected]',
+       'provenance.get("intervention") == expected')

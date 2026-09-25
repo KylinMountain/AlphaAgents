@@ -400,6 +400,10 @@ class TraderState:
         self._unique(
             (item.observation_hash for item in self.recent_observations),
             "observation hashes")
+        self._unique(self.pending_orders, "pending order ids")
+        if any(not isinstance(value, str) or not value.strip()
+               for value in self.pending_orders):
+            raise TraderRuntimeError("pending order ids must be non-empty strings")
 
     @staticmethod
     def _unique(values, field: str) -> None:
@@ -474,6 +478,7 @@ class TraderState:
         if value.get("schema_version") != 1:
             raise TraderRuntimeError("unsupported trader state schema")
         expected_hash = value.get("state_hash")
+        require_text(expected_hash, "state_hash")
         state = cls(
             trader_id=value["trader_id"],
             as_of=datetime.fromisoformat(value["as_of"]),
@@ -509,7 +514,7 @@ class TraderState:
             lessons=tuple(value.get("lessons") or []),
             rules=tuple(value.get("rules") or []),
         )
-        if expected_hash is not None and state.state_hash != expected_hash:
+        if state.state_hash != expected_hash:
             raise TraderRuntimeError("trader state hash mismatch")
         return state
 

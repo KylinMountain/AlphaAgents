@@ -2747,6 +2747,11 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 ),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
+                "decision_explanation": {
+                    "status": verdict.get("decision_status"),
+                    "no_trade_reason": verdict.get("no_trade_reason") or "",
+                    "rejected": verdict.get("rejected") or [],
+                },
                 "world_read_set": ctx.last_world_read_set,
                 "decision_trace": {
                     "direction": (
@@ -2768,7 +2773,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     "planner": {
                         "status": (
                             "unreadable" if verdict.get("parse_error")
-                            else ("ordered" if verdict.get("orders") else "empty")
+                            else (verdict.get("decision_status")
+                                  or ("ordered" if verdict.get("orders") else "empty"))
                         ),
                         "model_elapsed_ms": verdict.get("model_elapsed_ms"),
                         "refused": len(verdict.get("refused") or []),

@@ -303,6 +303,41 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         return {"orders": [], "refused": [],
                 "parse_error": "reply is not an object with an 'orders' list"}
 
+    # An abstention is a decision too. Never infer its rationale from the
+    # absence of orders, and never resample until the model agrees to buy.
+    explanation = payload.get("no_trade_reason")
+    if explanation is None:
+        explanation = payload.get("reason")  # Legacy top-level spelling.
+    explanation = explanation.strip() if isinstance(explanation, str) else ""
+    rejected = []
+    raw_rejected = payload.get("rejected", [])
+    explanation_error = None
+    if not isinstance(raw_rejected, list):
+        explanation_error = "rejected must be a list"
+    else:
+        seen = set()
+        for item in raw_rejected:
+            if not isinstance(item, dict):
+                explanation_error = "rejected entries must be objects"
+                break
+            code, reason = item.get("code"), item.get("reason")
+            ids = item.get("rule_ids", [])
+            if (not isinstance(code, str) or code not in panel_codes or code in seen
+                    or not isinstance(reason, str) or not reason.strip()
+                    or not isinstance(ids, list)
+                    or any(not isinstance(rid, str) or not rid.strip() for rid in ids)):
+                explanation_error = "rejected needs a unique panel code, reason and rule_ids list"
+                break
+            seen.add(code)
+            rejected.append({"code": code, "reason": reason.strip(),
+                             "rule_ids": [rid.strip() for rid in ids]})
+    if not payload["orders"] and not explanation:
+        explanation_error = "empty orders require a non-empty no_trade_reason"
+    if explanation_error:
+        return {"orders": [], "refused": [], "parse_error": explanation_error,
+                "decision_status": "incomplete", "no_trade_reason": explanation,
+                "rejected": rejected}
+
     orders: list[dict] = []
     for i, raw in enumerate(payload["orders"]):
         if not isinstance(raw, dict):
@@ -380,7 +415,14 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             # the caller renders as its trader's default — not as zero.
             **_thesis_fields(raw, code),
         })
-    return {"orders": orders, "refused": refused, "parse_error": None}
+    if {order["code"] for order in orders} & {item["code"] for item in rejected}:
+        return {"orders": [], "refused": refused,
+                "parse_error": "a code cannot be both ordered and rejected",
+                "decision_status": "incomplete", "no_trade_reason": explanation,
+                "rejected": rejected}
+    return {"orders": orders, "refused": refused, "parse_error": None,
+            "decision_status": "ordered" if orders else ("refused" if refused else "abstained"),
+            "no_trade_reason": explanation, "rejected": rejected}
 
 
 #: What the agent may state about a position beyond its price plan. Each is

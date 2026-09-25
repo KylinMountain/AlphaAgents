@@ -114,12 +114,12 @@ class TestAnOrderIsTheMostItWillPay:
 
 
 class TestAnUnreadableReplyIsNotAnEmptyOne:
-    """``{"orders": []}`` means the agent chose to do nothing. A reply we could
-    not parse means we do not know what it chose. Collapsing the two is how a
+    """An explained empty order list is an abstention. An unexplained one is
+    incomplete: we do not know why it chose nothing. Collapsing the two is how a
     decider that never worked looks like a decider that is being careful."""
 
     def test_an_empty_order_list_parses_with_no_error(self):
-        verdict = D.parse_orders('{"orders": []}', CODES)
+        verdict = D.parse_orders('{"orders": [], "no_trade_reason": "No executable entry"}', CODES)
         assert verdict["orders"] == []
         assert verdict["parse_error"] is None
 
@@ -138,7 +138,7 @@ class TestAnUnreadableReplyIsNotAnEmptyOne:
     def test_a_fenced_reply_is_read(self):
         """A fence is formatting, not a different answer. Not stripping it
         would turn every fenced reply into the silent case above."""
-        verdict = D.parse_orders('```json\n{"orders": []}\n```', CODES)
+        verdict = D.parse_orders('```json\n{"orders": [], "no_trade_reason": "No entry"}\n```', CODES)
         assert verdict["parse_error"] is None
 
 

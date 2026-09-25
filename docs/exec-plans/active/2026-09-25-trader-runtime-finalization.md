@@ -13,18 +13,18 @@
 
 ## 验收
 
-- [ ] T5、T7 均以合入后的 `main` 为基线；`uv run pytest tests/ -q`、
+- [x] T5、T7 均以合入后的 `main` 为基线；`uv run pytest tests/ -q`、
   `uv run python scripts/lint_harness.py` 和 `uv run python scripts/lint_docs.py` 均退出 0。
-- [ ] T8 测试证明：历史 BUY 的模拟成交产生 `POSITION_CHANGED` 或等价不可变事实，
+- [x] T8 测试证明：历史 BUY 的模拟成交产生 `POSITION_CHANGED` 或等价不可变事实，
   同一 `run_id` 的下一会话能据此作 HOLD / REDUCE / SELL，且决策在执行前已经封存。
-- [ ] T8 测试证明：收盘 review 产生 LessonCandidate；只有此前已物化、时间尺度、
+- [x] T8 测试证明：收盘 review 产生 LessonCandidate；只有此前已物化、时间尺度、
   horizon、evidence scope 与 run/trader 都匹配的重复证据可在之后注入 Lesson / Rule。
-- [ ] 最终 T8 分支只包含 T8 的提交，不携带旧 T6/T7 实现；不 force push，采用基于
+- [x] 最终 T8 分支只包含 T8 的提交，不携带旧 T6/T7 实现；不 force push，采用基于
   合入后 `main` 的新分支与替代 PR。
-- [ ] 使用 `scripts/walk_bootstrap.py` 创建隔离目录后，运行连续 30 个交易日的
+- [x] 使用 `scripts/walk_bootstrap.py` 创建隔离目录后，运行连续 30 个交易日的
   `scripts/walk_forward.py` 并以退出 0、`corpus_read_only: true`、
   `production_db_unchanged: true` 和报告文件存在为成功判据。
-- [ ] `TRADER_CORE_IMPLEMENTATION.md` 与本计划更新实际完成状态、运行命令和结果；
+- [x] `TRADER_CORE_IMPLEMENTATION.md` 与本计划更新实际完成状态、运行命令和结果；
   不将未执行的生产晋升或无样本的策略有效性写成已验证。
 
 ## 决策记录
@@ -72,6 +72,15 @@
 - 第三次录制也不是最终验收：它已连续通过 2026-01-05 至 2026-01-12 的 6 个交易日和
   7 次 Market Review，但在 2026-01-13 暴露多对象输出边界后主动停止。修复后须再次从新的
   隔离目录完整重跑 30 日。
+- **最终验收（2026-09-26）：** 全新的隔离目录
+  `/private/var/folders/x5/cdm2lfb11p9_vkm_3z_thlj00000gn/T/alphaagents-t8-final.XXXXXX.Y7GEu4fZVl/replay`
+  以 `record` 模式完整运行 `2026-01-05 → 2026-02-13` 的 30/30 个交易日并退出 0。报告位于
+  `walk-reports/t8-20260105-30d-final3`：30 次 Market Review、31 次 Trade Review、335 次
+  Runtime decision、33 次 watch recheck、13 个 LessonCandidate；
+  `market_review_failed=0`、`trade_review_failed=0`、抛错日阶段为 0、生产库内容 hash 未变且
+  3 个共享语料库均只读。121 次模型调用走同系列备用模型，均被本轮 journal 录制。账户
+  +2.818%、相对等权市场 -4.002%，只作为这一个窗口的结果，不作为策略有效性结论；所有学习
+  均停留在 observation（最大 n=31，小于 n≥50 的晋升门槛）。
 
 最终重新录制命令：
 

@@ -1,6 +1,6 @@
 # Trader Core Implementation: Phase 1–5 实际状态
 
-- 记录日期：2026-09-13（补记第九轮：Phase 4 的 U1–U5）。
+- 记录日期：2026-09-26（补记 T5–T8 连续 Runtime 与最终 30 日隔离回放）。
   **机制已交付 ≠ 已经在跑** —— 见 §7 与 §12。
 - 依据：[Phase 1 计划](exec-plans/completed/2026-09-11-trader-core-phase1.md)、
   [Phase 2 计划](exec-plans/completed/2026-09-11-trader-core-phase2.md)、
@@ -2691,5 +2691,28 @@ T3 之前的形状（缺四个提案列），`candidate_transitions` 整张表�
 那条），复原后 16 passed。另：`tests/test_policy_cli.py` 里断言「冲突被打印」的那条改名并翻转成
 断言**没有**冲突（`"nothing refuses it" not in out`），同时新增正向断言——仓库规则那一行确实被打印。
 
+## 15. T5–T8 连续 Trader Runtime 与隔离回放（2026-09-26）
 
+**已实现并以真实 30 日窗口验证。** T5 的 `HOLD / ADD / REDUCE / SELL`、T7 的
+`LessonCandidate → Lesson → Rule` 证据门槛、以及 T8 的 historical adapter 现在都经由同一
+个 `TraderState` Runtime 运行。历史 BUY 的模拟成交被转换为 `POSITION_CHANGED` 事实；后续会话在
+同一 `run_id`/`trader_id` 命名空间读取状态，决策在执行前封存。收盘 Review 与交易 Review 只能产生
+隔离的候选/observation，未达到样本门槛不会成为生产 Rule。
 
+最终录制使用 `scripts/walk_bootstrap.py` 生成空白回放目录，然后以 `record` 模式运行：
+
+```bash
+ALPHAAGENTS_DATA_DIR=<fresh-replay-dir> ALPHAAGENTS_LLM_MODE=record \
+  uv run python scripts/walk_forward.py --start 2026-01-05 --days 30 \
+  --trader default --decider llm --max-turns 1 --no-trader-tools \
+  --model-timeout 120 --keep-going --run-id t8-20260105-30d-final3
+```
+
+实际窗口为 `2026-01-05 → 2026-02-13`（30/30 日），退出 0。报告记录 335 次 Runtime
+decision、33 次 watch recheck、30 次 Market Review、31 次 Trade Review 与 13 个
+LessonCandidate；`market_review_failed=0`、`trade_review_failed=0`、抛错日阶段为 0。生产库内容
+hash 未变，3 个共享语料文件均以只读方式打开。121 次模型调用使用同系列备用模型并被 journal 录制。
+
+这个窗口的账户收益 +2.818%、相对等权市场 -4.002%，**不是**策略有效性结论。所有学习都停在
+observation（最高 n=31，小于仓库的 n≥50 门槛），而且 replay 自身的 observation context 不等同于
+生产环境中经批准知识快照注入的 Rule。

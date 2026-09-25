@@ -68,6 +68,7 @@ class ObservationType(str, Enum):
     THEME_CHANGE = "theme_change"
     NEWS = "news"
     EVENT = "event"
+    CANDIDATE = "candidate"
     ORDER_FILLED = "order_filled"
     POSITION_CHANGED = "position_changed"
     THESIS_SIGNAL = "thesis_signal"

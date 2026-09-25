@@ -271,3 +271,62 @@ def lessons_from_trade_reviews(
         count += 1
     conn.commit()
     return count
+
+
+def lessons_from_market_review(
+    conn: sqlite3.Connection,
+    *,
+    trader_id: str,
+    day: str,
+    run_id: str | None = None,
+) -> int:
+    """Quarantine executable board lessons from today's market review."""
+    from alpha_agents.evolution import market_review, replay_mode
+
+    market_review.ensure(conn)
+    row = conn.execute(
+        "SELECT review_json FROM market_reviews "
+        "WHERE trader_id=? AND date=?",
+        (trader_id, day)).fetchone()
+    if row is None:
+        return 0
+    try:
+        review = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return 0
+
+    run = trader_session.namespace(run_id)
+    scope = (
+        "replay_daily" if replay_mode.replay_process() else "live_daily")
+    count = 0
+    for index, board in enumerate(review.get("boards") or []):
+        if not isinstance(board, dict):
+            continue
+        claim = str(
+            board.get("lesson") or board.get("next_time") or "").strip()
+        name = str(board.get("name") or "").strip()
+        if not claim or not name:
+            continue
+        kind = str(board.get("kind") or "").strip()
+        trader_learning.save_lesson_candidate(
+            run_id=run,
+            trader_id=trader_id,
+            source_type="market_review",
+            source_ref=f"market:{day}:{index}:{name}",
+            source_date=day,
+            claim=claim,
+            action="adjust",
+            applicable_context=(
+                f"{kind} / {name}" if kind else name),
+            evidence_timeframe="1d",
+            decision_horizon="3-5d",
+            evidence_scope=scope,
+            support_count=1,
+            counterexample_count=0,
+            confidence=0.5,
+            evidence={"board": board},
+            conn=conn,
+        )
+        count += 1
+    conn.commit()
+    return count

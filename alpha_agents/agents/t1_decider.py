@@ -381,7 +381,8 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             seen.add(code)
             rejected.append({"code": code, "reason": reason.strip(),
                              "rule_ids": [rid.strip() for rid in ids]})
-    if not payload["orders"] and not watch and not explanation:
+    if (explanation_error is None and not payload["orders"]
+            and not watch and not explanation):
         explanation_error = (
             "empty orders without watch require a non-empty no_trade_reason")
     if explanation_error:
@@ -482,9 +483,12 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         status = "ordered"
     elif watch:
         status = "waiting"
-    elif rejected or refused:
+    elif refused:
         status = "refused"
     else:
+        # Explicit per-code rejections still describe an overall abstention.
+        # Keep the historical public status while the runtime records REJECT
+        # decisions per security.
         status = "abstained"
     return {"orders": orders, "watch": watch, "refused": refused,
             "parse_error": None, "decision_status": status,

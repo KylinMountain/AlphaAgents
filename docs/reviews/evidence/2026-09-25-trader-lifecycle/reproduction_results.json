@@ -1,0 +1,9 @@
+{
+  "scope": "synthetic code counterexamples, not historical trading performance",
+  "gate_identical_scores": {"promote": true, "outcome": "promote", "reason": "Brier +0.0000 不退化 (t=0.0, n=20) — 通过", "abstained": false, "n": 20, "mean_diff": 0.0, "t_stat": 0.0},
+  "gate_worse_within_tolerance": {"promote": true, "outcome": "promote", "reason": "Brier +0.0040 不退化 (t=None, n=20) — 通过", "abstained": false, "n": 20, "mean_diff": 0.004, "t_stat": null},
+  "gate_distinct_dates_in_input": 1,
+  "missing_day_returned_stale_bar": {"requested_day": "2026-01-07", "latest_stored_day": "2026-01-06", "returned_close": 11.0, "returned_change_pct": 10.0},
+  "open_exit_still_uses_full_exit_day_high": {"peak_pct": 20.0, "giveback_pp": 20.0, "qualification": "declared whole-day upper bound, not an achievable exit; phase is absent from the input contract"},
+  "session_memory_has_no_trader_identity": {"key": "600001", "other_caller_can_read_same_rejection": true}
+}

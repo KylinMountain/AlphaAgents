@@ -1,0 +1,18 @@
+{
+  "date": "2026-09-25",
+  "base_commit": "ce83ce6b507be55b190c585c4f3d09495c17dd19",
+  "main_repair_commit": "2af26fb8fbaef817b6d2e2add2dfb2bcbdd0921f",
+  "tested_application_commit_on_isolated_branch": "44b8fab2dd86c201a7ea99bf1b530ab26635c5ad",
+  "application_blob_match": "All 13 changed application/test/plan files verified by git hash-object against the successful runner git ls-tree manifest; temporary audit workflows and patch staging excluded from main.",
+  "patch_sha256": "d852b60ecb02e280e665f126a8a925444adc5ec661758ee0428be4bc924e4439",
+  "workflow_run_id": 36086737643,
+  "workflow_job_id": 107920192499,
+  "workflow_url": "https://github.com/KylinMountain/AlphaAgents/actions/runs/36086737643",
+  "environment": {"python": "3.12.3", "dependencies": "uv sync --frozen --extra dev"},
+  "targeted": {"command": "uv run pytest tests/test_decision_learning_integrity.py tests/test_handbook.py tests/test_trade_review.py tests/test_t1_decider.py tests/test_day_record.py tests/test_sector_first_wiring.py -q --no-header", "passed": 108, "seconds": 8.43},
+  "full_suite": {"command": "uv run pytest tests/ -q --no-header", "passed": 3435, "skipped": 20, "warnings": 2, "seconds": 168.06, "warning_detail": "Existing test_build_lock multi-threaded multiprocessing fork deprecation warnings"},
+  "checks": {"harness": {"passed": true, "files": 241, "existing_debt": 13}, "docs": {"passed": true}, "policy": {"passed": true, "existing_debt": 14}},
+  "not_verified": ["User's seven original local runs", "Historical-corpus dependent behavior outside fixtures", "Real provider behavior with the revised prompts", "Profitability, drawdown improvement or out-of-sample alpha"],
+  "source_snapshot_workflow_on_main": false,
+  "force_push_used": false
+}

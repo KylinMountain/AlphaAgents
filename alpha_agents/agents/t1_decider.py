@@ -73,7 +73,9 @@ from alpha_agents.data.decision_frame import (
     DecisionFrame, FrameError, TraderState, fingerprint,
 )
 from alpha_agents.data.decision_capture import Capture
-from alpha_agents.trader import Condition, TraderRuntimeError
+from alpha_agents.trader import (
+    Action, Condition, DecisionContext, TraderDecision, TraderRuntimeError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -487,6 +489,95 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
     return {"orders": orders, "watch": watch, "refused": refused,
             "parse_error": None, "decision_status": status,
             "no_trade_reason": explanation, "rejected": rejected}
+
+
+def to_runtime_decisions(verdict: dict, context: DecisionContext) -> tuple[TraderDecision, ...]:
+    """Translate a parsed T1 answer into the continuous Trader Runtime vocabulary."""
+    if verdict.get("parse_error"):
+        raise DeciderError("cannot commit an unreadable planner reply")
+    base = verdict.get("decision_id")
+    if not isinstance(base, str) or not base.strip():
+        raise DeciderError("runtime decisions require the captured decision identity")
+
+    made_at = context.information_cutoff
+    decisions: list[TraderDecision] = []
+
+    for index, order in enumerate(verdict.get("orders") or []):
+        confidence = order.get("conviction", order.get("prob", 0.5))
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = min(1.0, max(0.0, confidence))
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:buy:{index}:{order['code']}",
+            made_at=made_at,
+            action=Action.BUY,
+            code=order["code"],
+            thesis_id=None,
+            confidence=confidence,
+            reasoning=order.get("reason") or "planner buy",
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+            size_pct=order.get("size_pct"),
+            entry_low=order.get("entry_low"),
+            entry_high=order.get("entry_high"),
+            stop_loss=order.get("stop_loss"),
+            target_price=order.get("target_price"),
+        ))
+
+    for index, item in enumerate(verdict.get("watch") or []):
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:wait:{index}:{item['code']}",
+            made_at=made_at,
+            action=Action.WAIT,
+            code=item["code"],
+            thesis_id=None,
+            confidence=float(item.get("confidence", 0.5)),
+            reasoning=item["reason"],
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+            invalidations=tuple(
+                Condition.from_dict(value)
+                for value in item.get("invalidations") or []),
+            next_check=tuple(
+                Condition.from_dict(value)
+                for value in item.get("next_check") or []),
+        ))
+
+    for index, item in enumerate(verdict.get("rejected") or []):
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:reject:{index}:{item['code']}",
+            made_at=made_at,
+            action=Action.REJECT,
+            code=item["code"],
+            thesis_id=None,
+            confidence=0.5,
+            reasoning=item["reason"],
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+        ))
+
+    if not decisions:
+        reason = verdict.get("no_trade_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise DeciderError("empty planner decision requires no_trade_reason")
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:hold",
+            made_at=made_at,
+            action=Action.HOLD,
+            code=None,
+            thesis_id=None,
+            confidence=0.5,
+            reasoning=reason.strip(),
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+        ))
+    return tuple(decisions)
 
 
 #: What the agent may state about a position beyond its price plan. Each is

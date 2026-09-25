@@ -83,8 +83,17 @@ async def manage_book(trader, price_map: dict, today_str: str,
                 morning_calls = exit_decision.pending_morning_calls(
                     today_str, trader.id)
                 if morning_calls:
-                    pos_alerts += exit_decision.apply(
-                        morning_calls, open_pos, price_map)
+                    try:
+                        await exit_decision.commit_runtime_decisions(
+                            morning_calls, open_pos, trader_id=trader.id,
+                            decision_key=f"morning-position:{today_str}:{trader.id}")
+                    except Exception as exc:
+                        logger.exception(
+                            "Morning position calls were not sealed in "
+                            "TraderState — holding: %s", exc)
+                    else:
+                        pos_alerts += exit_decision.apply(
+                            morning_calls, open_pos, price_map)
                 # Theses first: they are the agent's own stated plan,
                 # evaluated in code, so they cost nothing and they run
                 # before the hard floor gets a chance to close a

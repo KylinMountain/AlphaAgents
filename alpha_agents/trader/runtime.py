@@ -8,11 +8,12 @@ from alpha_agents.trader.state import (
     StateTransition, ThesisState, TraderDecision, TraderState, WatchItem,
 )
 from alpha_agents.trader.types import (
-    DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
+    Action, DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
     WatchStatus,
 )
 
 MAX_RECENT_OBSERVATIONS = 200
+MAX_RECENT_DECISIONS = 200
 
 _THESIS_SIGNALS = {
     "activate": ThesisStatus.ACTIVE,
@@ -109,6 +110,144 @@ class TraderRuntime:
             changed=True,
         )
 
+    async def commit_decisions(
+        self,
+        state: TraderState,
+        decisions: list[TraderDecision] | tuple[TraderDecision, ...],
+        context: DecisionContext,
+    ) -> StepResult:
+        """Persist reasoning output into the same continuous cognitive state.
+
+        Reasoning is deliberately outside this domain layer. This method owns
+        only the deterministic consequences of a decision: WAIT becomes a
+        durable watch, REJECT closes that watch, and BUY/ADD converts it into
+        an acted-on opportunity. Execution and positions remain downstream.
+        """
+        if context.information_cutoff != state.as_of:
+            raise TraderRuntimeError(
+                "decisions must commit against the exact state cutoff")
+        existing_ids = {item.decision_id for item in state.recent_decisions}
+        incoming_ids: set[str] = set()
+        watch_by_code = {item.code: item for item in state.watchlist}
+        order = [item.code for item in state.watchlist]
+        transitions: list[StateTransition] = []
+
+        for decision in decisions:
+            if not isinstance(decision, TraderDecision):
+                raise TraderRuntimeError(
+                    "commit_decisions accepts TraderDecision objects only")
+            if decision.decision_id in existing_ids or decision.decision_id in incoming_ids:
+                raise TraderRuntimeError("duplicate decision id")
+            incoming_ids.add(decision.decision_id)
+            if decision.made_at != context.information_cutoff:
+                raise TraderRuntimeError(
+                    "decision made_at must equal its logical information cutoff")
+            if decision.evidence_scope != context.evidence_scope:
+                raise TraderRuntimeError(
+                    "decision evidence scope does not match DecisionContext")
+            if decision.decision_horizon != context.decision_horizon:
+                raise TraderRuntimeError(
+                    "decision horizon does not match DecisionContext")
+            if decision.timeframe != context.observation_resolution:
+                raise TraderRuntimeError(
+                    "decision timeframe does not match DecisionContext")
+            if not decision.code:
+                raise TraderRuntimeError("trade decision requires a code")
+
+            code = decision.code
+            current = watch_by_code.get(code)
+            if decision.action == Action.WAIT:
+                if not decision.next_check:
+                    raise TraderRuntimeError(
+                        "WAIT decision needs at least one next_check condition")
+                next_watch = WatchItem(
+                    code=code,
+                    status=WatchStatus.WATCHING,
+                    why=decision.reasoning,
+                    trigger_conditions=decision.next_check,
+                    invalidation_conditions=decision.invalidations,
+                    trigger_all=False,
+                    next_check=self._describe_conditions(decision.next_check),
+                    created_at=(
+                        current.created_at
+                        if current is not None and current.status in {
+                            WatchStatus.WATCHING, WatchStatus.TRIGGERED}
+                        else decision.made_at),
+                    last_checked_at=(
+                        decision.made_at if current is not None else None),
+                    evidence_timeframe=decision.timeframe,
+                    decision_horizon=decision.decision_horizon,
+                    evidence_scope=decision.evidence_scope,
+                )
+                watch_by_code[code] = next_watch
+                if code not in order:
+                    order.append(code)
+                transitions.append(StateTransition(
+                    kind="watch",
+                    subject=code,
+                    from_status=(
+                        current.status.value if current else "absent"),
+                    to_status=WatchStatus.WATCHING.value,
+                    at=decision.made_at,
+                    observation_hash="decision:" + decision.decision_id,
+                    reason="WAIT decision created or refreshed watch",
+                ))
+            elif decision.action == Action.REJECT and current is not None:
+                if current.status != WatchStatus.REJECTED:
+                    watch_by_code[code] = replace(
+                        current, status=WatchStatus.REJECTED,
+                        last_checked_at=decision.made_at)
+                    transitions.append(StateTransition(
+                        kind="watch",
+                        subject=code,
+                        from_status=current.status.value,
+                        to_status=WatchStatus.REJECTED.value,
+                        at=decision.made_at,
+                        observation_hash="decision:" + decision.decision_id,
+                        reason="REJECT decision closed watch",
+                    ))
+            elif decision.action in {Action.BUY, Action.ADD} and current is not None:
+                if current.status != WatchStatus.CONVERTED:
+                    watch_by_code[code] = replace(
+                        current, status=WatchStatus.CONVERTED,
+                        last_checked_at=decision.made_at)
+                    transitions.append(StateTransition(
+                        kind="watch",
+                        subject=code,
+                        from_status=current.status.value,
+                        to_status=WatchStatus.CONVERTED.value,
+                        at=decision.made_at,
+                        observation_hash="decision:" + decision.decision_id,
+                        reason=f"{decision.action.value.upper()} acted on watch",
+                    ))
+
+        if not decisions:
+            return StepResult(
+                state=state, transitions=(), reevaluate_subjects=(),
+                accepted_observation_hashes=(), decisions=(), changed=False)
+
+        next_state = state.evolve(
+            as_of=state.as_of,
+            watchlist=tuple(watch_by_code[code] for code in order),
+            recent_decisions=tuple(
+                (*state.recent_decisions, *decisions)[-MAX_RECENT_DECISIONS:]),
+        )
+        return StepResult(
+            state=next_state,
+            transitions=tuple(transitions),
+            reevaluate_subjects=(),
+            accepted_observation_hashes=(),
+            decisions=tuple(decisions),
+            changed=True,
+        )
+
+    @staticmethod
+    def _describe_conditions(conditions) -> str:
+        return " OR ".join(
+            f"{item.subject + ':' if item.subject else ''}"
+            f"{item.metric} {item.op.value} {item.value}"
+            for item in conditions)
+
     @staticmethod
     def _reject_duplicate_batch(observations: list[Observation]) -> None:
         hashes = [item.observation_hash for item in observations]
@@ -158,7 +297,8 @@ class TraderRuntime:
             }
             relevant = [
                 observation for observation in observations
-                if watched_subjects.intersection(observation.subjects)
+                if observation.available_at >= item.created_at
+                and watched_subjects.intersection(observation.subjects)
             ]
             if not relevant:
                 updated.append(item)
@@ -230,7 +370,8 @@ class TraderRuntime:
             }
             relevant = [
                 observation for observation in observations
-                if thesis_subjects.intersection(observation.subjects)
+                if observation.available_at >= thesis.created_at
+                and thesis_subjects.intersection(observation.subjects)
             ]
             current = thesis
 

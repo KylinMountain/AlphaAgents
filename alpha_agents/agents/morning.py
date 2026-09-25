@@ -168,5 +168,3 @@ async def run_t1_open_plan(**kwargs):
     from alpha_agents.agents import t1_decider
     return await t1_decider.propose(**kwargs)
 
-
-run_t1_open_plan.decider_name = "t1_llm"

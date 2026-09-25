@@ -110,7 +110,7 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
       "next_check": [
         {{"metric": "price", "op": "<=", "value": 30.0, "subject": "600001"}}
       ],
-      "invalidations": [
+      "cancel_if": [
         {{"metric": "net_flow", "op": "<", "value": 0, "subject": "AI算力"}}
       ]
     }}
@@ -128,7 +128,7 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
   `op` 只能是 `< <= > >= == !=`；`subject` 是该指标属于哪个股票或主题。
   常用 metric 可以是 `price`、`volume_ratio`、`net_flow` 等实际已提供或未来
   Observation 能提供的字段，不能编造一个系统永远观测不到的条件。
-- `watch[].invalidations` 是逻辑失效条件；没有可以给空数组。
+- `watch[].cancel_if` 是等待逻辑失效条件；没有可以给空数组。
 - 同一代码在一次回答中只能属于 `orders / watch / rejected` 其中一个。
 - `code` 必须逐字出现在上面的候选池里。
 - **一只票同时只能有一笔**：如果你已经持有它，或它还在挂单中，再下单会被

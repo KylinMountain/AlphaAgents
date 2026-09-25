@@ -112,11 +112,22 @@ class TraderRuntime:
                 "the same new observation appears twice in one step")
 
     @staticmethod
-    def _conditions_met(conditions, observations, *, require_all: bool) -> bool:
+    def _condition_matches(condition, observation, *, default_subject: str) -> bool:
+        if condition.subject is None and default_subject not in observation.subjects:
+            return False
+        return condition.matches(observation)
+
+    @classmethod
+    def _conditions_met(
+        cls, conditions, observations, *, require_all: bool,
+        default_subject: str,
+    ) -> bool:
         if not conditions:
             return False
         matched = [
-            any(condition.matches(observation) for observation in observations)
+            any(cls._condition_matches(
+                condition, observation, default_subject=default_subject)
+                for observation in observations)
             for condition in conditions
         ]
         return all(matched) if require_all else any(matched)
@@ -134,9 +145,15 @@ class TraderRuntime:
             if item.status != WatchStatus.WATCHING:
                 updated.append(item)
                 continue
+            watched_subjects = {
+                item.code,
+                *(condition.subject for condition in (
+                    *item.trigger_conditions, *item.invalidation_conditions)
+                  if condition.subject is not None),
+            }
             relevant = [
                 observation for observation in observations
-                if item.code in observation.subjects
+                if watched_subjects.intersection(observation.subjects)
             ]
             if not relevant:
                 updated.append(item)
@@ -146,15 +163,17 @@ class TraderRuntime:
             current = replace(item, last_checked_at=checked_at)
 
             invalidated = self._conditions_met(
-                item.invalidation_conditions, relevant, require_all=False)
+                item.invalidation_conditions, relevant, require_all=False,
+                default_subject=item.code)
             triggered = self._conditions_met(
                 item.trigger_conditions, relevant,
-                require_all=item.trigger_all)
+                require_all=item.trigger_all, default_subject=item.code)
 
             if invalidated:
                 current = replace(current, status=WatchStatus.REJECTED)
                 witness = self._first_witness(
-                    item.invalidation_conditions, relevant)
+                    item.invalidation_conditions, relevant,
+                    default_subject=item.code)
                 transitions.append(StateTransition(
                     kind="watch",
                     subject=item.code,
@@ -167,7 +186,9 @@ class TraderRuntime:
                 recheck.add(item.code)
             elif triggered:
                 current = replace(current, status=WatchStatus.TRIGGERED)
-                witness = self._first_witness(item.trigger_conditions, relevant)
+                witness = self._first_witness(
+                    item.trigger_conditions, relevant,
+                    default_subject=item.code)
                 transitions.append(StateTransition(
                     kind="watch",
                     subject=item.code,
@@ -197,15 +218,23 @@ class TraderRuntime:
                 updated.append(thesis)
                 continue
 
+            thesis_subjects = {
+                thesis.subject,
+                *(condition.subject for condition in thesis.invalidations
+                  if condition.subject is not None),
+            }
             relevant = [
                 observation for observation in observations
-                if thesis.subject in observation.subjects
+                if thesis_subjects.intersection(observation.subjects)
             ]
             current = thesis
 
             if self._conditions_met(
-                    thesis.invalidations, relevant, require_all=False):
-                witness = self._first_witness(thesis.invalidations, relevant)
+                    thesis.invalidations, relevant, require_all=False,
+                    default_subject=thesis.subject):
+                witness = self._first_witness(
+                    thesis.invalidations, relevant,
+                    default_subject=thesis.subject)
                 current = replace(
                     thesis, status=ThesisStatus.INVALIDATED,
                     updated_at=witness.available_at)
@@ -253,9 +282,13 @@ class TraderRuntime:
 
         return tuple(updated), transitions, recheck
 
-    @staticmethod
-    def _first_witness(conditions, observations) -> Observation:
+    @classmethod
+    def _first_witness(
+        cls, conditions, observations, *, default_subject: str,
+    ) -> Observation:
         for observation in observations:
-            if any(condition.matches(observation) for condition in conditions):
+            if any(cls._condition_matches(
+                    condition, observation, default_subject=default_subject)
+                   for condition in conditions):
                 return observation
         raise TraderRuntimeError("matched condition has no observation witness")

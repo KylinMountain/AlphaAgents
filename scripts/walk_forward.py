@@ -1152,6 +1152,19 @@ def _book_and_knowledge(
         except Exception as exc:                          # noqa: BLE001
             logger.warning("%s unavailable: %s", fn.__name__, exc)
     parts.append(_knowledge_block(ctx, day))
+    try:
+        from alpha_agents.evolution import trader_replay
+        learn_as_of = (
+            ctx.corpus.previous(day) if phase == "open" else day)
+        if learn_as_of:
+            parts.append(trader_replay.learning_block(
+                run_id=str(ctx.run_id),
+                trader_id=ctx.trader,
+                day=learn_as_of,
+                decision_horizon="3-5d",
+            ))
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("Trader Runtime learning unavailable: %s", exc)
     return book, "\n\n".join(p for p in parts if p)
 
 

@@ -254,6 +254,7 @@ class TraderDecision:
     decision_horizon: DecisionHorizon
     evidence_scope: EvidenceScope
     size_pct: float | None = None
+    fraction: float | None = None
     entry_low: float | None = None
     entry_high: float | None = None
     stop_loss: float | None = None
@@ -274,6 +275,10 @@ class TraderDecision:
         if self.size_pct is not None:
             if not isinstance(self.size_pct, (int, float)) or self.size_pct <= 0:
                 raise TraderRuntimeError("size_pct must be positive when provided")
+        if self.fraction is not None:
+            if (not isinstance(self.fraction, (int, float))
+                    or not 0 < float(self.fraction) < 1):
+                raise TraderRuntimeError("fraction must be in (0, 1)")
         if (self.entry_low is not None and self.entry_high is not None
                 and self.entry_low > self.entry_high):
             raise TraderRuntimeError("entry_low cannot exceed entry_high")
@@ -291,6 +296,7 @@ class TraderDecision:
             "decision_horizon": self.decision_horizon.value,
             "evidence_scope": self.evidence_scope.value,
             "size_pct": self.size_pct,
+            "fraction": self.fraction,
             "entry_low": self.entry_low,
             "entry_high": self.entry_high,
             "stop_loss": self.stop_loss,
@@ -313,6 +319,7 @@ class TraderDecision:
             decision_horizon=DecisionHorizon(value["decision_horizon"]),
             evidence_scope=EvidenceScope(value["evidence_scope"]),
             size_pct=value.get("size_pct"),
+            fraction=value.get("fraction"),
             entry_low=value.get("entry_low"),
             entry_high=value.get("entry_high"),
             stop_loss=value.get("stop_loss"),

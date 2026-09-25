@@ -30,6 +30,8 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from alpha_agents.data.memory_store import get_theme_by_name
 from alpha_agents.data.portfolio import (
@@ -38,8 +40,14 @@ from alpha_agents.data.portfolio import (
 # A-share board lot. Imported from the module that already owns the constant
 # rather than re-declared, so a market-rule change moves one place.
 from alpha_agents.data.portfolio_exit import LOT_SIZE
+from alpha_agents.trader import (
+    Action, DecisionContext, DecisionHorizon, EvidenceScope, Observation,
+    ObservationType, Session, Timeframe, TraderDecision, TraderRuntime,
+    TraderRuntimeError, TraderState,
+)
 
 logger = logging.getLogger(__name__)
+_TZ = ZoneInfo("Asia/Shanghai")
 
 # How much of the flash corpus to put in front of the agent per theme.
 # Two is enough to establish whether the story changed; more and the
@@ -397,6 +405,187 @@ def parse_decisions(output: str) -> list[dict]:
     return out
 
 
+def _runtime_cutoff() -> datetime:
+    from alpha_agents.data import trader_session
+
+    value = datetime.fromisoformat(trader_session.instant())
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=_TZ)
+    else:
+        value = value.astimezone(_TZ)
+    return value.replace(microsecond=0)
+
+
+def _runtime_context(cutoff: datetime) -> DecisionContext:
+    from alpha_agents.evolution.replay_mode import replay_process
+
+    replay = replay_process()
+    return DecisionContext(
+        mode="replay" if replay else "live",
+        observation_resolution=(
+            Timeframe.DAILY if replay else Timeframe.MINUTE_5),
+        decision_horizon=DecisionHorizon.POSITION,
+        session=Session.INTRADAY,
+        information_cutoff=cutoff,
+        evidence_scope=(
+            EvidenceScope.REPLAY_DAILY if replay
+            else EvidenceScope.LIVE_INTRADAY),
+    )
+
+
+def _position_observations(
+    state: TraderState, positions: list[dict], cutoff: datetime,
+    timeframe: Timeframe,
+) -> list[Observation]:
+    """Emit only actual book changes, never infer a fill from a quote."""
+    before = {item.code: item for item in state.positions}
+    now = {str(pos.get("code") or ""): pos for pos in positions
+           if pos.get("code")}
+    observations: list[Observation] = []
+
+    for code, pos in sorted(now.items()):
+        shares = int(pos.get("shares") or 0)
+        avg_price = float(
+            pos.get("avg_price") or pos.get("open_price") or 0)
+        thesis_id = pos.get("thesis_id")
+        previous = before.get(code)
+        if (previous is not None and previous.shares == shares
+                and abs(previous.avg_price - avg_price) < 1e-12
+                and previous.thesis_id == (
+                    str(thesis_id) if thesis_id is not None else None)):
+            continue
+        observations.append(Observation.create(
+            observed_at=cutoff,
+            available_at=cutoff,
+            type=ObservationType.POSITION_CHANGED,
+            subjects=[code],
+            data={
+                "code": code,
+                "shares": shares,
+                "avg_price": avg_price,
+                "thesis_id": thesis_id,
+            },
+            source="portfolio_book",
+            evidence_refs=[
+                f"position:{pos.get('id', code)}:{shares}:{avg_price}"
+            ],
+            timeframe=timeframe,
+        ))
+
+    for code, previous in sorted(before.items()):
+        if code in now:
+            continue
+        observations.append(Observation.create(
+            observed_at=cutoff,
+            available_at=cutoff,
+            type=ObservationType.POSITION_CHANGED,
+            subjects=[code],
+            data={
+                "code": code, "shares": 0,
+                "avg_price": previous.avg_price,
+                "thesis_id": previous.thesis_id,
+            },
+            source="portfolio_book",
+            evidence_refs=[f"position-closed:{code}:{cutoff.isoformat()}"],
+            timeframe=timeframe,
+        ))
+    return observations
+
+
+def _confidence(value: str) -> float:
+    return {
+        "high": 0.8, "medium": 0.6, "low": 0.4,
+    }.get(str(value or "").strip().lower(), 0.5)
+
+
+def to_runtime_decisions(
+    decisions: list[dict], context: DecisionContext, *, decision_key: str,
+) -> tuple[TraderDecision, ...]:
+    """Map the existing position agent's actions into Trader Runtime."""
+    action_map = {
+        "sell": Action.SELL,
+        "trim": Action.REDUCE,
+        "add": Action.ADD,
+        "hold": Action.HOLD,
+    }
+    out = []
+    for index, item in enumerate(decisions):
+        code = str(item.get("code") or "").strip()
+        action = action_map.get(str(item.get("action") or "").strip().lower())
+        if not code or action is None:
+            continue
+        fraction = item.get("fraction")
+        size_pct = item.get("size_pct")
+        try:
+            fraction = float(fraction) if fraction is not None else None
+        except (TypeError, ValueError):
+            fraction = None
+        try:
+            size_pct = float(size_pct) if size_pct is not None else None
+        except (TypeError, ValueError):
+            size_pct = None
+        out.append(TraderDecision(
+            decision_id=f"{decision_key}:{index}:{code}:{action.value}",
+            made_at=context.information_cutoff,
+            action=action,
+            code=code,
+            thesis_id=None,
+            confidence=_confidence(item.get("confidence")),
+            reasoning=(
+                item.get("reason") or
+                ("继续持有，当前没有触发退出理由"
+                 if action == Action.HOLD else "position decision")),
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+            size_pct=size_pct if action == Action.ADD else None,
+            fraction=fraction if action == Action.REDUCE else None,
+        ))
+    return tuple(out)
+
+
+async def commit_runtime_decisions(
+    decisions: list[dict], positions: list[dict], *,
+    trader_id: str, decision_key: str | None = None,
+) -> tuple[TraderDecision, ...]:
+    """Seal position observations and decisions before execution is attempted."""
+    from alpha_agents.data import trader_session, trader_state_store
+
+    cutoff = _runtime_cutoff()
+    context = _runtime_context(cutoff)
+    run_id = trader_session.namespace()
+    state = trader_state_store.load_latest(
+        run_id=run_id, trader_id=trader_id)
+    if state is None:
+        state = TraderState.create(trader_id=trader_id, as_of=cutoff)
+        trader_state_store.save(state, run_id=run_id)
+    if state.as_of > cutoff:
+        raise TraderRuntimeError(
+            "persisted TraderState is ahead of position decision cutoff")
+
+    runtime = TraderRuntime()
+    observed = await runtime.step(
+        state,
+        _position_observations(
+            state, positions, cutoff, context.observation_resolution),
+        context,
+    )
+    state = observed.state
+    if observed.changed:
+        trader_state_store.save(state, run_id=run_id)
+
+    key = decision_key or (
+        f"position:{run_id}:{cutoff.isoformat(timespec='seconds')}")
+    runtime_decisions = to_runtime_decisions(
+        decisions, context, decision_key=key)
+    if not runtime_decisions:
+        return ()
+    committed = await runtime.commit_decisions(
+        state, runtime_decisions, context)
+    trader_state_store.save(committed.state, run_id=run_id)
+    return runtime_decisions
+
+
 def apply(decisions: list[dict], positions: list[dict],
           price_map: dict[str, float]) -> list[dict]:
     """Execute the decisions. Returns alerts in check_positions' shape."""
@@ -564,6 +753,16 @@ async def run(price_map: dict[str, float], signals: list[dict],
         return []
     logger.info("Exit decisions: %s",
                 ", ".join(f"{d['code']}={d['action']}" for d in decisions))
+    try:
+        await commit_runtime_decisions(
+            decisions, positions, trader_id=trader_id or "default")
+    except Exception as exc:
+        # A state write failure means the Trader cannot later explain what it
+        # decided. Fail closed on discretionary execution; the hard stop has
+        # already run below this layer.
+        logger.exception(
+            "Position decision was not sealed in TraderState — holding: %s", exc)
+        return []
     return apply(decisions, positions, price_map)
 
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from alpha_agents.trader.observation import Observation
-from alpha_agents.trader.state import StateTransition, ThesisState, TraderState, WatchItem
+from alpha_agents.trader.state import (
+    StateTransition, ThesisState, TraderDecision, TraderState, WatchItem,
+)
 from alpha_agents.trader.types import (
     DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
     WatchStatus,
@@ -27,6 +29,7 @@ class StepResult:
     transitions: tuple[StateTransition, ...]
     reevaluate_subjects: tuple[str, ...]
     accepted_observation_hashes: tuple[str, ...]
+    decisions: tuple[TraderDecision, ...]
     changed: bool
 
 
@@ -85,6 +88,7 @@ class TraderRuntime:
                 transitions=(),
                 reevaluate_subjects=(),
                 accepted_observation_hashes=(),
+                decisions=(),
                 changed=False,
             )
 
@@ -101,6 +105,7 @@ class TraderRuntime:
             transitions=transitions,
             reevaluate_subjects=reevaluate,
             accepted_observation_hashes=accepted,
+            decisions=(),
             changed=True,
         )
 

@@ -833,6 +833,7 @@ def _save_recommendations_list(
 
     if saved:
         logger.info("Saved %d predictions from morning report", saved)
+    return prediction_ids
 
 
 def _save_recommendations(report: str) -> None:

@@ -5,7 +5,8 @@ from dataclasses import dataclass, replace
 
 from alpha_agents.trader.observation import Observation
 from alpha_agents.trader.state import (
-    StateTransition, ThesisState, TraderDecision, TraderState, WatchItem,
+    PositionState, StateTransition, ThesisState, TraderDecision, TraderState,
+    WatchItem,
 )
 from alpha_agents.trader.types import (
     Action, DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
@@ -76,9 +77,13 @@ class TraderRuntime:
             state.watchlist, incoming)
         theses, thesis_transitions, thesis_recheck = self._update_theses(
             state.theses, incoming)
+        positions, position_transitions, position_recheck = self._update_positions(
+            state.positions, incoming)
 
-        transitions = tuple(watch_transitions + thesis_transitions)
-        reevaluate = tuple(sorted(watch_recheck | thesis_recheck))
+        transitions = tuple(
+            watch_transitions + thesis_transitions + position_transitions)
+        reevaluate = tuple(sorted(
+            watch_recheck | thesis_recheck | position_recheck))
         accepted = tuple(item.observation_hash for item in incoming)
 
         watermark_moves = context.information_cutoff > state.as_of
@@ -99,6 +104,7 @@ class TraderRuntime:
             as_of=context.information_cutoff,
             watchlist=watchlist,
             theses=theses,
+            positions=positions,
             recent_observations=history,
         )
         return StepResult(
@@ -355,6 +361,75 @@ class TraderRuntime:
             updated.append(current)
 
         return tuple(updated), transitions, recheck
+
+    def _update_positions(
+        self,
+        positions: tuple[PositionState, ...],
+        observations: list[Observation],
+    ) -> tuple[tuple[PositionState, ...], list[StateTransition], set[str]]:
+        """Apply explicit portfolio snapshots; never infer fills from prices."""
+        by_code = {item.code: item for item in positions}
+        order = [item.code for item in positions]
+        transitions: list[StateTransition] = []
+        recheck: set[str] = set()
+
+        for observation in observations:
+            if observation.type != ObservationType.POSITION_CHANGED:
+                continue
+            data = observation.data
+            code = str(data.get("code") or (
+                observation.subjects[0] if len(observation.subjects) == 1 else ""))
+            if not code or code not in observation.subjects:
+                raise TraderRuntimeError(
+                    "position observation needs one matching code subject")
+            try:
+                shares = int(data["shares"])
+                avg_price = float(data.get("avg_price") or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise TraderRuntimeError(
+                    "position observation needs numeric shares/avg_price") from exc
+            thesis_id = data.get("thesis_id")
+            if thesis_id is not None:
+                thesis_id = str(thesis_id)
+            current = by_code.get(code)
+
+            if shares <= 0:
+                if current is None:
+                    continue
+                del by_code[code]
+                order = [value for value in order if value != code]
+                transitions.append(StateTransition(
+                    kind="position", subject=code,
+                    from_status="open", to_status="closed",
+                    at=observation.available_at,
+                    observation_hash=observation.observation_hash,
+                    reason="portfolio snapshot reports zero shares",
+                ))
+                recheck.add(code)
+                continue
+
+            next_position = PositionState(
+                code=code, shares=shares, avg_price=avg_price,
+                thesis_id=thesis_id)
+            if current == next_position:
+                continue
+            by_code[code] = next_position
+            if code not in order:
+                order.append(code)
+            transitions.append(StateTransition(
+                kind="position", subject=code,
+                from_status="absent" if current is None else "open",
+                to_status="open",
+                at=observation.available_at,
+                observation_hash=observation.observation_hash,
+                reason=(
+                    "position opened"
+                    if current is None else "position size/cost changed"),
+            ))
+            recheck.add(code)
+
+        return tuple(by_code[code] for code in order), transitions, recheck
+
 
     def _update_theses(
         self,

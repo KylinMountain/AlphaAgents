@@ -73,6 +73,9 @@ from alpha_agents.data.decision_frame import (
     DecisionFrame, FrameError, TraderState, fingerprint,
 )
 from alpha_agents.data.decision_capture import Capture
+from alpha_agents.trader import (
+    Action, Condition, DecisionContext, TraderDecision, TraderRuntimeError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +290,48 @@ def _trailing_json_object(text: str) -> str:
     return text
 
 
+def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict], str | None]:
+    """Normalize WAIT decisions into the Trader Runtime condition grammar."""
+    raw_watch = payload.get("watch", [])
+    if not isinstance(raw_watch, list):
+        return [], "watch must be a list"
+
+    watch: list[dict] = []
+    seen: set[str] = set()
+    for item in raw_watch:
+        if not isinstance(item, dict):
+            return [], "watch entries must be objects"
+        code = item.get("code")
+        reason = item.get("reason")
+        next_check = item.get("next_check")
+        invalidations = item.get("invalidations", [])
+        if (not isinstance(code, str) or code not in panel_codes or code in seen
+                or not isinstance(reason, str) or not reason.strip()
+                or not isinstance(next_check, list) or not next_check
+                or not isinstance(invalidations, list)):
+            return [], (
+                "watch needs a unique panel code, non-empty reason, "
+                "non-empty next_check list and invalidations list")
+        try:
+            checks = [Condition.from_dict(value).as_dict() for value in next_check]
+            invalid = [Condition.from_dict(value).as_dict()
+                       for value in invalidations]
+            confidence = float(item.get("confidence", 0.5))
+        except (KeyError, TypeError, ValueError, TraderRuntimeError):
+            return [], "watch contains an invalid condition or confidence"
+        if not 0 <= confidence <= 1:
+            return [], "watch confidence must be in [0, 1]"
+        seen.add(code)
+        watch.append({
+            "code": code,
+            "reason": reason.strip(),
+            "confidence": confidence,
+            "next_check": checks,
+            "invalidations": invalid,
+        })
+    return watch, None
+
+
 def parse_orders(text: str, panel_codes: set[str]) -> dict:
     """Turn the model's reply into orders, naming every refusal.
 
@@ -313,9 +358,10 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
     if explanation is None:
         explanation = payload.get("reason")  # Legacy top-level spelling.
     explanation = explanation.strip() if isinstance(explanation, str) else ""
+    watch, watch_error = _parse_watch_items(payload, panel_codes)
     rejected = []
     raw_rejected = payload.get("rejected", [])
-    explanation_error = None
+    explanation_error = watch_error
     if not isinstance(raw_rejected, list):
         explanation_error = "rejected must be a list"
     else:
@@ -335,10 +381,12 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             seen.add(code)
             rejected.append({"code": code, "reason": reason.strip(),
                              "rule_ids": [rid.strip() for rid in ids]})
-    if not payload["orders"] and not explanation:
-        explanation_error = "empty orders require a non-empty no_trade_reason"
+    if not payload["orders"] and not watch and not explanation:
+        explanation_error = (
+            "empty orders without watch require a non-empty no_trade_reason")
     if explanation_error:
-        return {"orders": [], "refused": [], "parse_error": explanation_error,
+        return {"orders": [], "watch": watch, "refused": [],
+                "parse_error": explanation_error,
                 "decision_status": "incomplete", "no_trade_reason": explanation,
                 "rejected": rejected}
 
@@ -419,14 +467,117 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             # the caller renders as its trader's default — not as zero.
             **_thesis_fields(raw, code),
         })
-    if {order["code"] for order in orders} & {item["code"] for item in rejected}:
-        return {"orders": [], "refused": refused,
-                "parse_error": "a code cannot be both ordered and rejected",
+    ordered_codes = {order["code"] for order in orders}
+    watch_codes = {item["code"] for item in watch}
+    rejected_codes = {item["code"] for item in rejected}
+    if (ordered_codes & watch_codes or ordered_codes & rejected_codes
+            or watch_codes & rejected_codes):
+        return {"orders": [], "watch": watch, "refused": refused,
+                "parse_error": (
+                    "a code cannot be simultaneously ordered, watched or rejected"),
                 "decision_status": "incomplete", "no_trade_reason": explanation,
                 "rejected": rejected}
-    return {"orders": orders, "refused": refused, "parse_error": None,
-            "decision_status": "ordered" if orders else ("refused" if refused else "abstained"),
+
+    if orders:
+        status = "ordered"
+    elif watch:
+        status = "waiting"
+    elif rejected or refused:
+        status = "refused"
+    else:
+        status = "abstained"
+    return {"orders": orders, "watch": watch, "refused": refused,
+            "parse_error": None, "decision_status": status,
             "no_trade_reason": explanation, "rejected": rejected}
+
+
+def to_runtime_decisions(verdict: dict, context: DecisionContext) -> tuple[TraderDecision, ...]:
+    """Translate a parsed T1 answer into the continuous Trader Runtime vocabulary."""
+    if verdict.get("parse_error"):
+        raise DeciderError("cannot commit an unreadable planner reply")
+    base = verdict.get("decision_id")
+    if not isinstance(base, str) or not base.strip():
+        raise DeciderError("runtime decisions require the captured decision identity")
+
+    made_at = context.information_cutoff
+    decisions: list[TraderDecision] = []
+
+    for index, order in enumerate(verdict.get("orders") or []):
+        confidence = order.get("conviction", order.get("prob", 0.5))
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = min(1.0, max(0.0, confidence))
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:buy:{index}:{order['code']}",
+            made_at=made_at,
+            action=Action.BUY,
+            code=order["code"],
+            thesis_id=None,
+            confidence=confidence,
+            reasoning=order.get("reason") or "planner buy",
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+            size_pct=order.get("size_pct"),
+            entry_low=order.get("entry_low"),
+            entry_high=order.get("entry_high"),
+            stop_loss=order.get("stop_loss"),
+            target_price=order.get("target_price"),
+        ))
+
+    for index, item in enumerate(verdict.get("watch") or []):
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:wait:{index}:{item['code']}",
+            made_at=made_at,
+            action=Action.WAIT,
+            code=item["code"],
+            thesis_id=None,
+            confidence=float(item.get("confidence", 0.5)),
+            reasoning=item["reason"],
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+            invalidations=tuple(
+                Condition.from_dict(value)
+                for value in item.get("invalidations") or []),
+            next_check=tuple(
+                Condition.from_dict(value)
+                for value in item.get("next_check") or []),
+        ))
+
+    for index, item in enumerate(verdict.get("rejected") or []):
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:reject:{index}:{item['code']}",
+            made_at=made_at,
+            action=Action.REJECT,
+            code=item["code"],
+            thesis_id=None,
+            confidence=0.5,
+            reasoning=item["reason"],
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+        ))
+
+    if not decisions:
+        reason = verdict.get("no_trade_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise DeciderError("empty planner decision requires no_trade_reason")
+        decisions.append(TraderDecision(
+            decision_id=f"{base}:hold",
+            made_at=made_at,
+            action=Action.HOLD,
+            code=None,
+            thesis_id=None,
+            confidence=0.5,
+            reasoning=reason.strip(),
+            timeframe=context.observation_resolution,
+            decision_horizon=context.decision_horizon,
+            evidence_scope=context.evidence_scope,
+        ))
+    return tuple(decisions)
 
 
 #: What the agent may state about a position beyond its price plan. Each is
@@ -781,7 +932,7 @@ async def _run_frame(frame: DecisionFrame, *, model, tools: list, budget,
         logger.warning(
             "%s: decider exceeded %d turns without answering — treating the "
             "day as undecided (not as 'no orders')", day, max_turns)
-        parsed = {"orders": [], "refused": [], "raw": "",
+        parsed = {"orders": [], "watch": [], "refused": [], "raw": "",
                   "parse_error": f"MaxTurnsExceeded after {max_turns} turns "
                                  f"({exc})"}
         parsed["research_budget"] = budget.summary() if budget else None

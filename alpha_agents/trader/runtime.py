@@ -27,14 +27,7 @@ class StepResult:
     transitions: tuple[StateTransition, ...]
     reevaluate_subjects: tuple[str, ...]
     accepted_observation_hashes: tuple[str, ...]
-
-    @property
-    def changed(self) -> bool:
-        return bool(
-            self.transitions
-            or self.accepted_observation_hashes
-            or self.state.version
-        )
+    changed: bool
 
 
 class TraderRuntime:
@@ -92,6 +85,7 @@ class TraderRuntime:
                 transitions=(),
                 reevaluate_subjects=(),
                 accepted_observation_hashes=(),
+                changed=False,
             )
 
         history = tuple(
@@ -107,6 +101,7 @@ class TraderRuntime:
             transitions=transitions,
             reevaluate_subjects=reevaluate,
             accepted_observation_hashes=accepted,
+            changed=True,
         )
 
     @staticmethod

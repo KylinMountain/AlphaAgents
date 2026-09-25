@@ -377,6 +377,7 @@ def _intraday_observations(
     candidates: list[dict],
     prices: dict,
     cutoff: datetime,
+    market_view: dict | None = None,
 ) -> list[Observation]:
     """Facts that changed now; the runtime decides which old plans they wake."""
     observations: list[Observation] = []
@@ -407,6 +408,37 @@ def _intraday_observations(
             ],
             timeframe=Timeframe.MINUTE_5,
         ))
+
+    market_view = market_view or {}
+    explicit_subjects = {
+        condition.subject
+        for item in state.watchlist
+        for condition in (*item.trigger_conditions, *item.invalidation_conditions)
+        if condition.subject is not None
+    }
+    ranks = market_view.get("sector_ranks") or {}
+    flows = market_view.get("sector_flows") or {}
+    for subject in sorted(explicit_subjects):
+        data = {}
+        if subject in ranks:
+            data["theme_rank"] = ranks[subject]
+        if subject in flows:
+            data["net_flow"] = flows[subject]
+        if subject == "MARKET" and market_view.get("breadth_ratio") is not None:
+            data["breadth_ratio"] = market_view["breadth_ratio"]
+        if data:
+            observations.append(Observation.create(
+                observed_at=cutoff,
+                available_at=cutoff,
+                type=ObservationType.THEME_CHANGE,
+                subjects=[subject],
+                data=data,
+                source="intraday_market_view",
+                evidence_refs=[
+                    f"intraday-market:{subject}:{cutoff.isoformat(timespec='minutes')}"
+                ],
+                timeframe=Timeframe.MINUTE_5,
+            ))
 
     for item in candidates:
         code = str(item.get("code") or "")
@@ -479,6 +511,7 @@ async def plan_intraday(
     prediction_ids: dict[str, int] | None = None,
     research_context: str = "",
     knowledge_block: str = "",
+    market_view: dict | None = None,
     run_id: str | None = None,
 ) -> dict:
     """Advance intraday observations and re-evaluate only meaningful subjects."""
@@ -503,7 +536,8 @@ async def plan_intraday(
     context = _intraday_context(cutoff)
     runtime = TraderRuntime()
     observed = await runtime.step(
-        state, _intraday_observations(state, candidates, prices, cutoff),
+        state, _intraday_observations(
+            state, candidates, prices, cutoff, market_view),
         context)
     state = observed.state
     if observed.changed:

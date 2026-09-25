@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, time as dt_time
 
 from alpha_agents.agents.json_reply import picks_line
 import re
@@ -122,7 +123,7 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 _FENCE_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 SYSTEM_INSTRUCTIONS = (
-    "你是一名 A 股日频交易员。你只根据用户消息里给出的信息做决定，"
+    "你是一名 A 股交易员。你只根据用户消息里给出的信息做决定，"
     "不使用你记忆中的任何具体行情或个股事实。"
     "输出必须是单个 JSON 对象，没有其它文字。"
 )
@@ -682,11 +683,25 @@ _SESSIONS = {
 }
 
 
+def _validate_information_cutoff(day: str, phase: str, value: str) -> str:
+    """Validate the logical decision instant carried by prompt, frame and state."""
+    try:
+        stamp = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise DeciderError("information_cutoff must be an ISO timestamp") from exc
+    if stamp.date().isoformat() != day:
+        raise DeciderError("information_cutoff must be on the decision day")
+    if phase == "open" and stamp.time() >= dt_time(9, 30):
+        raise DeciderError("open decisions must be frozen before 09:30")
+    return stamp.isoformat(sep=" ", timespec="seconds")
+
+
 def build_message(*, day: str, prev_day: str, panel: list[dict],
                   news: list[dict], book: str, knowledge: str,
                   trader_note: str, picks: int, template: str,
                   market: dict | None = None, phase: str = "open",
-                  research_packet: dict | None = None) -> str:
+                  research_packet: dict | None = None,
+                  decision_time: str | None = None) -> str:
     """Fill the prompt. Every placeholder must be consumed.
 
     The ``{VOCAB}`` lesson from ``agents/morning.py`` applies: a template
@@ -707,6 +722,17 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
             f"phase must be one of {sorted(_SESSIONS)}, not {phase!r}")
     moment = {k: v.format(day=day, prev_day=prev_day)
               for k, v in _SESSIONS[phase].items()}
+    if decision_time is not None:
+        stamp = _validate_information_cutoff(day, phase, decision_time)
+        moment["session"] = (
+            f"现在站在 **{stamp} 开盘前**。"
+            if phase == "open"
+            else f"现在站在 **{stamp} 收盘决策时点**。")
+        moment["news_cutoff"] = stamp
+        moment["news_window"] = (
+            f"上一交易日收盘后 → {stamp}"
+            if phase == "open"
+            else f"{day} 09:00 → {stamp}")
     fields = {"day": day, "prev_day": prev_day, "panel": format_panel(panel),
               "news": format_news(news), "market": format_market(market or {}),
               **moment,
@@ -754,7 +780,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   research_budget=None, research_packet: dict | None = None,
                   knowledge_intervention: dict | None = None,
                   trader_id: str | None = None, run_id: str | None = None,
-                  origin: str = "t1_decider") -> dict:
+                  origin: str = "t1_decider",
+                  information_cutoff: str | None = None) -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -793,7 +820,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,
         template=chosen_template,
-        market=market, phase=phase, research_packet=research_packet)
+        market=market, phase=phase, research_packet=research_packet,
+        decision_time=information_cutoff)
 
     # A tool-less stage may still carry the shared decision budget.
     from alpha_agents.tools.budget import ResearchBudget, use_research_budget
@@ -810,7 +838,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                                  trader_note=trader_note or ""),
         panel_codes=[row["code"] for row in panel], model=model,
         template=chosen_template, max_turns=max_turns, tools=tools or [],
-        trader_id=trader_id or "unbound", run_id=namespace(run_id), origin=origin)
+        trader_id=trader_id or "unbound", run_id=namespace(run_id), origin=origin,
+        information_cutoff=information_cutoff)
     if knowledge_intervention is not None:
         frame = frame.change_knowledge(**knowledge_intervention)
     with Capture(frame, enabled=trader_id is not None) as captured:
@@ -836,18 +865,22 @@ _PLAN_CODE_HASH = fingerprint({
 
 def make_frame(*, day: str, phase: str, message: str, state: TraderState,
                panel_codes: list[str], model, template: str, max_turns: int,
-               tools: list, trader_id: str, run_id: str, origin: str) -> DecisionFrame:
+               tools: list, trader_id: str, run_id: str, origin: str,
+               information_cutoff: str | None = None) -> DecisionFrame:
     """Freeze what is actually handed to the SDK; never reconstruct it later."""
     if phase not in _SESSIONS:
         raise FrameError("Unsupported planner session")
     name = getattr(model, "model", None)
     name = name if isinstance(name, str) and name else "unbound"
+    cutoff = _validate_information_cutoff(
+        day, phase, information_cutoff
+        or f"{day} {'15:00:00' if phase == 'close' else '09:00:00'}")
     return DecisionFrame.create(
         identity={"run_id": run_id, "trader_id": trader_id, "stage": "trade_plan",
                   "phase": phase, "session_day": day, "origin": origin,
-                  "information_cutoff": f"{day} {'15:00:00' if phase == 'close' else '09:00:00'}",
+                  "information_cutoff": cutoff,
                   "information_grade": "synthetic_close" if phase == "close"
-                                       else "declared_daily_open"},
+                                       else "declared_preopen"},
         state=state,
         request={"agent_name": f"t1_decider:{DECIDER_NAME}",
                  "instructions": SYSTEM_INSTRUCTIONS, "message": message,

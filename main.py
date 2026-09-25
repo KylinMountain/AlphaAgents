@@ -301,6 +301,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     from alpha_agents.pipeline.tasks.news_ingest import run_news_ingest
     from alpha_agents.pipeline.tasks.opening_reminder import run_opening_reminder
     from alpha_agents.pipeline.tasks.intraday_monitor import run_intraday_monitor, set_scheduler
+    from alpha_agents.agents.trader_runtime import plan_intraday
     from alpha_agents.pipeline.tasks.review import run_review
     from alpha_agents.pipeline.tasks.shadow_run import run_shadow_run
     from alpha_agents.pipeline.tasks.daily_archive import run_daily_archive
@@ -365,7 +366,8 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     # 4 min sits between the boost and normal intervals so a wedged run
     # gets killed long before the next normal tick at 5 min.
     scheduler.add_task(Task(
-        "intraday_monitor", run_intraday_monitor,
+        "intraday_monitor",
+        lambda: run_intraday_monitor(trader_plan=plan_intraday),
         dtime(9, 30), end_at=dtime(15, 0), interval_minutes=5,
         timeout_seconds=240,
     ))

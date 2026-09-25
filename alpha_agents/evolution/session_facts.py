@@ -94,7 +94,7 @@ def compute(hist: sqlite3.Connection, *, day: str,
             news_titles: list[str] | None = None,
             ours: dict[str, str] | None = None,
             news_history: list[tuple[str, str]] | None = None,
-            search=None) -> dict:
+            search=None, unseen_label: str = UNSEEN) -> dict:
     """The session's facts. ``ours`` maps a concept to SELECTED or SEEN;
     every concept not in it is UNSEEN."""
     names = names or {}
@@ -116,6 +116,7 @@ def compute(hist: sqlite3.Connection, *, day: str,
 
     boards = []
     for concept, codes in members.items():
+        codes = list(dict.fromkeys(codes))
         have = [c for c in codes if c in moves]
         if len(have) < MIN_MEMBERS:
             continue
@@ -147,7 +148,9 @@ def compute(hist: sqlite3.Connection, *, day: str,
             "headlines": today_titles[:5],
             "timeline": _timeline(
                 [d for d, t in news_history if d < day and names_it(t)], day),
-            "ours": ours.get(concept, UNSEEN),
+            "ours": ours.get(concept, unseen_label),
+            "covered": len(have), "total": len(codes),
+            "flow_covered": sum(c in net for c in have),
         })
     boards.sort(key=lambda b: -b["pct"])
     shown = boards[:TOP] + (boards[-BOTTOM:] if len(boards) > TOP else [])
@@ -162,6 +165,9 @@ def compute(hist: sqlite3.Connection, *, day: str,
         "day": day, "prev": prev,
         "market": {
             "n": len(moves),
+            "previous_sample_n": hist.execute(
+                "SELECT COUNT(DISTINCT code) FROM daily_kline WHERE date=? AND close>0",
+                (prev,)).fetchone()[0],
             "up": sum(v > 0 for v in moves.values()),
             "down": sum(v < 0 for v in moves.values()),
             "median_pct": round(statistics.median(moves.values()), 2),
@@ -251,9 +257,15 @@ def load_news(day: str, prev: str | None) -> tuple[list[str], list[tuple[str, st
 
 def _board_line(b: dict) -> str:
     return (f"{b['name']} {b['pct']:+.2f}%（上涨占比{b['up_ratio']}%，涨停{b['limit_up']}只，"
-            f"最高{b['max_streak']}连板，主力净额{b['net_yi']:+.1f}亿，"
+            f"最高{b['max_streak']}连板，"
+            + (f"已覆盖主力净额{b['net_yi']:+.1f}亿，"
+               if b.get("flow_covered", 1) else "主力净额缺失，")
+            +
             f"领涨{b['leader']}{b['leader_pct']:+.1f}%，相关快讯{b['news']}条）"
             f"——你今天：{b['ours']}"
+            + (f"；成分行情覆盖 {b['covered']}/{b['total']}，"
+               f"资金覆盖 {b['flow_covered']}/{b['covered']}"
+               if "covered" in b else "")
             + _news_lines(b))
 
 
@@ -277,10 +289,13 @@ def render(f: dict) -> str:
         return ""
     m = f["market"]
     lines = [
-        f"全市场 {m['n']} 只：上涨 {m['up']}、下跌 {m['down']}，涨跌幅中位 {m['median_pct']:+.2f}%；"
+        f"当日可比样本 {m['n']} 只：上涨 {m['up']}、下跌 {m['down']}，涨跌幅中位 {m['median_pct']:+.2f}%；"
         f"涨停 {m['limit_up']}、跌停 {m['limit_down']}、炸板 {m['broken']}（炸板率 {m['broken_rate']}%）；"
         f"最高 {m['max_streak']} 连板",
     ]
+    lines.insert(0, f"行情覆盖：{m['n']}/{m.get('previous_sample_n', m['n'])}"
+                 "（分母为前一交易日有效样本，非全市场完整性保证）。"
+                 "缺失不表示零涨跌；排名仅代表已覆盖样本。")
     if m["ladder"]:
         lines.append("连板梯队：" + "；".join(
             f"{n}({c}) {s}板" for n, c, s in m["ladder"]))

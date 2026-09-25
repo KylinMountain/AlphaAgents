@@ -896,10 +896,54 @@ CREATE TABLE IF NOT EXISTS trade_reviews (
     close_date TEXT NOT NULL,
     facts_json TEXT NOT NULL,
     lesson_json TEXT,
+    facts_available_on TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_on TEXT,
+    review_available_on TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_trade_reviews_trader
     ON trade_reviews(trader_id, close_date);
+
+CREATE TABLE IF NOT EXISTS trade_review_attempts (
+    id INTEGER PRIMARY KEY,
+    position_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    attempted_on TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('started','failed','complete')),
+    lesson_json TEXT NOT NULL,
+    error TEXT NOT NULL DEFAULT '',
+    UNIQUE(position_id, attempt, status)
+);
+CREATE TRIGGER IF NOT EXISTS trade_review_attempts_no_update
+BEFORE UPDATE ON trade_review_attempts BEGIN
+    SELECT RAISE(ABORT, 'trade_review_attempts is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trade_review_attempts_no_delete
+BEFORE DELETE ON trade_review_attempts BEGIN
+    SELECT RAISE(ABORT, 'trade_review_attempts is append-only');
+END;
+CREATE TABLE IF NOT EXISTS trader_session_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    trader_id TEXT NOT NULL,
+    session_day TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('morning_input','entry_observation')),
+    code TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trader_session_events
+    ON trader_session_events(run_id,trader_id,session_day,kind,code,observed_at);
+CREATE TRIGGER IF NOT EXISTS trader_session_events_no_update
+BEFORE UPDATE ON trader_session_events BEGIN
+    SELECT RAISE(ABORT, 'trader_session_events is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trader_session_events_no_delete
+BEFORE DELETE ON trader_session_events BEGIN
+    SELECT RAISE(ABORT, 'trader_session_events is append-only');
+END;
 
 CREATE TABLE IF NOT EXISTS evolution_metrics (
     date TEXT PRIMARY KEY,

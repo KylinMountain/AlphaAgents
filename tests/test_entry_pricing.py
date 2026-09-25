@@ -242,9 +242,8 @@ class TestDeclineBecomesMemory:
 
     def test_recall_reads_back_what_was_decided(self):
         from alpha_agents.pipeline.tasks import session_memory as IM
-        IM._declined.clear()
-        IM.note_decline("301511", 12.40, "position_pct=100，距支撑仅2.2%")
-        recalled = IM.recall_decline("301511", 13.60)
+        IM.note_decline("301511", 12.40, "position_pct=100，距支撑仅2.2%", trader_id="t1")
+        recalled = IM.recall_decline("301511", 13.60, trader_id="t1")
         assert "12.40" in recalled and "13.60" in recalled
         assert "+9.7%" in recalled and "position_pct=100" in recalled
 
@@ -258,12 +257,13 @@ class TestDeclineBecomesMemory:
         # unused and the test silently testing nothing.
         monkeypatch.setattr(theme_gate, "resolve_theme", lambda t: t)
         monkeypatch.setattr(theme_gate, "theme_admits", lambda t: None)
-        IM._declined.clear()
-        IM.note_decline("301511", 12.40, "位置太高")
+        IM.note_decline("301511", 12.40, "位置太高", trader_id="t1")
         out = MON._worth_asking(
             [{"code": "301511", "theme": "固态电池"}], {"301511": 13.60})
         assert len(out) == 1, "被否过的票必须还能再被问一次"
-        assert "位置太高" in out[0]["prior_view"]
+        enriched = MON._with_prior_views(out, {"301511": 13.60}, trader_id="t1")
+        assert "位置太高" in enriched[0]["prior_view"]
+        assert "prior_view" not in out[0]
 
     def test_the_filter_and_order_creation_read_one_gate(self, monkeypatch):
         """A candidate dropped here would have been refused there.
@@ -304,7 +304,8 @@ class TestDeclineBecomesMemory:
         from datetime import datetime, timedelta
 
         from alpha_agents.pipeline.tasks import session_memory as IM
-        IM._declined.clear()
-        IM._declined["301511"] = (
-            12.40, datetime.now() - timedelta(minutes=200), "位置太高")
-        assert IM.recall_decline("301511", 13.60) is None
+        from alpha_agents.evolution.replay_mode import replay_as_of
+        with replay_as_of("2026-01-05 14:30"):
+            IM.note_decline("301511", 12.40, "位置太高", trader_id="t1")
+        with replay_as_of("2026-01-06 09:35"):
+            assert IM.recall_decline("301511", 13.60, trader_id="t1") is None

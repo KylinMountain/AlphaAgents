@@ -141,7 +141,7 @@ def test_review_uses_order_time_rules_not_close_time_rules(conn, hist, monkeypat
     seen = []
     async def words(f, *, model, trader=None, rules=""):
         seen.append(rules)
-        return {"verdict": "reviewed", "followed": ["R2", "R999"], "broke": [],
+        return {"verdict": "reviewed", "next_time": "testable rule", "followed": ["R2", "R999"], "broke": [],
                 "rule_versions": {"R2": "model invented this"}}
     monkeypatch.setattr(TR, "write_words", words)
     asyncio.run(TR.review_closed(conn, hist, trader_id="default", as_of="2026-01-19",

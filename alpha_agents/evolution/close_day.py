@@ -30,19 +30,25 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                      exposure_text: str = "", record_text: str = "",
                      handbook_before: str | None = None,
                      review_market: bool = True) -> dict:
-    """Run all three steps for one trader. Never raises; returns counts."""
+    """Return completion counts; temporal-integrity faults propagate."""
     from alpha_agents.evolution import handbook, market_review, trade_review
 
     # The *_failed counts are what a replay's report checks before it shows a
     # number: a day whose review timed out is a day the trader did not learn.
     counts = {"trade_reviews": 0, "market_review": 0, "handbook": 0,
               "market_review_failed": 0, "handbook_failed": 0}
+    review_stats = {}
     try:
         counts["trade_reviews"] = await trade_review.review_closed(
             conn, hist, trader_id=trader_id, as_of=day, model=model,
-            trader=trader, handbook_before=handbook_before)
+            trader=trader, handbook_before=handbook_before, stats=review_stats)
     except Exception as e:                            # noqa: BLE001
+        from alpha_agents.data.clock import LookAheadError
+        if isinstance(e, LookAheadError):
+            raise
+        review_stats["trade_review_failed"] = review_stats.get("trade_review_failed", 0) + 1
         logger.warning("%s: trade reviews failed for %s: %s", day, trader_id, e)
+    counts.update(review_stats)
 
     if review_market and facts_text:
         context = "\n\n".join(x for x in (

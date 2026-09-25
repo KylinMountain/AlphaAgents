@@ -149,7 +149,7 @@ def evidence(rule: dict, reviews: list[tuple[dict, dict]]) -> str:
     """What the market says about one rule, from the trader's own trades."""
     cited = [f for f, _ in reviews if f["position_id"] in set(rule.get("from") or [])]
     line = (f"来源 {len(cited)} 笔复盘：中位到手 {_med([f['return_pct'] for f in cited])}，"
-            f"中位吐回 {statistics.median([f['giveback_pp'] for f in cited]):.1f} 个点"
+            f"中位峰值差（非可达利润） {statistics.median([f['giveback_pp'] for f in cited]):.1f} 个点"
             if cited else "来源：未引用可核对的复盘")
     since = rule.get("since") or ""
     # A later close is insufficient: the ORDER must postdate this version,

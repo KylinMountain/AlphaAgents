@@ -360,6 +360,13 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
                                       trader_id=trader.id,
                                       knowledge=knowledge_block)
 
+    # Freeze actual inputs before asking; failure/abstention must leave evidence too.
+    from alpha_agents.data import trader_session
+    trader_session.append(trader_id=trader.id, kind="morning_input", payload={
+        "events_context": events_ctx, "themes_context": themes_ctx,
+        "stats_context": stats_ctx,
+        "themes": [t["name"] for t in (themes or []) if t.get("name")],
+    })
     report = await run_morning_analysis(events_ctx, themes_ctx, stats_ctx,
                                         trader=trader)
     if not report or report.startswith("["):

@@ -50,7 +50,7 @@ from alpha_agents.pipeline.tasks.intraday_report import (
     _auto_fill_actionable, _fix_prices_in_report, _get_cause_analysis,
 )
 from alpha_agents.pipeline.tasks.session_memory import (
-    note_decline, recall_decline,
+    note_decline, note_undecided, recall_decline,
 )
 
 logger = logging.getLogger(__name__)
@@ -715,7 +715,7 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
     """
     from alpha_agents.data.theme_gate import resolve_theme, theme_admits, theme_score_note
 
-    out, dropped, recalled = [], [], 0
+    out, dropped = [], []
     for r in recs:
         code = r["code"]
         theme = r.get("theme", "")
@@ -731,18 +731,11 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
         note = theme_score_note(resolved)
         if note:
             item["theme_note"] = note
-        prior = recall_decline(code, prices.get(code) or 0)
-        if prior:
-            item["prior_view"] = prior
-            recalled += 1
         out.append(item)
 
     if dropped:
         logger.info("定价前剔除 %d 个（订单必被拒，不是判断问题）: %s",
                     len(dropped), ", ".join(dropped[:6]))
-    if recalled:
-        logger.info("%d 个候选带上了今天早些时候的判断，交回给交易员复核",
-                    recalled)
     return out
 
 
@@ -855,9 +848,11 @@ async def _save_intraday_recommendations(report: str) -> None:
                 # same, and only the first is worth handing back next
                 # cycle — so keep the trader's own words when there are
                 # any, and say plainly when there are none.
-                note_decline(code, prices.get(code) or 0,
-                             (decision or {}).get("reason", "")
-                             or "模型没有给出结论")
+                if decision and decision.get("action") == "skip" and decision.get("reason"):
+                    note_decline(code, prices.get(code) or 0, decision["reason"],
+                                 trader_id=trader.id)
+                else:
+                    note_undecided(code, prices.get(code) or 0, trader_id=trader.id)
                 continue
             if _record_intraday_pick(trader, {**r, **_order_fields(decision)},
                                      code, today, "intraday",
@@ -892,11 +887,25 @@ async def _price_for(trader, candidates: list[dict],
     if not entry_pricing.enabled():
         logger.info("AGENT_ENTRY_PRICING 已关闭 — 盘中不下单")
         return {}
+    candidates = _with_prior_views(candidates, prices, trader_id=trader.id)
     try:
         return await entry_pricing.price(candidates, trader)
     except Exception as e:
         logger.warning("交易员 %s 定价异常（%s）— 本轮不下单", trader.id, e)
         return {}
+
+
+def _with_prior_views(candidates: list[dict], prices: dict, *, trader_id: str) -> list[dict]:
+    # Candidates are shared; beliefs are not. Strip stale cross-book annotations.
+    out = []
+    for candidate in candidates:
+        item = {k: v for k, v in candidate.items() if k != "prior_view"}
+        prior = recall_decline(item["code"], prices.get(item["code"]) or 0,
+                               trader_id=trader_id)
+        if prior:
+            item["prior_view"] = prior
+        out.append(item)
+    return out
 
 
 def _record_intraday_pick(trader, r: dict, code: str, today: str,

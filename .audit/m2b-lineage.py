@@ -62,11 +62,17 @@ def test_measured_review_keeps_parent_lineage_and_excludes_other_runs():
             book.execute('INSERT INTO theme_opportunity_sets VALUES (?,?,?)', (sid, run, day))
             book.execute('INSERT INTO opportunity_sets VALUES (?,?,?)', (sid, run, day))
             for offset, theme, code, status in [(0, 'strong', 'AAA', 'agent_selected'),
-                                                (1, 'flat', 'BBB', 'offered_not_researched')]:
+                                                (1, 'flat', 'BBB', 'offered_not_researched'),
+                                                (2, 'weak', 'CCC', 'offered_not_researched'),
+                                                (3, 'mild', 'DDD', 'offered_not_researched')]:
                 book.execute('INSERT INTO theme_opportunity_items VALUES (?,?,?,?)',
                              (sid*10+offset, sid, theme, status))
                 book.execute('INSERT INTO opportunity_items VALUES (?,?,?,?,?)',
                              (sid*10+offset, sid, code, status, '{"primary_theme":"strong"}'))
+        for day in ('2026-01-05', '2026-01-06', '2026-01-07'):
+            for index in range(50):
+                hist.execute('INSERT INTO daily_kline VALUES (?,?,?,?,?,?,?)',
+                             (f'benchmark{index}', day, 10, 10, 10, 10, 0.0))
         scope = ('parent', 'child')
         assert RV.direction_choice(book, hist, MEMBERS, run_id=scope, horizon=1).n == 2
         assert RV.direction_choice(book, hist, MEMBERS, run_id='child', horizon=1).n == 1

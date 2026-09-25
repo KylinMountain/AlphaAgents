@@ -425,3 +425,144 @@ class TestTheBookShowsWhetherAPositionIsUp:
              "open_price": 10.0, "stop_loss": 9.0, "target_price": 12.0,
              "holding_days": 1}, None)
         assert "目标12.0" in line
+
+
+class TestWaitIsAFirstClassDecision:
+    def test_wait_parses_without_global_no_trade_reason(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"等回踩",'
+            '"confidence":0.7,"next_check":[{"metric":"price","op":"<=",'
+            '"value":9.8,"subject":"600001"}],"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert verdict["decision_status"] == "waiting"
+        assert verdict["orders"] == []
+        assert verdict["watch"] == [{
+            "code": "600001",
+            "reason": "等回踩",
+            "confidence": 0.7,
+            "next_check": [{
+                "metric": "price", "op": "<=", "value": 9.8,
+                "subject": "600001",
+            }],
+            "invalidations": [],
+        }]
+
+    def test_wait_requires_a_machine_checkable_trigger(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"再等等",'
+            '"next_check":[],"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+        assert "next_check" in verdict["parse_error"]
+
+    def test_wait_condition_operator_is_validated(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"等",'
+            '"next_check":[{"metric":"price","op":"around","value":10}],'
+            '"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+        assert "invalid condition" in verdict["parse_error"]
+
+    def test_wait_cannot_name_a_stock_outside_the_panel(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"300999","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":10}],'
+            '"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+
+    @pytest.mark.parametrize("other", ["orders", "rejected"])
+    def test_same_code_cannot_be_wait_and_another_action(self, other):
+        if other == "orders":
+            body = (
+                '{"orders":[{"code":"600001","entry_high":10.2,'
+                '"stop_loss":9.2,"reason":"买"}],'
+                '"watch":[{"code":"600001","reason":"等",'
+                '"next_check":[{"metric":"price","op":"<=","value":9.8}],'
+                '"invalidations":[]}]}'
+            )
+        else:
+            body = (
+                '{"orders":[],"no_trade_reason":"不立即买",'
+                '"watch":[{"code":"600001","reason":"等",'
+                '"next_check":[{"metric":"price","op":"<=","value":9.8}],'
+                '"invalidations":[]}],'
+                '"rejected":[{"code":"600001","reason":"同时拒绝","rule_ids":[]}]}'
+            )
+        verdict = D.parse_orders(body, CODES)
+        assert verdict["decision_status"] == "incomplete"
+        assert "simultaneously" in verdict["parse_error"]
+
+    def test_plain_empty_orders_still_need_a_reason(self):
+        verdict = D.parse_orders('{"orders":[]}', CODES)
+        assert verdict["decision_status"] == "incomplete"
+        assert "no_trade_reason" in verdict["parse_error"]
+
+    def test_prompt_teaches_wait_as_distinct_from_reject(self):
+        text = D.load_prompt()
+        assert '"watch"' in text
+        assert "WAIT" in text
+        assert "next_check" in text
+        assert "orders / watch / rejected" in text
+
+
+class TestRuntimeDecisionTranslation:
+    def _context(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from alpha_agents.trader import (
+            DecisionContext, DecisionHorizon, EvidenceScope, Session, Timeframe,
+        )
+        return DecisionContext(
+            mode="live",
+            observation_resolution=Timeframe.DAILY,
+            decision_horizon=DecisionHorizon.SWING,
+            session=Session.PRE_OPEN,
+            information_cutoff=datetime(
+                2026, 9, 25, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            evidence_scope=EvidenceScope.LIVE_DAILY,
+        )
+
+    def test_buy_wait_reject_map_to_distinct_runtime_actions(self):
+        from alpha_agents.trader import Action
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_high":10.2,'
+            '"stop_loss":9.2,"reason":"现在买","conviction":0.8}],'
+            '"watch":[{"code":"600002","reason":"等回踩","confidence":0.7,'
+            '"next_check":[{"metric":"price","op":"<=","value":19.0}],'
+            '"invalidations":[]}],'
+            '"rejected":[]}',
+            CODES,
+        )
+        verdict["decision_id"] = "capture-1"
+        decisions = D.to_runtime_decisions(verdict, self._context())
+        assert [item.action for item in decisions] == [Action.BUY, Action.WAIT]
+        assert decisions[0].code == "600001"
+        assert decisions[0].confidence == 0.8
+        assert decisions[1].code == "600002"
+        assert decisions[1].next_check[0].metric == "price"
+
+    def test_pure_abstention_becomes_global_hold(self):
+        from alpha_agents.trader import Action
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[],"no_trade_reason":"市场太弱",'
+            '"rejected":[]}',
+            CODES,
+        )
+        verdict["decision_id"] = "capture-2"
+        [decision] = D.to_runtime_decisions(verdict, self._context())
+        assert decision.action == Action.HOLD
+        assert decision.code is None
+        assert decision.reasoning == "市场太弱"
+
+    def test_unreadable_reply_cannot_enter_runtime(self):
+        verdict = D.parse_orders("not json", CODES)
+        verdict["decision_id"] = "capture-3"
+        with pytest.raises(D.DeciderError, match="unreadable"):
+            D.to_runtime_decisions(verdict, self._context())

@@ -82,6 +82,15 @@ class TestWriting:
         assert "watchlist" not in got
         assert got["boards"][0]["name"] == "算力" and got["boards"][0]["kind"] == ""
 
+    def test_an_unescaped_quote_in_a_text_field_is_repaired(self):
+        reply = ('{"market":"m","themes":"属于"老题材+新催化"，质量更高",'
+                 '"boards":[{"name":"化工","kind":"错过"}]}')
+        got = MR._parse(reply)
+        assert got == {"market": "m", "themes": "属于\"老题材+新催化\"，质量更高",
+                       "boards": [{"name": "化工", "kind": "错过", "driver": "",
+                                   "evidence": "", "morning": "", "verdict": "",
+                                   "lesson": ""}]}
+
     def test_the_days_record_reaches_the_model(self, conn, monkeypatch):
         import agents
         seen = {}
@@ -147,4 +156,3 @@ class TestBoardNamesMatchTheConceptTable:
     ])
     def test_the_move_is_stripped(self, raw, want):
         assert MR.board_name(raw) == want
-

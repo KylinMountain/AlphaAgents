@@ -85,7 +85,8 @@ _INSTRUCTIONS = """你是这个账户的交易员。现在是收盘后。下面�
 只输出一个 JSON 对象：
 {"market": "...", "themes": "...",
  "boards": [{"name": "...", "kind": "错过", "driver": "...", "evidence": "...",
-             "morning": "...", "verdict": "...", "lesson": "..."}]}"""
+             "morning": "...", "verdict": "...", "lesson": "..."}]}
+不要输出 markdown 围栏。文本字段里的英文双引号必须写成 JSON 转义 `\\"`，或改用中文引号。"""
 
 
 def board_name(raw: str) -> str:
@@ -108,10 +109,21 @@ def _parse(text: str) -> dict | None:
     start, end = t.find("{"), t.rfind("}")
     if start < 0 or end <= start:
         return None
+    payload = t[start:end + 1]
     try:
-        raw = json.loads(t[start:end + 1])
+        raw = json.loads(payload)
     except json.JSONDecodeError:
-        return None
+        # The close review is prose-heavy.  A model occasionally leaves a
+        # quotation mark inside one text field unescaped.  Repair only the
+        # already-delimited object, then keep the same schema filter below;
+        # prose still cannot become a stored review.
+        from json_repair import repair_json
+
+        try:
+            raw = repair_json(payload, return_objects=True)
+        except Exception as exc:                      # noqa: BLE001
+            logger.debug("Could not repair market review JSON (%s)", exc)
+            return None
     if not isinstance(raw, dict):
         return None
     boards = []

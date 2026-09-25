@@ -1,0 +1,107 @@
+name: M1 lifecycle validation
+
+# Isolated validation utility; this workflow and staging files do not go to main.
+on:
+  push:
+    branches: [audit/trader-lifecycle-m1-20260925]
+    paths: [.github/workflows/audit-m1-validation.yml, .audit/m1-followup.py]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/trader-lifecycle-m1-20260925
+          fetch-depth: 0
+      - name: Apply hash-verified changes
+        run: |
+          mkdir -p /tmp/m1-validation
+          python - <<'PY'
+          import base64, hashlib, json, lzma
+          from pathlib import Path
+          root = Path.cwd()
+          text = ''.join((root / f'.audit/m1-v2.{i}').read_text().strip() for i in (1, 2, 3))
+          raw = lzma.decompress(base64.b64decode(text, validate=True))
+          assert hashlib.sha256(raw).hexdigest() == '8518dc0f1cc15ddab04f1bd1711eb04a2f15a41065a7a43d01f16f573b50da1d'
+          edits = json.loads(raw)
+          changes = []
+          for item in edits:
+              path = Path(item['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert str(path).startswith(('alpha_agents/', 'tests/', 'docs/exec-plans/')) or str(path) == 'scripts/walk_forward.py'
+              file = root / path
+              old = file.read_bytes() if file.exists() else b''
+              actual = hashlib.sha256(old).hexdigest()
+              if actual == item['new']:
+                  continue
+              assert actual == item['old'], f'Base changed: {path}'
+              assert file.exists() == item['exists'], f'Existence changed: {path}'
+              lines = old.decode().splitlines(True)
+              for start, stop, new in reversed(item['edits']):
+                  lines[start:stop] = new.splitlines(True)
+              new = ''.join(lines).encode()
+              assert hashlib.sha256(new).hexdigest() == item['new'], f'Bad result: {path}'
+              changes.append((file, new))
+          for path, data in changes:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(data)
+          Path('/tmp/m1-validation/changed-paths.json').write_text(json.dumps([x['path'] for x in edits]))
+          print(f'Verified {len(edits)} paths; applied {len(changes)} changes')
+          PY
+          if [ -f .audit/m1-followup.py ]; then python .audit/m1-followup.py; fi
+          git diff --check
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Targeted regressions
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_trader_lifecycle_m1.py tests/test_decision_learning_integrity.py tests/test_trade_review.py tests/test_handbook.py tests/test_day_record.py tests/test_entry_pricing.py tests/test_session_facts.py tests/test_morning_position_calls.py tests/test_kernel_clock.py -q --no-header 2>&1 | tee /tmp/m1-validation/targeted.log
+      - name: Full test suite
+        run: |
+          set -o pipefail
+          uv run pytest tests/ -q --no-header 2>&1 | tee /tmp/m1-validation/tests.log
+      - name: Existing invariant checks
+        run: |
+          set -euo pipefail
+          uv run python scripts/lint_harness.py 2>&1 | tee /tmp/m1-validation/harness.log
+          uv run python scripts/lint_docs.py 2>&1 | tee /tmp/m1-validation/docs.log
+          uv run python scripts/lint_policy.py 2>&1 | tee /tmp/m1-validation/policy.log
+      - name: Record successfully tested source on audit branch
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/audit/trader-lifecycle-m1-20260925
+          git config user.name Kylin
+          git config user.email kose2livs@gmail.com
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          paths = json.loads(Path('/tmp/m1-validation/changed-paths.json').read_text())
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          PY
+          git diff --cached --stat | tee /tmp/m1-validation/change-stat.txt
+          if ! git diff --cached --quiet; then git commit -m 'fix: preserve original trader facts and recover incomplete learning'; fi
+          git push origin HEAD:refs/heads/audit/trader-lifecycle-m1-20260925
+          git rev-parse HEAD | tee /tmp/m1-validation/tested-commit.txt
+          python - <<'PY'
+          import hashlib, json, subprocess, tarfile
+          from pathlib import Path
+          paths = json.loads(Path('/tmp/m1-validation/changed-paths.json').read_text())
+          rows = []
+          with tarfile.open('/tmp/m1-validation/tested-files.tar.gz', 'w:gz') as tar:
+              for path in paths:
+                  rows.append({'path': path, 'sha': subprocess.check_output(['git','hash-object',path],text=True).strip(), 'sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest()})
+                  tar.add(path, arcname=path)
+          Path('/tmp/m1-validation/verified-files.json').write_text(json.dumps(rows, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-validation
+          path: /tmp/m1-validation/
+          retention-days: 3

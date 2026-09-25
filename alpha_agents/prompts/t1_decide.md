@@ -133,8 +133,8 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
   变化时需要重新判断。
 - `watch[].next_check` 使用机器可判断的条件：`metric / op / value / subject`。
   `op` 只能是 `< <= > >= == !=`；`subject` 是该指标属于哪个股票或主题。
-  常用 metric 可以是 `price`、`volume_ratio`、`net_flow` 等实际已提供或未来
-  Observation 能提供的字段，不能编造一个系统永远观测不到的条件。
+  当前可用 metric **只允许** `price` 和 `change_pct`。后续时间尺度扩展会同步
+  增加 detector 与 vocabulary；不要提前编造系统目前观测不到的条件。
 - `watch[].cancel_if` 是等待逻辑失效条件；没有可以给空数组。
 - 同一代码在一次回答中只能属于 `orders / watch / rejected` 其中一个。
 - `code` 必须逐字出现在上面的候选池里。

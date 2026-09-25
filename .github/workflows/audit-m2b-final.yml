@@ -1,0 +1,88 @@
+name: M2-B final reconciliation
+on:
+  push:
+    branches: [audit/trader-lifecycle-m2b-20260925]
+    paths: [.github/workflows/audit-m2b-final.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Apply and fingerprint isolated changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/m2b-final
+          python - <<'PY'
+          import pathlib,base64,lzma,hashlib,subprocess,json,tarfile
+          if not pathlib.Path('scripts/walk_branch.py').exists():
+              raw=pathlib.Path('.audit/m2b.patch.xz.b64.1').read_text()
+              prefix=lzma.LZMADecompressor().decompress(base64.b64decode(raw))
+              prefix=prefix[:prefix.rfind(b'diff --git ')]
+              assert hashlib.sha256(prefix).hexdigest()=='f49f7e6bda6bceb29ac5de4e3074c119d926ef864384e151d1d632faed318f4b'
+              tail=lzma.decompress(base64.b64decode(pathlib.Path('.audit/m2b-tail.patch.xz.b64').read_text()))
+              assert hashlib.sha256(tail).hexdigest()=='56a2b5d0a00b0611fc2586b6d55148895173ade400ad5c1d2db1f29b519fdb53'
+              path=pathlib.Path('/tmp/m2b-final/changes.patch');path.write_bytes(prefix+tail)
+              subprocess.run(['git','apply','--check',str(path)],check=True)
+              subprocess.run(['git','apply',str(path)],check=True)
+          for filename in ('.audit/m2b-followup.py','.audit/m2b-preflight.py'):
+              subprocess.run(['python',filename],check=True)
+          file=pathlib.Path('scripts/walk_forward.py')
+          file.write_text(file.read_text().replace('return ctx.model is not None and bool(getattr(args, "checkpoint_out", None)', 'return getattr(ctx, "model", None) is not None and bool(getattr(args, "checkpoint_out", None)'))
+          paths=['alpha_agents/agents/t1_decider.py','scripts/walk_forward.py','scripts/walk_resume.py','scripts/walk_checkpoint.py','scripts/walk_branch.py','tests/test_walk_branch.py','docs/walk_branch.md','docs/exec-plans/active/2026-09-25-trader-lifecycle-m2b.md']
+          pathlib.Path('/tmp/m2b-final/paths.json').write_text(json.dumps(paths))
+          with tarfile.open('/tmp/m2b-final/tested-files.tar.gz','w:gz') as tar:
+              for path in paths: tar.add(path,arcname=path)
+          hashes={p:{'sha256':hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest(),'git_blob':subprocess.check_output(['git','hash-object',p],text=True).strip()} for p in paths}
+          pathlib.Path('/tmp/m2b-final/verified-files.json').write_text(json.dumps(hashes,indent=2))
+          PY
+          git diff --check
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Targeted continuous-branch regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_walk_branch.py tests/test_walk_forward.py tests/test_decision_frames.py tests/test_decision_lab.py tests/test_trader_lifecycle_m1.py tests/test_t1_decider.py -q --no-header 2>&1 | tee /tmp/m2b-final/targeted.log
+      - name: Full regression suite
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/ -q --no-header 2>&1 | tee /tmp/m2b-final/tests.log
+      - name: Architecture and documentation checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python scripts/lint_harness.py 2>&1 | tee /tmp/m2b-final/harness.log
+          uv run python scripts/lint_docs.py 2>&1 | tee /tmp/m2b-final/docs.log
+          uv run python scripts/lint_policy.py 2>&1 | tee /tmp/m2b-final/policy.log
+      - name: Preserve successfully tested source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Kylin
+          git config user.email kose2livs@gmail.com
+          python - <<'PY'
+          import json,subprocess
+          subprocess.run(['git','add',*json.load(open('/tmp/m2b-final/paths.json'))],check=True)
+          PY
+          git diff --cached --stat | tee /tmp/m2b-final/changes-stat.txt
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: continue independently learned trader trajectories with verified restore boundaries'
+          fi
+          git push origin "HEAD:refs/heads/audit/m2b-final-tested-${GITHUB_RUN_ID}"
+          git rev-parse HEAD > /tmp/m2b-final/tested-commit.txt
+          git ls-tree -r HEAD > /tmp/m2b-final/tested-tree.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m2b-final-validation
+          path: /tmp/m2b-final/
+          retention-days: 3

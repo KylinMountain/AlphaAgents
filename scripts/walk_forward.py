@@ -1384,6 +1384,18 @@ def _learn(ctx, day: str) -> dict:
             "closed_today": len(closed_today), "distilled": distilled}
 
 
+def _strict_branch_learning(ctx) -> bool:
+    args = getattr(ctx, "args", None)
+    return getattr(ctx, "model", None) is not None and bool(getattr(args, "checkpoint_out", None)
+                                          or getattr(args, "continuation", None))
+
+
+def _lost_branch_review(ctx, day: str) -> None:
+    if _strict_branch_learning(ctx):
+        ctx.failed_learning.append((day, "market_review_failed"))
+        ctx.counters["market_review_failed"] += 1
+
+
 def _review_trades(ctx, day: str, conn) -> int:
     """The trader's close of day: trade reviews, market review, handbook.
 
@@ -1400,6 +1412,7 @@ def _review_trades(ctx, day: str, conn) -> int:
     from alpha_agents.evolution import close_day
     from alpha_agents.evolution import session_facts as SF
 
+    hist = None
     try:
         hist = sqlite3.connect(
             f"file:{DATA_DIR / 'market_history.db'}?mode=ro", uri=True)
@@ -1407,6 +1420,9 @@ def _review_trades(ctx, day: str, conn) -> int:
             f"file:{DATA_DIR / 'market_snapshots.db'}?mode=ro", uri=True)
     except sqlite3.Error as exc:
         logger.warning("%s: close review needs market history: %s", day, exc)
+        if hist is not None:
+            hist.close()
+        _lost_branch_review(ctx, day)
         return 0
     loop = getattr(ctx, "loop", None)
     run = (loop.run_until_complete if loop is not None else asyncio.run)
@@ -1436,10 +1452,13 @@ def _review_trades(ctx, day: str, conn) -> int:
         if isinstance(exc, LookAheadError):
             raise
         logger.warning("%s: close review failed: %s", day, exc)
+        _lost_branch_review(ctx, day)
         return 0
     finally:
         hist.close()
         flows.close()
+    if _strict_branch_learning(ctx) and not got.get("market_review"):
+        got["market_review_failed"] = 1
     ctx.counters["market_reviews"] += got.get("market_review", 0)
     ctx.counters["handbook_rewrites"] += got.get("handbook", 0)
     ctx.counters["market_review_failed"] += got.get("market_review_failed", 0)
@@ -1567,7 +1586,8 @@ def _review(ctx, day: str) -> list:
         return []
     try:
         return RV.review(_get_conn(), hist, _review_members(ctx),
-                         run_id=ctx.run_id, trader_id=ctx.trader, as_of=day)
+                         run_id=getattr(ctx, "review_lineage", ctx.run_id),
+                         trader_id=ctx.trader, as_of=day)
     except Exception as exc:                          # noqa: BLE001
         logger.warning("%s: review failed: %s", day, exc)
         return []
@@ -1657,14 +1677,15 @@ def _knowledge_block(ctx, day: str) -> str:
     return "\n\n".join(x for x in (measured, trades) if x)
 
 
-def _build_model(timeout: float | None):
+def _build_model(timeout: float | None, *, pinned: bool = False):
     """The journaled chat model, with the run's timeout applied.
 
     Imported lazily so a placeholder run — which is most of them — does not
     depend on the ``agents`` layer at all.
     """
     from alpha_agents.model_factory import create_model
-    return create_model(timeout=timeout)
+    return (create_model(timeout=timeout, allow_failover=False, max_retries=0)
+            if pinned else create_model(timeout=timeout))
 
 
 def _event_snapshot_refs(panel: list[dict], cutoff: str) -> list[dict]:
@@ -2274,6 +2295,16 @@ def _sector_stock_choice(ctx, *, day: str, prev_day: str,
     )
 
 
+def _plan_intervention(ctx, day: str, phase: str) -> dict | None:
+    """One first-day open-plan perturbation, never a rewritten past memory."""
+    change = getattr(ctx, "branch_intervention", None)
+    if (not change or day != ctx.branch_start or phase != "open"
+            or ctx.branch_intervention_used):
+        return None
+    ctx.branch_intervention_used = True
+    return change
+
+
 def _sector_trade_plan(ctx, *, day: str, prev_day: str,
                        panel: list[dict], news: list[dict],
                        market: dict, book: str, knowledge: str,
@@ -2287,6 +2318,7 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
             "parse_error": None, "research_budget": None,
         }
     return t1_decider.propose_sync(
+        knowledge_intervention=_plan_intervention(ctx, day, "open"),
         trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
         day=day,
         prev_day=prev_day,
@@ -2662,6 +2694,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     )
     else:
         verdict = t1_decider.propose_sync(
+            knowledge_intervention=_plan_intervention(ctx, day, phase),
             trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
             day=day,
             prev_day=prev_day,
@@ -4366,7 +4399,10 @@ class Context:
         #: singleton, so a model per day would not break the journal — but it
         #: would leak a connection pool per simulated session, and this is the
         #: object the timeout lives on.
-        self.model = (_build_model(args.model_timeout)
+        branching = bool(getattr(args, "checkpoint_out", None)
+                         or getattr(args, "continuation", None))
+        self.model = ((_build_model(args.model_timeout, pinned=True) if branching
+                       else _build_model(args.model_timeout))
                       if args.decider == "llm" else None)
         #: One event loop for the whole window, and it exists **because** the
         #: model above is built once. httpx pools connections bound to the loop
@@ -4480,15 +4516,40 @@ def run(args) -> dict:
     _assert_model_mode(args.decider)
     _assert_an_exit_exists(args)
 
-    ctx = Context(args)
+    branching = bool(getattr(args, "checkpoint_out", None)
+                     or getattr(args, "continuation", None))
+    if branching:
+        from scripts import walk_checkpoint as checkpoint
+        checkpoint.validate_runner(args)
+        if not getattr(args, "continuation", None):
+            checkpoint.require_fresh_prefix(Path(DATA_DIR))
+        source_hash = checkpoint.source_identity()
+        runtime_hash = checkpoint.runtime_identity()
+        from alpha_agents import model_factory
+        old_attempts = model_factory.ATTEMPTS
+        model_factory.ATTEMPTS = 1
+    ctx = None
     # The window is a function of its own for one reason: the loop the model's
     # connection pool is bound to has to be closed on the way out, including
     # when a day raises. ``run`` is the only thing that knows when the window
     # begins and ends, so it is the only thing that can own that.
     try:
-        return _run_window(ctx, args)
+        ctx = Context(args)
+        if getattr(args, "continuation", None):
+            checkpoint.restore_runtime(ctx, args.continuation)
+        result = _run_window(ctx, args)
+        if branching and (checkpoint.source_identity() != source_hash
+                          or checkpoint.runtime_identity() != runtime_hash):
+            raise checkpoint.CheckpointError("Source/runtime changed while running")
+        if getattr(args, "checkpoint_out", None):
+            result["checkpoint"] = checkpoint.capture_result(
+                ctx, args, result, source_hash=source_hash, runtime_hash=runtime_hash)
+        return result
     finally:
-        _close_decider_loop(ctx)
+        if ctx is not None:
+            _close_decider_loop(ctx)
+        if branching:
+            model_factory.ATTEMPTS = old_attempts
 
 
 def _close_decider_loop(ctx) -> None:
@@ -4524,13 +4585,24 @@ def _arm_stall_dump() -> None:
 
 
 def _run_window(ctx, args) -> dict:
-    _seed_theme(ctx)
+    if not getattr(args, "continuation", None):
+        _seed_theme(ctx)
 
     window = ctx.corpus.window(args.start, args.days)
     _verify_experiment_window(ctx, window)
     if not window:
         raise RuntimeError("walk-forward window is empty")
-    initial_account = _initial_account(ctx, window[0])
+    if getattr(args, "continuation", None):
+        from scripts.walk_checkpoint import CheckpointError
+        with replay_as_of(args.continuation["completed_through"]):
+            initial_account = _initial_account(ctx, window[0])
+        if abs(initial_account["equity"] - args.continuation["end_account"]["equity"]) > 0.01:
+            raise CheckpointError("Restored equity does not match the checkpoint boundary")
+    else:
+        initial_account = _initial_account(ctx, window[0])
+    if getattr(args, "continuation", None):
+        from scripts.walk_checkpoint import assert_initial_account
+        assert_initial_account(initial_account, args.continuation["end_account"])
     journal_before = _journal_records(_REPLAY_DIR)
     #: Tool calls are read from the journal's own records rather than counted
     #: in memory, for the same reason the exit legs are read back from
@@ -5018,6 +5090,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
         #: makes unavoidable.
         "corpus_changes": result["corpus"]["changes"],
         "errors": result["errors"],
+        "integrity": integrity(result),
         "capability_matrix": capability_matrix,
         "limitations": list(_limitations(ctx)),
     }
@@ -5553,6 +5626,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", type=Path,
                         help="the replay's data directory (or set "
                              "ALPHAAGENTS_DATA_DIR; --target wins).")
+    parser.add_argument("--checkpoint-out", type=Path, default=None,
+                        help="seal a clean end-of-window checkpoint; disables note merge, "
+                             "pins provider and refuses keep-going/formal experiment modes")
     parser.add_argument("--start", required=True,
                         help="first simulated session, YYYY-MM-DD.")
     parser.add_argument("--days", type=int, default=30,

@@ -203,9 +203,20 @@ def _finding(dimension: str, question: str, unit: str,
 # ── ① 主线 ──────────────────────────────────────────────────────────────
 
 
+def _run_scope(run_id: str | tuple[str, ...] | None, *, alias: str = "") -> tuple[str, tuple]:
+    """Keep parent observations identifiable while selecting one branch lineage."""
+    if run_id is None:
+        return "", ()
+    ids = (run_id,) if isinstance(run_id, str) else run_id
+    if not isinstance(ids, tuple) or not ids or any(not isinstance(x, str) or not x for x in ids):
+        raise ValueError("Run scope must name one run or a nonempty lineage")
+    ids = tuple(dict.fromkeys(ids))
+    return f"WHERE {alias}run_id IN ({','.join('?' for _ in ids)}) ", ids
+
+
 def direction_choice(book: sqlite3.Connection, hist: sqlite3.Connection,
                      members: dict[str, list[str]], *,
-                     run_id: str | None = None,
+                     run_id: str | tuple[str, ...] | None = None,
                      horizon: int = DEFAULT_HORIZON,
                      as_of: str | None = None,
                      member_cap: int = 60) -> Finding:
@@ -215,11 +226,11 @@ def direction_choice(book: sqlite3.Connection, hist: sqlite3.Connection,
     的主线。「你没选中今天最强的那条」在 390 条里永远成立，没有信息量；
     「在你自己看过的 5 条里你选了第 2 弱的」才是可行动的。
     """
+    scope, params = _run_scope(run_id, alias="s.")
     rows = book.execute(
         "SELECT s.day, i.sector_id, i.status FROM theme_opportunity_items i "
         "JOIN theme_opportunity_sets s ON s.id = i.theme_opportunity_set_id "
-        + ("WHERE s.run_id = ? " if run_id else "")
-        + "ORDER BY s.day", (run_id,) if run_id else ()).fetchall()
+        + scope + "ORDER BY s.day", params).fetchall()
 
     by_day: dict[str, dict[str, str]] = {}
     for r in rows:
@@ -261,7 +272,7 @@ def direction_choice(book: sqlite3.Connection, hist: sqlite3.Connection,
 
 
 def stock_choice(book: sqlite3.Connection, hist: sqlite3.Connection, *,
-                 run_id: str | None = None,
+                 run_id: str | tuple[str, ...] | None = None,
                  horizon: int = DEFAULT_HORIZON,
                  as_of: str | None = None) -> Finding:
     """主线选对了，这条线里的票选对了吗。
@@ -270,12 +281,12 @@ def stock_choice(book: sqlite3.Connection, hist: sqlite3.Connection, *,
     主线了，为什么没选对股票」——把主线的贡献和选股的贡献分开，否则一
     笔赚钱的交易说不清是踩对了线还是挑对了票。
     """
+    scope, params = _run_scope(run_id, alias="s.")
     rows = book.execute(
         "SELECT s.day, i.code, i.status, i.panel_row_json "
         "FROM opportunity_items i "
         "JOIN opportunity_sets s ON s.id = i.opportunity_set_id "
-        + ("WHERE s.run_id = ? " if run_id else "")
-        + "ORDER BY s.day", (run_id,) if run_id else ()).fetchall()
+        + scope + "ORDER BY s.day", params).fetchall()
 
     by_day: dict[str, list[dict]] = {}
     for r in rows:
@@ -446,17 +457,17 @@ def exit_timing(book: sqlite3.Connection, hist: sqlite3.Connection, *,
 
 
 def absence(book: sqlite3.Connection, hist: sqlite3.Connection, *,
-            run_id: str | None = None,
+            run_id: str | tuple[str, ...] | None = None,
             as_of: str | None = None) -> Finding:
     """没上场的那些天，市场在做什么。
 
     空仓不是中性的。在一个上行窗口里，不作为和做错一样要付代价，而
     盈亏表看不见这笔——它只记录发生过的交易。
     """
+    scope, params = _run_scope(run_id)
     days = [r["day"] for r in book.execute(
         "SELECT DISTINCT day FROM opportunity_sets "
-        + ("WHERE run_id = ? " if run_id else "")
-        + "ORDER BY day", (run_id,) if run_id else ()).fetchall()]
+        + scope + "ORDER BY day", params).fetchall()]
     held = book.execute(
         "SELECT open_date, close_date FROM virtual_portfolio "
         "WHERE open_date IS NOT NULL AND shares > 0").fetchall()
@@ -485,7 +496,7 @@ def absence(book: sqlite3.Connection, hist: sqlite3.Connection, *,
 
 def review(book: sqlite3.Connection, hist: sqlite3.Connection,
            members: dict[str, list[str]], *,
-           run_id: str | None = None, trader_id: str | None = None,
+           run_id: str | tuple[str, ...] | None = None, trader_id: str | None = None,
            horizon: int = DEFAULT_HORIZON,
            as_of: str | None = None) -> list[Finding]:
     """五段复盘。

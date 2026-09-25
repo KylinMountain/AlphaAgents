@@ -46,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     target = args.target.expanduser().resolve()
 
+    if (target / "branch-origin.json").exists():
+        print("This is an independent branch. Do not rebuild it with the parent's "
+              "recording; create a new trial from the sealed checkpoint.")
+        return 1
     saved = target / RUN_ARGS
     if not saved.exists():
         print(f"{saved} is missing: this directory was not run by a walk_forward "

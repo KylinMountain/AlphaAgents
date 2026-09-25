@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes, save_prediction, get_today_intraday_predictions
+from alpha_agents.agents.trader_runtime import plan_intraday
 from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
@@ -1045,7 +1046,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
                     tag, trader_id, code, r.get("name", ""), entry_price or 0)
     except Exception as e:
         logger.debug("Failed to save intraday prediction for %s: %s", code, e)
-        return None
+        return None if not place_order else False
 
     # Production T4 passes place_order=False: this function is now a research
     # recorder. The direct order branch remains temporarily for compatibility
@@ -1056,7 +1057,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
     # Legacy compatibility: create pending order for actionable recommendations.
     price_chg = prices.get(code + "_chg", 0)
     if trader is None or rec_type == "signal" or price_chg >= 9.8:
-        return pred_id
+        return True
     try:
         # Prefer structured JSON fields, fallback to regex
         entry_low = r.get("entry_low")
@@ -1068,7 +1069,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         # side door — which is the entire thing this path replaced.
         if entry_low is None or entry_high is None or stop_loss_val is None:
             logger.debug("%s 缺少交易员定价 — 不下单", code)
-            return pred_id
+            return True
         # Thesis before order, same as the morning path. The pick came from
         # a scoring function but the *price* came from the trader, so its
         # reason is on record and from_recommendation derives the exit
@@ -1101,4 +1102,4 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         )
     except Exception as e:
         logger.debug("Failed to create pending order for %s: %s", code, e)
-    return pred_id
+    return True

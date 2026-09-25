@@ -673,6 +673,19 @@ _SESSIONS = {
             "  `entry_high` 是你今天最多愿意付的价：开盘价不高于它就按开盘价成交。"
             "`entry_low` 可以不写；写了就表示开盘低于它你也不买。"),
     },
+    "intraday": {
+        "session": "现在站在 **{day} 盘中实时决策时点**。",
+        "sight": (
+            "- 你能看到系统明确提供的**当前价格/当日涨幅/主题与事件快照**，"
+            "这些事实都必须早于当前 information cutoff。\\n"
+            "- 你**不知道当前时点之后**会发生什么，也不知道最终收盘。"
+            "不要把未来日线或收盘结果当成当前事实。"),
+        "news_cutoff": "当前 information cutoff",
+        "news_window": "今日开盘 → 当前 information cutoff",
+        "fills_how": (
+            "  这是盘中挂单：系统不会假设你立刻成交。entry_high / entry_low "
+            "形成后续实时价格检查的可成交区间；A 股 T+1 与成交容量仍由执行层约束。"),
+    },
     "close": {
         "session": "现在站在 **{day} 收盘前 14:55**。",
         "sight": (
@@ -738,7 +751,8 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
             f"上一交易日收盘后 → {stamp}"
             if phase == "open"
             else f"{day} 09:00 → {stamp}")
-    fields = {"day": day, "prev_day": prev_day, "panel": format_panel(panel),
+    fields = {"day": day, "prev_day": prev_day,
+              "panel": format_panel(panel, phase=phase),
               "news": format_news(news), "market": format_market(market or {}),
               **moment,
               "book": book or "（空仓）",

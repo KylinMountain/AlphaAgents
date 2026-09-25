@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
-from alpha_agents.agents import t1_decider
 from alpha_agents.data import clock, market_history as mh, opportunity_journal as OJ
 from alpha_agents.data.portfolio_intent import create_pending_order
 from alpha_agents.data.trader_session import namespace
@@ -179,6 +178,8 @@ async def plan_open(
     prediction_ids: dict[str, int] | None = None,
     knowledge_block: str = "",
     events_context: str = "",
+    planner=None,
+    decider_name: str = "t1_llm",
 ) -> dict:
     """Make and submit today's live pre-open plan through the replay planner."""
     day = clock.today()
@@ -199,7 +200,9 @@ async def plan_open(
         logger.warning("Live T1 tools unavailable; planner runs tool-less: %s", exc)
         tools = []
 
-    verdict = await t1_decider.propose(
+    if planner is None:
+        raise ValueError("live T1 requires an injected planner")
+    verdict = await planner(
         day=day,
         prev_day=prev_day,
         panel=panel,
@@ -253,7 +256,7 @@ async def plan_open(
             stop_loss=order.get("stop_loss"),
             target_price=order.get("target_price"),
             source="t1_live",
-            reason=f"{t1_decider.DECIDER_NAME}: {order.get('reason') or ''}",
+            reason=f"{decider_name}: {order.get('reason') or ''}",
             trader_id=trader.id,
             prediction_id=pred_ids.get(order["code"]),
             thesis_id=thesis_id,

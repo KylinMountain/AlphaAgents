@@ -144,7 +144,7 @@ def load_prompt(path: Path | None = None) -> str:
     return (path or (PROMPTS_DIR / PROMPT_FILE)).read_text(encoding="utf-8")
 
 
-def format_panel(panel: list[dict]) -> str:
+def format_panel(panel: list[dict], *, phase: str = "open") -> str:
     """Render the allowed securities, one per line, with what is knowable.
 
     The columns are what a person would look at before deciding, minus the
@@ -162,14 +162,19 @@ def format_panel(panel: list[dict]) -> str:
     if not panel:
         return "（今天没有可交易的候选）"
     sector_first = any(row.get("primary_theme") for row in panel)
+    price_label = (
+        "当前价" if phase == "intraday"
+        else ("今日收盘" if phase == "close" else "T-1 收盘"))
+    change_label = (
+        "今日涨幅" if phase in {"intraday", "close"} else "T-1 涨幅")
     if sector_first:
         lines = [
-            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
+            f"| 代码 | 名称 | {price_label} | {change_label} | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
             "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     else:
         lines = [
-            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
+            f"| 代码 | 名称 | {price_label} | {change_label} | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
             "|---|---|---|---|---|---|---|---|---|",
         ]
     for row in panel:

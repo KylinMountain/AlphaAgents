@@ -89,3 +89,8 @@ if manifest.exists():
     if 'tests/test_walk_forward.py' not in paths:
         paths.append('tests/test_walk_forward.py')
         manifest.write_text(json.dumps(paths))
+
+# Assert the new diagnostic label, retaining the legacy-data warning.
+change('tests/test_walk_forward.py',
+       'assert "吐回11.7个点" in block and "下次：先兑现一半" in block',
+       'assert "峰值差11.7个点（非可达利润）" in block and "下次：先兑现一半" in block\n        assert "不纳入持有期极值统计" in block')

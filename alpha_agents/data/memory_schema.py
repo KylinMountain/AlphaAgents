@@ -945,6 +945,30 @@ BEFORE DELETE ON trader_session_events BEGIN
     SELECT RAISE(ABORT, 'trader_session_events is append-only');
 END;
 
+-- M2 is a new event stream; do not rebuild the M1 CHECK constraint.
+CREATE TABLE IF NOT EXISTS decision_capture_events (
+    id TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    trader_id TEXT NOT NULL,
+    session_day TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('decision_input','decision_output')),
+    code TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE(invocation_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_decision_capture_events
+    ON decision_capture_events(run_id,trader_id,session_day,kind,observed_at);
+CREATE TRIGGER IF NOT EXISTS decision_capture_events_no_update
+BEFORE UPDATE ON decision_capture_events BEGIN
+    SELECT RAISE(ABORT, 'decision_capture_events is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS decision_capture_events_no_delete
+BEFORE DELETE ON decision_capture_events BEGIN
+    SELECT RAISE(ABORT, 'decision_capture_events is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS evolution_metrics (
     date TEXT PRIMARY KEY,
     intraday_hit_rate_7d REAL,

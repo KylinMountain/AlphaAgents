@@ -30,12 +30,19 @@ nobody decided to take.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
+from pathlib import Path
 import json
 import logging
 import os
 import re
 
+from alpha_agents.data.decision_frame import DecisionFrame, TraderState, fingerprint
+from alpha_agents.data.decision_capture import Capture
+from alpha_agents.data import trader_session
+
 logger = logging.getLogger(__name__)
+_CODE_HASH = fingerprint(Path(__file__).read_text(encoding="utf-8"))
 
 # Three shapes, because the model reliably produces the decision and
 # unreliably produces the wrapper. A run that reasoned correctly and then
@@ -223,9 +230,27 @@ async def price(candidates: list[dict], trader) -> dict[str, dict]:
             model_settings=create_model_settings(),
             tools=[get_price_levels, get_stock_quotes, get_stock_fund_flow],
         )
-        result = await asyncio.wait_for(
-            Runner.run(agent, build_context(candidates, trader), max_turns=25),
-            timeout=_TIMEOUT)
+        message = build_context(candidates, trader)
+        at = trader_session.instant()
+        frame = DecisionFrame.create(
+            identity={"run_id": trader_session.namespace(), "trader_id": trader.id,
+                      "stage": "entry_price", "phase": "intraday",
+                      "session_day": at[:10], "information_cutoff": at,
+                      "information_grade": "live_tool_input", "origin": "entry_pricing"},
+            # This is the displayed state, not a restorable account checkpoint.
+            state=TraderState.create(book=message,
+                                     trader_note=getattr(trader, "extra_prompt", "") or ""),
+            request={"agent_name": agent.name, "instructions": instructions,
+                     "message": message, "max_turns": 25,
+                     "model": getattr(agent.model, "model", None) or "unbound",
+                     "model_settings": asdict(agent.model_settings),
+                     "tools": [tool.name for tool in agent.tools]},
+            panel_codes=[c["code"] for c in candidates],
+            producer={"contract": "entry_orders.v1", "code_hash": _CODE_HASH})
+        with Capture(frame) as captured:
+            result = await asyncio.wait_for(
+                Runner.run(agent, message, max_turns=25), timeout=_TIMEOUT)
+            captured.output = {"raw": result.final_output or ""}
     except asyncio.TimeoutError:
         logger.warning("交易员 %s 定价超时（%ds）— 本轮不下单", trader.id, _TIMEOUT)
         return {}

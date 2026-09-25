@@ -69,6 +69,10 @@ from alpha_agents.model_factory import run_agent
 from agents.exceptions import MaxTurnsExceeded
 
 from alpha_agents.config import PROMPTS_DIR
+from alpha_agents.data.decision_frame import (
+    DecisionFrame, FrameError, TraderState, fingerprint,
+)
+from alpha_agents.data.decision_capture import Capture
 
 logger = logging.getLogger(__name__)
 
@@ -596,7 +600,9 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   model=None, template: str | None = None,
                   max_turns: int | None = None, market: dict | None = None,
                   phase: str = "open", tools: list | None = None,
-                  research_budget=None, research_packet: dict | None = None) -> dict:
+                  research_budget=None, research_packet: dict | None = None,
+                  trader_id: str | None = None, run_id: str | None = None,
+                  origin: str = "t1_decider") -> dict:
     """Ask the model for today's orders.
 
     ``model`` defaults to the journaled model from ``model_factory``. That is
@@ -630,10 +636,11 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         model = create_model()
     if max_turns is None:
         max_turns = DEFAULT_MAX_TURNS
+    chosen_template = template if template is not None else load_prompt()
     message = build_message(
         day=day, prev_day=prev_day, panel=panel, news=news, book=book,
         knowledge=knowledge, trader_note=trader_note, picks=picks,
-        template=template if template is not None else load_prompt(),
+        template=chosen_template,
         market=market, phase=phase, research_packet=research_packet)
 
     # A tool-less stage may still carry the shared decision budget.
@@ -644,18 +651,118 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         budget = budget or ResearchBudget()
         message += "\n\n" + budget.prompt_hint()
 
-    agent = Agent(name=f"t1_decider:{DECIDER_NAME}",
-                  instructions=SYSTEM_INSTRUCTIONS, model=model,
+    from alpha_agents.data.trader_session import namespace
+    frame = make_frame(
+        day=day, phase=phase, message=message,
+        state=TraderState.create(book=book or "", knowledge=knowledge or "",
+                                 trader_note=trader_note or ""),
+        panel_codes=[row["code"] for row in panel], model=model,
+        template=chosen_template, max_turns=max_turns, tools=tools or [],
+        trader_id=trader_id or "unbound", run_id=namespace(run_id), origin=origin)
+    with Capture(frame, enabled=trader_id is not None) as captured:
+        parsed = await _run_frame(frame, model=model, tools=tools or [], budget=budget)
+        parsed["frame_hash"] = frame.frame_hash
+        parsed["decision_id"] = captured.invocation_id
+        captured.output = parsed
+        return parsed
+
+
+# The loaded adapter identity must not change when files are edited under a
+# long-running process. This is a planner hash, not a whole-project policy hash.
+_PLAN_ROOT = Path(__file__).resolve().parents[2]
+_PLAN_CODE_HASH = fingerprint({
+    path: (_PLAN_ROOT / path).read_text(encoding="utf-8") for path in (
+        "alpha_agents/agents/t1_decider.py", "alpha_agents/agents/json_reply.py",
+        "alpha_agents/data/thesis.py", "alpha_agents/model_factory.py",
+        "alpha_agents/data/decision_frame.py",
+        "alpha_agents/llm_journal.py", "pyproject.toml", "uv.lock",
+    )
+})
+
+
+def make_frame(*, day: str, phase: str, message: str, state: TraderState,
+               panel_codes: list[str], model, template: str, max_turns: int,
+               tools: list, trader_id: str, run_id: str, origin: str) -> DecisionFrame:
+    """Freeze what is actually handed to the SDK; never reconstruct it later."""
+    if phase not in _SESSIONS:
+        raise FrameError("Unsupported planner session")
+    name = getattr(model, "model", None)
+    name = name if isinstance(name, str) and name else "unbound"
+    return DecisionFrame.create(
+        identity={"run_id": run_id, "trader_id": trader_id, "stage": "trade_plan",
+                  "phase": phase, "session_day": day, "origin": origin,
+                  "information_cutoff": f"{day} {'15:00:00' if phase == 'close' else '09:00:00'}",
+                  "information_grade": "synthetic_close" if phase == "close"
+                                       else "declared_daily_open"},
+        state=state,
+        request={"agent_name": f"t1_decider:{DECIDER_NAME}",
+                 "instructions": SYSTEM_INSTRUCTIONS, "message": message,
+                 "max_turns": max_turns, "model": name, "model_settings": None,
+                 "tools": [getattr(t, "name", type(t).__name__) for t in tools]},
+        panel_codes=panel_codes,
+        producer={"contract": "t1_orders.v1", "code_hash": _PLAN_CODE_HASH,
+                  "template_hash": fingerprint(template)})
+
+
+def require_frozen_plan(frame: DecisionFrame) -> dict:
+    """A tool-bearing initial input is not a complete replayable trajectory."""
+    value = frame.as_dict()
+    if value["producer"]["contract"] != "t1_orders.v1":
+        raise FrameError("Only the tool-free T+1 plan contract can be rerun")
+    if value["producer"]["code_hash"] != _PLAN_CODE_HASH:
+        raise FrameError("Planner code differs from the frozen frame; use its recorded revision")
+    if value["request"]["tools"] or value["request"]["model_settings"] is not None:
+        raise FrameError("Tool-bearing/custom-settings frames cannot be rerun as bare plans")
+    if value["identity"]["trader_id"] == "unbound":
+        raise FrameError("A frozen experiment requires a known trader identity")
+    return value
+
+
+def parse_frozen_plan(frame: DecisionFrame, raw: str) -> dict:
+    """Parser regression only, not a new sample from a model."""
+    value = require_frozen_plan(frame)
+    return {**parse_orders(raw, set(value["panel_codes"])), "raw": raw}
+
+
+async def propose_frame(frame: DecisionFrame, *, model, timeout: float = 180) -> dict:
+    """Run the original seam on a frozen input, with no tools or source writes.
+
+    The caller supplies a pinned model and private experiment storage. There is
+    one logical attempt; SDK transport retries must also be disabled by caller.
+    """
+    value = require_frozen_plan(frame)
+    if value["request"]["model"] == "unbound" or getattr(model, "model", None) != value["request"]["model"]:
+        raise FrameError("Configured model does not match the frozen declared model")
+    if not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
+        raise FrameError("Frozen decision timeout must be in (0, 600]")
+    return await _run_frame(frame, model=model, tools=[], budget=None,
+                            timeout=timeout, attempts=1)
+
+
+async def _run_frame(frame: DecisionFrame, *, model, tools: list, budget,
+                     timeout: float | None = None, attempts: int | None = None) -> dict:
+    """The shared execution/parser seam; it never executes a trading order."""
+    from alpha_agents.tools.budget import use_research_budget
+    value = frame.as_dict()
+    request = value["request"]
+    day = value["identity"]["session_day"]
+    message, max_turns = request["message"], request["max_turns"]
+    call_options = {"max_turns": max_turns, "label": "t1_decide"}
+    # Preserve ordinary provider retry/timeout defaults unless explicitly set.
+    if timeout is not None:
+        call_options["timeout"] = timeout
+    if attempts is not None:
+        call_options["attempts"] = attempts
+    agent = Agent(name=request["agent_name"],
+                  instructions=request["instructions"], model=model,
                   tools=list(tools) if tools else [])
     started = time.monotonic()
     try:
         if budget is None:
-            result = await run_agent(agent, message, max_turns=max_turns,
-                                         label="t1_decide")
+            result = await run_agent(agent, message, **call_options)
         else:
             with use_research_budget(budget):
-                result = await run_agent(agent, message, max_turns=max_turns,
-                                         label="t1_decide")
+                result = await run_agent(agent, message, **call_options)
     except MaxTurnsExceeded as exc:
         # A model that spends its whole turn budget asking questions has not
         # said what to buy, and "it did not answer" is not "buy nothing" — the
@@ -679,7 +786,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         parsed["model_elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return parsed
     raw = result.final_output or ""
-    parsed = parse_orders(raw, {row["code"] for row in panel})
+    parsed = parse_orders(raw, set(value["panel_codes"]))
     parsed["raw"] = raw
     parsed["research_budget"] = budget.summary() if budget else None
     parsed["research_trace"] = budget.trace() if budget else []

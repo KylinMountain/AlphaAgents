@@ -252,7 +252,8 @@ class TestATooLongDeliberationIsADayNotAWindow:
         a text search cannot tell a comment from a statement."""
         import ast
         import inspect
-        tree = ast.parse(inspect.getsource(t1_decider.propose))
+        # Normal and frozen calls now share the same exception boundary.
+        tree = ast.parse(inspect.getsource(t1_decider._run_frame))
         handlers = [h for node in ast.walk(tree)
                     if isinstance(node, ast.Try)
                     for h in node.handlers

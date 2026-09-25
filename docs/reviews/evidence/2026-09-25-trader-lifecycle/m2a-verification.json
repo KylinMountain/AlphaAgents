@@ -1,0 +1,70 @@
+{
+  "date": "2026-09-25",
+  "scope": "M2-A immutable initial-input capture and isolated tool-free planner experiments; not all M2/M3",
+  "base_commit": "dea9c519ba1d61233bb81c2b719a527acde9e7cc",
+  "tested_source_commit": "0d4dc51e85d49d1b6890a5baf07f708ad3809440",
+  "workflow_run_id": 36096258524,
+  "workflow_job_id": 107949043476,
+  "workflow_url": "https://github.com/KylinMountain/AlphaAgents/actions/runs/36096258524",
+  "validation_artifact_id": 10847249211,
+  "validation_artifact_sha256": "28a83bf79c6b96598c1a7f8d69c3fff890e12c7735cf40c2541c0b1db29fe84d",
+  "dependencies": "uv sync --frozen --extra dev",
+  "targeted": {
+    "command": "uv run pytest tests/test_decision_frames.py tests/test_decision_lab.py tests/test_t1_decider.py tests/test_trader_tools_wiring.py tests/test_sector_first_wiring.py tests/test_entry_pricing.py tests/test_model_factory.py tests/test_two_decisions.py -q --no-header",
+    "passed": 204,
+    "seconds": 11.11
+  },
+  "full_suite": {
+    "command": "uv run pytest tests/ -q --no-header",
+    "passed": 3528,
+    "skipped": 20,
+    "warnings": 2,
+    "seconds": 160.46,
+    "new_cases_vs_m1_3471_pass_baseline": 57,
+    "warning_detail": "Existing test_build_lock multithreaded multiprocessing fork deprecation warnings"
+  },
+  "checks": {
+    "harness": {"passed": true, "files": 245, "existing_debt": 13},
+    "docs": {"passed": true},
+    "policy": {"passed": true, "existing_debt": 14}
+  },
+  "source_verification": {
+    "method": "Compared every tested-files archive entry with the successful runner verified-files.json using both SHA-256 and Git blob SHA",
+    "matched_tested_files": 13,
+    "unchanged_code_and_test_blobs_for_main": 11,
+    "unchanged_tested_usage_document_for_main": 1,
+    "plan_handling": "The tested active M2-A plan is replaced by a completed delivery record; this verification JSON is added separately",
+    "temporary_audit_workflows_payloads_or_edit_scripts_in_main": false
+  },
+  "initial_validation": {
+    "workflow_run_id": 36095816394,
+    "tested_source_commit": "6960ed1f1b40c719c65bf8f4dd5678bb2c74dc95",
+    "targeted_passed": 198,
+    "full_passed": 3522,
+    "full_failed": 0,
+    "followup": "Added dependency-lock identity, transaction rollback and one-shot capture guards, preserved large existing turn budgets, and explicitly incomplete usage on interrupted requests; six regression cases added"
+  },
+  "important_semantics": {
+    "capture": "Actual pre-provider SDK input, not a reconstructed world or full tool trajectory",
+    "state": "Displayed book/knowledge/note, not a restorable complete account checkpoint",
+    "build": "Planner source/template/dependency-lock identity, not all repository learning code",
+    "intervention": "One exact unique knowledge fragment; non-knowledge input unchanged; parent hash retained",
+    "trials": "Fresh subprocess and private storage per sample; one logical attempt; SDK transport retries and client failover disabled; no retry until buy",
+    "limits": "Maximum 200 logical samples, four workers, explicit deadlines; schedule seed does not seed the model",
+    "usage": "Counts only journaled requests; interrupted/unrecorded requests and token usage can be missing, never inferred zero-cost",
+    "tools": "Tool-bearing initial-input captures are observation-only and refused by frozen-plan executor",
+    "source_reads": "Read-only/query-only source export; no source account/order/learning writes in experiment",
+    "parser_check": "Reusing a saved raw response is not an independent behavioral sample",
+    "model_identity": "Configured declared model must match; provider-side routing or training knowledge is not certified"
+  },
+  "not_verified": [
+    "Real-model responses or behavioral improvement",
+    "User's original seven local runs and historical-journal import",
+    "Point-in-time truth or authenticity of original inputs",
+    "Full tool-response trajectory reproduction",
+    "Continuous account and learning state branching",
+    "Full online/replay strategy convergence or scheduler isolation",
+    "M3 behavioral evolution, profitability, improved drawdown or out-of-sample alpha"
+  ],
+  "force_push_used": false
+}

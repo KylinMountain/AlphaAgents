@@ -2287,6 +2287,7 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
             "parse_error": None, "research_budget": None,
         }
     return t1_decider.propose_sync(
+        trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
         day=day,
         prev_day=prev_day,
         panel=panel,
@@ -2661,6 +2662,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     )
     else:
         verdict = t1_decider.propose_sync(
+            trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
             day=day,
             prev_day=prev_day,
             panel=panel,
@@ -2754,6 +2756,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 ),
                 "research_packet": verdict.get("research_packet"),
                 "research_trace": verdict.get("research_trace") or [],
+                "frame_hash": verdict.get("frame_hash"),
+                "decision_id": verdict.get("decision_id"),
                 "decision_explanation": {
                     "status": verdict.get("decision_status"),
                     "no_trade_reason": verdict.get("no_trade_reason") or "",

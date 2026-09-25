@@ -75,11 +75,12 @@ def test_exposure_line_names_the_cost_of_being_out():
     assert "平均仓位 1.5%，空仓 1 天" in line and "+6.8%" in line
 
 
-class TestTheHandbookSeesWhatWasMissed:
-    def test_the_rewrite_is_handed_the_misses(self, tmp_path, monkeypatch, hist):
+class TestMissedOpportunitiesBecomeCandidates:
+    def test_market_review_lesson_is_quarantined_not_activated(
+            self, tmp_path, monkeypatch, hist):
         from alpha_agents import config
-        from alpha_agents.data import memory_store
-        from alpha_agents.evolution import close_day, handbook, market_review
+        from alpha_agents.data import memory_store, trader_learning
+        from alpha_agents.evolution import close_day, market_review
 
         monkeypatch.setattr(config, "DATA_DIR", tmp_path, raising=False)
         monkeypatch.setattr(memory_store, "MEMORY_DB_PATH", tmp_path / "m.db",
@@ -96,20 +97,18 @@ class TestTheHandbookSeesWhatWasMissed:
                 '{"boards": [{"name": "算力", "kind": "错过", "driver": "情绪", '
                 '"verdict": "没看到", "lesson": "看涨停扩散"}]}'))
             return {"boards": []}
-        seen = {}
 
-        async def consolidate(conn, trader_id, *, as_of, model, trader=None,
-                              opportunity=""):
-            seen["opportunity"] = opportunity
-            return True
         monkeypatch.setattr(market_review, "write", write)
-        monkeypatch.setattr(handbook, "consolidate", consolidate)
         got = asyncio.run(close_day.review_day(
             conn, hist, trader_id="default", trader=None, day="2026-01-07",
             model=None, facts_text="事实", exposure_text="平均仓位 3.2%"))
-        assert got["market_review"] == 1 and got["handbook"] == 1
-        assert "平均仓位 3.2%" in seen["opportunity"]
-        assert "[错过]算力（情绪）：没看到｜下次：看涨停扩散" in seen["opportunity"]
+        assert got["market_review"] == 1
+        assert got["handbook"] == 0
+        assert got["lesson_candidates"] == 1
+        rows = trader_learning.lesson_candidates(
+            run_id="live", trader_id="default", conn=conn)
+        assert rows[0]["claim"] == "看涨停扩散"
+        assert rows[0]["applicable_context"] == "错过 / 算力"
         conn.close()
         memory_store._local.conn = None
 

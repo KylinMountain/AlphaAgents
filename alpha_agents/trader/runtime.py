@@ -8,7 +8,7 @@ from alpha_agents.trader.state import (
     StateTransition, ThesisState, TraderDecision, TraderState, WatchItem,
 )
 from alpha_agents.trader.types import (
-    DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
+    Action, DecisionContext, ObservationType, ThesisStatus, TraderRuntimeError,
     WatchStatus,
 )
 
@@ -156,7 +156,7 @@ class TraderRuntime:
 
             code = decision.code
             current = watch_by_code.get(code)
-            if decision.action.value == "wait":
+            if decision.action == Action.WAIT:
                 if not decision.next_check:
                     raise TraderRuntimeError(
                         "WAIT decision needs at least one next_check condition")
@@ -168,8 +168,13 @@ class TraderRuntime:
                     invalidation_conditions=decision.invalidations,
                     trigger_all=False,
                     next_check=self._describe_conditions(decision.next_check),
-                    created_at=decision.made_at,
-                    last_checked_at=None,
+                    created_at=(
+                        current.created_at
+                        if current is not None and current.status in {
+                            WatchStatus.WATCHING, WatchStatus.TRIGGERED}
+                        else decision.made_at),
+                    last_checked_at=(
+                        decision.made_at if current is not None else None),
                     evidence_timeframe=decision.timeframe,
                     decision_horizon=decision.decision_horizon,
                     evidence_scope=decision.evidence_scope,
@@ -187,7 +192,7 @@ class TraderRuntime:
                     observation_hash="decision:" + decision.decision_id,
                     reason="WAIT decision created or refreshed watch",
                 ))
-            elif decision.action.value == "reject" and current is not None:
+            elif decision.action == Action.REJECT and current is not None:
                 if current.status != WatchStatus.REJECTED:
                     watch_by_code[code] = replace(
                         current, status=WatchStatus.REJECTED,
@@ -201,7 +206,7 @@ class TraderRuntime:
                         observation_hash="decision:" + decision.decision_id,
                         reason="REJECT decision closed watch",
                     ))
-            elif decision.action.value in {"buy", "add"} and current is not None:
+            elif decision.action in {Action.BUY, Action.ADD} and current is not None:
                 if current.status != WatchStatus.CONVERTED:
                     watch_by_code[code] = replace(
                         current, status=WatchStatus.CONVERTED,

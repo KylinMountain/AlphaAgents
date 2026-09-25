@@ -311,11 +311,11 @@ async def run_morning_scan() -> str | None:
     # default kept alive to wind down an old book manages its exits in
     # the intraday cycle but does not get a morning scan.
     traders = load_traders(scanning=True)
+    from alpha_agents.pipeline.scheduler import _is_trading_day
+    allow_new_risk = await asyncio.to_thread(_is_trading_day)
     reports = []
     for trader in traders:
         try:
-            from alpha_agents.pipeline.scheduler import _is_trading_day
-            allow_new_risk = await asyncio.to_thread(_is_trading_day)
             report = await _scan_for(
                 trader, events_ctx, themes_ctx, stats_ctx,
                 themes=themes, single=len(traders) == 1,

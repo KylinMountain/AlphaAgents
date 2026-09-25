@@ -209,16 +209,56 @@ async def run_intraday_monitor() -> str | None:
     pending = get_pending_orders()
     open_pos = get_open_positions()
     price_alerts = get_active_price_alerts()
-    all_codes = list({p["code"] for p in pending + open_pos} | {a["code"] for a in price_alerts})
+
+    # Persistent WAIT plans are risk-relevant even on a quiet market cycle.
+    # They must be checked before the anomaly early-return below.
+    from alpha_agents.data import trader_state_store
+    from alpha_agents.data.trader_session import namespace as run_namespace
+    runtime_traders = load_traders()
+    watch_codes: set[str] = set()
+    for _trader in runtime_traders:
+        try:
+            state = trader_state_store.load_latest(
+                run_id=run_namespace(), trader_id=_trader.id)
+            if state is not None:
+                watch_codes.update(
+                    item.code for item in state.watchlist
+                    if item.status.value in {"watching", "triggered"})
+        except Exception as e:
+            logger.warning(
+                "Trader Runtime state unavailable for %s: %s", _trader.id, e)
+
+    all_codes = list(
+        {p["code"] for p in pending + open_pos}
+        | {a["code"] for a in price_alerts}
+        | watch_codes)
 
     if all_codes:
         rt_prices = await asyncio.to_thread(get_realtime_quotes, all_codes)
         if rt_prices:
             price_map = {code: data["price"] for code, data in rt_prices.items()}
+            trader_prices = {}
+            for code, data in rt_prices.items():
+                trader_prices[code] = data["price"]
+                trader_prices[code + "_chg"] = data.get("change_pct", 0)
             world = await asyncio.to_thread(_market_view)
 
-            for _trader in load_traders():
+            for _trader in runtime_traders:
                 await manage_book(_trader, price_map, today_str, world)
+                # A watch crossing its condition wakes the same Trader even
+                # when the market as a whole has no anomaly.
+                try:
+                    result = await plan_intraday(
+                        [], _trader, prices=trader_prices,
+                        market_view=world)
+                    if result.get("decisions"):
+                        logger.info(
+                            "Trader Runtime watch recheck [%s]: %s",
+                            _trader.id, result.get("status"))
+                except Exception as e:
+                    logger.exception(
+                        "Trader Runtime watch check [%s] failed: %s",
+                        _trader.id, e)
 
             # Check price alerts
             if price_alerts:
@@ -739,6 +779,31 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
     return out
 
 
+def _dedupe_actionable_by_code(recs: list[dict]) -> list[dict]:
+    """One security is one Trader subject, even when several themes surface it."""
+    chosen: dict[str, dict] = {}
+    themes: dict[str, set[str]] = {}
+    for rec in recs:
+        code = str(rec.get("code") or "")
+        if not code:
+            continue
+        theme = str(rec.get("theme") or "")
+        themes.setdefault(code, set())
+        if theme:
+            themes[code].add(theme)
+        current = chosen.get(code)
+        if current is None or float(rec.get("score") or 0) > float(
+                current.get("score") or 0):
+            chosen[code] = dict(rec)
+    out = []
+    for code, rec in chosen.items():
+        rec["alternate_themes"] = sorted(
+            theme for theme in themes.get(code, set())
+            if theme != rec.get("theme"))
+        out.append(rec)
+    return out
+
+
 async def _save_intraday_recommendations(report: str) -> None:
     """Extract recommendations from intraday report and save with real-time prices."""
     import asyncio
@@ -824,42 +889,43 @@ async def _save_intraday_recommendations(report: str) -> None:
     # came at the *order*, after the thinking was paid for. 301511 was
     # priced nineteen times and declined nineteen times with the same
     # sentence, because nothing remembered the last eighteen.
-    buys = _worth_asking(buys, prices)
+    buys = _dedupe_actionable_by_code(_worth_asking(buys, prices))
     if not buys:
         if saved:
             logger.info("Saved %d intraday predictions", saved)
         return
 
-    # Concurrently: each trader's pass takes minutes against a slow
-    # endpoint, and the intraday cycle runs every five. Serial pricing
-    # would make the cycle time scale with the number of traders, so
-    # adding a third trader would start pushing cycles into each other.
-    results = await asyncio.gather(
-        *(_price_for(t, buys, prices) for t in traders))
-
-    for trader, decisions in zip(traders, results):
+    # Research records candidates; the continuous Trader Runtime owns the
+    # decision. The old entry_pricing path is kept below as a migration helper
+    # but production no longer asks a second model to create an independent
+    # order outside TraderState.
+    from alpha_agents.evolution.context_builder import knowledge_in_force
+    knowledge_block = knowledge_in_force()
+    for trader in traders:
+        prediction_ids = {}
         for r in buys:
-            code = r["code"]
-            decision = decisions.get(code)
-            if decision is None or decision.get("action") != "buy":
-                # Three different things, one outcome: no order. The
-                # fallback constant this replaced is exactly what must not
-                # come back. But a considered "no" and silence are not the
-                # same, and only the first is worth handing back next
-                # cycle — so keep the trader's own words when there are
-                # any, and say plainly when there are none.
-                if decision and decision.get("action") == "skip" and decision.get("reason"):
-                    note_decline(code, prices.get(code) or 0, decision["reason"],
-                                 trader_id=trader.id)
-                else:
-                    note_undecided(code, prices.get(code) or 0, trader_id=trader.id)
-                continue
-            if _record_intraday_pick(trader, {**r, **_order_fields(decision)},
-                                     code, today, "intraday",
-                                     decision["confidence"],
-                                     prices.get(code), prices,
-                                     _intraday_ctx, "actionable"):
+            confidence = "high" if r.get("score", 0) >= 70 else "medium"
+            pred_id = _record_intraday_pick(
+                trader, r, r["code"], today, "intraday",
+                confidence, prices.get(r["code"]), prices,
+                _intraday_ctx, "actionable", place_order=False)
+            if pred_id is not None:
+                prediction_ids[r["code"]] = pred_id
                 saved += 1
+        try:
+            plan = await plan_intraday(
+                buys, trader, prices=prices,
+                prediction_ids=prediction_ids,
+                research_context=report,
+                knowledge_block=knowledge_block)
+            logger.info(
+                "Trader Runtime intraday [%s]: %s, %d order(s), recheck=%s",
+                trader.id, plan.get("status"), len(plan.get("placed") or []),
+                plan.get("reevaluate_subjects") or [])
+        except Exception as e:
+            logger.exception(
+                "Trader Runtime intraday [%s] failed — no legacy order fallback: %s",
+                trader.id, e)
 
     if saved:
         logger.info("Saved %d intraday predictions (signal + actionable)", saved)
@@ -911,7 +977,7 @@ def _with_prior_views(candidates: list[dict], prices: dict, *, trader_id: str) -
 def _record_intraday_pick(trader, r: dict, code: str, today: str,
                           report_type: str, confidence: str,
                           entry_price, prices: dict, ctx: dict,
-                          rec_type: str) -> bool:
+                          rec_type: str, *, place_order: bool = True) -> int | None:
     """Save one code-generated pick as one trader's prediction and order.
 
     The candidate list is shared — it comes from a scoring function, not a
@@ -979,13 +1045,18 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
                     tag, trader_id, code, r.get("name", ""), entry_price or 0)
     except Exception as e:
         logger.debug("Failed to save intraday prediction for %s: %s", code, e)
-        return False
+        return None
 
-    # Create pending order for actionable recommendations (not signals,
-    # not at limit-up)
+    # Production T4 passes place_order=False: this function is now a research
+    # recorder. The direct order branch remains temporarily for compatibility
+    # tests/callers until the migration is complete.
+    if not place_order:
+        return pred_id
+
+    # Legacy compatibility: create pending order for actionable recommendations.
     price_chg = prices.get(code + "_chg", 0)
     if trader is None or rec_type == "signal" or price_chg >= 9.8:
-        return True
+        return pred_id
     try:
         # Prefer structured JSON fields, fallback to regex
         entry_low = r.get("entry_low")
@@ -997,7 +1068,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         # side door — which is the entire thing this path replaced.
         if entry_low is None or entry_high is None or stop_loss_val is None:
             logger.debug("%s 缺少交易员定价 — 不下单", code)
-            return True
+            return pred_id
         # Thesis before order, same as the morning path. The pick came from
         # a scoring function but the *price* came from the trader, so its
         # reason is on record and from_recommendation derives the exit
@@ -1030,4 +1101,4 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         )
     except Exception as e:
         logger.debug("Failed to create pending order for %s: %s", code, e)
-    return True
+    return pred_id

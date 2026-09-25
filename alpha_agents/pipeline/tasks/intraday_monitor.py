@@ -248,7 +248,12 @@ async def run_intraday_monitor(*, trader_plan=None) -> str | None:
                 # A watch crossing its condition wakes the same Trader even
                 # when the market as a whole has no anomaly.
                 try:
-                    result = await plan_intraday(
+                    if trader_plan is None:
+                        logger.warning(
+                            "Trader Runtime intraday planner not injected — "
+                            "watch observation recorded but no new risk decision")
+                        continue
+                    result = await trader_plan(
                         [], _trader, prices=trader_prices,
                         market_view=world)
                     if result.get("decisions"):

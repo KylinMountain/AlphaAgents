@@ -1,17 +1,17 @@
 """The trader's close of day, in the order a trader does it.
 
-1. Review each trade it closed (``trade_review``) — with the handbook that
-   was in force while it held them.
-2. Review the day (``market_review``): the market's numbers beside the
+1. Review each trade it closed (``trade_review``) — with the legacy handbook
+   that was in force while it held them.
+2. Review every persisted TraderDecision and quarantine any concrete
+   LessonCandidate; WAIT/HOLD/REJECT are reviewed even without a trade.
+3. Review the day (``market_review``): the market's numbers beside the
    trader's own record of the day (``day_record``) — what it chose at the
    open and why, what it passed on, its orders, fills and holdings — board
    by board as missed / walked into / turned under it / got right. It is a
    diagnosis of the day, not tomorrow's shortlist.
-3. Rewrite its handbook (``handbook``) from every trade review **and** from
-   those diagnoses and its exposure against the market. A rewrite
-   that only reads losses learns only to stay out; the 2026-01 replay with a
-   handbook did exactly that (18 buys → 9, exposure 6.7% → 3.2%, in a market
-   up 6.8%).
+4. Stop at evidence. A close review may create LessonCandidates, but it does
+   **not** rewrite an active handbook/rule. Candidate→Lesson→Rule is a separate
+   evidence pipeline, so one review can no longer become a permanent veto.
 
 Replay and live share this; they differ only in how the day's facts, the
 exposure line and the "what did I do with each board" map are assembled.
@@ -32,11 +32,18 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                      review_market: bool = True) -> dict:
     """Return completion counts; temporal-integrity faults propagate."""
     from alpha_agents.evolution import handbook, market_review, trade_review
+    from alpha_agents.evolution import trader_review
 
     # The *_failed counts are what a replay's report checks before it shows a
     # number: a day whose review timed out is a day the trader did not learn.
-    counts = {"trade_reviews": 0, "market_review": 0, "handbook": 0,
-              "market_review_failed": 0, "handbook_failed": 0}
+    counts = {
+        "trade_reviews": 0, "market_review": 0,
+        # Retained for report/backward compatibility. New close-day processing
+        # never rewrites the legacy handbook.
+        "handbook": 0, "handbook_failed": 0,
+        "decision_reviews": 0, "lesson_candidates": 0,
+        "market_review_failed": 0,
+    }
     review_stats = {}
     try:
         counts["trade_reviews"] = await trade_review.review_closed(
@@ -50,6 +57,26 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
         logger.warning("%s: trade reviews failed for %s: %s", day, trader_id, e)
     counts.update(review_stats)
 
+    try:
+        got = await trader_review.review_decisions(
+            conn,
+            trader_id=trader_id,
+            day=day,
+            model=model,
+            facts=facts_text,
+            record=record_text,
+        )
+        counts["decision_reviews"] += got["decision_reviews"]
+        counts["lesson_candidates"] += got["lesson_candidates"]
+        counts["lesson_candidates"] += trader_review.lessons_from_trade_reviews(
+            conn, trader_id=trader_id, day=day)
+    except Exception as e:                            # noqa: BLE001
+        from alpha_agents.data.clock import LookAheadError
+        if isinstance(e, LookAheadError):
+            raise
+        logger.warning("%s: Trader decision review failed for %s: %s",
+                       day, trader_id, e)
+
     if review_market and facts_text:
         context = "\n\n".join(x for x in (
             exposure_text,
@@ -58,18 +85,15 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                                      facts=facts_text, model=model,
                                      record=record_text, context=context):
             counts["market_review"] = 1
+            counts["lesson_candidates"] += (
+                trader_review.lessons_from_market_review(
+                    conn, trader_id=trader_id, day=day))
         elif model is not None:
             # write() returns None without a model or facts; both are ruled
             # out here, so None is an error or an unreadable reply.
             counts["market_review_failed"] = 1
 
-    opportunity = "\n".join(x for x in (
-        exposure_text, market_review.missed(conn, trader_id, up_to=day)) if x)
-    if counts["trade_reviews"] or counts["market_review"]:
-        got = await handbook.consolidate(conn, trader_id, as_of=day, model=model,
-                                         trader=trader, opportunity=opportunity)
-        if got:
-            counts["handbook"] = 1
-        elif got is False:
-            counts["handbook_failed"] = 1
+    # The legacy handbook is intentionally read-only here. One review is
+    # evidence, not authority. T7 aggregates candidates into Lessons/Rules
+    # only after repeated support/counterevidence checks.
     return counts

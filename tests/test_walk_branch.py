@@ -363,10 +363,12 @@ def test_missing_close_review_cannot_make_model_branch_complete(tmp_path, monkey
     assert bool(ctx.failed_learning) == (model is not None)
 
 
-def test_copied_branches_learn_different_rules_and_read_them_next_day(tmp_path, monkeypatch):
+def test_copied_branches_quarantine_different_lessons_without_rule_leakage(
+        tmp_path, monkeypatch):
     from alpha_agents import config, model_factory
+    from alpha_agents.data import trader_learning
     from alpha_agents.data.memory_store import _SCHEMA
-    from alpha_agents.evolution import close_day, handbook, market_review
+    from alpha_agents.evolution import close_day, market_review
     from alpha_agents.evolution.replay_mode import replay_as_of
     source = tiny(tmp_path / 'prefix')
     with closing(sqlite3.connect(source / 'memory.db')) as conn:
@@ -380,25 +382,39 @@ def test_copied_branches_learn_different_rules_and_read_them_next_day(tmp_path, 
         with monkeypatch.context() as patch:
             patch.setattr(config, 'DATA_DIR', target)
             async def reply(agent, message, **kwargs):
-                payload = ({'market': label, 'themes': label, 'boards': []}
-                           if agent.name == 'market_review' else
-                           {'rules': [{'id': 'R1', 'text': label + ' tested hypothesis', 'from': []}]})
+                assert agent.name == 'market_review'
+                payload = {
+                    'market': label, 'themes': label,
+                    'boards': [{
+                        'name': '算力', 'kind': '错过', 'driver': '情绪',
+                        'evidence': 'synthetic', 'morning': 'synthetic',
+                        'verdict': 'synthetic',
+                        'lesson': label + ' tested hypothesis',
+                    }],
+                }
                 return SimpleNamespace(final_output=json.dumps(payload))
             patch.setattr(model_factory, 'run_agent', reply)
             with closing(sqlite3.connect(target / 'memory.db')) as conn:
                 conn.row_factory = sqlite3.Row
                 with closing(sqlite3.connect(':memory:')) as hist:
                     with replay_as_of('2026-01-06'):
-                        got = asyncio.run(close_day.review_day(conn, hist, trader_id='default',
-                            trader=None, day='2026-01-06', model='stub',
+                        got = asyncio.run(close_day.review_day(
+                            conn, hist, trader_id='default', trader=None,
+                            day='2026-01-06', model='stub',
                             facts_text='Synthetic fixture, not market evidence',
-                            exposure_text='Synthetic known account exposure', handbook_before='2026-01-06'))
-                    assert got['market_review'] == got['handbook'] == 1
+                            exposure_text='Synthetic known account exposure',
+                            handbook_before='2026-01-06'))
+                    assert got['market_review'] == 1
+                    assert got['handbook'] == 0
+                    assert got['lesson_candidates'] == 1
+                    rows = trader_learning.lesson_candidates(
+                        run_id='live', trader_id='default', conn=conn)
+                    assert len(rows) == 1
+                    assert rows[0]['claim'] == label + ' tested hypothesis'
                     with replay_as_of('2026-01-07 09:00'):
-                        assert label in handbook.load('default', before='2026-01-07')
-                        assert label in market_review.inject(conn, 'default', before='2026-01-07')
-    assert 'alpha tested hypothesis' in (tmp_path / 'alpha/traders/default/MEMORY.md').read_text()
-    assert 'alpha tested hypothesis' not in (tmp_path / 'beta/traders/default/MEMORY.md').read_text()
+                        assert label in market_review.inject(
+                            conn, 'default', before='2026-01-07')
+        assert (target / 'traders/default/MEMORY.md').read_text() == 'R2 original rule'
     assert (source / 'traders/default/MEMORY.md').read_text() == 'R2 original rule'
     assert CP.verify(checkpoint)
 

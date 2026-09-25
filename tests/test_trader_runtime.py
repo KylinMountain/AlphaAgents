@@ -306,8 +306,9 @@ def decision(*, decision_id="d1", action=Action.WAIT, made_at=None,
         decision_horizon=DecisionHorizon.SWING,
         evidence_scope=scope,
         invalidations=(),
-        next_check=tuple(next_check or (
-            Condition("price", CompareOp.LE, 30.0),)),
+        next_check=tuple(
+            (Condition("price", CompareOp.LE, 30.0),)
+            if next_check is None else next_check),
     )
 
 
@@ -421,3 +422,15 @@ def test_empty_decision_commit_is_noop():
     result = commit(base, [], live_context())
     assert result.state is base
     assert not result.changed
+
+
+def test_repeated_wait_preserves_original_watch_identity():
+    base = TraderState.create(trader_id="x", as_of=at())
+    first = commit(base, [decision(made_at=at(9, 3))], live_context()).state
+    refreshed = commit(
+        first,
+        [decision(decision_id="d2", made_at=at(9, 8))],
+        live_context()).state
+    assert len(refreshed.watchlist) == 1
+    assert refreshed.watchlist[0].created_at == at(9, 3)
+    assert refreshed.watchlist[0].last_checked_at == at(9, 8)

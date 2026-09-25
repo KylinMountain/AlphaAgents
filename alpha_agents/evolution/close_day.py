@@ -33,6 +33,7 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
     """Return completion counts; temporal-integrity faults propagate."""
     from alpha_agents.evolution import handbook, market_review, trade_review
     from alpha_agents.evolution import trader_review
+    from alpha_agents.evolution import trader_learning
 
     # The *_failed counts are what a replay's report checks before it shows a
     # number: a day whose review timed out is a day the trader did not learn.
@@ -42,6 +43,7 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
         # never rewrites the legacy handbook.
         "handbook": 0, "handbook_failed": 0,
         "decision_reviews": 0, "lesson_candidates": 0,
+        "lessons_created": 0, "rules_created": 0,
         "market_review_failed": 0,
     }
     review_stats = {}
@@ -77,6 +79,15 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
         logger.warning("%s: Trader decision review failed for %s: %s",
                        day, trader_id, e)
 
+    try:
+        learned = trader_learning.advance(
+            trader_id=trader_id, as_of=day, conn=conn)
+        counts["lessons_created"] += learned["lessons_created"]
+        counts["rules_created"] += learned["rules_created"]
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("%s: Trader learning advance failed for %s: %s",
+                       day, trader_id, e)
+
     if review_market and facts_text:
         context = "\n\n".join(x for x in (
             exposure_text,
@@ -85,9 +96,6 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                                      facts=facts_text, model=model,
                                      record=record_text, context=context):
             counts["market_review"] = 1
-            counts["lesson_candidates"] += (
-                trader_review.lessons_from_market_review(
-                    conn, trader_id=trader_id, day=day))
         elif model is not None:
             # write() returns None without a model or facts; both are ruled
             # out here, so None is an error or an unreadable reply.

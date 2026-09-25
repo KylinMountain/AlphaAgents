@@ -95,7 +95,8 @@ def model_identity() -> dict:
 
 
 def create_model(timeout: float | None = None, *,
-                 role: str = llm_roles.AGENT) -> OpenAIChatCompletionsModel:
+                 role: str = llm_roles.AGENT, allow_failover: bool = True,
+                 max_retries: int | None = None) -> OpenAIChatCompletionsModel:
     """The chat model a role runs on.
 
     ``role`` names the purpose, not the provider: ``agent`` for the deciders,
@@ -124,10 +125,12 @@ def create_model(timeout: float | None = None, *,
     # same identity, no proxy, no file — so the production path is unchanged.
     api_key, base_url, model = _credentials(role)
     extra = {"timeout": timeout} if timeout else {}
+    if max_retries is not None:
+        extra["max_retries"] = max_retries
     client = AsyncOpenAI(api_key=api_key, base_url=base_url, **extra)
     # Failover inside, journal outside: the journal records what the SDK
     # asked, so a resumed run matches its recording whichever model answered.
-    if role == llm_roles.AGENT and not _is_openrouter():
+    if allow_failover and role == llm_roles.AGENT and not _is_openrouter():
         client = with_failover(client, base_url, api_key, model or DEFAULT_MODEL)
     return OpenAIChatCompletionsModel(
         model=model or DEFAULT_MODEL,

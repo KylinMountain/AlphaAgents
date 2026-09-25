@@ -150,7 +150,10 @@ def _record(day: str, trader, panel: list[dict], verdict: dict,
             panel=panel,
             orders=verdict.get("orders") or [],
             refusals=verdict.get("refused") or [],
-            research={"source": "live_morning_research"},
+            research={
+                "source": "live_morning_research",
+                "deep_dive_names": [row["code"] for row in panel],
+            },
             parse_error=verdict.get("parse_error"),
             raw=verdict.get("raw") or "",
             context={
@@ -168,7 +171,8 @@ def _record(day: str, trader, panel: list[dict], verdict: dict,
             },
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Live T1 opportunity journal failed: %s", exc)
+        logger.error("Live T1 opportunity journal failed; refusing new risk: %s", exc)
+        raise
 
 
 async def plan_open(
@@ -179,7 +183,6 @@ async def plan_open(
     knowledge_block: str = "",
     events_context: str = "",
     planner=None,
-    decider_name: str = "t1_llm",
 ) -> dict:
     """Make and submit today's live pre-open plan through the replay planner."""
     day = clock.today()
@@ -256,7 +259,7 @@ async def plan_open(
             stop_loss=order.get("stop_loss"),
             target_price=order.get("target_price"),
             source="t1_live",
-            reason=f"{decider_name}: {order.get('reason') or ''}",
+            reason=order.get("reason") or "",
             trader_id=trader.id,
             prediction_id=pred_ids.get(order["code"]),
             thesis_id=thesis_id,

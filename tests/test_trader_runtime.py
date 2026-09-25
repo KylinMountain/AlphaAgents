@@ -296,7 +296,7 @@ def decision(*, decision_id="d1", action=Action.WAIT, made_at=None,
              timeframe=Timeframe.MINUTE_5, next_check=None):
     return TraderDecision(
         decision_id=decision_id,
-        made_at=made_at or at(9, 3),
+        made_at=made_at or at(),
         action=action,
         code="600001",
         thesis_id=None,
@@ -337,7 +337,16 @@ def test_wait_decision_becomes_durable_watch_and_is_recorded():
 
 def test_observation_before_watch_creation_cannot_trigger_it():
     base = TraderState.create(trader_id="x", as_of=at())
-    watched = commit(base, [decision(made_at=at(9, 3))], live_context()).state
+    manual_watch = WatchItem(
+        code="600001", status=WatchStatus.WATCHING, why="created later",
+        trigger_conditions=(Condition("price", CompareOp.LE, 30.0),),
+        invalidation_conditions=(), trigger_all=False,
+        next_check="price <= 30", created_at=at(9, 3),
+        last_checked_at=None, evidence_timeframe=Timeframe.MINUTE_5,
+        decision_horizon=DecisionHorizon.SWING,
+        evidence_scope=EvidenceScope.LIVE_INTRADAY)
+    watched = TraderState.create(
+        trader_id="x", as_of=at(), watchlist=(manual_watch,))
     old_tick = obs(
         price=29.0, available=at(9, 2), timeframe=Timeframe.MINUTE_5)
     result = run(watched, [old_tick], live_context(cutoff=at(9, 5)))
@@ -372,7 +381,7 @@ def test_reject_closes_existing_watch_without_creating_another():
     rejected = commit(
         waited,
         [decision(
-            decision_id="d2", action=Action.REJECT, made_at=at(9, 4),
+            decision_id="d2", action=Action.REJECT, made_at=at(),
             next_check=())],
         live_context())
     assert len(rejected.state.watchlist) == 1
@@ -426,11 +435,21 @@ def test_empty_decision_commit_is_noop():
 
 def test_repeated_wait_preserves_original_watch_identity():
     base = TraderState.create(trader_id="x", as_of=at())
-    first = commit(base, [decision(made_at=at(9, 3))], live_context()).state
+    first = commit(base, [decision(made_at=at())], live_context()).state
+    advanced = run(first, [], live_context(cutoff=at(9, 8))).state
     refreshed = commit(
-        first,
+        advanced,
         [decision(decision_id="d2", made_at=at(9, 8))],
-        live_context()).state
+        live_context(cutoff=at(9, 8))).state
     assert len(refreshed.watchlist) == 1
-    assert refreshed.watchlist[0].created_at == at(9, 3)
+    assert refreshed.watchlist[0].created_at == at()
     assert refreshed.watchlist[0].last_checked_at == at(9, 8)
+
+
+def test_decision_wall_clock_cannot_replace_logical_cutoff():
+    base = TraderState.create(trader_id="x", as_of=at())
+    with pytest.raises(TraderRuntimeError, match="logical information cutoff"):
+        commit(
+            base,
+            [decision(made_at=at(9, 3))],
+            live_context(cutoff=at()))

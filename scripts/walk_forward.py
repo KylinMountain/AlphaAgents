@@ -2308,7 +2308,8 @@ def _plan_intervention(ctx, day: str, phase: str) -> dict | None:
 def _sector_trade_plan(ctx, *, day: str, prev_day: str,
                        panel: list[dict], news: list[dict],
                        market: dict, book: str, knowledge: str,
-                       research_packet_payload: dict) -> dict:
+                       research_packet_payload: dict,
+                       information_cutoff: str | None = None) -> dict:
     """Shared B/C/D order planner. It cannot research or widen the stock set."""
     from alpha_agents.agents import t1_decider
 
@@ -2337,6 +2338,7 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
         max_turns=ctx.max_turns,
         research_budget=None,
         research_packet=research_packet_payload,
+        information_cutoff=information_cutoff,
     )
 
 def _validate_sector_order_relations(
@@ -2483,6 +2485,41 @@ def _decision_world_read_set(
     return read_set
 
 
+def _trader_runtime_prepare(ctx, day: str, phase: str,
+                            panel: list[dict], market: dict):
+    """Persist the same Trader observations live uses, before the model call."""
+    from alpha_agents.evolution import trader_replay
+
+    if ctx.loop is None:
+        raise RuntimeError("LLM replay Trader Runtime requires the window loop")
+    return ctx.loop.run_until_complete(trader_replay.prepare(
+        run_id=str(ctx.run_id),
+        trader_id=ctx.trader,
+        day=day,
+        phase=phase,
+        panel=panel,
+        market=market,
+    ))
+
+
+def _trader_runtime_commit(ctx, state, dctx, verdict: dict) -> None:
+    """Seal the Trader's raw decision before execution filters or fills."""
+    if state is None or dctx is None or verdict.get("parse_error"):
+        return
+    if not verdict.get("decision_id"):
+        return
+    from alpha_agents.agents import t1_decider
+    from alpha_agents.evolution import trader_replay
+
+    decisions = t1_decider.to_runtime_decisions(verdict, dctx)
+    ctx.loop.run_until_complete(trader_replay.commit(
+        state, decisions,
+        run_id=str(ctx.run_id),
+        context=dctx,
+    ))
+    ctx.counters["trader_runtime_decisions"] += len(decisions)
+
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """Model-backed buy decision through the declared selection architecture."""
@@ -2490,6 +2527,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ranking_day = day if phase == "close" else prev_day
     market = _market_state(ctx, prev_day)
+    runtime_state = None
+    runtime_context = None
     minimal_mode = ctx.selection_architecture in {
         "dual_rank_price_v1", "sector_rank_price_v1",
     }
@@ -2665,6 +2704,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         if row.get("code") not in blocked
                     ]
                     if planner_allowed:
+                        runtime_state, runtime_context = _trader_runtime_prepare(
+                            ctx, day, phase, planner_allowed, market)
                         verdict = _sector_trade_plan(
                             ctx,
                             day=day,
@@ -2675,6 +2716,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                             book=book,
                             knowledge=knowledge,
                             research_packet_payload=packet,
+                            information_cutoff=runtime_context.information_cutoff.isoformat(
+                                sep=" ", timespec="seconds"),
                         )
                     else:
                         verdict = {
@@ -2693,6 +2736,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         + list(verdict.get("refused") or [])
                     )
     else:
+        runtime_state, runtime_context = _trader_runtime_prepare(
+            ctx, day, phase, panel, market)
         verdict = t1_decider.propose_sync(
             knowledge_intervention=_plan_intervention(ctx, day, phase),
             trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
@@ -2712,7 +2757,15 @@ def _decide_llm(ctx, day: str, prev_day: str,
             tools=[] if minimal_mode else _trader_tools(ctx),
             max_turns=1 if minimal_mode else ctx.max_turns,
             research_budget=None if minimal_mode else shared_budget,
+            information_cutoff=runtime_context.information_cutoff.isoformat(
+                sep=" ", timespec="seconds"),
         )
+
+    # Commit the Trader's raw cognition before deterministic execution guards
+    # can refuse capacity/relation/fill. A refused execution is an outcome of
+    # a BUY decision, not a reason to rewrite the decision as HOLD.
+    _trader_runtime_commit(
+        ctx, runtime_state, runtime_context, verdict)
 
     if sector_mode and not verdict.get("parse_error"):
         valid_orders, relation_refusals = _validate_sector_order_relations(

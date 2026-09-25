@@ -91,6 +91,16 @@ class TestWriting:
                                    "evidence": "", "morning": "", "verdict": "",
                                    "lesson": ""}]}
 
+    def test_the_final_complete_object_wins_over_model_working(self):
+        reply = ('{"market":"draft","themes":"draft"}\n'
+                 'I need to include the boards array.\n'
+                 '{"market":"...","themes":"...","boards":[...]}\n'
+                 '{"market":"final","themes":"final",'
+                 '"boards":[{"name":"医药","kind":"错过"}]}')
+        got = MR._parse(reply)
+        assert got["market"] == "final"
+        assert got["boards"][0]["name"] == "医药"
+
     def test_the_days_record_reaches_the_model(self, conn, monkeypatch):
         import agents
         seen = {}

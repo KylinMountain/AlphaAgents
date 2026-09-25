@@ -106,25 +106,53 @@ def board_name(raw: str) -> str:
 
 def _parse(text: str) -> dict | None:
     t = (text or "").strip()
-    start, end = t.find("{"), t.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    payload = t[start:end + 1]
-    try:
-        raw = json.loads(payload)
-    except json.JSONDecodeError:
-        # The close review is prose-heavy.  A model occasionally leaves a
-        # quotation mark inside one text field unescaped.  Repair only the
-        # already-delimited object, then keep the same schema filter below;
-        # prose still cannot become a stored review.
-        from json_repair import repair_json
+    payloads = []
+    start = None
+    depth = 0
+    quoted = False
+    escaped = False
+    for index, char in enumerate(t):
+        if start is None:
+            if char == "{":
+                start, depth = index, 1
+            continue
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                payloads.append(t[start:index + 1])
+                start = None
 
+    raw = None
+    for payload in payloads:
         try:
-            raw = repair_json(payload, return_objects=True)
-        except Exception as exc:                      # noqa: BLE001
-            logger.debug("Could not repair market review JSON (%s)", exc)
-            return None
-    if not isinstance(raw, dict):
+            candidate = json.loads(payload)
+        except json.JSONDecodeError:
+            # The close review is prose-heavy.  A model occasionally leaves a
+            # quotation mark inside one text field unescaped.  Repair only the
+            # already-delimited object, then keep the same schema filter below;
+            # prose still cannot become a stored review.
+            from json_repair import repair_json
+
+            try:
+                candidate = repair_json(payload, return_objects=True)
+            except Exception as exc:                  # noqa: BLE001
+                logger.debug("Could not repair market review JSON (%s)", exc)
+                continue
+        if isinstance(candidate, dict) and isinstance(candidate.get("boards"), list):
+            raw = candidate
+    if raw is None:
         return None
     boards = []
     for b in raw.get("boards") or []:

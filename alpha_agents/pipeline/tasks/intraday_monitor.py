@@ -778,6 +778,31 @@ def _worth_asking(recs: list[dict], prices: dict) -> list[dict]:
     return out
 
 
+def _dedupe_actionable_by_code(recs: list[dict]) -> list[dict]:
+    """One security is one Trader subject, even when several themes surface it."""
+    chosen: dict[str, dict] = {}
+    themes: dict[str, set[str]] = {}
+    for rec in recs:
+        code = str(rec.get("code") or "")
+        if not code:
+            continue
+        theme = str(rec.get("theme") or "")
+        themes.setdefault(code, set())
+        if theme:
+            themes[code].add(theme)
+        current = chosen.get(code)
+        if current is None or float(rec.get("score") or 0) > float(
+                current.get("score") or 0):
+            chosen[code] = dict(rec)
+    out = []
+    for code, rec in chosen.items():
+        rec["alternate_themes"] = sorted(
+            theme for theme in themes.get(code, set())
+            if theme != rec.get("theme"))
+        out.append(rec)
+    return out
+
+
 async def _save_intraday_recommendations(report: str) -> None:
     """Extract recommendations from intraday report and save with real-time prices."""
     import asyncio
@@ -863,7 +888,7 @@ async def _save_intraday_recommendations(report: str) -> None:
     # came at the *order*, after the thinking was paid for. 301511 was
     # priced nineteen times and declined nineteen times with the same
     # sentence, because nothing remembered the last eighteen.
-    buys = _worth_asking(buys, prices)
+    buys = _dedupe_actionable_by_code(_worth_asking(buys, prices))
     if not buys:
         if saved:
             logger.info("Saved %d intraday predictions", saved)

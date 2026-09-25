@@ -481,3 +481,23 @@ def test_state_rejects_future_decision_and_observation():
         TraderState.create(
             trader_id="x", as_of=at(),
             recent_observations=(future_observation,))
+
+
+def test_global_hold_is_recorded_without_a_fake_security():
+    base = TraderState.create(trader_id="x", as_of=at())
+    hold = TraderDecision(
+        decision_id="hold-1",
+        made_at=at(),
+        action=Action.HOLD,
+        code=None,
+        thesis_id=None,
+        confidence=0.5,
+        reasoning="market breadth too weak",
+        timeframe=Timeframe.MINUTE_5,
+        decision_horizon=DecisionHorizon.SWING,
+        evidence_scope=EvidenceScope.LIVE_INTRADAY,
+    )
+    result = commit(base, [hold], live_context())
+    assert result.state.recent_decisions[-1] == hold
+    assert result.state.watchlist == ()
+    assert result.transitions == ()

@@ -395,8 +395,7 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
             plan = await live_t1.plan_open(
                 recs, trader, prediction_ids=prediction_ids,
                 knowledge_block=knowledge_block, events_context=events_ctx,
-                planner=run_t1_open_plan,
-                decider_name=run_t1_open_plan.decider_name)
+                planner=run_t1_open_plan)
             placed = plan.get("placed") or []
             if placed:
                 report += "\n\n【最终 T1 计划】\n" + "\n".join(

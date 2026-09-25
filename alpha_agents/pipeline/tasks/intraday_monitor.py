@@ -12,7 +12,6 @@ import time
 from datetime import datetime
 
 from alpha_agents.data.memory_store import get_active_themes, save_prediction, get_today_intraday_predictions
-from alpha_agents.agents.trader_runtime import plan_intraday
 from alpha_agents.config import DATA_DIR
 from alpha_agents.tools.sector_ranking import get_sector_ranking_fn, get_concept_ranking_fn
 from alpha_agents.tools.anomaly_detect import get_anomaly_stocks_fn
@@ -159,7 +158,7 @@ def _market_view() -> dict:
     return out
 
 
-async def run_intraday_monitor() -> str | None:
+async def run_intraday_monitor(*, trader_plan=None) -> str | None:
     """Execute one intraday monitoring cycle.
 
     1. Print current themes being watched
@@ -805,7 +804,9 @@ def _dedupe_actionable_by_code(recs: list[dict]) -> list[dict]:
     return out
 
 
-async def _save_intraday_recommendations(report: str) -> None:
+async def _save_intraday_recommendations(
+    report: str, *, trader_plan=None,
+) -> None:
     """Extract recommendations from intraday report and save with real-time prices."""
     import asyncio
 
@@ -914,7 +915,12 @@ async def _save_intraday_recommendations(report: str) -> None:
                 prediction_ids[r["code"]] = pred_id
                 saved += 1
         try:
-            plan = await plan_intraday(
+            if trader_plan is None:
+                logger.warning(
+                    "Trader Runtime intraday planner not injected — "
+                    "research saved but no new risk decision")
+                continue
+            plan = await trader_plan(
                 buys, trader, prices=prices,
                 prediction_ids=prediction_ids,
                 research_context=report,

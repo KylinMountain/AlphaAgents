@@ -335,9 +335,8 @@ def test_wait_decision_becomes_durable_watch_and_is_recorded():
     assert result.decisions[0].action == Action.WAIT
 
 
-def test_observation_before_watch_creation_cannot_trigger_it():
-    base = TraderState.create(trader_id="x", as_of=at())
-    manual_watch = WatchItem(
+def test_state_rejects_watch_created_in_its_future():
+    future_watch = WatchItem(
         code="600001", status=WatchStatus.WATCHING, why="created later",
         trigger_conditions=(Condition("price", CompareOp.LE, 30.0),),
         invalidation_conditions=(), trigger_all=False,
@@ -345,13 +344,9 @@ def test_observation_before_watch_creation_cannot_trigger_it():
         last_checked_at=None, evidence_timeframe=Timeframe.MINUTE_5,
         decision_horizon=DecisionHorizon.SWING,
         evidence_scope=EvidenceScope.LIVE_INTRADAY)
-    watched = TraderState.create(
-        trader_id="x", as_of=at(), watchlist=(manual_watch,))
-    old_tick = obs(
-        price=29.0, available=at(9, 2), timeframe=Timeframe.MINUTE_5)
-    result = run(watched, [old_tick], live_context(cutoff=at(9, 5)))
-    assert result.state.watchlist[0].status == WatchStatus.WATCHING
-    assert not result.transitions
+    with pytest.raises(TraderRuntimeError, match="state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(), watchlist=(future_watch,))
 
 
 def test_wait_then_new_tick_then_buy_converts_same_watch():
@@ -474,3 +469,15 @@ def test_daily_replay_wait_carries_into_next_session_and_triggers():
         context(cutoff=at(day=26)))
     assert triggered.state.watchlist[0].status == WatchStatus.TRIGGERED
     assert triggered.reevaluate_subjects == ("600001",)
+
+
+def test_state_rejects_future_decision_and_observation():
+    future_decision = decision(made_at=at(9, 1))
+    with pytest.raises(TraderRuntimeError, match="decision.*state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(), recent_decisions=(future_decision,))
+    future_observation = obs(available=at(9, 1))
+    with pytest.raises(TraderRuntimeError, match="observation.*state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(),
+            recent_observations=(future_observation,))

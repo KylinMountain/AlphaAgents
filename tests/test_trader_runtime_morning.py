@@ -120,7 +120,7 @@ def test_wait_persists_watch_without_creating_order(monkeypatch):
 
     assert got["status"] == "waiting"
     assert got["placed"] == []
-    assert seen["information_cutoff"] == "2026-09-25 09:05:00"
+    assert seen["information_cutoff"] == "2026-09-25 09:05:00+08:00"
     assert seen["tools"] == []
     assert seen["origin"] == "trader_runtime:morning"
     assert got["decisions"][0]["action"] == Action.WAIT.value

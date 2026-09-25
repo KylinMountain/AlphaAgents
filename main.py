@@ -353,7 +353,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
 
     # Morning scan: 09:00, every day (non-trading days still useful for global news)
     scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0),
-                            trading_day_only=False, timeout_seconds=600,
+                            trading_day_only=False, timeout_seconds=1200,
                             catch_up_grace_minutes=25, lane="decision"))
 
     # Opening reminder: 09:25, trading days only (集合竞价末端,价格已稳定)

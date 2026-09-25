@@ -2498,21 +2498,96 @@ def _decision_world_read_set(
     return read_set
 
 
-def _trader_runtime_prepare(ctx, day: str, phase: str,
+def _runtime_watch_rows(ctx, state, codes: tuple[str, ...], *,
+                        day: str, prev_day: str, phase: str) -> list[dict]:
+    """Rebuild triggered WAIT names from their sealed candidate evidence."""
+    if not codes:
+        return []
+    mark_day = day if phase == "close" else prev_day
+    bars = ctx.corpus.bars(mark_day)
+    unavailable = _unavailable_codes(ctx) if phase == "close" else set()
+    out = []
+    for code in codes:
+        if code in unavailable or code not in ctx.corpus.instruments:
+            continue
+        bar = bars.get(code)
+        if not bar or not bar.get("close"):
+            continue
+        adv = ctx.corpus.adv20(code, prev_day)
+        if not adv or adv <= 0:
+            continue
+        prior = {}
+        for observation in reversed(state.recent_observations):
+            if (observation.type.value == "candidate"
+                    and code in observation.subjects):
+                prior = observation.data
+                break
+        if not prior:
+            continue
+        row = {
+            "code": code,
+            "name": prior.get("name")
+                    or ctx.corpus.instruments[code]["name"],
+            "close": float(bar["close"]),
+            "change_pct": round(float(bar.get("change_pct") or 0), 2),
+            "adv20": adv,
+            "turnover_rate": round(
+                float(bar.get("turnover_rate") or 0), 2),
+            "consecutive_limits": prior.get("consecutive_limits"),
+            "net_amount": prior.get("net_amount"),
+            "concepts": prior.get("concepts") or [],
+        }
+        for key in (
+            "primary_theme", "supporting_themes",
+            "membership_snapshot_id", "membership_hash",
+            "primary_theme_relation_evidence_id",
+            "supporting_theme_relation_evidence_ids",
+        ):
+            if prior.get(key) is not None:
+                row[key] = prior[key]
+        out.append(row)
+    return out
+
+
+def _merge_runtime_rows(panel: list[dict], extra: list[dict]) -> list[dict]:
+    out = list(panel)
+    seen = {row["code"] for row in out}
+    for row in extra:
+        if row["code"] not in seen:
+            out.append(row)
+            seen.add(row["code"])
+    return out
+
+
+def _trader_runtime_prepare(ctx, day: str, prev_day: str, phase: str,
                             panel: list[dict], market: dict):
     """Persist the same Trader observations live uses, before the model call."""
     from alpha_agents.evolution import trader_replay
 
     if ctx.loop is None:
         raise RuntimeError("LLM replay Trader Runtime requires the window loop")
-    return ctx.loop.run_until_complete(trader_replay.prepare(
-        run_id=str(ctx.run_id),
-        trader_id=ctx.trader,
-        day=day,
-        phase=phase,
-        panel=panel,
-        market=market,
-    ))
+    mark_day = day if phase == "close" else prev_day
+    marks = {
+        code: {
+            "price": float(row["close"]),
+            "change_pct": row.get("change_pct"),
+        }
+        for code, row in ctx.corpus.bars(mark_day).items()
+        if row.get("close")
+    }
+    state, dctx, recheck = ctx.loop.run_until_complete(
+        trader_replay.prepare(
+            run_id=str(ctx.run_id),
+            trader_id=ctx.trader,
+            day=day,
+            phase=phase,
+            panel=panel,
+            market=market,
+            marks=marks,
+        ))
+    watch_rows = _runtime_watch_rows(
+        ctx, state, recheck, day=day, prev_day=prev_day, phase=phase)
+    return state, dctx, watch_rows
 
 
 def _trader_runtime_commit(ctx, state, dctx, verdict: dict) -> None:
@@ -2540,8 +2615,6 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ranking_day = day if phase == "close" else prev_day
     market = _market_state(ctx, prev_day)
-    runtime_state = None
-    runtime_context = None
     minimal_mode = ctx.selection_architecture in {
         "dual_rank_price_v1", "sector_rank_price_v1",
     }
@@ -2593,9 +2666,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
         panel = [row for row in panel if row["code"] not in unavailable]
         ctx.counters["close_panel_held_removed"] += before - len(panel)
 
+    runtime_state, runtime_context, runtime_watch_rows = (
+        _trader_runtime_prepare(ctx, day, prev_day, phase, panel, market))
+    ctx.counters["trader_runtime_watch_rechecks"] += len(runtime_watch_rows)
     ctx.counters["panel_size"] += len(panel)
-    if not panel:
-        logger.info("%s: empty panel, nothing to decide", day)
+    if not panel and not runtime_watch_rows:
+        logger.info("%s: empty panel and no pending watch, nothing to decide", day)
         return []
 
     book, knowledge = _book_and_knowledge(
@@ -2716,9 +2792,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         row for row in planner_panel
                         if row.get("code") not in blocked
                     ]
+                    planner_allowed = _merge_runtime_rows(
+                        planner_allowed, runtime_watch_rows)
                     if planner_allowed:
-                        runtime_state, runtime_context = _trader_runtime_prepare(
-                            ctx, day, phase, planner_allowed, market)
                         verdict = _sector_trade_plan(
                             ctx,
                             day=day,
@@ -2749,8 +2825,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         + list(verdict.get("refused") or [])
                     )
     else:
-        runtime_state, runtime_context = _trader_runtime_prepare(
-            ctx, day, phase, panel, market)
+        panel = _merge_runtime_rows(panel, runtime_watch_rows)
         verdict = t1_decider.propose_sync(
             knowledge_intervention=_plan_intervention(ctx, day, phase),
             trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",

@@ -100,6 +100,7 @@ def test_daily_replay_wait_condition_triggers_same_watch_state():
     assert item.status == WatchStatus.TRIGGERED
     assert result.reevaluate_subjects == ("600001",)
     assert result.transitions[0].kind == "watch"
+    assert result.decisions == ()
 
 
 def test_intraday_live_uses_same_watch_state_machine():
@@ -220,6 +221,11 @@ def test_state_round_trip_and_hash_tamper_detection():
     restored = TraderState.from_dict(encoded)
     assert restored == original
     assert restored.state_hash == original.state_hash
+
+    missing_hash = dict(encoded)
+    missing_hash.pop("state_hash")
+    with pytest.raises(TraderRuntimeError, match="state_hash"):
+        TraderState.from_dict(missing_hash)
 
     encoded["market_view"]["regime"] = "invented"
     with pytest.raises(TraderRuntimeError, match="hash mismatch"):

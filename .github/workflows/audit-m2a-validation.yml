@@ -1,0 +1,82 @@
+name: M2-A decision laboratory validation
+
+on:
+  push:
+    branches: [audit/trader-lifecycle-m2a-20260925]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/trader-lifecycle-m2a-20260925
+          fetch-depth: 0
+      - name: Apply isolated adapter changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/m2a-validation
+          python .audit/m2-apply.py
+          if test -f .audit/m2-followup.py; then python .audit/m2-followup.py; fi
+          git diff --check
+          python - <<'PY'
+          import json,tarfile
+          from pathlib import Path
+          paths=json.loads(Path('/tmp/m2a-validation/changed-paths.json').read_text())
+          with tarfile.open('/tmp/m2a-validation/tested-files.tar.gz','w:gz') as tar:
+              for path in paths:
+                  tar.add(path,arcname=path)
+          PY
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Targeted regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_decision_frames.py tests/test_decision_lab.py tests/test_t1_decider.py tests/test_trader_tools_wiring.py tests/test_sector_first_wiring.py tests/test_entry_pricing.py tests/test_model_factory.py tests/test_two_decisions.py -q --no-header 2>&1 | tee /tmp/m2a-validation/targeted.log
+      - name: Full test suite
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/ -q --no-header 2>&1 | tee /tmp/m2a-validation/tests.log
+      - name: Architectural and documentation checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python scripts/lint_harness.py 2>&1 | tee /tmp/m2a-validation/harness.log
+          uv run python scripts/lint_docs.py 2>&1 | tee /tmp/m2a-validation/docs.log
+          uv run python scripts/lint_policy.py 2>&1 | tee /tmp/m2a-validation/policy.log
+      - name: Commit successfully tested application on audit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name Kylin
+          git config user.email kose2livs@gmail.com
+          python - <<'PY'
+          import json,subprocess,hashlib
+          from pathlib import Path
+          root=Path('/tmp/m2a-validation')
+          paths=json.loads((root/'changed-paths.json').read_text())
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','commit','-m','feat: freeze decision inputs and isolate planner experiments'],check=True)
+          records=[]
+          for name in paths:
+              content=Path(name).read_bytes()
+              sha=subprocess.check_output(['git','hash-object',name],text=True).strip()
+              records.append({'path':name,'sha':sha,'sha256':hashlib.sha256(content).hexdigest()})
+          (root/'verified-files.json').write_text(json.dumps(records,indent=2))
+          (root/'tested-commit.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          PY
+          git push origin HEAD:refs/heads/audit/trader-lifecycle-m2a-20260925
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m2a-validation
+          path: /tmp/m2a-validation/
+          retention-days: 3

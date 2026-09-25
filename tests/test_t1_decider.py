@@ -425,3 +425,88 @@ class TestTheBookShowsWhetherAPositionIsUp:
              "open_price": 10.0, "stop_loss": 9.0, "target_price": 12.0,
              "holding_days": 1}, None)
         assert "目标12.0" in line
+
+
+class TestWaitIsAFirstClassDecision:
+    def test_wait_parses_without_global_no_trade_reason(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"等回踩",'
+            '"confidence":0.7,"next_check":[{"metric":"price","op":"<=",'
+            '"value":9.8,"subject":"600001"}],"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert verdict["decision_status"] == "waiting"
+        assert verdict["orders"] == []
+        assert verdict["watch"] == [{
+            "code": "600001",
+            "reason": "等回踩",
+            "confidence": 0.7,
+            "next_check": [{
+                "metric": "price", "op": "<=", "value": 9.8,
+                "subject": "600001",
+            }],
+            "invalidations": [],
+        }]
+
+    def test_wait_requires_a_machine_checkable_trigger(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"再等等",'
+            '"next_check":[],"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+        assert "next_check" in verdict["parse_error"]
+
+    def test_wait_condition_operator_is_validated(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"600001","reason":"等",'
+            '"next_check":[{"metric":"price","op":"around","value":10}],'
+            '"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+        assert "invalid condition" in verdict["parse_error"]
+
+    def test_wait_cannot_name_a_stock_outside_the_panel(self):
+        verdict = D.parse_orders(
+            '{"orders":[],"watch":[{"code":"300999","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":10}],'
+            '"invalidations":[]}]}',
+            CODES,
+        )
+        assert verdict["decision_status"] == "incomplete"
+
+    @pytest.mark.parametrize("other", ["orders", "rejected"])
+    def test_same_code_cannot_be_wait_and_another_action(self, other):
+        if other == "orders":
+            body = (
+                '{"orders":[{"code":"600001","entry_high":10.2,'
+                '"stop_loss":9.2,"reason":"买"}],'
+                '"watch":[{"code":"600001","reason":"等",'
+                '"next_check":[{"metric":"price","op":"<=","value":9.8}],'
+                '"invalidations":[]}]}'
+            )
+        else:
+            body = (
+                '{"orders":[],"no_trade_reason":"不立即买",'
+                '"watch":[{"code":"600001","reason":"等",'
+                '"next_check":[{"metric":"price","op":"<=","value":9.8}],'
+                '"invalidations":[]}],'
+                '"rejected":[{"code":"600001","reason":"同时拒绝","rule_ids":[]}]}'
+            )
+        verdict = D.parse_orders(body, CODES)
+        assert verdict["decision_status"] == "incomplete"
+        assert "simultaneously" in verdict["parse_error"]
+
+    def test_plain_empty_orders_still_need_a_reason(self):
+        verdict = D.parse_orders('{"orders":[]}', CODES)
+        assert verdict["decision_status"] == "incomplete"
+        assert "no_trade_reason" in verdict["parse_error"]
+
+    def test_prompt_teaches_wait_as_distinct_from_reject(self):
+        text = D.load_prompt()
+        assert '"watch"' in text
+        assert "WAIT" in text
+        assert "next_check" in text
+        assert "orders / watch / rejected" in text

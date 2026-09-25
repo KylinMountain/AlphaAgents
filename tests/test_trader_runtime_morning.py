@@ -274,3 +274,10 @@ def test_final_trader_prompt_contains_the_frozen_research_packet():
     assert "隔夜订单超预期" in text
     assert "主线资金" in text
     assert "morning_research" in text
+
+
+def test_logical_now_drops_wall_clock_microseconds(monkeypatch):
+    monkeypatch.setattr(
+        C.trader_session, "instant",
+        lambda: "2026-09-25 09:05:00.742381")
+    assert C._logical_now().isoformat() == "2026-09-25T09:05:00+08:00"

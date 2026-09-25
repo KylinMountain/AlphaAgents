@@ -974,7 +974,8 @@ END;
 -- accidentally restore one another. Updates/deletes are forbidden; writers use
 -- compare-and-swap against the latest parent hash in trader_state_store.py.
 CREATE TABLE IF NOT EXISTS trader_state_snapshots (
-    state_hash TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    state_hash TEXT NOT NULL,
     run_id TEXT NOT NULL,
     trader_id TEXT NOT NULL,
     version INTEGER NOT NULL,
@@ -986,6 +987,8 @@ CREATE TABLE IF NOT EXISTS trader_state_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_trader_state_latest
     ON trader_state_snapshots(run_id, trader_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_trader_state_hash
+    ON trader_state_snapshots(run_id, trader_id, state_hash);
 CREATE TRIGGER IF NOT EXISTS trader_state_snapshots_no_update
 BEFORE UPDATE ON trader_state_snapshots BEGIN
     SELECT RAISE(ABORT, 'trader_state_snapshots is append-only');

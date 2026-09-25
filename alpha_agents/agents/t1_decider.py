@@ -304,14 +304,14 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
         code = item.get("code")
         reason = item.get("reason")
         next_check = item.get("next_check")
-        invalidations = item.get("invalidations", [])
+        invalidations = item.get("cancel_if", item.get("invalidations", []))
         if (not isinstance(code, str) or code not in panel_codes or code in seen
                 or not isinstance(reason, str) or not reason.strip()
                 or not isinstance(next_check, list) or not next_check
                 or not isinstance(invalidations, list)):
             return [], (
                 "watch needs a unique panel code, non-empty reason, "
-                "non-empty next_check list and invalidations list")
+                "non-empty next_check list and cancel_if list")
         try:
             checks = [Condition.from_dict(value).as_dict() for value in next_check]
             invalid = [Condition.from_dict(value).as_dict()

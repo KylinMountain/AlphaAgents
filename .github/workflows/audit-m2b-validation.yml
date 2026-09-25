@@ -33,6 +33,8 @@ jobs:
               subprocess.run(['git','apply',str(path)],check=True)
           followup=pathlib.Path('.audit/m2b-followup.py')
           if followup.exists(): subprocess.run(['python',str(followup)],check=True)
+          file=pathlib.Path('scripts/walk_forward.py')
+          file.write_text(file.read_text().replace('return ctx.model is not None and bool(getattr(args, "checkpoint_out", None)', 'return getattr(ctx, "model", None) is not None and bool(getattr(args, "checkpoint_out", None)'))
           paths=['alpha_agents/agents/t1_decider.py','scripts/walk_forward.py','scripts/walk_resume.py','scripts/walk_checkpoint.py','scripts/walk_branch.py','tests/test_walk_branch.py','docs/walk_branch.md','docs/exec-plans/active/2026-09-25-trader-lifecycle-m2b.md']
           pathlib.Path('/tmp/m2b-validation/paths.json').write_text(json.dumps(paths))
           with tarfile.open('/tmp/m2b-validation/tested-files.tar.gz','w:gz') as tar:

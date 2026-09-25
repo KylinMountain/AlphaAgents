@@ -256,3 +256,21 @@ def test_risk_calendar_failure_is_fail_closed(monkeypatch):
         lambda: (_ for _ in ()).throw(RuntimeError("calendar down")))
     assert S._is_trading_day(
         datetime(2026, 10, 1, 9, 0), fail_closed=True) is False
+
+
+def test_final_trader_prompt_contains_the_frozen_research_packet():
+    from alpha_agents.agents import t1_decider as D
+
+    text = D.build_message(
+        day="2026-09-25", prev_day="2026-09-24",
+        panel=fixed_panel(), news=[], book="", knowledge="",
+        trader_note="", picks=1, template=D.load_prompt(),
+        phase="open", decision_time="2026-09-25 09:05:00",
+        research_packet={
+            "source": "morning_research",
+            "events_context": "隔夜订单超预期",
+            "candidates": [{"code": "600001", "reason": "主线资金"}],
+        })
+    assert "隔夜订单超预期" in text
+    assert "主线资金" in text
+    assert "morning_research" in text

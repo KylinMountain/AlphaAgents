@@ -340,7 +340,7 @@ alpha_agents/trader/
 
 ### T2 — Watchlist + Thesis Lifecycle
 
-**状态：implemented on feature branch; awaiting regression/merge.**
+**状态：completed and merged to main at f347dee2.**
 
 交付状态机：
 
@@ -349,7 +349,15 @@ alpha_agents/trader/
 - Observation → Watch/Thesis transition；
 - WAIT → 条件满足 → re-evaluate 的端到端测试。
 
-### T3 — Morning 接管
+### T3 — 持久化 TraderState + Morning 接管
+
+**状态：in progress.**
+
+先建立 run/trader 隔离、append-only、CAS 的 TraderState 持久化；没有可靠恢复前不切生产 Morning。
+
+随后 Morning Scan 只输出 research/candidate Observation。
+
+原 T3 — Morning 接管
 
 Morning Scan 只输出 research/candidate Observation。
 

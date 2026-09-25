@@ -349,16 +349,17 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task("news_ingest", run_news_ingest, dtime(0, 0),
                             end_at=dtime(23, 59), interval_minutes=5,
                             trading_day_only=False, timeout_seconds=150,
-                            catch_up_grace_minutes=None))
+                            catch_up_grace_minutes=None, lane="io"))
 
     # Morning scan: 09:00, every day (non-trading days still useful for global news)
     scheduler.add_task(Task("morning_scan", run_morning_scan, dtime(9, 0),
                             trading_day_only=False, timeout_seconds=600,
-                            catch_up_grace_minutes=25))
+                            catch_up_grace_minutes=25, lane="decision"))
 
     # Opening reminder: 09:25, trading days only (集合竞价末端,价格已稳定)
     scheduler.add_task(Task("opening_reminder", run_opening_reminder, dtime(9, 25),
-                            timeout_seconds=300, catch_up_grace_minutes=5))
+                            timeout_seconds=300, catch_up_grace_minutes=5,
+                            lane="account"))
 
     # Intraday monitor: 09:30-15:00 every 5 min, boost to 2 min on anomaly.
     # Healthy anomaly path takes 2-3 min (multiple LLM calls + VPA filter);
@@ -367,13 +368,14 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task(
         "intraday_monitor", run_intraday_monitor,
         dtime(9, 30), end_at=dtime(15, 0), interval_minutes=5,
-        timeout_seconds=240,
+        timeout_seconds=240, lane="account",
     ))
 
     # Post-market review: 15:30, trading days only.
     # Heaviest task (review_agent + 5 archives + market_history daily fetch).
     scheduler.add_task(Task("review", run_review, dtime(15, 30),
-                            timeout_seconds=1200, catch_up_grace_minutes=90))
+                            timeout_seconds=1200, catch_up_grace_minutes=90,
+                            lane="research"))
 
     # Shadow experiments: 15:45, trading days only, behind the review so the
     # day's champion picks are final before the challenger is paired against
@@ -386,7 +388,8 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     # without a person, but the gate it moves on is unchanged -- the actor
     # is holdout_gate, a forward-only paired test over market outcomes.
     scheduler.add_task(Task("shadow_run", run_shadow_run, dtime(15, 45),
-                            timeout_seconds=300, catch_up_grace_minutes=90))
+                            timeout_seconds=300, catch_up_grace_minutes=90,
+                            lane="evolution"))
 
     # Tushare EOD archive: 17:30, trading days only.
     #
@@ -403,6 +406,7 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
     scheduler.add_task(Task(
         "daily_archive", run_daily_archive,
         dtime(17, 30), timeout_seconds=900, catch_up_grace_minutes=1440,
+        lane="io",
     ))
 
     # The trader's own close review: 19:00, after the day's K-line (17:30)
@@ -415,20 +419,21 @@ def cmd_run_v2(args: argparse.Namespace) -> None:
         # Per trader: trade reviews, a 420 s market review, a 600 s handbook
         # rewrite. Two traders on a slow reasoning model need the hour.
         dtime(19, 0), timeout_seconds=3600, catch_up_grace_minutes=240,
+        lane="research",
     ))
 
     # Night scan: 20:00, every day (monitors foreign markets)
     scheduler.add_task(Task(
         "night_scan", run_night_scan,
         dtime(20, 0), trading_day_only=False, timeout_seconds=900,
-        catch_up_grace_minutes=60,
+        catch_up_grace_minutes=60, lane="research",
     ))
 
     # Weekly report: Saturday 10:00
     scheduler.add_task(Task(
         "weekly_report", run_weekly_report,
         dtime(10, 0), trading_day_only=False, weekday=5,
-        timeout_seconds=1200, catch_up_grace_minutes=180,
+        timeout_seconds=1200, catch_up_grace_minutes=180, lane="research",
     ))
 
     # --task: run a single task and exit

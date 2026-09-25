@@ -139,9 +139,9 @@ class TraderRuntime:
             if decision.decision_id in existing_ids or decision.decision_id in incoming_ids:
                 raise TraderRuntimeError("duplicate decision id")
             incoming_ids.add(decision.decision_id)
-            if decision.made_at < state.as_of:
+            if decision.made_at != context.information_cutoff:
                 raise TraderRuntimeError(
-                    "decision cannot predate the state it was made from")
+                    "decision made_at must equal its logical information cutoff")
             if decision.evidence_scope != context.evidence_scope:
                 raise TraderRuntimeError(
                     "decision evidence scope does not match DecisionContext")

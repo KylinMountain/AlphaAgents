@@ -260,3 +260,14 @@ def test_intraday_prediction_recorder_can_be_research_only(monkeypatch):
         {"600002": 20.0, "600002_chg": 2.0},
         {}, "actionable", place_order=False)
     assert pred_id == 77
+
+
+def test_duplicate_sector_candidates_become_one_trader_subject():
+    got = IM._dedupe_actionable_by_code([
+        {"code": "600001", "theme": "AI算力", "score": 70},
+        {"code": "600001", "theme": "液冷", "score": 85},
+        {"code": "600002", "theme": "机器人", "score": 60},
+    ])
+    assert [item["code"] for item in got] == ["600001", "600002"]
+    assert got[0]["theme"] == "液冷"
+    assert got[0]["alternate_themes"] == ["AI算力"]

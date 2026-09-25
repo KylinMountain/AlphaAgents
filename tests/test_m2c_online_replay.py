@@ -47,8 +47,6 @@ def test_live_plan_calls_shared_t1_decider_and_intent(monkeypatch):
             "frame_hash": "frame", "decision_id": 1,
         }
 
-    monkeypatch.setattr(live_t1.t1_decider, "propose", propose)
-
     def submit(**kwargs):
         placed.append(kwargs)
         return 123
@@ -59,6 +57,7 @@ def test_live_plan_calls_shared_t1_decider_and_intent(monkeypatch):
         [{"code": "600000", "name": "浦发", "theme": "银行"}],
         trader(), prediction_ids={"600000": 44},
         knowledge_block="approved", events_context="overnight",
+        planner=propose, decider_name="t1_llm",
     ))
 
     assert called["planner"]["origin"] == "live_morning"
@@ -80,8 +79,7 @@ def test_empty_live_panel_is_deterministic_abstention(monkeypatch):
     async def forbidden(**kwargs):
         raise AssertionError("model must not be called for an empty allowed panel")
 
-    monkeypatch.setattr(live_t1.t1_decider, "propose", forbidden)
-    result = asyncio.run(live_t1.plan_open([], trader()))
+    result = asyncio.run(live_t1.plan_open([], trader(), planner=forbidden))
     assert result["decision_status"] == "abstained"
     assert result["placed"] == []
 

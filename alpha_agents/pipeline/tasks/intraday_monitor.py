@@ -249,7 +249,8 @@ async def run_intraday_monitor() -> str | None:
                 # when the market as a whole has no anomaly.
                 try:
                     result = await plan_intraday(
-                        [], _trader, prices=trader_prices)
+                        [], _trader, prices=trader_prices,
+                        market_view=world)
                     if result.get("decisions"):
                         logger.info(
                             "Trader Runtime watch recheck [%s]: %s",

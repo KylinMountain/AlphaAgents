@@ -30,6 +30,7 @@ from alpha_agents.tools.futures_quotes import get_futures_quotes_fn
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.data.memory_store import upsert_theme
 from alpha_agents.agents.morning import run_morning_analysis
+from alpha_agents.agents.trader_runtime import plan_morning
 # cross_validate agent replaced by code-driven 5-dimension check (v2.3)
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
@@ -310,12 +311,16 @@ async def run_morning_scan() -> str | None:
     # default kept alive to wind down an old book manages its exits in
     # the intraday cycle but does not get a morning scan.
     traders = load_traders(scanning=True)
+    from alpha_agents.pipeline.scheduler import _is_trading_day
+    allow_new_risk = await asyncio.to_thread(
+        _is_trading_day, fail_closed=True)
     reports = []
     for trader in traders:
         try:
-            report = await _scan_for(trader, events_ctx, themes_ctx, stats_ctx,
-                                     themes=themes,
-                                     single=len(traders) == 1)
+            report = await _scan_for(
+                trader, events_ctx, themes_ctx, stats_ctx,
+                themes=themes, single=len(traders) == 1,
+                allow_new_risk=allow_new_risk)
         except Exception as e:
             logger.exception("交易员 %s 的晨扫失败，其余交易员继续: %s",
                              trader.id, e)
@@ -335,7 +340,8 @@ async def run_morning_scan() -> str | None:
 
 async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
                     themes: list[dict] | None = None,
-                    single: bool = True) -> str | None:
+                    single: bool = True,
+                    allow_new_risk: bool = True) -> str | None:
     """One trader's morning: its prompt, its picks, its orders.
 
     The context is rebuilt per trader rather than shared: the market half
@@ -384,8 +390,35 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
         recs = _extract_table_recommendations(report)
     if recs:
         recs = await _cross_validate_recommendations(recs)
-        _save_recommendations_list(recs, trader,
-                                   knowledge_block=knowledge_block)
+        prediction_ids = _save_recommendations_list(
+            recs, trader, knowledge_block=knowledge_block,
+            place_orders=False)
+        try:
+            plan = await plan_morning(
+                recs, trader, prediction_ids=prediction_ids,
+                knowledge_block=knowledge_block,
+                events_context=events_ctx,
+                allow_new_risk=allow_new_risk)
+            decisions = plan.get("decisions") or []
+            if decisions:
+                lines = []
+                for item in decisions:
+                    action = str(item.get("action") or "").upper()
+                    code = item.get("code") or "MARKET"
+                    lines.append(
+                        f"• {action} {code} — {item.get('reasoning') or ''}")
+                report += "\n\n【Trader Runtime 最终决策】\n" + "\n".join(lines)
+            elif plan.get("status") == "research_only":
+                report += "\n\n【Trader Runtime】非交易日：仅记录研究，不新增风险"
+            else:
+                report += (
+                    "\n\n【Trader Runtime】本轮未新增订单 — "
+                    f"{plan.get('reason') or plan.get('status') or '无可执行决策'}")
+        except Exception as exc:
+            logger.exception(
+                "交易员 %s 的 Trader Runtime 晨盘决策失败 — 不回退旧下单路径: %s",
+                trader.id, exc)
+            report += "\n\n【Trader Runtime】决策失败，本轮不新增风险"
 
     # The morning's verdict on yesterday's book. Stored rather than
     # executed: at 09:00 there is no live price and a sell needs one.
@@ -635,7 +668,8 @@ def _morning_relation_status(
 def _save_recommendations_list(
         recs: list[dict], trader=None, *, relation_archive=None,
         strict_relations: bool = False,
-        knowledge_block: str | None = None) -> None:
+        knowledge_block: str | None = None,
+        place_orders: bool = True) -> dict[str, int]:
     """Save pre-validated recommendations as predictions, fetching entry prices.
 
     ``trader`` owns the resulting predictions, theses and orders, and
@@ -657,7 +691,8 @@ def _save_recommendations_list(
     # the order rather than mis-date it.
     today = clock.today()
     if not recs:
-        return
+        return {}
+    prediction_ids: dict[str, int] = {}
 
     # Batch-fetch latest close prices for all recommendation codes
     entry_prices: dict[str, float | None] = {}
@@ -739,10 +774,18 @@ def _save_recommendations_list(
                 trader_id=trader.id,
             )
             saved += 1
+            prediction_ids[code] = pred_id
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",
                         code, r.get("name", ""), r.get("confidence", ""),
                         entry_prices.get(code, 0) or 0)
-            # Create pending order (挂单，等价格回调到介入区间再建仓)
+            # Research and trading are separate owners. Production passes
+            # place_orders=False: the morning analyst records forecasts, and
+            # Trader Runtime decides BUY/WAIT/REJECT. The legacy branch stays
+            # temporarily for direct callers during migration and is removed
+            # after T3/T4.
+            if not place_orders:
+                continue
+            # Create pending order (legacy compatibility path)
             try:
                 # Prefer structured JSON fields, fallback to regex parsing
                 entry_low = r.get("entry_low")
@@ -802,6 +845,7 @@ def _save_recommendations_list(
 
     if saved:
         logger.info("Saved %d predictions from morning report", saved)
+    return prediction_ids
 
 
 def _save_recommendations(report: str) -> None:

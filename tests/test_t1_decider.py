@@ -566,3 +566,33 @@ class TestRuntimeDecisionTranslation:
         verdict["decision_id"] = "capture-3"
         with pytest.raises(D.DeciderError, match="unreadable"):
             D.to_runtime_decisions(verdict, self._context())
+
+
+class TestExactDecisionCutoff:
+    def test_preopen_cutoff_is_rendered_into_the_prompt(self):
+        text = D.build_message(
+            day="2026-09-25", prev_day="2026-09-24",
+            panel=PANEL, news=[], book="", knowledge="",
+            trader_note="", picks=1, template=D.load_prompt(),
+            phase="open", decision_time="2026-09-25 09:05:00")
+        assert "2026-09-25 09:05:00" in text
+
+    def test_open_cutoff_at_or_after_0930_is_refused(self):
+        with pytest.raises(D.DeciderError, match="before 09:30"):
+            D._validate_information_cutoff(
+                "2026-09-25", "open", "2026-09-25 09:30:00")
+
+    def test_cutoff_cannot_belong_to_another_day(self):
+        with pytest.raises(D.DeciderError, match="decision day"):
+            D._validate_information_cutoff(
+                "2026-09-25", "open", "2026-09-24 09:05:00")
+
+
+def test_wait_rejects_a_metric_the_runtime_cannot_observe_yet():
+    verdict = D.parse_orders(
+        '{"orders":[],"watch":[{"code":"600001","reason":"等量",'
+        '"next_check":[{"metric":"volume_ratio","op":">=","value":1.5}],'
+        '"cancel_if":[]}]}',
+        CODES)
+    assert verdict["decision_status"] == "incomplete"
+    assert "invalid condition" in verdict["parse_error"]

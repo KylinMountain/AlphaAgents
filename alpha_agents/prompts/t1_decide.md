@@ -14,6 +14,13 @@
 
 {market}
 
+## 本轮共享研究包
+
+这是上游 Research 阶段在当前决策时点前已经整理好的事实与候选依据。它不是规则，
+也不是额外授权的股票池；最终交易仍只能从下面候选池中选择。
+
+{research_packet}
+
 ## 你的候选池（**只能从这些里面选**）
 
 这些是 {prev_day} 收盘时流动性可测、且当时已经上市的标的。池子混合了两类：
@@ -126,8 +133,8 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
   变化时需要重新判断。
 - `watch[].next_check` 使用机器可判断的条件：`metric / op / value / subject`。
   `op` 只能是 `< <= > >= == !=`；`subject` 是该指标属于哪个股票或主题。
-  常用 metric 可以是 `price`、`volume_ratio`、`net_flow` 等实际已提供或未来
-  Observation 能提供的字段，不能编造一个系统永远观测不到的条件。
+  当前可用 metric **只允许** `price` 和 `change_pct`。后续时间尺度扩展会同步
+  增加 detector 与 vocabulary；不要提前编造系统目前观测不到的条件。
 - `watch[].cancel_if` 是等待逻辑失效条件；没有可以给空数组。
 - 同一代码在一次回答中只能属于 `orders / watch / rejected` 其中一个。
 - `code` 必须逐字出现在上面的候选池里。

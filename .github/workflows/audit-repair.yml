@@ -1,0 +1,72 @@
+name: Audit repair validation
+
+# Temporary branch-only validation; this workflow does not enter main.
+on:
+  push:
+    branches: [audit/decision-learning-20260925]
+    paths: [.github/workflows/audit-repair.yml, .audit/**]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: audit-repair-20260925
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/decision-learning-20260925
+          fetch-depth: 0
+      - name: Apply isolated repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/alphaagents-audit
+          base64 -d .audit/repair.patch.gz.b64 | gzip -d > /tmp/alphaagents-audit/repair.patch
+          echo 'd852b60ecb02e280e665f126a8a925444adc5ec661758ee0428be4bc924e4439  /tmp/alphaagents-audit/repair.patch' | sha256sum -c -
+          git apply --check /tmp/alphaagents-audit/repair.patch
+          git apply /tmp/alphaagents-audit/repair.patch
+          git diff --check
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Targeted regression
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_decision_learning_integrity.py tests/test_handbook.py tests/test_trade_review.py tests/test_t1_decider.py tests/test_day_record.py tests/test_sector_first_wiring.py -q --no-header 2>&1 | tee /tmp/alphaagents-audit/targeted.log
+      - name: Full test suite
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest tests/ -q --no-header 2>&1 | tee /tmp/alphaagents-audit/tests.log
+      - name: Existing invariant checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python scripts/lint_harness.py 2>&1 | tee /tmp/alphaagents-audit/harness.log
+          uv run python scripts/lint_docs.py 2>&1 | tee /tmp/alphaagents-audit/docs.log
+          uv run python scripts/lint_policy.py 2>&1 | tee /tmp/alphaagents-audit/policy.log
+      - name: Record tested source on audit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Kylin'
+          git config user.email 'kose2livs@gmail.com'
+          git add alpha_agents scripts/walk_forward.py tests docs/exec-plans/active/2026-09-25-decision-learning-integrity.md
+          git diff --cached --stat | tee /tmp/alphaagents-audit/change-stat.txt
+          git commit -m 'fix: retain abstention evidence and version learned trading rules'
+          git push origin HEAD:refs/heads/audit/decision-learning-20260925
+          git rev-parse HEAD | tee /tmp/alphaagents-audit/tested-commit.txt
+          git ls-tree -r HEAD > /tmp/alphaagents-audit/tested-tree.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-validation
+          path: /tmp/alphaagents-audit/
+          retention-days: 3

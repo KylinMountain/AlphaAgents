@@ -601,6 +601,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   max_turns: int | None = None, market: dict | None = None,
                   phase: str = "open", tools: list | None = None,
                   research_budget=None, research_packet: dict | None = None,
+                  knowledge_intervention: dict | None = None,
                   trader_id: str | None = None, run_id: str | None = None,
                   origin: str = "t1_decider") -> dict:
     """Ask the model for today's orders.
@@ -659,6 +660,8 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         panel_codes=[row["code"] for row in panel], model=model,
         template=chosen_template, max_turns=max_turns, tools=tools or [],
         trader_id=trader_id or "unbound", run_id=namespace(run_id), origin=origin)
+    if knowledge_intervention is not None:
+        frame = frame.change_knowledge(**knowledge_intervention)
     with Capture(frame, enabled=trader_id is not None) as captured:
         parsed = await _run_frame(frame, model=model, tools=tools or [], budget=budget)
         parsed["frame_hash"] = frame.frame_hash

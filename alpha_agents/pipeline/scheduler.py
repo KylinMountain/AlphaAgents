@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # all of which run once or twice a day — fully logged.
 HIGH_FREQUENCY_MINUTES = 15
 
+# Work with different latency and safety requirements must never share one
+# await chain.  In particular, a long model/research task must not postpone
+# checking the live book.  Lanes serialize work that can conflict, while
+# allowing independent classes to make progress concurrently.
+TASK_LANES = frozenset({"account", "decision", "research", "io", "evolution"})
+
 
 def _is_high_frequency(task) -> bool:
     interval = getattr(task, "interval_minutes", None)
@@ -65,6 +71,7 @@ class Task:
         weekday: int | None = None,
         timeout_seconds: int = 600,
         catch_up_grace_minutes: int | None = 15,
+        lane: str = "research",
     ):
         self.name = name
         self.run_fn = run_fn
@@ -81,6 +88,9 @@ class Task:
         # One-shot tasks may be caught up after restart only inside this
         # window. Stale catch-up would run "morning" logic with afternoon data.
         self.catch_up_grace_minutes = catch_up_grace_minutes
+        if lane not in TASK_LANES:
+            raise ValueError(f"Unknown task lane {lane!r}; expected one of {sorted(TASK_LANES)}")
+        self.lane = lane
         # Dynamic interval boost — used to shorten polling on anomaly detection
         self._boost_until: datetime | None = None
         self._boost_interval: int = 2  # minutes to use while boosted
@@ -133,6 +143,9 @@ class TradingDayScheduler:
         self._running = False
         self._trading_day_cache: dict[str, bool] = {}
         self._on_task_output = on_task_output  # Callback: (task_name, output_text) -> None
+        self._inflight: dict[str, asyncio.Task] = {}
+        self._custom_inflight: dict[int, asyncio.Task] = {}
+        self._lane_locks = {lane: asyncio.Lock() for lane in TASK_LANES}
 
     def add_task(self, task: Task) -> None:
         """Register a task with the scheduler."""
@@ -214,68 +227,97 @@ class TradingDayScheduler:
 
             for task in self._tasks:
                 if task.should_run(now, is_trading):
-                    logger.info("Running task: %s (timeout=%ds)", task.name, task.timeout_seconds)
-                    chatty = _is_high_frequency(task)
-                    if not chatty:
-                        log_activity("task_start", task=task.name, status="running",
-                                     message=f"开始 {task.name}")
-                    started = datetime.now()
-                    try:
-                        result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
-                        task._last_run = datetime.now()
-                        logger.info("Task %s completed", task.name)
-                        took = (task._last_run - started).total_seconds()
-                        preview = result if isinstance(result, str) else ""
-                        # A silent high-frequency task logs nothing: 288
-                        # "完成" rows a day from news_ingest alone told the
-                        # reader nothing they could act on. It still logs
-                        # when it produced output, and failures always log.
-                        if preview or not chatty:
-                            log_activity(
-                                "task_done", task=task.name, status="ok",
-                                message=preview[:2000] or f"{task.name} 完成",
-                                detail={"seconds": round(took, 1),
-                                        "has_output": bool(preview)},
-                            )
-                        # Persist the report itself. Without this the
-                        # morning scan, review, night scan and weekly
-                        # report existed only as a push notification and
-                        # a 2000-char activity row — the dashboard's
-                        # report page could never show any of them.
-                        if preview.strip():
-                            try:
-                                from alpha_agents.data.report_store import (
-                                    save_task_report,
-                                )
-                                save_task_report(task.name, preview)
-                            except Exception as e:
-                                logger.warning(
-                                    "Failed to persist %s report: %s",
-                                    task.name, e,
-                                )
+                    self._dispatch(task)
 
-                        # Notify chat terminal if callback is set
-                        if self._on_task_output and result and isinstance(result, str):
-                            self._on_task_output(task.name, result)
-                    except asyncio.TimeoutError:
-                        logger.error("Task %s exceeded %ds timeout — cancelled "
-                                     "(any to_thread workers will keep running until "
-                                     "their blocking call returns)",
-                                     task.name, task.timeout_seconds)
-                        task._last_run = datetime.now()
-                        log_activity("task_failed", task=task.name, status="timeout",
-                                     message=f"{task.name} 超时 ({task.timeout_seconds}s)")
-                    except Exception as e:
-                        logger.exception("Task %s failed", task.name)
-                        task._last_run = datetime.now()
-                        log_activity("task_failed", task=task.name, status="failed",
-                                     message=f"{task.name} 失败: {e}"[:500])
-                    self._save_state()
-
-            # Check custom tasks from DB
-            await self._check_custom_tasks(now, is_trading)
+            # Custom prompts are research work. Dispatch them as such rather
+            # than awaiting an LLM request in the scheduler's control loop.
+            self._check_custom_tasks(now, is_trading)
 
             await asyncio.sleep(30)
+
+        # First-stage shutdown is graceful: stop scheduling new work and let
+        # already admitted tasks finish inside their declared timeouts.
+        await self._drain_inflight()
+
+    async def _execute_task(self, task: Task, *, catch_up: bool = False) -> None:
+        """Run one admitted task under its lane lock and persist its outcome."""
+        prefix = "Catch-up: " if catch_up else ""
+        lock = self._lane_locks[task.lane]
+        async with lock:
+            logger.info("%sRunning task: %s [lane=%s] (timeout=%ds)",
+                        prefix, task.name, task.lane, task.timeout_seconds)
+            chatty = _is_high_frequency(task)
+            if not chatty:
+                log_activity("task_start", task=task.name, status="running",
+                             message=f"开始 {task.name}", detail={"lane": task.lane})
+            started = datetime.now()
+            try:
+                result = await asyncio.wait_for(
+                    task.run_fn(), timeout=task.timeout_seconds)
+                task._last_run = datetime.now()
+                logger.info("%sTask %s completed", prefix, task.name)
+                took = (task._last_run - started).total_seconds()
+                preview = result if isinstance(result, str) else ""
+                if preview or not chatty:
+                    log_activity(
+                        "task_done", task=task.name, status="ok",
+                        message=preview[:2000] or f"{task.name} 完成",
+                        detail={"seconds": round(took, 1),
+                                "has_output": bool(preview), "lane": task.lane},
+                    )
+                if preview.strip():
+                    try:
+                        from alpha_agents.data.report_store import save_task_report
+                        save_task_report(task.name, preview)
+                    except Exception as e:
+                        logger.warning("Failed to persist %s report: %s",
+                                       task.name, e)
+                if self._on_task_output and result and isinstance(result, str):
+                    self._on_task_output(task.name, result)
+            except asyncio.TimeoutError:
+                logger.error("%sTask %s exceeded %ds timeout — cancelled "
+                             "(any to_thread workers will keep running until "
+                             "their blocking call returns)", prefix, task.name,
+                             task.timeout_seconds)
+                task._last_run = datetime.now()
+                log_activity("task_failed", task=task.name, status="timeout",
+                             message=f"{task.name} 超时 ({task.timeout_seconds}s)",
+                             detail={"lane": task.lane})
+            except asyncio.CancelledError:
+                logger.info("Task %s cancelled during shutdown", task.name)
+                raise
+            except Exception as e:
+                logger.exception("%sTask %s failed", prefix, task.name)
+                task._last_run = datetime.now()
+                log_activity("task_failed", task=task.name, status="failed",
+                             message=f"{task.name} 失败: {e}"[:500],
+                             detail={"lane": task.lane})
+            finally:
+                self._save_state()
+
+    def _dispatch(self, task: Task, *, catch_up: bool = False) -> bool:
+        """Admit a task once; never queue a second copy while one is in flight."""
+        current = self._inflight.get(task.name)
+        if current is not None and not current.done():
+            logger.debug("Task %s already in flight; duplicate tick ignored", task.name)
+            return False
+
+        async def runner() -> None:
+            try:
+                await self._execute_task(task, catch_up=catch_up)
+            finally:
+                self._inflight.pop(task.name, None)
+
+        self._inflight[task.name] = asyncio.create_task(
+            runner(), name=f"scheduler:{task.lane}:{task.name}")
+        return True
+
+    async def _drain_inflight(self) -> None:
+        tasks = [t for t in (*self._inflight.values(), *self._custom_inflight.values())
+                 if not t.done()]
+        if tasks:
+            logger.info("Draining %d in-flight scheduler task(s)", len(tasks))
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_custom_task(self, task: dict) -> None:
         """Execute a custom task by running its prompt through an Agent."""
@@ -305,10 +347,12 @@ class TradingDayScheduler:
         except Exception as e:
             logger.warning("Custom task #%d failed: %s", task["id"], e)
 
-    async def _check_custom_tasks(self, now: datetime, is_trading: bool) -> None:
-        """Check and run any due custom tasks."""
+    def _check_custom_tasks(self, now: datetime, is_trading: bool) -> None:
+        """Admit due custom prompts to the research lane without blocking control."""
         try:
-            from alpha_agents.data.memory_store import get_active_custom_tasks, update_custom_task_last_run
+            from alpha_agents.data.memory_store import (
+                get_active_custom_tasks, update_custom_task_last_run,
+            )
             tasks = get_active_custom_tasks()
         except Exception:
             return
@@ -320,22 +364,29 @@ class TradingDayScheduler:
             schedule_time = task.get("schedule_time", "")
             interval = task.get("interval", "once")
             last_run = task.get("last_run", "")
-
-            # Skip if not the right time (check within 1-minute window)
+            task_id = task.get("id")
+            if type(task_id) is not int:
+                continue
             if not schedule_time or abs(self._time_diff_minutes(current_hm, schedule_time)) > 1:
                 continue
-
-            # Skip weekday-only tasks on non-trading days
             if interval == "weekday" and not is_trading:
                 continue
-
-            # Skip if already ran today
             if last_run and last_run[:10] == today:
                 continue
+            current = self._custom_inflight.get(task_id)
+            if current is not None and not current.done():
+                continue
 
-            # Run it
-            await self._run_custom_task(task)
-            update_custom_task_last_run(task["id"])
+            async def runner(item=task, item_id=task_id) -> None:
+                try:
+                    async with self._lane_locks["research"]:
+                        await self._run_custom_task(item)
+                    update_custom_task_last_run(item_id)
+                finally:
+                    self._custom_inflight.pop(item_id, None)
+
+            self._custom_inflight[task_id] = asyncio.create_task(
+                runner(), name=f"scheduler:research:custom-{task_id}")
 
     @staticmethod
     def _time_diff_minutes(t1: str, t2: str) -> float:
@@ -377,22 +428,10 @@ class TradingDayScheduler:
                 continue
 
             if elapsed_seconds > 0:
-                logger.info("Catch-up: running missed task '%s' (was scheduled at %s)",
-                            task.name, task.run_at)
-                try:
-                    result = await asyncio.wait_for(task.run_fn(), timeout=task.timeout_seconds)
-                    task._last_run = datetime.now()
-                    logger.info("Catch-up: task %s completed", task.name)
-                    if self._on_task_output and result and isinstance(result, str):
-                        self._on_task_output(task.name, result)
-                except asyncio.TimeoutError:
-                    logger.error("Catch-up: task %s exceeded %ds timeout — cancelled",
-                                 task.name, task.timeout_seconds)
-                    task._last_run = datetime.now()
-                except Exception:
-                    logger.exception("Catch-up: task %s failed", task.name)
-                    task._last_run = datetime.now()
-                self._save_state()
+                logger.info("Catch-up: admitting missed task '%s' [lane=%s] "
+                            "(was scheduled at %s)", task.name, task.lane,
+                            task.run_at)
+                self._dispatch(task, catch_up=True)
 
     def boost_task(self, name: str, minutes: int = 15) -> None:
         """Temporarily shorten a task's polling interval after anomaly detection."""

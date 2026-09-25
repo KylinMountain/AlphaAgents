@@ -29,7 +29,7 @@ from alpha_agents.tools.global_market import get_global_overview_fn
 from alpha_agents.tools.futures_quotes import get_futures_quotes_fn
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.data.memory_store import upsert_theme
-from alpha_agents.agents.morning import run_morning_analysis
+from alpha_agents.agents.morning import run_morning_analysis, run_t1_open_plan
 # cross_validate agent replaced by code-driven 5-dimension check (v2.3)
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
@@ -394,7 +394,9 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
             from alpha_agents.pipeline import live_t1
             plan = await live_t1.plan_open(
                 recs, trader, prediction_ids=prediction_ids,
-                knowledge_block=knowledge_block, events_context=events_ctx)
+                knowledge_block=knowledge_block, events_context=events_ctx,
+                planner=run_t1_open_plan,
+                decider_name=run_t1_open_plan.decider_name)
             placed = plan.get("placed") or []
             if placed:
                 report += "\n\n【最终 T1 计划】\n" + "\n".join(

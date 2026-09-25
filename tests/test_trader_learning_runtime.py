@@ -196,3 +196,20 @@ def test_version_tables_are_append_only(conn):
     with pytest.raises(sqlite3.DatabaseError, match="append-only"):
         conn.execute("UPDATE trader_lessons SET claim='edited'")
     conn.rollback()
+
+
+def test_same_evidence_next_day_does_not_extend_rule_expiry(conn):
+    for i in range(1, 6):
+        candidate(conn, i)
+    first = L.advance(
+        trader_id="default", as_of="2026-09-20",
+        run_id="run-a", conn=conn)
+    rule_id = first["rule_ids"][0]
+    second = L.advance(
+        trader_id="default", as_of="2026-09-21",
+        run_id="run-a", conn=conn)
+    assert second["rules_created"] == 0
+    rows = D.rules(run_id="run-a", trader_id="default", conn=conn)
+    assert len(rows) == 1
+    assert rows[0]["id"] == rule_id
+    assert rows[0]["expires_on"] == "2026-12-19"

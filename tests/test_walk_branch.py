@@ -227,6 +227,13 @@ def test_actual_plan_capture_has_perturbed_input_and_parent_hash(monkeypatch):
     assert seen[0]['request']['message'] == 'R2 consider leaders'
     assert seen[0]['provenance']['parent_frame_hash']
     assert read_inputs(_get_conn())[0]['frame'] == seen[0]
+    task = {"branch_id": "branch", "intervention": {
+        "name": "x", "old": "only leaders", "new": "consider leaders"}}
+    evidence = WB.intervention_evidence(_get_conn(), task, "2026-01-06")
+    assert evidence["frame_hash"] == seen[0]["frame_hash"]
+    assert WB.intervention_evidence(_get_conn(), task, "2026-01-07") is None
+    assert WB.intervention_evidence(_get_conn(), {**task, "branch_id": "other"}, "2026-01-06") is None
+
 
 
 def options(checkpoint, tmp_path, **changes):
@@ -464,3 +471,20 @@ def test_invalid_review_lineage_is_not_silently_unscoped(scope):
     from alpha_agents.evolution.review import _run_scope
     with pytest.raises(ValueError):
         _run_scope(scope)
+
+
+
+def test_attempted_but_uncaptured_intervention_is_not_applied():
+    with closing(sqlite3.connect(':memory:')) as conn:
+        task = {'branch_id': 'branch', 'intervention': {'name': 'x', 'old': 'a', 'new': 'b'}}
+        assert WB.intervention_evidence(conn, task, '2026-01-06') is None
+
+
+def test_membership_bytes_must_match_loaded_prefix(tmp_path):
+    path = tmp_path / 'membership.json'
+    path.write_text('original')
+    ctx = SimpleNamespace(input_identity={'files': {'sector_membership': {'sha256': CP.file_hash(path)}}})
+    CP.require_stable_membership(ctx, path)
+    path.write_text('changed')
+    with pytest.raises(CP.CheckpointError, match='Membership archive changed'):
+        CP.require_stable_membership(ctx, path)

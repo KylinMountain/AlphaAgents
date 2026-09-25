@@ -71,7 +71,8 @@ token or monetary cost. Within a branch the dates always run sequentially.
 Scope is deliberately narrow: one exact replacement in the knowledge shown to
 **the first open trade plan on the first branch day**. Upstream selection and
 past reviews/rule records are not edited. The changed frame stores its parent
-hash and intervention. After that decision, the branch advances its own orders,
+hash and intervention. Application is reported only from a verified captured
+input, not from the fact that an edit was attempted. After that decision, the branch advances its own orders,
 account, outcomes and learning through the existing runner. It is an initial
 context perturbation, NOT permanent rule deletion and NOT a change to the
 handbook update algorithm. A restriction may be relearned later.

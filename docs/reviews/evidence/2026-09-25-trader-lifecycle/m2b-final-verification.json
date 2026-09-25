@@ -1,0 +1,64 @@
+{
+  "date": "2026-09-25",
+  "scope": "M2-B continuous account and learning branches, including final captured-intervention and membership-input checks",
+  "m2a_base_commit": "dd58114f5e6177b2d8b8d3b4772fcf8dbb9d0f5c",
+  "m2b_core_commit": "27e72ccaab6ebb454644131793473122bd5d1731",
+  "tested_source_commit": "75c02c0e47908c4e46811521e1bef75d0cd10033",
+  "workflow_run_id": 36101147393,
+  "workflow_job_id": 107963703754,
+  "workflow_url": "https://github.com/KylinMountain/AlphaAgents/actions/runs/36101147393",
+  "validation_artifact_id": 10849367665,
+  "validation_artifact_sha256": "2dc792d12c0ab3a490bc34a33a15b73604e237d731ed5c5e3d442000008824ad",
+  "environment": {"python": "3.12.3", "dependencies": "uv sync --frozen --extra dev"},
+  "targeted": {
+    "command": "uv run pytest tests/test_walk_branch.py tests/test_walk_forward.py tests/test_review.py tests/test_decision_frames.py tests/test_decision_lab.py tests/test_trader_lifecycle_m1.py tests/test_t1_decider.py -q --no-header",
+    "passed": 279,
+    "skipped": 1,
+    "seconds": 35.28
+  },
+  "full_suite": {
+    "command": "uv run pytest tests/ -q --no-header",
+    "passed": 3590,
+    "skipped": 20,
+    "warnings": 2,
+    "seconds": 196.07,
+    "new_cases_vs_m2a_3528_pass_baseline": 62,
+    "new_cases_vs_m2b_core": 2,
+    "warning_detail": "Existing test_build_lock multi-threaded multiprocessing fork deprecation warnings"
+  },
+  "checks": {
+    "harness": {"passed": true, "files": 245, "existing_debt": 13},
+    "docs": {"passed": true},
+    "policy": {"passed": true, "existing_debt": 14}
+  },
+  "source_verification": {
+    "method": "Verified all nine entries from tested-files.tar.gz against verified-files.json using SHA-256 and Git blob SHA; compared with the successful M2-B core archive",
+    "changed_application_test_and_usage_files": {
+      "scripts/walk_checkpoint.py": "403d50bd9414737cfc45dba2f553188d6ffb4c1e",
+      "scripts/walk_branch.py": "22fc7b48e611b5c0d7bb02f00d2c46846a8dbd98",
+      "tests/test_walk_branch.py": "faf53cfc7ba3c0baf5c9ed3392a3937517c9164c",
+      "docs/walk_branch.md": "50cb7e6569e31c4c4de113f4c5282707aa79f080"
+    },
+    "other_tested_source_unchanged_from_core": true,
+    "temporary_audit_workflows_payloads_or_edit_scripts_in_main": false,
+    "documentation": "Completed follow-up note and this verification record are added after testing; original core verification is retained"
+  },
+  "initial_final_review": {
+    "workflow_run_id": 36100904062,
+    "targeted_passed": 278,
+    "targeted_failed": 1,
+    "targeted_skipped": 1,
+    "finding": "New evidence reader used a plural provenance key; corrected to the existing singular intervention contract without weakening the regression assertion"
+  },
+  "evidence_limits": [
+    "Continuity uses synthetic market fixtures through the real runner",
+    "Independent next-day learning is tested with deterministic stub model responses, not real-model learning quality",
+    "An applied input is a verified captured frame, not proof the model followed the instruction",
+    "Treatment changes only the first eligible open plan on the first branch day; not permanent rule removal",
+    "Historical prefix evidence remains inherited and is not counted as a fresh experimental observation",
+    "Hashes establish content identity, not point-in-time market truth or provider authenticity",
+    "Original user seven-run journals and historical corpus were not rerun",
+    "No profitability, drawdown improvement, full online/replay convergence, scheduler isolation or M3 promotion claim"
+  ],
+  "force_push_used": false
+}

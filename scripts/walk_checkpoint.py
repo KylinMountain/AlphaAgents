@@ -333,6 +333,13 @@ def restore_runtime(ctx, value: dict) -> None:
     ctx.review_lineage = (value["parent_run_id"], ctx.run_id)
 
 
+def require_stable_membership(ctx, path: Path) -> None:
+    """Do not seal new archive bytes for membership loaded at prefix start."""
+    expected = ctx.input_identity.get("files", {}).get("sector_membership", {}).get("sha256")
+    if not expected or file_hash(path) != expected:
+        raise CheckpointError("Membership archive changed since the prefix started")
+
+
 def capture_result(ctx, args, result: dict, *, source_hash: str, runtime_hash: str) -> dict:
     from alpha_agents.data.memory_store import _get_conn
     from alpha_agents.model_factory import SWITCHES
@@ -357,6 +364,7 @@ def capture_result(ctx, args, result: dict, *, source_hash: str, runtime_hash: s
         saved_args.pop(key, None)
     inputs = {}
     if getattr(args, "sector_membership", None):
+        require_stable_membership(ctx, Path(args.sector_membership))
         inputs["sector_membership.json"] = str(args.sector_membership)
         saved_args["sector_membership"] = "sector_membership.json"
     metadata = {

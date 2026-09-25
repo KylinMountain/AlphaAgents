@@ -99,6 +99,28 @@ def _deny_network(event, args):
             raise RuntimeError("Mechanical branch network access is disabled")
 
 
+def intervention_evidence(conn, task: dict, session: str) -> dict | None:
+    """An attempted edit is not evidence that it reached a captured input."""
+    if task.get("intervention") is None:
+        return None
+    from alpha_agents.data.decision_capture import read_inputs
+    expected = {"field": "knowledge", **task["intervention"]}
+    matched = []
+    for record in read_inputs(conn, run_id=task["branch_id"], limit=10000):
+        frame = record["frame"]
+        identity = frame["identity"]
+        provenance = frame["provenance"]
+        if (identity["session_day"] == session and identity["phase"] == "open"
+                and provenance.get("parent_frame_hash")
+                and provenance.get("intervention") == expected):
+            matched.append({"decision_id": record["invocation_id"],
+                            "frame_hash": frame["frame_hash"],
+                            "parent_frame_hash": provenance["parent_frame_hash"]})
+    if len(matched) > 1:
+        raise CheckpointError("A one-shot intervention was applied more than once")
+    return matched[0] if matched else None
+
+
 def worker(args) -> int:
     workspace = args.workspace.resolve(strict=True)
     task = json.loads((workspace / "task.json").read_text())
@@ -139,7 +161,9 @@ def worker(args) -> int:
         got = WF.run(run_args)
         report = WF.write_report(got, run_args.out)
         health = WF.integrity(got)
-        applied = getattr(got["ctx"], "branch_intervention_used", False)
+        from alpha_agents.data.memory_store import _get_conn
+        evidence = intervention_evidence(_get_conn(), task, value["next_session"])
+        applied = evidence is not None
         full_dates = [r["date"] for r in got["equity"]] == task["sessions"]
         if abs(got["initial_account"]["equity"] - value["end_account"]["equity"]) > 0.01:
             raise CheckpointError("Branch starting equity differs from checkpoint ending equity")
@@ -154,7 +178,8 @@ def worker(args) -> int:
                       initial_account=got["initial_account"], end_account=got["equity"][-1],
                       metrics=equity_metrics(got["initial_account"]["equity"], got["equity"]),
                       counters=dict(got["ctx"].counters), errors=got["errors"],
-                      intervention_applied=applied,
+                      intervention_attempted=getattr(got["ctx"], "branch_intervention_used", False),
+                      intervention_evidence=evidence, intervention_applied=applied,
                       intervention=task["intervention"],
                       note="Metrics cover the branch suffix only; parent history is not new evidence")
         if task["intervention"] and not applied:

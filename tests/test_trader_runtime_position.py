@@ -154,7 +154,7 @@ def test_runtime_commit_happens_before_discretionary_execution(monkeypatch):
     monkeypatch.setattr(E, "commit_runtime_decisions", seal)
     monkeypatch.setattr(E, "apply", apply)
     got = asyncio.run(E.run(
-        prices, [{"type":"signal","code":"600001"}],
+        prices, [{"type":"signal","code":"600001","reason":"test signal"}],
         trader_id="default"))
     assert got[0]["type"] == "agent_exit"
     assert order == ["seal", "apply"]
@@ -181,5 +181,5 @@ def test_state_write_failure_holds_instead_of_executing(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("unsealed discretionary decision must not execute")))
     assert asyncio.run(E.run(
-        {"600001":11.0}, [{"type":"signal","code":"600001"}],
+        {"600001":11.0}, [{"type":"signal","code":"600001","reason":"test signal"}],
         trader_id="default")) == []

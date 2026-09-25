@@ -10,6 +10,7 @@ future.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 
@@ -51,6 +52,9 @@ def render(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
            trader_id: str, day: str, directions: str = "") -> str:
     """The day's record as the close review reads it."""
     lines = [directions] if directions else []
+    plans = plans_text(conn, trader_id=trader_id, day=day)
+    if plans:
+        lines.append(plans)
     try:
         orders = conn.execute(
             "SELECT code, name, theme, open_date, open_price, status, reason "
@@ -100,3 +104,42 @@ def render(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
             lines.append(f"- {code} {name or ''}（{theme or '无主线'}）到手 {r}；"
                          f"理由：{_clip(why)}")
     return "\n".join(lines)
+
+
+def plans_text(conn: sqlite3.Connection, *, trader_id: str, day: str) -> str:
+    """Read original planner explanations, never ask a model to invent them.
+
+    Older/live stores may not contain an opportunity journal. Missing journal
+    tables are supported; an existing but unreadable journal is named.
+    """
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('opportunity_sets','opportunity_contexts')")}
+    if len(tables) != 2:
+        return "交易计划理由：未记录（不能据此认定主动观望）。"
+    try:
+        rows = conn.execute(
+            "SELECT s.phase, s.parse_error, c.context_json "
+            "FROM opportunity_sets s LEFT JOIN opportunity_contexts c "
+            "ON c.opportunity_set_id = s.id WHERE s.trader_id = ? AND s.day = ? "
+            "ORDER BY s.information_cutoff, s.id", (trader_id, day)).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("Planner record unavailable for %s %s: %s", trader_id, day, exc)
+        return "交易计划记录不可读；不能认定主动观望。"
+    lines = []
+    for phase, error, raw in rows:
+        if error:
+            lines.append(f"- {phase} 交易计划未完成：{error}；不是主动观望。")
+            continue
+        try:
+            detail = json.loads(raw or "{}").get("decision_explanation") or {}
+            reason = detail.get("no_trade_reason") or ""
+            status = detail.get("status") or "未记录"
+            lines.append(f"- {phase} 交易计划状态：{status}；不交易理由：{reason or '未记录'}")
+            for item in detail.get("rejected") or []:
+                ids = "、".join(item.get("rule_ids") or []) or "未引用守则"
+                lines.append(f"  拒绝 {item['code']}：{item['reason']}；{ids}")
+        except (json.JSONDecodeError, AttributeError, KeyError, TypeError) as exc:
+            logger.warning("Planner explanation unreadable: %s", exc)
+            lines.append(f"- {phase} 交易计划理由不可读；不能认定主动观望。")
+    return "交易计划原始记录：\n" + "\n".join(lines) if lines else ""

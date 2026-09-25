@@ -222,13 +222,22 @@ async def review_closed(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
     or before ``as_of`` by construction.
     """
     from alpha_agents.evolution import handbook
-    rules = handbook.load(trader_id, before=handbook_before)
     n = 0
     for pos in unreviewed(conn, trader_id, as_of):
         f = facts(pos, hist)
         if f is None:
             continue
+        before = f.get("order_date") or f["open_date"]
+        if handbook_before and handbook_before < before:
+            before = handbook_before
+        rules = handbook.load(trader_id, before=before)
+        versions = handbook.bindings(trader_id, before=before)
         words = await write_words(f, model=model, trader=trader, rules=rules)
+        words = dict(words)
+        # The model may classify compliance, but it cannot name its own version.
+        words["rule_versions"] = versions
+        for field in ("followed", "broke"):
+            words[field] = [rid for rid in words.get(field) or [] if rid in versions]
         save(conn, f, words, trader_id)
         conn.commit()
         n += 1

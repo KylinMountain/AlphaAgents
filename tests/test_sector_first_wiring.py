@@ -546,6 +546,8 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
             "orders": [], "refused": [], "parse_error": None,
             "raw": "{}", "research_budget": None,
             "model_elapsed_ms": 7,
+            "decision_status": "abstained", "no_trade_reason": "No valid entry",
+            "rejected": [{"code": "600001", "reason": "Outside entry zone", "rule_ids": ["R2"]}],
         }
 
     monkeypatch.setattr(wf, "_sector_trade_plan", planner)
@@ -572,7 +574,9 @@ def test_sector_planner_receives_direction_stock_and_tool_evidence(monkeypatch):
         "status": "selected", "model_elapsed_ms": 3, "refused": 0}
     assert trace["stock"]["status"] == "selected"
     assert trace["stock"]["model_elapsed_ms"] == 5
-    assert trace["planner"]["status"] == "empty"
+    assert trace["planner"]["status"] == "abstained"
+    assert journal["context"]["decision_explanation"]["no_trade_reason"] == "No valid entry"
+    assert journal["context"]["decision_explanation"]["rejected"][0]["rule_ids"] == ["R2"]
     assert trace["planner"]["model_elapsed_ms"] == 7
 
 

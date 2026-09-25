@@ -25,6 +25,7 @@ sandbox, because ``DATA_DIR`` is the sandbox there.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -92,6 +93,54 @@ def _rules(trader_id: str, before: str | None = None) -> list[dict]:
         return []
 
 
+def content_hash(text: str) -> str:
+    """Whitespace is presentation; all other text changes create new evidence."""
+    normalized = " ".join(text.split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def rule_ref(rule: dict) -> str:
+    """A rule incarnation, not just a display ID or reusable text hash."""
+    return (f"{rule['id']}@{rule.get('version', 1)}:"
+            f"{content_hash(rule['text'])}:{rule.get('since', '')}")
+
+
+def bindings(trader_id: str, *, before: str | None = None) -> dict[str, str]:
+    """Machine bindings for the structured handbook visible at that time.
+
+    A manually edited live MEMORY.md may disagree with the JSON history; do
+    not certify version bindings for text that the model was not actually shown.
+    """
+    recorded = _version_before(trader_id, before, ".md")
+    if recorded is None or load(trader_id, before=before) != recorded.read_text("utf-8").strip():
+        return {}
+    return {r["id"]: rule_ref(r) for r in _rules(trader_id, before)}
+
+
+def _past_rules(trader_id: str, up_to: str) -> list[dict]:
+    """Keep version numbers monotone even across clearing/reintroducing an ID."""
+    out = []
+    for p in sorted(_history(trader_id).glob("*.json")):
+        if p.stem > up_to:
+            continue
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        out.extend(payload.get("rules") or [])
+    return out
+
+
+def _version_rules(rules: list[dict], previous: dict, history: list[dict], as_of: str) -> None:
+    for r in rules:
+        old = previous.get(r["id"])
+        r["content_hash"] = content_hash(r["text"])
+        if old and content_hash(old["text"]) == r["content_hash"]:
+            r["version"] = old.get("version", 1)
+            r["since"] = old.get("since") or as_of
+        else:
+            prior = [int(v.get("version", 1)) for v in history if v["id"] == r["id"]]
+            r["version"] = max(prior, default=0) + 1
+            r["since"] = as_of
+
+
 def _med(xs: list[float]) -> str:
     return f"{statistics.median(xs):+.1f}%" if xs else "—"
 
@@ -103,7 +152,15 @@ def evidence(rule: dict, reviews: list[tuple[dict, dict]]) -> str:
             f"中位吐回 {statistics.median([f['giveback_pp'] for f in cited]):.1f} 个点"
             if cited else "来源：未引用可核对的复盘")
     since = rule.get("since") or ""
-    after = [(f, w) for f, w in reviews if f["close_date"] > since] if since else []
+    # A later close is insufficient: the ORDER must postdate this version,
+    # and the review must be bound by code to exactly that version. Old rows
+    # without bindings remain source observations, never forward evidence.
+    ref = rule_ref(rule)
+    after = [(f, w) for f, w in reviews
+             if (f.get("order_date") or f.get("open_date") or "") > since
+             and (w.get("rule_versions") or {}).get(rule["id"]) == ref
+             and not (rule["id"] in (w.get("followed") or [])
+                      and rule["id"] in (w.get("broke") or []))] if since else []
     kept = [f["return_pct"] for f, w in after if rule["id"] in (w.get("followed") or [])]
     broke = [f["return_pct"] for f, w in after if rule["id"] in (w.get("broke") or [])]
     if kept or broke:
@@ -120,8 +177,11 @@ def render(trader_id: str, rules: list[dict], reviews, as_of: str) -> str:
              f"最后改写：{as_of}。守则是我从自己的逐笔复盘里总结的；"
              "每条下面的「证据」由系统按日线计算，不是我写的。",
              ""]
+    if not rules:
+        lines.append("当前没有个人经验规则；交易机制和账户约束仍然有效。")
     for r in rules:
         lines.append(f"## {r['id']}　{r['text']}")
+        lines.append(f"版本：v{r.get('version', 1)} / {content_hash(r['text'])[:12]}；生效起点：{r.get('since', as_of)}")
         lines.append(f"> 证据：{evidence(r, reviews)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -167,8 +227,9 @@ def _parse(text: str, known_ids: set[str]) -> list[dict] | None:
     next_n = 1 + max([int(i[1:]) for i in used
                       if i.startswith("R") and i[1:].isdigit()] or [0])
     for item in items[:MAX_RULES]:
-        if not isinstance(item, dict) or not str(item.get("text") or "").strip():
-            continue
+        if (not isinstance(item, dict) or not isinstance(item.get("text"), str)
+                or not item["text"].strip() or not isinstance(item.get("from", []), list)):
+            return None
         rid = str(item.get("id") or "").strip().upper()
         if not (rid.startswith("R") and rid[1:].isdigit()) or rid in seen:
             rid = f"R{next_n}"
@@ -178,9 +239,9 @@ def _parse(text: str, known_ids: set[str]) -> list[dict] | None:
         for c in item.get("from") or []:
             try:
                 cites.append(int(str(c).lstrip("#")))
-            except ValueError:
+            except (TypeError, ValueError):
                 continue
-        out.append({"id": rid, "text": str(item["text"]).strip()[:300],
+        out.append({"id": rid, "text": item["text"].strip(),
                     "from": cites})
     return out
 
@@ -235,20 +296,21 @@ async def consolidate(conn: sqlite3.Connection, trader_id: str, *, as_of: str,
                        trader_id, type(e).__name__, e)
         return False
     rules = _parse(result.final_output or "", set(previous))
-    if not rules:
+    if rules is None:
         logger.warning("Handbook rewrite for %s unreadable — keeping the old one",
                        trader_id)
         return False
-    for r in rules:
-        # A kept rule keeps the date it was first written: that is where its
-        # forward evidence starts.
-        r["since"] = previous.get(r["id"], {}).get("since") or as_of
+    _version_rules(rules, previous, _past_rules(trader_id, as_of), as_of)
     text = render(trader_id, rules, reviews, as_of)
     hist = _history(trader_id)
     hist.mkdir(parents=True, exist_ok=True)
     (hist / f"{as_of}.md").write_text(text, encoding="utf-8")
     (hist / f"{as_of}.json").write_text(
-        json.dumps({"as_of": as_of, "rules": rules}, ensure_ascii=False, indent=1),
+        json.dumps({"as_of": as_of, "rules": rules,
+                    "removed": [{"id": rid, "rule_ref": rule_ref(r)}
+                                for rid, r in previous.items()
+                                if rid not in {v["id"] for v in rules}]},
+                   ensure_ascii=False, indent=1),
         encoding="utf-8")
     path(trader_id).write_text(text, encoding="utf-8")
     logger.info("Handbook [%s] rewritten as of %s: %d rules", trader_id, as_of,

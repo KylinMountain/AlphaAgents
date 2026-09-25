@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest tests/test_walk_branch.py tests/test_walk_forward.py tests/test_walk_resume.py tests/test_decision_frames.py tests/test_decision_lab.py tests/test_trader_lifecycle_m1.py tests/test_t1_decider.py -q --no-header 2>&1 | tee /tmp/m2b-validation/targeted.log
+          uv run pytest tests/test_walk_branch.py tests/test_walk_forward.py tests/test_decision_frames.py tests/test_decision_lab.py tests/test_trader_lifecycle_m1.py tests/test_t1_decider.py -q --no-header 2>&1 | tee /tmp/m2b-validation/targeted.log
       - name: Full regression suite
         shell: bash
         run: |

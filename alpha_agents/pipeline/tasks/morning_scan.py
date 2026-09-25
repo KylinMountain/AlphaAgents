@@ -312,7 +312,8 @@ async def run_morning_scan() -> str | None:
     # the intraday cycle but does not get a morning scan.
     traders = load_traders(scanning=True)
     from alpha_agents.pipeline.scheduler import _is_trading_day
-    allow_new_risk = await asyncio.to_thread(_is_trading_day)
+    allow_new_risk = await asyncio.to_thread(
+        _is_trading_day, fail_closed=True)
     reports = []
     for trader in traders:
         try:

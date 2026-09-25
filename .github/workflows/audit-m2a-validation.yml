@@ -21,6 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/m2a-validation
+          git restore --source=dea9c519ba1d61233bb81c2b719a527acde9e7cc -- alpha_agents/agents/t1_decider.py scripts/walk_forward.py alpha_agents/model_factory.py alpha_agents/data/memory_schema.py alpha_agents/pipeline/tasks/entry_pricing.py tests/test_trader_tools_wiring.py
           python .audit/m2-apply.py
           if test -f .audit/m2-followup.py; then python .audit/m2-followup.py; fi
           git diff --check
@@ -64,7 +65,7 @@ jobs:
           root=Path('/tmp/m2a-validation')
           paths=json.loads((root/'changed-paths.json').read_text())
           subprocess.run(['git','add','--',*paths],check=True)
-          subprocess.run(['git','commit','-m','feat: freeze decision inputs and isolate planner experiments'],check=True)
+          subprocess.run(['git','commit','-m','fix: bind planner dependencies and report incomplete experiment usage'],check=True)
           records=[]
           for name in paths:
               content=Path(name).read_bytes()

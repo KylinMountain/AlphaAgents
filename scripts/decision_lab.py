@@ -112,8 +112,9 @@ def prepare(args) -> tuple[dict, list[dict]]:
 
 
 def journal_usage(path: Path) -> dict:
-    out = {"provider_requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
-           "response_models": [], "usage_complete": True}
+    out = {"recorded_provider_requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
+           "response_models": [], "usage_complete": True,
+           "count_basis": "journal records only; in-flight/unrecorded requests may be absent"}
     for file in sorted(path.glob("llm_journal/*.jsonl")):
         for line in file.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -124,12 +125,16 @@ def journal_usage(path: Path) -> dict:
                 out["usage_complete"] = False
                 out["unreadable_journal_lines"] = out.get("unreadable_journal_lines", 0) + 1
                 continue
+            if not isinstance(row, dict):
+                out["usage_complete"] = False
+                continue
             if row.get("kind") not in ("llm_call", "llm_error"):
                 continue
-            out["provider_requests"] += 1
+            out["recorded_provider_requests"] += 1
             if row.get("response_model") and row["response_model"] not in out["response_models"]:
                 out["response_models"].append(row["response_model"])
-            usage = (row.get("response_json") or {}).get("usage")
+            response = row.get("response_json")
+            usage = response.get("usage") if isinstance(response, dict) else None
             if not isinstance(usage, dict):
                 out["usage_complete"] = False
                 continue
@@ -183,6 +188,8 @@ def worker(args) -> int:
             traceback.print_exc()
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     result["usage"] = journal_usage(storage)
+    if args.live and result["status"] == "error":
+        result["usage"]["usage_complete"] = False
     write_json(workspace / "result.json", result)
     return 0 if result["status"] != "error" else 1
 
@@ -211,6 +218,8 @@ def _launch(task: dict, args, root: Path, raw: str | None) -> dict:
             result = {"status": "error", "error_type": type(exc).__name__}
     result.setdefault("elapsed_ms", int((time.monotonic() - started) * 1000))
     result.setdefault("usage", journal_usage(workspace / "storage"))
+    if args.live and result["status"] == "error":
+        result["usage"]["usage_complete"] = False
     result.update({k: task[k] for k in ("sample_id", "source_frame_hash", "arm", "trial")})
     result.update({key: task["frame"][key] for key in (
         "frame_hash", "input_hash", "state_snapshot_hash", "policy_build_hash")})
@@ -223,7 +232,7 @@ def summarize(manifest: dict, results: list[dict]) -> dict:
     for row in results:
         bucket = groups.setdefault(row["arm"], {"n": 0, "status_counts": {}, "ordered_samples": 0,
                                               "ordered_codes": {}, "elapsed_ms": 0,
-                                              "provider_requests": 0})
+                                              "recorded_provider_requests": 0})
         bucket["n"] += 1
         status = row["status"]
         bucket["status_counts"][status] = bucket["status_counts"].get(status, 0) + 1
@@ -232,7 +241,7 @@ def summarize(manifest: dict, results: list[dict]) -> dict:
         for code in set(codes):
             bucket["ordered_codes"][code] = bucket["ordered_codes"].get(code, 0) + 1
         bucket["elapsed_ms"] += row.get("elapsed_ms", 0)
-        bucket["provider_requests"] += (row.get("usage") or {}).get("provider_requests", 0)
+        bucket["recorded_provider_requests"] += (row.get("usage") or {}).get("recorded_provider_requests", 0)
     return {"experiment_id": manifest["experiment_id"], "mode": manifest["mode"],
             "planned_samples": manifest["planned_samples"], "finished_samples": len(results),
             "groups": groups, "results": results,

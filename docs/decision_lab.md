@@ -7,7 +7,7 @@ portfolio backtest or evidence that a strategy is profitable.
 
 Before awaiting the provider, the actual system instructions and rendered user
 message are sealed with run/trader/session/cutoff, panel codes, declared model,
-capability names, planner source/template identity and displayed trader context.
+capability names, planner source/template/dependency-lock identity and displayed trader context.
 The original text is retained, not reassembled later from today's databases.
 
 `policy_build_hash` describes the planner adapter, instructions, template, model
@@ -85,7 +85,9 @@ writer is invoked. Existing experiment directories cannot be reused or resumed.
 the recorded declared model. The client disables model-family failover and SDK
 transport retries and makes one logical attempt per sample; failures remain in
 the denominator. Provider-side routing/defaults cannot be verified by this client.
-Actual journaled request/token counts and response model names are reported,
+Recorded request/token counts and response model names are reported. An interrupted
+request may have no terminal journal entry; failed live samples mark usage incomplete,
+not zero-cost. The dependency lock is included in the planner fingerprint. Counts are
 not interpreted as proof the remote server's implementation was identical.
 
 ## No-model parser check

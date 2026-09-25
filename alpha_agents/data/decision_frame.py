@@ -99,8 +99,8 @@ def _validate(body: dict) -> None:
                 "model", "model_settings"}, "request")
     for key in ("agent_name", "instructions", "message", "model"):
         _text(req[key], key)
-    if type(req["max_turns"]) is not int or not 1 <= req["max_turns"] <= 100:
-        raise FrameError("max_turns must be between 1 and 100")
+    if type(req["max_turns"]) is not int or req["max_turns"] <= 0:
+        raise FrameError("max_turns must be a positive integer")
     for key, values in (("tools", req["tools"]), ("panel_codes", body["panel_codes"])):
         if not isinstance(values, list) or any(not isinstance(v, str) or not v for v in values):
             raise FrameError(f"Invalid {key}")

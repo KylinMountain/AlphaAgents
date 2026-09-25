@@ -26,14 +26,16 @@ class Capture:
         conn = _get_conn()
         if conn.in_transaction:
             raise FrameError("Decision capture cannot commit an unrelated transaction")
-        conn.execute("INSERT INTO decision_capture_events "
-                     "(id,invocation_id,run_id,trader_id,session_day,kind,observed_at,payload_json) "
-                     "VALUES (?,?,?,?,?,?,?,?)", (digest, self.invocation_id, run, trader,
-                     ident["session_day"], kind, at, json.dumps(payload, ensure_ascii=False,
-                                                              allow_nan=False)))
-        conn.commit()
+        with conn:
+            conn.execute("INSERT INTO decision_capture_events "
+                         "(id,invocation_id,run_id,trader_id,session_day,kind,observed_at,payload_json) "
+                         "VALUES (?,?,?,?,?,?,?,?)", (digest, self.invocation_id, run, trader,
+                         ident["session_day"], kind, at, json.dumps(payload, ensure_ascii=False,
+                                                                  allow_nan=False)))
 
     def __enter__(self):
+        if self.invocation_id is not None:
+            raise FrameError("A capture is a single invocation, not reusable state")
         if self.enabled:
             self.invocation_id = uuid4().hex
             self._append("decision_input", {"invocation_id": self.invocation_id,

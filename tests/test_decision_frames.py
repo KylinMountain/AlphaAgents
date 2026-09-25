@@ -192,3 +192,32 @@ def test_capture_does_not_commit_unrelated_business_transaction():
     assert conn.in_transaction
     conn.rollback()
     assert conn.execute("SELECT count(*) FROM business_test").fetchone()[0] == 0
+
+
+def test_capture_insert_failure_rolls_back_its_own_transaction():
+    with replay_as_of("2026-01-19 09:00"):
+        with Capture(frame()) as capture:
+            conn = memory_store._get_conn()
+            with pytest.raises(sqlite3.IntegrityError):
+                capture._append("decision_input", {"duplicate": True})
+            assert not conn.in_transaction
+            capture.output = {"raw": "valid answer"}
+    assert conn.execute("SELECT count(*) FROM decision_capture_events").fetchone()[0] == 2
+
+
+def test_a_capture_cannot_reuse_an_old_answer():
+    with replay_as_of("2026-01-19 09:00"):
+        capture = Capture(frame())
+        with capture:
+            capture.output = {"raw": "first answer"}
+        with pytest.raises(FrameError):
+            with capture:
+                pass
+
+
+def test_frame_records_large_existing_turn_budget_without_imposing_new_policy():
+    f = frame().as_dict()
+    f["request"]["max_turns"] = 1000
+    got = DecisionFrame.create(identity=f["identity"], state=TraderState.create(),
+        request=f["request"], panel_codes=f["panel_codes"], producer=f["producer"])
+    assert got.as_dict()["request"]["max_turns"] == 1000

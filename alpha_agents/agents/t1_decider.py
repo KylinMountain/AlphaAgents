@@ -675,6 +675,7 @@ _PLAN_CODE_HASH = fingerprint({
         "alpha_agents/agents/t1_decider.py", "alpha_agents/agents/json_reply.py",
         "alpha_agents/data/thesis.py", "alpha_agents/model_factory.py",
         "alpha_agents/data/decision_frame.py",
+        "alpha_agents/llm_journal.py", "pyproject.toml", "uv.lock",
     )
 })
 

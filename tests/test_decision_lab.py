@@ -169,7 +169,7 @@ def test_offline_checks_use_private_processes_and_never_overwrite(tmp_path):
     assert summary["mode"] == "parser_check"
     assert summary["finished_samples"] == 2
     assert all(r["status"] == "abstained" for r in summary["results"]), summary
-    assert all(r["usage"]["provider_requests"] == 0 for r in summary["results"])
+    assert all(r["usage"]["recorded_provider_requests"] == 0 for r in summary["results"])
     assert all((args.output / r["sample_id"] / "storage").is_dir() for r in summary["results"])
     assert args.frame[0].read_bytes() == before
     with pytest.raises(FileExistsError):
@@ -235,5 +235,38 @@ def test_incomplete_journal_does_not_erase_failed_sample(tmp_path):
     directory.mkdir()
     (directory / "sample.jsonl").write_text('{"kind":"llm_error"}\n{"broken":')
     usage = lab.journal_usage(tmp_path)
-    assert usage["provider_requests"] == 1
+    assert usage["recorded_provider_requests"] == 1
     assert not usage["usage_complete"] and usage["unreadable_journal_lines"] == 1
+
+
+def test_dependency_lock_is_part_of_the_loaded_planner_identity():
+    from alpha_agents.data.decision_frame import fingerprint
+    paths = ("alpha_agents/agents/t1_decider.py", "alpha_agents/agents/json_reply.py",
+             "alpha_agents/data/thesis.py", "alpha_agents/model_factory.py",
+             "alpha_agents/data/decision_frame.py", "alpha_agents/llm_journal.py",
+             "pyproject.toml", "uv.lock")
+    expected = fingerprint({p: (lab.ROOT / p).read_text(encoding="utf-8") for p in paths})
+    assert D._PLAN_CODE_HASH == expected
+
+
+def test_parent_deadline_cannot_claim_zero_cost(tmp_path, monkeypatch):
+    args = options(tmp_path, live=True)
+    _, tasks = lab.prepare(args)
+    def timeout(*args, **kwargs):
+        raise lab.subprocess.TimeoutExpired("worker", 1)
+    monkeypatch.setattr(lab.subprocess, "run", timeout)
+    root = tmp_path / "workers"
+    root.mkdir()
+    result = lab._launch(tasks[0], args, root, None)
+    assert result["error_type"] == "WorkerDeadline"
+    assert result["usage"]["recorded_provider_requests"] == 0
+    assert not result["usage"]["usage_complete"]
+
+
+def test_malformed_journal_record_does_not_drop_the_sample(tmp_path):
+    path = tmp_path / "llm_journal"
+    path.mkdir()
+    (path / "bad.jsonl").write_text('[]\n{"kind":"llm_call","response_json":[]}')
+    got = lab.journal_usage(tmp_path)
+    assert got["recorded_provider_requests"] == 1
+    assert not got["usage_complete"]

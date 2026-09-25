@@ -156,3 +156,17 @@ async def run_morning_analysis(
     except Exception as e:
         logger.error("Morning agent failed: %s", e)
         return f"[晨扫失败: {e}]"
+
+
+async def run_t1_open_plan(**kwargs):
+    """Downstream agent entry for the shared T1 planner.
+
+    Pipeline code injects this callable into its live adapter instead of
+    importing agents from an upstream layer. Replay calls the same planner
+    directly; both therefore share the structured decision contract.
+    """
+    from alpha_agents.agents import t1_decider
+    return await t1_decider.propose(**kwargs)
+
+
+run_t1_open_plan.decider_name = "t1_llm"

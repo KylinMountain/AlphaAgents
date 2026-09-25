@@ -453,3 +453,24 @@ def test_decision_wall_clock_cannot_replace_logical_cutoff():
             base,
             [decision(made_at=at(9, 3))],
             live_context(cutoff=at()))
+
+
+def test_daily_replay_wait_carries_into_next_session_and_triggers():
+    base = TraderState.create(trader_id="x", as_of=at())
+    wait_daily = decision(
+        scope=EvidenceScope.REPLAY_DAILY,
+        timeframe=Timeframe.DAILY,
+        made_at=at())
+    waited = commit(base, [wait_daily], context()).state
+    assert waited.watchlist[0].evidence_scope == EvidenceScope.REPLAY_DAILY
+
+    next_day = obs(
+        price=29.7,
+        available=at(day=26),
+        kind=ObservationType.DAILY_BAR,
+        timeframe=Timeframe.DAILY)
+    triggered = run(
+        waited, [next_day],
+        context(cutoff=at(day=26)))
+    assert triggered.state.watchlist[0].status == WatchStatus.TRIGGERED
+    assert triggered.reevaluate_subjects == ("600001",)

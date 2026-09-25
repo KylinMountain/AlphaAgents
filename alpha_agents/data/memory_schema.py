@@ -969,6 +969,32 @@ BEFORE DELETE ON decision_capture_events BEGIN
     SELECT RAISE(ABORT, 'decision_capture_events is append-only');
 END;
 
+-- Continuous Trader Runtime state. Every row is a sealed immutable snapshot.
+-- run_id is part of identity so replay branches and live state can never
+-- accidentally restore one another. Updates/deletes are forbidden; writers use
+-- compare-and-swap against the latest parent hash in trader_state_store.py.
+CREATE TABLE IF NOT EXISTS trader_state_snapshots (
+    state_hash TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    trader_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    parent_state_hash TEXT,
+    as_of TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(run_id, trader_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_trader_state_latest
+    ON trader_state_snapshots(run_id, trader_id, version DESC);
+CREATE TRIGGER IF NOT EXISTS trader_state_snapshots_no_update
+BEFORE UPDATE ON trader_state_snapshots BEGIN
+    SELECT RAISE(ABORT, 'trader_state_snapshots is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trader_state_snapshots_no_delete
+BEFORE DELETE ON trader_state_snapshots BEGIN
+    SELECT RAISE(ABORT, 'trader_state_snapshots is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS evolution_metrics (
     date TEXT PRIMARY KEY,
     intraday_hit_rate_7d REAL,

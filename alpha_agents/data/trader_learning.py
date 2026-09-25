@@ -335,3 +335,101 @@ def append_rule_event(
     if conn is None:
         db.commit()
     return int(cur.lastrowid)
+
+
+def save_lesson_version(
+    *, run_id: str, trader_id: str, lesson_key: str, source_date: str,
+    claim: str, action: str, applicable_context: str,
+    evidence_timeframe: str, decision_horizon: str, evidence_scope: str,
+    support_count: int, counterexample_count: int, confidence: float,
+    evidence_refs: list[int], conn: sqlite3.Connection | None = None,
+) -> tuple[int, bool]:
+    """Append a Lesson version only when its evidence set changed."""
+    db = init_schema(conn)
+    run_id = _text(run_id, "run_id")
+    trader_id = _text(trader_id, "trader_id")
+    lesson_key = _text(lesson_key, "lesson_key")
+    refs = sorted(set(int(value) for value in evidence_refs))
+    refs_json = json.dumps(refs, separators=(",", ":"))
+    latest = db.execute(
+        "SELECT * FROM trader_lessons WHERE run_id=? AND trader_id=? "
+        "AND lesson_key=? ORDER BY version DESC LIMIT 1",
+        (run_id, trader_id, lesson_key)).fetchone()
+    if latest is not None:
+        row = dict(latest)
+        if (row["support_count"] == support_count
+                and row["counterexample_count"] == counterexample_count
+                and abs(float(row["confidence"]) - float(confidence)) < 1e-12
+                and row["evidence_refs_json"] == refs_json):
+            return int(row["id"]), False
+        version = int(row["version"]) + 1
+        supersedes = int(row["id"])
+    else:
+        version = 1
+        supersedes = None
+    cur = db.execute(
+        "INSERT INTO trader_lessons "
+        "(run_id,trader_id,lesson_key,version,supersedes_id,source_date,"
+        "claim,action,applicable_context,evidence_timeframe,decision_horizon,"
+        "evidence_scope,support_count,counterexample_count,confidence,evidence_refs_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, trader_id, lesson_key, version, supersedes, source_date,
+         claim, action, applicable_context, evidence_timeframe, decision_horizon,
+         evidence_scope, support_count, counterexample_count, float(confidence),
+         refs_json))
+    if conn is None:
+        db.commit()
+    return int(cur.lastrowid), True
+
+
+def save_rule_version(
+    *, run_id: str, trader_id: str, rule_key: str, lesson_id: int,
+    source_date: str, claim: str, action: str, applicable_context: str,
+    evidence_timeframe: str, decision_horizon: str, evidence_scope: str,
+    support_count: int, counterexample_count: int, confidence: float,
+    evidence_refs: list[int], expires_on: str,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[int, bool]:
+    """Append a Rule version; a new version starts active via an event."""
+    db = init_schema(conn)
+    run_id = _text(run_id, "run_id")
+    trader_id = _text(trader_id, "trader_id")
+    rule_key = _text(rule_key, "rule_key")
+    refs = sorted(set(int(value) for value in evidence_refs))
+    refs_json = json.dumps(refs, separators=(",", ":"))
+    latest = db.execute(
+        "SELECT * FROM trader_rules WHERE run_id=? AND trader_id=? "
+        "AND rule_key=? ORDER BY version DESC LIMIT 1",
+        (run_id, trader_id, rule_key)).fetchone()
+    if latest is not None:
+        row = dict(latest)
+        if (row["support_count"] == support_count
+                and row["counterexample_count"] == counterexample_count
+                and abs(float(row["confidence"]) - float(confidence)) < 1e-12
+                and row["evidence_refs_json"] == refs_json
+                and row["expires_on"] == expires_on):
+            return int(row["id"]), False
+        version = int(row["version"]) + 1
+        supersedes = int(row["id"])
+    else:
+        version = 1
+        supersedes = None
+    cur = db.execute(
+        "INSERT INTO trader_rules "
+        "(run_id,trader_id,rule_key,version,supersedes_id,lesson_id,source_date,"
+        "claim,action,applicable_context,evidence_timeframe,decision_horizon,"
+        "evidence_scope,support_count,counterexample_count,confidence,"
+        "evidence_refs_json,expires_on) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, trader_id, rule_key, version, supersedes, lesson_id,
+         source_date, claim, action, applicable_context, evidence_timeframe,
+         decision_horizon, evidence_scope, support_count, counterexample_count,
+         float(confidence), refs_json, expires_on))
+    rule_id = int(cur.lastrowid)
+    db.execute(
+        "INSERT INTO trader_rule_events (rule_id,event,reason,at) "
+        "VALUES (?,?,?,?)",
+        (rule_id, "activate", "evidence threshold reached", source_date))
+    if conn is None:
+        db.commit()
+    return rule_id, True

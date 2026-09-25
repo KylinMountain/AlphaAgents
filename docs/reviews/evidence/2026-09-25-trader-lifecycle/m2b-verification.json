@@ -1,0 +1,67 @@
+{
+  "date": "2026-09-25",
+  "scope": "M2-B continuous replay account and learning branches; not full online/replay convergence, scheduler isolation or M3",
+  "base_commit": "dd58114f5e6177b2d8b8d3b4772fcf8dbb9d0f5c",
+  "tested_source_commit": "a6a5d4527405a79c9cfe905fe60e130a27718a42",
+  "workflow_run_id": 36100684523,
+  "workflow_job_id": 107962301524,
+  "workflow_url": "https://github.com/KylinMountain/AlphaAgents/actions/runs/36100684523",
+  "validation_artifact_id": 10849302108,
+  "validation_artifact_sha256": "05beaaf8853c05f86e1e2934a5c2e9dc5552f3cd6112092b06cda86af75487d3",
+  "environment": {"python": "3.12.3", "dependencies": "uv sync --frozen --extra dev"},
+  "targeted": {
+    "command": "uv run pytest tests/test_walk_branch.py tests/test_walk_forward.py tests/test_review.py tests/test_decision_frames.py tests/test_decision_lab.py tests/test_trader_lifecycle_m1.py tests/test_t1_decider.py -q --no-header",
+    "passed": 277, "skipped": 1, "seconds": 34.99
+  },
+  "full_suite": {
+    "command": "uv run pytest tests/ -q --no-header",
+    "passed": 3588, "skipped": 20, "warnings": 2, "seconds": 198.21,
+    "new_cases_vs_m2a_3528_pass_baseline": 60,
+    "warning_detail": "Existing test_build_lock multi-threaded multiprocessing fork deprecation warnings"
+  },
+  "checks": {
+    "harness": {"passed": true, "files": 245, "existing_debt": 13},
+    "docs": {"passed": true},
+    "policy": {"passed": true, "existing_debt": 14}
+  },
+  "source_verification": {
+    "method": "Compared every tested-files archive member to verified-files.json using SHA-256 and Git blob SHA, then matched the successful runner git ls-tree manifest",
+    "matched_tested_files": 9,
+    "unchanged_code_and_test_blobs_for_main": 7,
+    "unchanged_tested_usage_document_for_main": 1,
+    "plan_handling": "Tested active plan replaced by completed delivery record; verification JSON added separately",
+    "temporary_audit_workflows_payloads_or_edit_scripts_in_main": false,
+    "files": {
+      "alpha_agents/agents/t1_decider.py": "9bacfb15cc1a5808fd59be839a3ab01ea01dcd55",
+      "alpha_agents/evolution/review.py": "fc86d0e9687c5a7735df3c2232f717ea16826789",
+      "scripts/walk_forward.py": "103a342c2b7f6a2944d53d52125c72d5d6393764",
+      "scripts/walk_resume.py": "636210b967d1965a9f5bae8868202962c6c22a8a",
+      "scripts/walk_checkpoint.py": "70b2d1b316be1d600229079bb7106df6eaf07ab0",
+      "scripts/walk_branch.py": "32ed61a9a5cf7da6b6f4960495880c00818a1ee3",
+      "tests/test_walk_branch.py": "8e1f82cb4804365fadd2fafc97c052d3bbefcbc8",
+      "docs/walk_branch.md": "b04d70c2636e54013c265cdce73341460c5c3caa"
+    }
+  },
+  "important_semantics": {
+    "checkpoint": "Runner-owned successful end-of-session boundary; fresh prefix state required, not an arbitrary old run directory",
+    "state": "All memory.db tables, trader histories, local indexes/variants and carried review/exposure/pending state; not a full live process image",
+    "sqlite": "Committed WAL included through backup API; quiescent source required, no distributed multi-database snapshot guarantee",
+    "initial_account": "Cash, invested and marked value, realized/unrealized profit, equity and position/order counts reconciled before the first continuation decision",
+    "lineage": "Parent observations retain their identity and remain visible to measured learning through explicit parent/child scope; unrelated runs excluded",
+    "intervention": "One exact unique knowledge replacement in the first open trade plan of the first continuation day; not permanent rule removal or update-algorithm intervention",
+    "independence": "Private writable branch copies, fresh process/run ID/model journal; parent future model replies not copied or replayed",
+    "limits": "16 branches, 30 sessions each, 200 declared branch-sessions, two concurrent branches and explicit deadline; not a monetary cost cap",
+    "failure": "Failed/incomplete branches retained, missing model-backed close reviews counted as lost learning, no retry-until-profit or tape splicing",
+    "usage": "Agent-journal counts are not total provider billing; interrupted requests and other model clients can be unobserved",
+    "validation": "Real runner equivalence uses synthetic market fixtures; independent review/handbook learning uses deterministic stub responses, not a real model"
+  },
+  "not_verified": [
+    "User's original seven historical runs or historical journal import",
+    "Real-model effectiveness, behavioral improvement or profitability",
+    "Full live-process restoration, broker integration or minute-level executable paths",
+    "Point-in-time truth of historical market inputs, model training knowledge or provider-side routing",
+    "Full online/replay strategy convergence or scheduler/control-plane isolation",
+    "M3 end-to-end behavioral evolution, independent forward improvement or promotion"
+  ],
+  "force_push_used": false
+}

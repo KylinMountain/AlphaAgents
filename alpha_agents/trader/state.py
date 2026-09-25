@@ -8,8 +8,9 @@ from typing import Any
 
 from alpha_agents.trader.observation import Observation
 from alpha_agents.trader.types import (
-    Action, CompareOp, DecisionHorizon, EvidenceScope, ThesisLevel,
-    ThesisStatus, Timeframe, TraderRuntimeError, WatchStatus, canonical_json,
+    Action, CompareOp, DecisionHorizon, EvidenceScope, ObservationType,
+    ThesisLevel, ThesisStatus, Timeframe, TraderRuntimeError, WatchStatus,
+    canonical_json,
     content_hash, require_aware, require_text,
 )
 
@@ -497,9 +498,7 @@ class TraderState:
                 Observation.create(
                     observed_at=datetime.fromisoformat(item["observed_at"]),
                     available_at=datetime.fromisoformat(item["available_at"]),
-                    type=__import__(
-                        "alpha_agents.trader.types",
-                        fromlist=["ObservationType"]).ObservationType(item["type"]),
+                    type=ObservationType(item["type"]),
                     subjects=item.get("subjects") or [],
                     data=item.get("data") or {},
                     source=item["source"],

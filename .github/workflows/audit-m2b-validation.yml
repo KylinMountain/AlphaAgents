@@ -1,10 +1,13 @@
-name: M2-B continuous trajectory validation
+name: M2-B final continuous trajectory validation
 on:
   push:
-    branches: [audit/trader-lifecycle-m2b-20260925]
+    branches: [audit/trader-lifecycle-m2b-final-20260925]
     paths: [.github/workflows/audit-m2b-validation.yml, '.audit/**']
 permissions:
   contents: write
+concurrency:
+  group: m2b-final-validation
+  cancel-in-progress: false
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -12,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: audit/trader-lifecycle-m2b-20260925
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Apply isolated changes
         shell: bash
@@ -31,7 +34,7 @@ jobs:
               path=pathlib.Path('/tmp/m2b-validation/changes.patch');path.write_bytes(prefix+tail)
               subprocess.run(['git','apply','--check',str(path)],check=True)
               subprocess.run(['git','apply',str(path)],check=True)
-          for name in ('m2b-followup.py', 'm2b-preflight.py', 'm2b-lineage.py'):
+          for name in ('m2b-followup.py','m2b-preflight.py','m2b-lineage.py','m2b-lastchecks.py'):
               followup=pathlib.Path('.audit')/name
               if followup.exists(): subprocess.run(['python',str(followup)],check=True)
           file=pathlib.Path('scripts/walk_forward.py')
@@ -78,10 +81,10 @@ jobs:
           git diff --cached --stat | tee /tmp/m2b-validation/changes-stat.txt
           if ! git diff --cached --quiet; then
             git commit -m 'feat: continue isolated account and learning trajectories from sealed checkpoints'
-            git push origin HEAD:refs/heads/audit/trader-lifecycle-m2b-20260925
           fi
           git rev-parse HEAD > /tmp/m2b-validation/tested-commit.txt
           git ls-tree -r HEAD > /tmp/m2b-validation/tested-tree.txt
+          git push origin HEAD:refs/heads/audit/trader-lifecycle-m2b-final-20260925
       - uses: actions/upload-artifact@v4
         if: always()
         with:

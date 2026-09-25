@@ -259,18 +259,40 @@ LIMITATIONS = (
     "capacity is measured from pre-decision ADV20 and enforced as a hard "
     "share cap on open-time fills; close-time synthetic buys remain a separate "
     "execution path and are reported separately",
-    "every order now carries the agent's own thesis and its own "
-    "invalidations, and a crossed invalidation wakes the agent rather than "
-    "closing the position — so an exit here is the agent's decision and the "
-    "run says nothing about what a mechanical rule would have done. A "
-    "position still open after its stated line was crossed is a choice the "
-    "agent made, not an oversight, and the checkpoint records it",
     "the learning step **records** observations, it does not promote them: "
     "every candidate stays in the ``observation`` state because n is far below "
     "the 50 this repository requires, and ``advance_candidate`` is deliberately "
     "not called by the pipeline — so 'the agent learned something' here means "
     "'a dated note stating its n was written and cited', not 'behaviour changed'",
 )
+
+#: Who closed positions, stated for the mode that actually ran. It was one
+#: unconditional sentence claiming the agent decided every exit, printed over
+#: a 30-day window in which the agent had sold nothing and every one of its
+#: 31 sells was an entry stop or target.
+AGENT_EXITS_LIMITATION = (
+    "the agent decides sells: a crossed invalidation wakes it rather than "
+    "closing the position, so a position still open after its stated line "
+    "was crossed is a choice the agent made, not an oversight")
+LIVE_EXITS_LIMITATION = (
+    "sell side as in production (--live-exits): the agent decides every sell; "
+    "entry stops and targets are shown to it but not executed, and only the "
+    "HARD_STOP_PCT floor below cost closes a position on its own (counted as "
+    "硬止损). The theme-archived hard exit does not occur in a replay")
+MECHANICAL_EXITS_LIMITATION = (
+    "sells are the entry stop and target levels, executed mechanically; the "
+    "agent was not asked about open positions, so this run says nothing about "
+    "how the Trader manages a position (production runs AGENT_EXIT_DECISIONS=1 "
+    "— use --live-exits to replay that)")
+
+
+def _exit_limitation(ctx) -> str:
+    if getattr(ctx, "hard_floor", False):
+        return LIVE_EXITS_LIMITATION
+    if getattr(ctx, "agent_exits", False):
+        return AGENT_EXITS_LIMITATION
+    return MECHANICAL_EXITS_LIMITATION
+
 
 #: What a placeholder run additionally cannot show.
 PLACEHOLDER_LIMITATIONS = (
@@ -329,6 +351,7 @@ CURRENT_MEMBERSHIP_LIMITATION = (
 
 def _limitations(ctx) -> tuple[str, ...]:
     base = list(LIMITATIONS)
+    base.append(_exit_limitation(ctx))
     extra = list(
         LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
     if not _membership_is_strict(ctx) and getattr(
@@ -3097,15 +3120,28 @@ def autonomy_flags(args) -> dict:
 
     The default is unchanged: earlier runs stay comparable, and this is a new
     arm rather than a replacement for the old one.
+
+    ``--live-exits`` is the production arrangement (``AGENT_EXIT_DECISIONS=1``):
+    the agent owns every sell, the entry stop and target are not executed, and
+    only the hard floor — ``HARD_STOP_PCT`` below cost — closes a position on
+    its own. It is the one mode in which a replay's sell side is the live one.
     """
     autonomous = bool(getattr(args, "autonomous", False))
+    live = bool(getattr(args, "live_exits", False))
+    if live and autonomous:
+        raise SystemExit(
+            "--live-exits 与 --autonomous 互斥：前者保留实盘的 HARD_STOP_PCT 硬线，"
+            "后者连硬线也关闭")
+    rails_off = autonomous or live
     return {
         "autonomous": autonomous,
-        "agent_exits": bool(getattr(args, "agent_exits", False)) or autonomous,
+        "agent_exits": (bool(getattr(args, "agent_exits", False))
+                        or rails_off),
         "mechanical_stop": (bool(getattr(args, "mechanical_stop", True))
-                            and not autonomous),
+                            and not rails_off),
         "mechanical_target": (bool(getattr(args, "mechanical_target", True))
-                              and not autonomous),
+                              and not rails_off),
+        "hard_floor": live,
     }
 
 
@@ -3770,8 +3806,10 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             mechanical_stops=(ctx.mechanical_stop
-                                               and ctx.mechanical_target),
+                             mechanical_stops=(
+                                 getattr(ctx, "hard_floor", False)
+                                 or (ctx.mechanical_stop
+                                     and ctx.mechanical_target)),
                              phase=phase,
                              signals=ctx.pending_signals))
     if not decisions:
@@ -4010,10 +4048,17 @@ def _settle_exits(ctx, day: str) -> dict:
         #
         # Note what this does NOT touch: `portfolio.position_monitor`'s hard
         # exit, which is a production path the replay does not call.
+        stop_level = pos.get("stop_loss") if ctx.mechanical_stop else None
+        floor = _hard_floor_price(pos) if getattr(ctx, "hard_floor", False) else None
+        if floor is not None:
+            # Production's `_is_hard_exit` line, as a price. It replaces the
+            # entry stop rather than joining it: under live exits the entry
+            # stop is evidence for the agent, not an order.
+            stop_level = floor
         verdict = S.exit_verdict(
             bar=S.bar_from_row(bars_today.get(code)), prev_close=prev_close,
             rule=rule,
-            stop_loss=(pos.get("stop_loss") if ctx.mechanical_stop else None),
+            stop_loss=stop_level,
             target_price=(pos.get("target_price")
                           if ctx.mechanical_target else None))
         counts[verdict.status] += 1
@@ -4023,9 +4068,10 @@ def _settle_exits(ctx, day: str) -> dict:
             continue
         if verdict.status != S.FILLED_AT_OPEN:
             continue
+        label = HARD_FLOOR_REASON if floor is not None else ""
         booked = portfolio_exit.close_position(
             pos["id"], close_price=verdict.price,
-            close_reason=f"walk_forward 开盘{verdict.reason[:60]}",
+            close_reason=f"walk_forward {label}开盘{verdict.reason[:60]}",
             command_id=f"walk:{ctx.run_id}:{day}:{pos['id']}")
         if not booked:
             counts["close_refused"] += 1
@@ -4037,8 +4083,28 @@ def _settle_exits(ctx, day: str) -> dict:
             "shares": pos.get("shares"), "price": verdict.price,
             "amount": (pos.get("shares") or 0) * verdict.price,
             "capacity_shares": None, "capacity_oversize": False,
-            "reason": verdict.reason})
+            "reason": f"{label}{verdict.reason}"})
     return {"counts": counts, "events": events, "fills": fills}
+
+
+#: Prefix on every close the hard floor made, so the report can count it
+#: apart from the agent's sells and from an entry stop.
+HARD_FLOOR_REASON = "硬止损: "
+
+
+def _hard_floor_price(pos: dict) -> float | None:
+    """The price at which the loss from cost reaches ``HARD_STOP_PCT``.
+
+    Same line as production's ``position_monitor._is_hard_exit``
+    (``current_return <= -HARD_STOP_PCT`` against ``open_price``), expressed
+    as a level so the daily-bar settlement can decide it — including a gap
+    through it, which fills at the open. ``None`` when the cost is unknown:
+    no floor is invented for a position whose cost the book does not hold.
+    """
+    open_price = pos.get("open_price")
+    if not open_price or open_price <= 0:
+        return None
+    return round(float(open_price) * (1 - P.HARD_STOP_PCT / 100), 4)
 
 
 def _value(ctx, day: str) -> dict:
@@ -4469,6 +4535,13 @@ class Context:
         )
         _verify_experiment_runtime(args, legacy_manifest)
         _verify_selection_experiment_runtime(args, selection_manifest)
+        if (getattr(args, "live_exits", False)
+                and self.experiment_manifest is not None):
+            # The runtime contract freezes mechanical_stop/target/agent_exits
+            # as argparse left them; --live-exits changes all three without
+            # touching those args, so a manifest could not tell the arms apart.
+            raise SystemExit("--live-exits 不能与实验 manifest 同用：runtime 契约"
+                             "未记录该模式")
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
                 "sector_first_no_flow", "sector_rank_price_v1"}:
@@ -4533,6 +4606,10 @@ class Context:
         #: number. The user asked to disable the take-profit as its own
         #: experiment.
         self.mechanical_target = _rails["mechanical_target"]
+        #: Whether ``HARD_STOP_PCT`` below cost closes a position without
+        #: asking the agent — the floor production keeps under
+        #: ``AGENT_EXIT_DECISIONS=1``. Only ``--live-exits`` turns it on.
+        self.hard_floor = _rails["hard_floor"]
         #: Whether the buy-side decider may **call tools**. On by default for
         #: the llm decider: a trader that cannot ask a question is a scorer,
         #: and the whole point of the last review's finding was that the
@@ -5769,6 +5846,8 @@ def _exit_attribution(result: dict) -> list[str]:
         # X was touched". The first version of this classifier looked for
         # "stop"/"止损" only, so seven real exits landed in 其他 — the split
         # was reporting 止损 1 when the truth was 止损 5 / 止盈 2.
+        if r.startswith(HARD_FLOOR_REASON):
+            return "硬止损"
         if "lower level" in low or "止损" in r or "stop" in low:
             return "止损"
         if "upper level" in low or "止盈" in r or "target" in low:
@@ -5896,6 +5975,10 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-take-profit，并在回放内不执行 HARD_STOP_PCT。"
              "机械止损会让一笔的结局衡量那条线而不是 agent 的判断，"
              "学习信号因此不可归因")
+    parser.add_argument(
+        "--live-exits", action="store_true",
+        help="与实盘 AGENT_EXIT_DECISIONS=1 一致：卖出由 agent 决定，不执行入场"
+             "止损/止盈价，只在成本亏损达 HARD_STOP_PCT 时硬平仓")
     parser.add_argument(
         "--close-buys", action="store_true",
         help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")

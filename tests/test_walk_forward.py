@@ -1436,3 +1436,122 @@ class TestAReplaySaysWhetherItIsComplete:
         assert "不能和完整的轮次比较" in text
         assert "决策失败 1/3 个交易日（01-06）" in text
         assert "守则改写失败 1 次（01-05）" in text
+
+
+# ── --live-exits: the replay's sell side is production's ────────────────────
+
+
+class TestLiveExitsMatchProduction:
+    """Production runs ``AGENT_EXIT_DECISIONS=1``: the agent owns every sell
+    and only ``HARD_STOP_PCT`` below cost closes a position on its own.
+
+    The 30-day T8 acceptance window ran without it. All 335 Runtime decisions
+    were BUY / WAIT / REJECT and all 31 sells were entry stops or targets, so
+    the Trader never managed a position it held. This pins the mode that
+    makes the replay's sell side the live one.
+    """
+
+    def _run_live(self, tmp_path, monkeypatch):
+        import alpha_agents.pipeline.tasks.exit_decision as ED
+
+        asked: list[tuple[str, str, tuple[str, ...]]] = []
+
+        async def _fake_hold(positions, price_map, **kw):
+            asked.append((kw.get("day"), kw.get("phase"),
+                          tuple(p["code"] for p in positions)))
+            return [{"code": p["code"], "action": "hold", "reason": "持有"}
+                    for p in positions]
+
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(ED, "decide_for_replay", _fake_hold)
+        monkeypatch.setattr(ED, "decide", _fake_hold)
+
+        series, instruments = _normal()
+        # Day 1 crosses both the entry stop (9.5) and the target (10.5) but
+        # not the floor (10 × 0.92 = 9.2). Day 2 gaps through the floor.
+        series["600001"][_SESSIONS[21]] = _bar(
+            open_=9.6, high=10.8, low=9.4, close=9.7, change_pct=-3.0)
+        series["600001"][_SESSIONS[22]] = _bar(
+            open_=9.0, high=9.1, low=8.8, close=8.9, change_pct=-8.2)
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        def _plant_then_decide(ctx, day, prev_day, phase="open"):
+            from alpha_agents.data import portfolio as P
+            if day == _START and not P.get_open_positions(ctx.trader):
+                P.create_pending_order(
+                    code="600001", name="甲", theme=ctx.theme,
+                    order_date=prev_day, entry_low=9.0, entry_high=11.0,
+                    stop_loss=9.5, target_price=10.5, source="test",
+                    reason="planted", trader_id=ctx.trader)
+                settled = walk_forward._settle_entries(
+                    ctx, prev_day, P.get_pending_orders(ctx.trader))
+                assert settled["fills"], "the planted order did not fill"
+            return []
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _plant_then_decide)
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None, **kw: object())
+        result = _run(replay, days=3, decider="llm", panel_size=5,
+                      live_exits=True)
+        return result, asked
+
+    def test_flags(self):
+        flags = walk_forward.autonomy_flags(argparse.Namespace(
+            live_exits=True, autonomous=False, agent_exits=False,
+            mechanical_stop=True, mechanical_target=True))
+        assert flags == {"autonomous": False, "agent_exits": True,
+                         "mechanical_stop": False, "mechanical_target": False,
+                         "hard_floor": True}
+
+    def test_it_refuses_autonomous_too(self):
+        with pytest.raises(SystemExit, match="互斥"):
+            walk_forward.autonomy_flags(argparse.Namespace(
+                live_exits=True, autonomous=True))
+
+    def test_the_floor_is_hard_stop_pct_below_cost(self):
+        pct = walk_forward.P.HARD_STOP_PCT
+        assert walk_forward._hard_floor_price({"open_price": 10.0}) == round(
+            10.0 * (1 - pct / 100), 4)
+        assert walk_forward._hard_floor_price({"open_price": None}) is None
+
+    def test_entry_levels_do_not_close_and_the_agent_is_asked(
+            self, tmp_path, monkeypatch):
+        result, asked = self._run_live(tmp_path, monkeypatch)
+        day1 = [f for f in _fills(result, "600001")
+                if f["side"] == "sell" and f["date"] == _SESSIONS[21]]
+        assert not day1, (
+            "the entry stop or target closed the position; under live exits "
+            "they are evidence for the agent, not orders")
+        assert (_SESSIONS[21], "open", ("600001",)) in asked, (
+            "the agent was not asked about a sellable position it held")
+        from alpha_agents.data import trader_state_store
+        ctx = result["ctx"]
+        state = trader_state_store.load_latest(
+            trader_id=ctx.trader, run_id=ctx.run_id)
+        actions = [str(getattr(d, "action", "")).lower()
+                   for d in state.recent_decisions]
+        assert any("hold" in a for a in actions), (
+            "the HOLD was not sealed into the run's TraderState: " + str(actions))
+
+    def test_the_gap_through_the_floor_is_a_hard_stop(
+            self, tmp_path, monkeypatch):
+        result, _ = self._run_live(tmp_path, monkeypatch)
+        sells = [f for f in _fills(result, "600001") if f["side"] == "sell"]
+        assert len(sells) == 1
+        assert sells[0]["date"] == _SESSIONS[22]
+        assert sells[0]["price"] == 9.0, "a gap through the floor fills at the open"
+        assert sells[0]["reason"].startswith(walk_forward.HARD_FLOOR_REASON)
+        line = " ".join(wf_exit_attribution(result))
+        assert "硬止损 1" in line
+
+    def test_the_report_names_the_mode_that_ran(self, tmp_path, monkeypatch):
+        result, _ = self._run_live(tmp_path, monkeypatch)
+        notes = walk_forward._limitations(result["ctx"])
+        assert walk_forward.LIVE_EXITS_LIMITATION in notes
+        assert walk_forward.MECHANICAL_EXITS_LIMITATION not in notes
+
+
+def test_a_default_run_says_its_exits_were_mechanical():
+    ctx = argparse.Namespace(agent_exits=False, hard_floor=False)
+    assert (walk_forward._exit_limitation(ctx)
+            == walk_forward.MECHANICAL_EXITS_LIMITATION)

@@ -384,8 +384,30 @@ async def _scan_for(trader, events_ctx: str, themes_ctx: str, stats_ctx: str,
         recs = _extract_table_recommendations(report)
     if recs:
         recs = await _cross_validate_recommendations(recs)
-        _save_recommendations_list(recs, trader,
-                                   knowledge_block=knowledge_block)
+        prediction_ids = _save_recommendations_list(
+            recs, trader, knowledge_block=knowledge_block,
+            place_orders=False)
+        # Research proposes the allowed panel; trading belongs to the shared
+        # T1 planner used by walk-forward replay. A planner failure means no
+        # new order, never a fallback to the old recommendation parser.
+        try:
+            from alpha_agents.pipeline import live_t1
+            plan = await live_t1.plan_open(
+                recs, trader, prediction_ids=prediction_ids,
+                knowledge_block=knowledge_block, events_context=events_ctx)
+            placed = plan.get("placed") or []
+            if placed:
+                report += "\n\n【最终 T1 计划】\n" + "\n".join(
+                    f"• {row['code']} {row.get('theme') or ''} — {row.get('reason') or ''}"
+                    for row in placed)
+            else:
+                reason = (plan.get("no_trade_reason")
+                          or plan.get("parse_error") or "没有通过最终交易计划")
+                report += f"\n\n【最终 T1 计划】空仓 — {reason}"
+        except Exception as exc:
+            logger.exception("交易员 %s 的最终 T1 计划失败 — 不回退旧下单路径: %s",
+                             trader.id, exc)
+            report += "\n\n【最终 T1 计划】失败，本轮不新增订单"
 
     # The morning's verdict on yesterday's book. Stored rather than
     # executed: at 09:00 there is no live price and a sell needs one.
@@ -635,7 +657,8 @@ def _morning_relation_status(
 def _save_recommendations_list(
         recs: list[dict], trader=None, *, relation_archive=None,
         strict_relations: bool = False,
-        knowledge_block: str | None = None) -> None:
+        knowledge_block: str | None = None,
+        place_orders: bool = True) -> dict[str, int]:
     """Save pre-validated recommendations as predictions, fetching entry prices.
 
     ``trader`` owns the resulting predictions, theses and orders, and
@@ -657,7 +680,8 @@ def _save_recommendations_list(
     # the order rather than mis-date it.
     today = clock.today()
     if not recs:
-        return
+        return {}
+    prediction_ids: dict[str, int] = {}
 
     # Batch-fetch latest close prices for all recommendation codes
     entry_prices: dict[str, float | None] = {}
@@ -739,9 +763,16 @@ def _save_recommendations_list(
                 trader_id=trader.id,
             )
             saved += 1
+            prediction_ids[code] = pred_id
             logger.info("  Saved prediction: %s %s (%s, entry=%.2f)",
                         code, r.get("name", ""), r.get("confidence", ""),
                         entry_prices.get(code, 0) or 0)
+            # Compatibility callers may still ask this helper to place the
+            # legacy morning order. The production morning path passes
+            # place_orders=False: research writes forecasts, while the shared
+            # T1 planner owns the actual trade decision.
+            if not place_orders:
+                continue
             # Create pending order (挂单，等价格回调到介入区间再建仓)
             try:
                 # Prefer structured JSON fields, fallback to regex parsing

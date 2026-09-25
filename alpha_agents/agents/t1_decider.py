@@ -291,6 +291,9 @@ def _trailing_json_object(text: str) -> str:
     return text
 
 
+_WAIT_METRICS = frozenset({"price", "change_pct"})
+
+
 def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict], str | None]:
     """Normalize WAIT decisions into the Trader Runtime condition grammar."""
     raw_watch = payload.get("watch", [])
@@ -314,9 +317,13 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
                 "watch needs a unique panel code, non-empty reason, "
                 "non-empty next_check list and cancel_if list")
         try:
-            checks = [Condition.from_dict(value).as_dict() for value in next_check]
-            invalid = [Condition.from_dict(value).as_dict()
-                       for value in invalidations]
+            parsed_checks = [Condition.from_dict(value) for value in next_check]
+            parsed_invalid = [Condition.from_dict(value) for value in invalidations]
+            if any(cond.metric not in _WAIT_METRICS
+                   for cond in (*parsed_checks, *parsed_invalid)):
+                raise TraderRuntimeError("unsupported WAIT metric")
+            checks = [cond.as_dict() for cond in parsed_checks]
+            invalid = [cond.as_dict() for cond in parsed_invalid]
             confidence = float(item.get("confidence", 0.5))
         except (KeyError, TypeError, ValueError, TraderRuntimeError):
             return [], "watch contains an invalid condition or confidence"

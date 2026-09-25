@@ -112,7 +112,7 @@ def test_price_cross_wakes_same_watch_and_buy_uses_intent(monkeypatch):
 
     async def propose(**kwargs):
         assert kwargs["phase"] == "intraday"
-        assert kwargs["information_cutoff"] == "2026-09-25 10:40:00"
+        assert kwargs["information_cutoff"] == "2026-09-25 10:40:00+08:00"
         assert kwargs["panel"][0]["code"] == "600001"
         assert kwargs["panel"][0]["close"] == 29.8
         assert kwargs["research_packet"]["triggered_watch"] == ["600001"]

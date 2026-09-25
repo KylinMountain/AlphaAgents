@@ -203,6 +203,22 @@ def _write_execution_thesis(
         return None
 
 
+def _decision_knowledge(
+    base: str, *, trader_id: str, run_id: str,
+    context: DecisionContext, as_of: str,
+) -> str:
+    """Add only prior, run-local learning; keep its evidence labels intact."""
+    from alpha_agents.evolution import trader_learning
+
+    learned = trader_learning.inject(
+        trader_id=trader_id,
+        decision_horizon=context.decision_horizon.value,
+        as_of=as_of,
+        run_id=run_id,
+    )
+    return "\n\n".join(value for value in (base, learned) if value)
+
+
 async def plan_morning(
     recommendations: list[dict],
     trader,
@@ -259,13 +275,20 @@ async def plan_morning(
     if observed.changed:
         trader_state_store.save(state, run_id=run)
 
+    decision_knowledge = _decision_knowledge(
+        knowledge_block,
+        trader_id=trader.id,
+        run_id=run,
+        context=context,
+        as_of=prev_day,
+    )
     verdict = await t1_decider.propose(
         day=day,
         prev_day=prev_day,
         panel=panel,
         news=[],
         book=_portfolio_context(trader.id, prev_day),
-        knowledge=knowledge_block,
+        knowledge=decision_knowledge,
         trader_note="\n\n".join(
             value for value in (trader.note, trader.extra_prompt) if value),
         picks=2,
@@ -571,6 +594,13 @@ async def plan_intraday(
             "reason": "no triggered/candidate code has executable market history",
         }
 
+    decision_knowledge = _decision_knowledge(
+        knowledge_block,
+        trader_id=trader.id,
+        run_id=run,
+        context=context,
+        as_of=prev_day,
+    )
     verdict = await t1_decider.propose(
         day=day,
         prev_day=prev_day,
@@ -583,7 +613,7 @@ async def plan_intraday(
                 for code, price in prices.items()
                 if "_" not in code and isinstance(price, (int, float))
             }),
-        knowledge=knowledge_block,
+        knowledge=decision_knowledge,
         trader_note="\n\n".join(
             value for value in (trader.note, trader.extra_prompt) if value),
         picks=min(2, len(panel)),

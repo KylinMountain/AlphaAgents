@@ -151,8 +151,15 @@ class TraderRuntime:
             if decision.timeframe != context.observation_resolution:
                 raise TraderRuntimeError(
                     "decision timeframe does not match DecisionContext")
-            if not decision.code:
-                raise TraderRuntimeError("trade decision requires a code")
+            needs_code = decision.action in {
+                Action.BUY, Action.ADD, Action.WAIT, Action.REDUCE,
+                Action.SELL, Action.REJECT,
+            }
+            if needs_code and not decision.code:
+                raise TraderRuntimeError(
+                    f"{decision.action.value} decision requires a code")
+            if not needs_code and decision.code is None:
+                continue
 
             code = decision.code
             current = watch_by_code.get(code)

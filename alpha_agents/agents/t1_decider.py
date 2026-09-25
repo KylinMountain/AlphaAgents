@@ -711,6 +711,10 @@ def _validate_information_cutoff(day: str, phase: str, value: str) -> str:
         raise DeciderError("information_cutoff must be on the decision day")
     if phase == "open" and stamp.time() >= dt_time(9, 30):
         raise DeciderError("open decisions must be frozen before 09:30")
+    if phase == "intraday" and not (
+            dt_time(9, 30) <= stamp.time() <= dt_time(15, 0)):
+        raise DeciderError(
+            "intraday decisions must be frozen inside the A-share session")
     return stamp.isoformat(sep=" ", timespec="seconds")
 
 
@@ -898,8 +902,10 @@ def make_frame(*, day: str, phase: str, message: str, state: TraderState,
         identity={"run_id": run_id, "trader_id": trader_id, "stage": "trade_plan",
                   "phase": phase, "session_day": day, "origin": origin,
                   "information_cutoff": cutoff,
-                  "information_grade": "synthetic_close" if phase == "close"
-                                       else "declared_preopen"},
+                  "information_grade": (
+                      "synthetic_close" if phase == "close"
+                      else ("declared_intraday" if phase == "intraday"
+                            else "declared_preopen"))},
         state=state,
         request={"agent_name": f"t1_decider:{DECIDER_NAME}",
                  "instructions": SYSTEM_INSTRUCTIONS, "message": message,

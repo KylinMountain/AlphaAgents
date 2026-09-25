@@ -41,7 +41,7 @@ def _logical_now() -> datetime:
         value = value.replace(tzinfo=_TZ)
     else:
         value = value.astimezone(_TZ)
-    return value
+    return value.replace(microsecond=0)
 
 
 def _context(cutoff: datetime) -> DecisionContext:

@@ -144,7 +144,7 @@ def load_prompt(path: Path | None = None) -> str:
     return (path or (PROMPTS_DIR / PROMPT_FILE)).read_text(encoding="utf-8")
 
 
-def format_panel(panel: list[dict]) -> str:
+def format_panel(panel: list[dict], *, phase: str = "open") -> str:
     """Render the allowed securities, one per line, with what is knowable.
 
     The columns are what a person would look at before deciding, minus the
@@ -162,14 +162,19 @@ def format_panel(panel: list[dict]) -> str:
     if not panel:
         return "（今天没有可交易的候选）"
     sector_first = any(row.get("primary_theme") for row in panel)
+    price_label = (
+        "当前价" if phase == "intraday"
+        else ("今日收盘" if phase == "close" else "T-1 收盘"))
+    change_label = (
+        "今日涨幅" if phase in {"intraday", "close"} else "T-1 涨幅")
     if sector_first:
         lines = [
-            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
+            f"| 代码 | 名称 | {price_label} | {change_label} | 换手% | ADV20(手) | 连板 | 主力净额(万) | 主方向去自身5日相对 | 主方向 | 辅方向 |",
             "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     else:
         lines = [
-            "| 代码 | 名称 | T-1 收盘 | T-1 涨幅 | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
+            f"| 代码 | 名称 | {price_label} | {change_label} | 换手% | ADV20(手) | 连板 | 主力净额(万) | 概念（当前成分） |",
             "|---|---|---|---|---|---|---|---|---|",
         ]
     for row in panel:
@@ -679,6 +684,19 @@ _SESSIONS = {
             "  `entry_high` 是你今天最多愿意付的价：开盘价不高于它就按开盘价成交。"
             "`entry_low` 可以不写；写了就表示开盘低于它你也不买。"),
     },
+    "intraday": {
+        "session": "现在站在 **{day} 盘中实时决策时点**。",
+        "sight": (
+            "- 你能看到系统明确提供的**当前价格/当日涨幅/主题与事件快照**，"
+            "这些事实都必须早于当前 information cutoff。\n"
+            "- 你**不知道当前时点之后**会发生什么，也不知道最终收盘。"
+            "不要把未来日线或收盘结果当成当前事实。"),
+        "news_cutoff": "当前 information cutoff",
+        "news_window": "今日开盘 → 当前 information cutoff",
+        "fills_how": (
+            "  这是盘中挂单：系统不会假设你立刻成交。entry_high / entry_low "
+            "形成后续实时价格检查的可成交区间；A 股 T+1 与成交容量仍由执行层约束。"),
+    },
     "close": {
         "session": "现在站在 **{day} 收盘前 14:55**。",
         "sight": (
@@ -704,6 +722,10 @@ def _validate_information_cutoff(day: str, phase: str, value: str) -> str:
         raise DeciderError("information_cutoff must be on the decision day")
     if phase == "open" and stamp.time() >= dt_time(9, 30):
         raise DeciderError("open decisions must be frozen before 09:30")
+    if phase == "intraday" and not (
+            dt_time(9, 30) <= stamp.time() <= dt_time(15, 0)):
+        raise DeciderError(
+            "intraday decisions must be frozen inside the A-share session")
     return stamp.isoformat(sep=" ", timespec="seconds")
 
 
@@ -735,16 +757,18 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
               for k, v in _SESSIONS[phase].items()}
     if decision_time is not None:
         stamp = _validate_information_cutoff(day, phase, decision_time)
-        moment["session"] = (
-            f"现在站在 **{stamp} 开盘前**。"
-            if phase == "open"
-            else f"现在站在 **{stamp} 收盘决策时点**。")
+        if phase == "open":
+            moment["session"] = f"现在站在 **{stamp} 开盘前**。"
+            moment["news_window"] = f"上一交易日收盘后 → {stamp}"
+        elif phase == "intraday":
+            moment["session"] = f"现在站在 **{stamp} 盘中**。"
+            moment["news_window"] = f"{day} 09:30 → {stamp}"
+        else:
+            moment["session"] = f"现在站在 **{stamp} 收盘决策时点**。"
+            moment["news_window"] = f"{day} 09:00 → {stamp}"
         moment["news_cutoff"] = stamp
-        moment["news_window"] = (
-            f"上一交易日收盘后 → {stamp}"
-            if phase == "open"
-            else f"{day} 09:00 → {stamp}")
-    fields = {"day": day, "prev_day": prev_day, "panel": format_panel(panel),
+    fields = {"day": day, "prev_day": prev_day,
+              "panel": format_panel(panel, phase=phase),
               "news": format_news(news), "market": format_market(market or {}),
               **moment,
               "book": book or "（空仓）",
@@ -890,8 +914,10 @@ def make_frame(*, day: str, phase: str, message: str, state: TraderState,
         identity={"run_id": run_id, "trader_id": trader_id, "stage": "trade_plan",
                   "phase": phase, "session_day": day, "origin": origin,
                   "information_cutoff": cutoff,
-                  "information_grade": "synthetic_close" if phase == "close"
-                                       else "declared_preopen"},
+                  "information_grade": (
+                      "synthetic_close" if phase == "close"
+                      else ("declared_intraday" if phase == "intraday"
+                            else "declared_preopen"))},
         state=state,
         request={"agent_name": f"t1_decider:{DECIDER_NAME}",
                  "instructions": SYSTEM_INSTRUCTIONS, "message": message,

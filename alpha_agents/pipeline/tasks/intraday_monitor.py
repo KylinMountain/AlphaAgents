@@ -980,7 +980,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
                     tag, trader_id, code, r.get("name", ""), entry_price or 0)
     except Exception as e:
         logger.debug("Failed to save intraday prediction for %s: %s", code, e)
-        return False
+        return None
 
     # Production T4 passes place_order=False: this function is now a research
     # recorder. The direct order branch remains temporarily for compatibility
@@ -1003,7 +1003,7 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         # side door — which is the entire thing this path replaced.
         if entry_low is None or entry_high is None or stop_loss_val is None:
             logger.debug("%s 缺少交易员定价 — 不下单", code)
-            return True
+            return pred_id
         # Thesis before order, same as the morning path. The pick came from
         # a scoring function but the *price* came from the trader, so its
         # reason is on record and from_recommendation derives the exit
@@ -1036,4 +1036,4 @@ def _record_intraday_pick(trader, r: dict, code: str, today: str,
         )
     except Exception as e:
         logger.debug("Failed to create pending order for %s: %s", code, e)
-    return True
+    return pred_id

@@ -271,3 +271,67 @@ def test_duplicate_sector_candidates_become_one_trader_subject():
     assert [item["code"] for item in got] == ["600001", "600002"]
     assert got[0]["theme"] == "液冷"
     assert got[0]["alternate_themes"] == ["AI算力"]
+
+
+def test_theme_flow_invalidation_can_wake_a_wait_without_price_trigger(monkeypatch):
+    watch = WatchItem(
+        code="600001", status=WatchStatus.WATCHING,
+        why="主题仍强，等价格",
+        trigger_conditions=(
+            Condition("price", CompareOp.LE, 25.0, subject="600001"),),
+        invalidation_conditions=(
+            Condition("net_flow", CompareOp.LT, 0, subject="算力"),),
+        trigger_all=False,
+        next_check="600001:price <= 25",
+        created_at=datetime(2026, 9, 25, 9, 5, tzinfo=TZ),
+        last_checked_at=None,
+        evidence_timeframe=Timeframe.DAILY,
+        decision_horizon=DecisionHorizon.SWING,
+        evidence_scope=EvidenceScope.LIVE_DAILY,
+    )
+    base = TraderState.create(
+        trader_id="default",
+        as_of=datetime(2026, 9, 25, 10, 35, tzinfo=TZ),
+        watchlist=(watch,))
+    monkeypatch.setattr(C, "_logical_now", lambda: at())
+    current, _ = store(monkeypatch, base)
+    monkeypatch.setattr(C, "_previous_session", lambda day: "2026-09-24")
+    monkeypatch.setattr(C.mh, "get_local_history", lambda *a, **k: history())
+    monkeypatch.setattr(C.feedback, "inject_portfolio", lambda **kwargs: "")
+
+    async def propose(**kwargs):
+        return {
+            "orders": [], "watch": [], "refused": [],
+            "rejected": [{
+                "code": "600001", "reason": "主题资金转负",
+                "rule_ids": [],
+            }],
+            "parse_error": None, "decision_status": "abstained",
+            "no_trade_reason": "原等待逻辑失效",
+            "decision_id": "intraday-flow-reject",
+        }
+
+    monkeypatch.setattr(C.t1_decider, "propose", propose)
+    got = asyncio.run(C.plan_intraday(
+        [], trader(),
+        prices={"600001": 31.0, "600001_chg": 1.0},
+        market_view={
+            "sector_flows": {"算力": -3.2},
+            "sector_ranks": {"算力": 18},
+            "breadth_ratio": 0.45,
+        }))
+
+    assert got["reevaluate_subjects"] == ["600001"]
+    assert got["decisions"][0]["action"] == Action.REJECT.value
+    assert current["state"].watchlist[0].status == WatchStatus.REJECTED
+
+
+def test_t4_wait_vocabulary_refuses_fake_volume_ratio():
+    from alpha_agents.agents import t1_decider as D
+
+    verdict = D.parse_orders(
+        '{"orders":[],"watch":[{"code":"600001","reason":"等量",'
+        '"next_check":[{"metric":"volume_ratio","op":">=","value":1.5}],'
+        '"invalidations":[]}]}',
+        {"600001"})
+    assert verdict["decision_status"] == "incomplete"

@@ -33,8 +33,14 @@ def _is_high_frequency(task) -> bool:
     return bool(interval and interval <= HIGH_FREQUENCY_MINUTES)
 
 
-def _is_trading_day(date: datetime | None = None) -> bool:
-    """Check if a date is a trading day using akshare calendar."""
+def _is_trading_day(
+    date: datetime | None = None, *, fail_closed: bool = False,
+) -> bool:
+    """Check the exchange calendar.
+
+    Scheduler convenience may fall back to weekdays. Risk admission may not:
+    when fail_closed=True an unavailable calendar means "research only".
+    """
     try:
         with no_proxy():
             df = ak.tool_trade_date_hist_sina()
@@ -45,6 +51,10 @@ def _is_trading_day(date: datetime | None = None) -> bool:
         date_b = date.strftime("%Y%m%d")
         return date_a in trade_dates or date_b in trade_dates
     except Exception as e:
+        if fail_closed:
+            logger.error(
+                "Trading calendar unavailable — new risk is disabled: %s", e)
+            return False
         logger.warning("Trading calendar API failed — falling back to weekday check. "
                        "This may incorrectly treat Chinese holidays as trading days: %s", e)
         return (date or datetime.now()).weekday() < 5

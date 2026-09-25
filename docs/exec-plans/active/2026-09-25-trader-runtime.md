@@ -308,11 +308,13 @@ T+1 TraderState
 ### T0 — 收敛范围
 
 - [x] PR #35 关闭且不合并；
-- [ ] 暂停 scheduler isolation；
-- [ ] M2-A / M2-B 保留为未来验证工具，不继续扩建；
-- [ ] 不新增 shadow / evaluator / experiment harness，直到 T8。
+- [x] 暂停 scheduler isolation；
+- [x] M2-A / M2-B 保留为未来验证工具，不继续扩建；
+- [x] 不新增 shadow / evaluator / experiment harness，直到 T8。
 
 ### T1 — Trader Core
+
+**状态：implemented on feature branch; awaiting regression/merge.**
 
 新增：
 

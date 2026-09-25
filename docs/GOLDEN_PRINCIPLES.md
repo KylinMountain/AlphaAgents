@@ -62,14 +62,16 @@ across modules.
 
 ## 4. Layer direction is one-way
 
-**Rule.** `data → sources → tools → evolution → pipeline → agents →
+**Rule.** `trader → data → sources → tools → evolution → pipeline → agents →
 server`. Cross-cutting (`config`, `http_client`, `notify`) is importable
 anywhere. Nothing else crosses backwards.
 
-The order is declared once, in `scripts/lint_harness.py`; the storage
-layer comes first because a source's job includes persisting what it
-fetched, and `evolution` sits below `pipeline` because the review task
-drives lesson extraction rather than the other way round.
+The order is declared once, in `scripts/lint_harness.py`. `trader/` is the
+pure domain layer: it owns causal state transitions and imports no storage,
+provider, market source or pipeline code. The storage layer follows it because
+a source's job includes persisting what it fetched, and `evolution` sits below
+`pipeline` because the review task drives lesson extraction rather than the
+other way round.
 
 **Why.** This is the constraint that keeps the repo navigable as it
 grows. Usually postponed until a team is large; with agents writing the

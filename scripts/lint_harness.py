@@ -32,7 +32,7 @@ PACKAGE = "alpha_agents"
 # and the holdout gate, not the reverse. Both orderings were corrected
 # after the linter flagged 27 "violations" that were really this file
 # being wrong about the architecture.
-LAYERS = ["data", "sources", "tools", "evolution", "pipeline", "agents", "server"]
+LAYERS = ["trader", "data", "sources", "tools", "evolution", "pipeline", "agents", "server"]
 
 # Importable from anywhere — cross-cutting, not layers.
 #

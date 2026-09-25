@@ -33,8 +33,9 @@ file in this repository is `scripts/walk_forward.py` at 1801 lines and
 nothing fails. Passing `scripts/` explicitly reports it plus 69 other
 pre-existing violations. See D37 in `docs/exec-plans/tech-debt-tracker.md`.
 
-1. **Layer direction.** `data → sources → tools → evolution → pipeline →
-   agents → server`. Never import backwards. Cross-cutting (`config`,
+1. **Layer direction.** `trader → data → sources → tools → evolution → pipeline →
+   agents → server`. `trader/` is the pure domain layer and must not import
+   storage, providers, market sources, pipeline or agents. Never import backwards. Cross-cutting (`config`,
    `http_client`, `notify`) may be imported from anywhere.
 2. **No LLM grades its own output.** Utility of a memory, principle or
    playbook comes from market data only. See `docs/GOLDEN_PRINCIPLES.md`.

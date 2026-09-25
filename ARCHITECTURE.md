@@ -8,11 +8,12 @@ Dependencies run one way. `scripts/lint_harness.py` fails the build on a
 backwards import.
 
 ```
-data → sources → tools → evolution → pipeline → agents → server
+trader → data → sources → tools → evolution → pipeline → agents → server
 ```
 
 | Layer | Owns | Does not |
 |---|---|---|
+| `trader/` | Pure Trader Runtime domain model: causal observations, state lineage, watch/thesis lifecycle, decisions | Import storage, providers, market sources, pipeline or agents |
 | `data/` | SQLite schemas and access, scoring, decision context, the trader book (orders, exits, theses, decision snapshots), attribution | Call the network |
 | `sources/` | 13 news feeds (`NEWS_SOURCES` in `pipeline/monitor.py`), each normalising to one shape | Decide anything |
 | `tools/` | Market queries the agents can call — quotes, fund flow, breadth, exit signals | Hold state |
@@ -37,6 +38,24 @@ with the one store that cannot be rebuilt.
 | `data/market_history.db` | Full-market daily K-lines, ~1.1 GB | Yes, slowly (`init-history`) |
 | `data/activity.db` | The live activity feed | Yes, it is a feed |
 | `data/chroma/concepts.db` | Concept embedding vectors | Yes (`build-embeddings`) |
+
+## Trader Runtime
+
+The strategy owner is one continuous Trader Runtime, not the scheduler task that
+happens to wake it up. Daily replay and live intraday execution feed different
+Observation streams into the same domain state machine:
+
+```
+Historical daily facts ─┐
+                        ├─ Observation → TraderState → Trader.step()
+Live intraday facts  ───┘
+```
+
+A daily lesson stays labelled daily when it is reused during an intraday
+decision. Evidence carries timeframe, decision horizon and evidence scope so a
+newer five-minute observation cannot silently turn a daily backtest result into
+an intraday rule. See
+`docs/exec-plans/active/2026-09-25-trader-runtime.md`.
 
 ## The day
 

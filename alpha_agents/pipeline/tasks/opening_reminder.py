@@ -1,8 +1,9 @@
 """Opening reminder task — runs at 09:15 before market open.
 
-Compares morning predictions against auction/opening prices and pushes
-a brief summary of which predictions are aligning and which show
-expectation gaps (预期差).
+Compares the final live T1 pending orders against auction/opening prices and
+pushes a brief summary of which planned entries are aligning and which show
+expectation gaps (预期差). Research-only morning predictions are deliberately
+excluded: the reminder must describe the book the trader actually armed.
 
 This is a rule-based task — no LLM agent required.
 """
@@ -12,7 +13,8 @@ import json
 import logging
 import time
 
-from alpha_agents.data.memory_store import get_pending_predictions
+from alpha_agents.data import clock
+from alpha_agents.data.portfolio import get_pending_orders
 from alpha_agents.tools.stock_quotes import get_stock_quotes_fn
 from alpha_agents.tools.market_breadth import get_market_breadth_fn
 from alpha_agents.notify import notify_all
@@ -21,17 +23,22 @@ logger = logging.getLogger(__name__)
 
 
 async def run_opening_reminder() -> str | None:
-    """09:15 pre-open check: validate morning predictions against auction data."""
-    today = time.strftime("%Y-%m-%d")
+    """09:15 pre-open check: validate final T1 orders against auction data."""
+    today = clock.today()
     logger.info("Opening reminder starting for %s ...", today)
 
-    # 1. Fetch today's morning predictions
-    predictions = get_pending_predictions(today)
+    # 1. Read the orders the shared T1 planner actually armed. Morning
+    # forecasts remain useful research evidence, but they are not the trade.
+    predictions = [dict(row) for row in get_pending_orders()
+                   if row.get("order_date") == today
+                   and row.get("source") == "t1_live"]
     if not predictions:
-        logger.info("Opening reminder: no predictions for today, skipping.")
+        logger.info("Opening reminder: no final T1 orders for today, skipping.")
         return None
+    for row in predictions:
+        row.setdefault("direction", "bullish")
 
-    # 2. Get current/auction prices for predicted stocks
+    # 2. Get current/auction prices for the final planned stocks
     codes = [p["code"] for p in predictions if p.get("code")]
     if not codes:
         return None

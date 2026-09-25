@@ -406,8 +406,7 @@ def save_rule_version(
         if (row["support_count"] == support_count
                 and row["counterexample_count"] == counterexample_count
                 and abs(float(row["confidence"]) - float(confidence)) < 1e-12
-                and row["evidence_refs_json"] == refs_json
-                and row["expires_on"] == expires_on):
+                and row["evidence_refs_json"] == refs_json):
             return int(row["id"]), False
         version = int(row["version"]) + 1
         supersedes = int(row["id"])

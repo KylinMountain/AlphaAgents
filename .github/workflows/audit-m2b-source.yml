@@ -1,0 +1,29 @@
+name: M2-B source preparation
+on:
+  push:
+    branches: [audit/trader-lifecycle-m2b-20260925]
+    paths: [.github/workflows/audit-m2b-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export staged source for isolated verification
+        run: |
+          mkdir -p /tmp/m2b-source
+          git archive --format=tar.gz --output=/tmp/m2b-source/source.tar.gz HEAD
+          python - <<'PY'
+          import base64,lzma,pathlib
+          raw=pathlib.Path('.audit/m2b.patch.xz.b64.1').read_text()
+          patch=lzma.LZMADecompressor().decompress(base64.b64decode(raw))
+          pathlib.Path('/tmp/m2b-source/staged-prefix.patch').write_bytes(patch)
+          print('Staged prefix bytes:',len(patch))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2b-source
+          path: /tmp/m2b-source
+          retention-days: 1

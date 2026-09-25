@@ -231,14 +231,14 @@ def test_intraday_cutoff_must_be_inside_market_session():
 
 def test_production_intraday_no_longer_uses_entry_pricing_as_order_owner():
     source = inspect.getsource(IM._save_intraday_recommendations)
-    assert "plan_intraday(" in source
+    assert "trader_plan(" in source
     assert "place_order=False" in source
     assert "_price_for(t" not in source
 
 
 def test_watch_check_occurs_before_no_anomaly_early_return():
     source = inspect.getsource(IM.run_intraday_monitor)
-    assert source.index("plan_intraday(") < source.index("if not has_anomaly:")
+    assert source.index("trader_plan(") < source.index("if not has_anomaly:")
 
 
 def test_intraday_prediction_recorder_can_be_research_only(monkeypatch):
@@ -335,3 +335,9 @@ def test_t4_wait_vocabulary_refuses_fake_volume_ratio():
         '"invalidations":[]}]}',
         {"600001"})
     assert verdict["decision_status"] == "incomplete"
+
+
+def test_pipeline_does_not_import_downstream_agent_controller():
+    source = inspect.getsource(IM)
+    assert "alpha_agents.agents.trader_runtime" not in source
+    assert "trader_plan" in inspect.signature(IM.run_intraday_monitor).parameters

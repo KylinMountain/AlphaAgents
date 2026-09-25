@@ -210,3 +210,39 @@ def test_prediction_writer_can_record_without_placing_legacy_order(monkeypatch):
         trader(), knowledge_block="K", place_orders=False)
     assert ids == {"600001": 11}
     assert len(called) == 1
+
+
+def test_existing_trader_state_is_resumed_not_reseeded(monkeypatch):
+    cutoff = datetime(2026, 9, 25, 9, 5, tzinfo=TZ)
+    previous = TraderState.create(
+        trader_id="default",
+        as_of=datetime(2026, 9, 24, 15, 0, tzinfo=TZ),
+        market_view={"regime": "range"})
+    monkeypatch.setattr(C, "_logical_now", lambda: cutoff)
+    monkeypatch.setattr(C, "_previous_session", lambda day: "2026-09-24")
+    monkeypatch.setattr(C, "_panel", lambda recs, prev: fixed_panel())
+    monkeypatch.setattr(C, "_portfolio_context", lambda *args: "")
+    monkeypatch.setattr(
+        C.trader_state_store, "load_latest",
+        lambda **kwargs: previous)
+    saved = []
+    monkeypatch.setattr(
+        C.trader_state_store, "save",
+        lambda value, **kwargs: saved.append(value) or True)
+    monkeypatch.setattr(C, "create_pending_order", lambda **kwargs: None)
+
+    async def propose(**kwargs):
+        return {
+            "orders": [], "watch": [], "rejected": [], "refused": [],
+            "parse_error": None, "decision_status": "abstained",
+            "no_trade_reason": "没有合适机会", "decision_id": "capture-r",
+        }
+
+    monkeypatch.setattr(C.t1_decider, "propose", propose)
+    got = asyncio.run(C.plan_morning(
+        [{"code": "600001", "name": "甲", "theme": "算力"}],
+        trader()))
+
+    assert got["state_version"] == 2
+    assert saved[0].parent_state_hash == previous.state_hash
+    assert saved[-1].recent_decisions[-1].action == Action.HOLD

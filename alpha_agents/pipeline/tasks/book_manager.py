@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date, timedelta
 
+from alpha_agents.data import market_history as mh
+from alpha_agents.data.t1_execution import capacity_shares
 from alpha_agents.data.portfolio import (
     check_pending_orders, check_positions, get_open_positions,
     get_pending_orders,
@@ -24,6 +27,35 @@ from alpha_agents.notify import notify_all
 from alpha_agents.pipeline.tasks import exit_decision, order_review, thesis_monitor
 
 logger = logging.getLogger(__name__)
+
+
+def _capacity_limits(pending: list[dict], today_str: str) -> dict[str, int]:
+    """ADV20 caps for T1-live orders, measured only from completed sessions.
+
+    Legacy orders predate the converged path and keep their historical behavior.
+    New live T1 orders use the same capacity function as walk-forward replay.
+    A new-path order without twenty completed sessions gets a zero cap instead
+    of silently becoming unlimited.
+    """
+    t1_codes = {str(row.get("code") or "") for row in pending
+                if row.get("source") == "t1_live" and row.get("code")}
+    if not t1_codes:
+        return {}
+    cut = (date.fromisoformat(today_str) - timedelta(days=1)).isoformat()
+    prev_day = mh.get_latest_trading_day_at_or_before(cut)
+    if prev_day is None:
+        return {code: 0 for code in t1_codes}
+
+    limits: dict[str, int] = {}
+    for code in t1_codes:
+        rows = mh.get_local_history(code, days=20, as_of=prev_day)
+        if not rows:
+            limits[code] = 0
+            continue
+        volumes = [float(row.get("volume") or 0) for row in rows]
+        adv20 = sum(volumes) / len(volumes) if volumes else None
+        limits[code] = capacity_shares(adv20)
+    return limits
 
 
 async def manage_book(trader, price_map: dict, today_str: str,
@@ -47,10 +79,12 @@ async def manage_book(trader, price_map: dict, today_str: str,
     try:
         if pending:
             wake = exit_decision.enabled()
-            fill_alerts = check_pending_orders(realtime_prices=price_map,
-                                               today=today_str,
-                                               trader_id=trader.id,
-                                               wake_agent=wake)
+            fill_alerts = check_pending_orders(
+                realtime_prices=price_map,
+                today=today_str,
+                trader_id=trader.id,
+                max_shares_by_code=_capacity_limits(pending, today_str),
+                wake_agent=wake)
             # A weakened theme on an order that carries a thesis is put to
             # the agent rather than cancelled for it — see order_review.
             signals = [a for a in fill_alerts if a.get("type") == "order_signal"]

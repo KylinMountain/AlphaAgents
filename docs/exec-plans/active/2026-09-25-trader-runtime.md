@@ -314,7 +314,7 @@ T+1 TraderState
 
 ### T1 — Trader Core
 
-**状态：implemented on feature branch; awaiting regression/merge.**
+**状态：completed and merged to main at 6bce80e2.**
 
 新增：
 
@@ -339,6 +339,8 @@ alpha_agents/trader/
 - 无 provider 的单元测试。
 
 ### T2 — Watchlist + Thesis Lifecycle
+
+**状态：implemented on feature branch; awaiting regression/merge.**
 
 交付状态机：
 

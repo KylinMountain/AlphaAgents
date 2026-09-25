@@ -41,18 +41,25 @@
   不能执行的工具文本而不是 JSON。修复是收紧输入契约，不把推理文本宽松解析为交易。
 - 2026-09-25：CLI 的 `--model-timeout` 必须约束 Planner 与三类日终 Review 的整次
   Agent 运行；网络客户端超时本身不足以防止 Runner 挂住。
+- 2026-09-26：一次真实 30 日录制证明 Planner 的 JSON 是局部而非全有或全无的契约：一条
+  无法执行的 WAIT（`net_flow`）或面板外 REJECT 不得抹掉同一回复中有效的 BUY / WAIT /
+  REJECT。坏项会成为带原因的 `refused` 记录；整个集合不是列表时仍硬失败。同步移除了
+  prompt 示例中与实际 WAIT metric 白名单矛盾的 `net_flow`。
 
 ## 本次验证记录
 
-- 已通过：完整测试集 `3716 passed, 18 skipped`；T8 Runtime / position /
-  replay-learning、T5 position、T6 review、T7 learning、bootstrap、Planner 与 tools
-  wiring 的定向回归均覆盖；`lint_harness`、`lint_docs`、`git diff --check` 均通过。
-- 隔离单日实跑：`2026-01-05` 在新 bootstrap 目录创建了空的 Runtime 与机会日志 schema，
-  证明原先的首日 `theme_opportunity_items` / `opportunity_items` 缺表已修复。当前网关在
-  15 秒内未返回模型响应，Runner 如配置抛出 `TimeoutError`；日终语义索引同样等待该外部
-  embedding 服务。因此它是可复现的环境阻塞，不能把该单日写成通过的策略或学习验收。
+- 已通过（修复前基线）：隔离目录
+  `/private/var/folders/x5/cdm2lfb11p9_vkm_3z_thlj00000gn/T/alphaagents-t8-30d.EVvXemeyDi/replay`
+  实跑 `2026-01-05 → 2026-02-13` 共 30 日，退出 0；30 次 market review、34 次 trade
+  review、17 条 observation，`trader_runtime_decisions=294`、`watch_rechecks=22`。报告确认
+  生产库 hash 未变、回放语料只读、抛错日阶段为 0。
+- 该基线**不作为最终验收**：它记录到两次 `decider_unreadable`。真实原因为一条使用
+  `net_flow` 的 WAIT 和一条面板外占位 REJECT 会令整个有效回复被丢弃。2026-09-26 已修复为
+  局部拒绝并由新增单元测试覆盖；该行为变更后必须重新录制完整窗口。
+- 当前代码验证：`uv run pytest tests/ -q` 为 `3718 passed, 18 skipped`；
+  `lint_harness`、`lint_docs`、`git diff --check` 均通过。
 
-待外部服务恢复后执行：
+最终重新录制命令：
 
 ```bash
 task_replay_root=$(mktemp -d -t alphaagents-t8)

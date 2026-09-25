@@ -327,8 +327,10 @@ def _trailing_json_object(text: str) -> str:
 _WAIT_METRICS = frozenset({"price", "change_pct"})
 
 
-def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict], str | None]:
-    """Normalize WAIT decisions into the Trader Runtime condition grammar."""
+def _parse_watch_items(
+    payload: dict, panel_codes: set[str], refused: list[dict],
+) -> tuple[list[dict], str | None]:
+    """Normalize WAIT decisions without discarding unrelated valid decisions."""
     raw_watch = payload.get("watch", [])
     if not isinstance(raw_watch, list):
         return [], "watch must be a list"
@@ -337,7 +339,9 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
     seen: set[str] = set()
     for item in raw_watch:
         if not isinstance(item, dict):
-            return [], "watch entries must be objects"
+            refused.append({"code": "", "why": "invalid_watch",
+                            "detail": "watch entry must be an object"})
+            continue
         code = item.get("code")
         reason = item.get("reason")
         next_check = item.get("next_check")
@@ -346,9 +350,13 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
                 or not isinstance(reason, str) or not reason.strip()
                 or not isinstance(next_check, list) or not next_check
                 or not isinstance(invalidations, list)):
-            return [], (
-                "watch needs a unique panel code, non-empty reason, "
-                "non-empty next_check list and cancel_if list")
+            refused.append({
+                "code": code if isinstance(code, str) else "",
+                "why": "invalid_watch",
+                "detail": ("watch needs a unique panel code, non-empty reason, "
+                           "non-empty next_check list and cancel_if list"),
+            })
+            continue
         try:
             parsed_checks = [Condition.from_dict(value) for value in next_check]
             parsed_invalid = [Condition.from_dict(value) for value in invalidations]
@@ -359,9 +367,13 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
             invalid = [cond.as_dict() for cond in parsed_invalid]
             confidence = float(item.get("confidence", 0.5))
         except (KeyError, TypeError, ValueError, TraderRuntimeError):
-            return [], "watch contains an invalid condition or confidence"
+            refused.append({"code": code, "why": "invalid_watch",
+                            "detail": "invalid condition or confidence"})
+            continue
         if not 0 <= confidence <= 1:
-            return [], "watch confidence must be in [0, 1]"
+            refused.append({"code": code, "why": "invalid_watch",
+                            "detail": "confidence must be in [0, 1]"})
+            continue
         seen.add(code)
         watch.append({
             "code": code,
@@ -399,7 +411,7 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
     if explanation is None:
         explanation = payload.get("reason")  # Legacy top-level spelling.
     explanation = explanation.strip() if isinstance(explanation, str) else ""
-    watch, watch_error = _parse_watch_items(payload, panel_codes)
+    watch, watch_error = _parse_watch_items(payload, panel_codes, refused)
     rejected = []
     raw_rejected = payload.get("rejected", [])
     explanation_error = watch_error
@@ -409,16 +421,22 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         seen = set()
         for item in raw_rejected:
             if not isinstance(item, dict):
-                explanation_error = "rejected entries must be objects"
-                break
+                refused.append({"code": "", "why": "invalid_rejected",
+                                "detail": "rejected entry must be an object"})
+                continue
             code, reason = item.get("code"), item.get("reason")
             ids = item.get("rule_ids", [])
             if (not isinstance(code, str) or code not in panel_codes or code in seen
                     or not isinstance(reason, str) or not reason.strip()
                     or not isinstance(ids, list)
                     or any(not isinstance(rid, str) or not rid.strip() for rid in ids)):
-                explanation_error = "rejected needs a unique panel code, reason and rule_ids list"
-                break
+                refused.append({
+                    "code": code if isinstance(code, str) else "",
+                    "why": "invalid_rejected",
+                    "detail": ("rejected needs a unique panel code, reason "
+                               "and rule_ids list"),
+                })
+                continue
             seen.add(code)
             rejected.append({"code": code, "reason": reason.strip(),
                              "rule_ids": [rid.strip() for rid in ids]})
@@ -427,7 +445,7 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         explanation_error = (
             "empty orders without watch require a non-empty no_trade_reason")
     if explanation_error:
-        return {"orders": [], "watch": watch, "refused": [],
+        return {"orders": [], "watch": watch, "refused": refused,
                 "parse_error": explanation_error,
                 "decision_status": "incomplete", "no_trade_reason": explanation,
                 "rejected": rejected}

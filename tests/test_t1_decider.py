@@ -487,7 +487,7 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
-        assert "next_check" in verdict["parse_error"]
+        assert verdict["refused"][0]["why"] == "invalid_watch"
 
     def test_wait_condition_operator_is_validated(self):
         verdict = D.parse_orders(
@@ -497,7 +497,10 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
-        assert "invalid condition" in verdict["parse_error"]
+        assert verdict["refused"] == [{
+            "code": "600001", "why": "invalid_watch",
+            "detail": "invalid condition or confidence",
+        }]
 
     def test_wait_cannot_name_a_stock_outside_the_panel(self):
         verdict = D.parse_orders(
@@ -507,6 +510,43 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
+        assert verdict["refused"][0]["why"] == "invalid_watch"
+
+    def test_invalid_wait_does_not_discard_a_valid_buy(self):
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_high":10.2,'
+            '"stop_loss":9.2,"reason":"买"}],'
+            '"watch":[{"code":"600002","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":19}],'
+            '"cancel_if":[{"metric":"net_flow","op":"<","value":0}]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert [order["code"] for order in verdict["orders"]] == ["600001"]
+        assert verdict["watch"] == []
+        assert verdict["refused"] == [{
+            "code": "600002", "why": "invalid_watch",
+            "detail": "invalid condition or confidence",
+        }]
+
+    def test_invalid_rejection_does_not_discard_other_valid_actions(self):
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_high":10.2,'
+            '"stop_loss":9.2,"reason":"买"}],'
+            '"watch":[{"code":"600002","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":19}],'
+            '"cancel_if":[]}],'
+            '"rejected":[{"code":"300999","reason":"面板外","rule_ids":[]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert [order["code"] for order in verdict["orders"]] == ["600001"]
+        assert [item["code"] for item in verdict["watch"]] == ["600002"]
+        assert verdict["rejected"] == []
+        assert verdict["refused"] == [{
+            "code": "300999", "why": "invalid_rejected",
+            "detail": "rejected needs a unique panel code, reason and rule_ids list",
+        }]
 
     @pytest.mark.parametrize("other", ["orders", "rejected"])
     def test_same_code_cannot_be_wait_and_another_action(self, other):
@@ -541,6 +581,7 @@ class TestWaitIsAFirstClassDecision:
         assert "WAIT" in text
         assert "next_check" in text
         assert "orders / watch / rejected" in text
+        assert "\"net_flow\"" not in text
 
 
 class TestRuntimeDecisionTranslation:
@@ -626,4 +667,4 @@ def test_wait_rejects_a_metric_the_runtime_cannot_observe_yet():
         '"cancel_if":[]}]}',
         CODES)
     assert verdict["decision_status"] == "incomplete"
-    assert "invalid condition" in verdict["parse_error"]
+    assert verdict["refused"][0]["why"] == "invalid_watch"

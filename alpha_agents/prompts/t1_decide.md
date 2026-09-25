@@ -100,7 +100,7 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
         {{"metric": "price", "op": "<=", "value": 30.0, "subject": "600001"}}
       ],
       "cancel_if": [
-        {{"metric": "net_flow", "op": "<", "value": 0, "subject": "AI算力"}}
+        {{"metric": "price", "op": "<", "value": 27.0, "subject": "600001"}}
       ]
     }}
   ],
@@ -113,7 +113,8 @@ surprise 口径；本仓库尚未对该规则做独立样本外验证〕
 - 对每个你认为**逻辑仍成立、只是条件尚未满足**的候选，放进 `watch`，不要把它
   混进 `rejected` 或只写在 `no_trade_reason` 里。WAIT 必须写清下一次什么事实
   变化时需要重新判断。
-- `watch[].next_check` 使用机器可判断的条件：`metric / op / value / subject`。
+- `watch[].next_check` 和 `watch[].cancel_if` 都使用机器可判断的条件：
+  `metric / op / value / subject`。
   `op` 只能是 `< <= > >= == !=`；`subject` 是该指标属于哪个股票或主题。
   当前可用 metric **只允许** `price` 和 `change_pct`。后续时间尺度扩展会同步
   增加 detector 与 vocabulary；不要提前编造系统目前观测不到的条件。

@@ -586,3 +586,13 @@ class TestExactDecisionCutoff:
         with pytest.raises(D.DeciderError, match="decision day"):
             D._validate_information_cutoff(
                 "2026-09-25", "open", "2026-09-24 09:05:00")
+
+
+def test_wait_rejects_a_metric_the_runtime_cannot_observe_yet():
+    verdict = D.parse_orders(
+        '{"orders":[],"watch":[{"code":"600001","reason":"等量",'
+        '"next_check":[{"metric":"volume_ratio","op":">=","value":1.5}],'
+        '"cancel_if":[]}]}',
+        CODES)
+    assert verdict["decision_status"] == "incomplete"
+    assert "invalid condition" in verdict["parse_error"]

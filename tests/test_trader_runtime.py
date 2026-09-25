@@ -6,9 +6,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from alpha_agents.trader import (
-    CompareOp, Condition, DecisionContext, DecisionHorizon, EvidenceScope,
+    Action, CompareOp, Condition, DecisionContext, DecisionHorizon, EvidenceScope,
     Observation, ObservationType, Session, ThesisLevel, ThesisState,
-    ThesisStatus, Timeframe, TraderRuntime, TraderRuntimeError, TraderState,
+    ThesisStatus, Timeframe, TraderDecision, TraderRuntime, TraderRuntimeError, TraderState,
     WatchItem, WatchStatus,
 )
 
@@ -289,3 +289,195 @@ def test_naive_timestamps_are_refused():
             type=ObservationType.EVENT, subjects=[],
             data={}, source="test", evidence_refs=[],
             timeframe=Timeframe.DAILY)
+
+
+def decision(*, decision_id="d1", action=Action.WAIT, made_at=None,
+             scope=EvidenceScope.LIVE_INTRADAY,
+             timeframe=Timeframe.MINUTE_5, next_check=None):
+    return TraderDecision(
+        decision_id=decision_id,
+        made_at=made_at or at(),
+        action=action,
+        code="600001",
+        thesis_id=None,
+        confidence=0.6,
+        reasoning="price too high; wait for planned level",
+        timeframe=timeframe,
+        decision_horizon=DecisionHorizon.SWING,
+        evidence_scope=scope,
+        invalidations=(),
+        next_check=tuple(
+            (Condition("price", CompareOp.LE, 30.0),)
+            if next_check is None else next_check),
+    )
+
+
+def live_context(cutoff=None):
+    return context(
+        mode="live", cutoff=cutoff or at(),
+        scope=EvidenceScope.LIVE_INTRADAY,
+        resolution=Timeframe.MINUTE_5)
+
+
+def commit(s, decisions, ctx):
+    return asyncio.run(TraderRuntime().commit_decisions(s, decisions, ctx))
+
+
+def test_wait_decision_becomes_durable_watch_and_is_recorded():
+    base = TraderState.create(trader_id="x", as_of=at())
+    result = commit(base, [decision()], live_context())
+    item = result.state.watchlist[0]
+    assert item.code == "600001"
+    assert item.status == WatchStatus.WATCHING
+    assert item.next_check == "price <= 30.0"
+    assert result.state.recent_decisions[-1].decision_id == "d1"
+    assert result.transitions[0].from_status == "absent"
+    assert result.decisions[0].action == Action.WAIT
+
+
+def test_state_rejects_watch_created_in_its_future():
+    future_watch = WatchItem(
+        code="600001", status=WatchStatus.WATCHING, why="created later",
+        trigger_conditions=(Condition("price", CompareOp.LE, 30.0),),
+        invalidation_conditions=(), trigger_all=False,
+        next_check="price <= 30", created_at=at(9, 3),
+        last_checked_at=None, evidence_timeframe=Timeframe.MINUTE_5,
+        decision_horizon=DecisionHorizon.SWING,
+        evidence_scope=EvidenceScope.LIVE_INTRADAY)
+    with pytest.raises(TraderRuntimeError, match="state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(), watchlist=(future_watch,))
+
+
+def test_wait_then_new_tick_then_buy_converts_same_watch():
+    base = TraderState.create(trader_id="x", as_of=at())
+    waited = commit(base, [decision()], live_context()).state
+
+    tick = obs(
+        price=29.8, available=at(9, 4), timeframe=Timeframe.MINUTE_5)
+    triggered = run(waited, [tick], live_context(cutoff=at(9, 4)))
+    assert triggered.state.watchlist[0].status == WatchStatus.TRIGGERED
+    assert triggered.reevaluate_subjects == ("600001",)
+
+    buy = decision(
+        decision_id="d2", action=Action.BUY, made_at=at(9, 4),
+        next_check=())
+    bought = commit(
+        triggered.state, [buy], live_context(cutoff=at(9, 4)))
+    assert len(bought.state.watchlist) == 1
+    assert bought.state.watchlist[0].status == WatchStatus.CONVERTED
+    assert [item.decision_id for item in bought.state.recent_decisions] == [
+        "d1", "d2"]
+
+
+def test_reject_closes_existing_watch_without_creating_another():
+    base = TraderState.create(trader_id="x", as_of=at())
+    waited = commit(base, [decision()], live_context()).state
+    rejected = commit(
+        waited,
+        [decision(
+            decision_id="d2", action=Action.REJECT, made_at=at(),
+            next_check=())],
+        live_context())
+    assert len(rejected.state.watchlist) == 1
+    assert rejected.state.watchlist[0].status == WatchStatus.REJECTED
+
+
+def test_wait_requires_recheck_condition():
+    base = TraderState.create(trader_id="x", as_of=at())
+    with pytest.raises(TraderRuntimeError, match="next_check"):
+        commit(
+            base,
+            [decision(next_check=())],
+            live_context())
+
+
+@pytest.mark.parametrize(
+    "bad,match",
+    [
+        ({"scope": EvidenceScope.REPLAY_DAILY}, "evidence scope"),
+        ({"timeframe": Timeframe.DAILY}, "timeframe"),
+    ],
+)
+def test_decision_metadata_must_match_decision_context(bad, match):
+    base = TraderState.create(trader_id="x", as_of=at())
+    d = decision(
+        scope=bad.get("scope", EvidenceScope.LIVE_INTRADAY),
+        timeframe=bad.get("timeframe", Timeframe.MINUTE_5))
+    with pytest.raises(TraderRuntimeError, match=match):
+        commit(base, [d], live_context())
+
+
+def test_decision_cannot_be_committed_again():
+    base = TraderState.create(trader_id="x", as_of=at())
+    first = commit(base, [decision()], live_context()).state
+    with pytest.raises(TraderRuntimeError, match="duplicate decision"):
+        commit(first, [decision()], live_context())
+
+
+def test_commit_requires_exact_state_cutoff():
+    base = TraderState.create(trader_id="x", as_of=at())
+    with pytest.raises(TraderRuntimeError, match="exact state cutoff"):
+        commit(base, [decision()], live_context(cutoff=at(9, 5)))
+
+
+def test_empty_decision_commit_is_noop():
+    base = TraderState.create(trader_id="x", as_of=at())
+    result = commit(base, [], live_context())
+    assert result.state is base
+    assert not result.changed
+
+
+def test_repeated_wait_preserves_original_watch_identity():
+    base = TraderState.create(trader_id="x", as_of=at())
+    first = commit(base, [decision(made_at=at())], live_context()).state
+    advanced = run(first, [], live_context(cutoff=at(9, 8))).state
+    refreshed = commit(
+        advanced,
+        [decision(decision_id="d2", made_at=at(9, 8))],
+        live_context(cutoff=at(9, 8))).state
+    assert len(refreshed.watchlist) == 1
+    assert refreshed.watchlist[0].created_at == at()
+    assert refreshed.watchlist[0].last_checked_at == at(9, 8)
+
+
+def test_decision_wall_clock_cannot_replace_logical_cutoff():
+    base = TraderState.create(trader_id="x", as_of=at())
+    with pytest.raises(TraderRuntimeError, match="logical information cutoff"):
+        commit(
+            base,
+            [decision(made_at=at(9, 3))],
+            live_context(cutoff=at()))
+
+
+def test_daily_replay_wait_carries_into_next_session_and_triggers():
+    base = TraderState.create(trader_id="x", as_of=at())
+    wait_daily = decision(
+        scope=EvidenceScope.REPLAY_DAILY,
+        timeframe=Timeframe.DAILY,
+        made_at=at())
+    waited = commit(base, [wait_daily], context()).state
+    assert waited.watchlist[0].evidence_scope == EvidenceScope.REPLAY_DAILY
+
+    next_day = obs(
+        price=29.7,
+        available=at(day=28),
+        kind=ObservationType.DAILY_BAR,
+        timeframe=Timeframe.DAILY)
+    triggered = run(
+        waited, [next_day],
+        context(cutoff=at(day=28)))
+    assert triggered.state.watchlist[0].status == WatchStatus.TRIGGERED
+    assert triggered.reevaluate_subjects == ("600001",)
+
+
+def test_state_rejects_future_decision_and_observation():
+    future_decision = decision(made_at=at(9, 1))
+    with pytest.raises(TraderRuntimeError, match="decision.*state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(), recent_decisions=(future_decision,))
+    future_observation = obs(available=at(9, 1))
+    with pytest.raises(TraderRuntimeError, match="observation.*state future"):
+        TraderState.create(
+            trader_id="x", as_of=at(),
+            recent_observations=(future_observation,))

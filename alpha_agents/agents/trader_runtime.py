@@ -257,13 +257,23 @@ async def plan_morning(
     if observed.changed:
         trader_state_store.save(state, run_id=run)
 
+    from alpha_agents.evolution import trader_learning as runtime_learning
+    learned = runtime_learning.inject(
+        trader_id=trader.id,
+        decision_horizon=context.decision_horizon.value,
+        as_of=day,
+        run_id=run,
+    )
+    decision_knowledge = "\n\n".join(
+        value for value in (knowledge_block, learned) if value)
+
     verdict = await t1_decider.propose(
         day=day,
         prev_day=prev_day,
         panel=panel,
         news=[],
         book=_portfolio_context(trader.id, prev_day),
-        knowledge=knowledge_block,
+        knowledge=decision_knowledge,
         trader_note="\n\n".join(
             value for value in (trader.note, trader.extra_prompt) if value),
         picks=2,

@@ -85,6 +85,9 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                                      facts=facts_text, model=model,
                                      record=record_text, context=context):
             counts["market_review"] = 1
+            counts["lesson_candidates"] += (
+                trader_review.lessons_from_market_review(
+                    conn, trader_id=trader_id, day=day))
         elif model is not None:
             # write() returns None without a model or facts; both are ruled
             # out here, so None is an error or an unreadable reply.

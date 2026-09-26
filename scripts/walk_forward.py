@@ -208,8 +208,7 @@ from alpha_agents.data.t1_execution import capacity_shares  # noqa: E402
 from alpha_agents.data.memory_store import upsert_theme  # noqa: E402
 from alpha_agents.data.portfolio_intent import create_pending_order  # noqa: E402
 from alpha_agents.evolution import (  # noqa: E402
-    performance, replay_capabilities, sector_experiment, selection_experiment,
-    world_read_set,
+    performance, replay_capabilities, sector_experiment, world_read_set,
 )
 from alpha_agents.evolution.replay_mode import get_replay_as_of, replay_as_of  # noqa: E402
 from alpha_agents.evolution.replay_mode import mark_replay_process  # noqa: E402
@@ -288,8 +287,7 @@ LIMITATIONS = (
     "the name as of the replayed date; codes absent from the previous "
     "session's bars are excluded, but a later ST marking is not knowable",
     "capacity is measured from pre-decision ADV20 and enforced as a hard "
-    "share cap on open-time fills; close-time synthetic buys remain a separate "
-    "execution path and are reported separately",
+    "share cap on open-time fills; buys are placed at 09:00 only",
     "the learning step **records** observations, it does not promote them: "
     "every candidate stays in the ``observation`` state because n is far below "
     "the 50 this repository requires, and ``advance_candidate`` is deliberately "
@@ -332,8 +330,6 @@ LLM_LIMITATIONS = (
     "candidates and never promotes them, and forward (live) days decide",
     "the news feed is the free flash stream only; the paid columns are not "
     "replayable, so nothing here speaks for them",
-    "the model chooses *within* a fixed panel of the previous session's "
-    "movers, so this measures selection inside a panel, not the panel itself",
     "one sampled model call per day: recorded and replayable, but a single "
     "sample is not a distribution over the model's judgement",
     "the close-phase decision is a **synthetic close assumption**, not a "
@@ -350,23 +346,14 @@ LLM_LIMITATIONS = (
     "from production's, and no window here says what production would decide",
 )
 
-#: The ablation arm has its own caveat. It is separate from
-#: LLM_LIMITATIONS because it describes an arm, not the decider: a run
-#: without the flag must not carry a caveat about a column it showed.
-CONCEPTS_ABLATED_LIMITATION = (
-    "ablation arm: the concept column (current membership) was removed from "
-    "the panel by --no-concepts; against a same-window run without the flag, "
-    "every order difference is attributable to that column alone"
-)
-
-
 #: Stated on every run that used today's membership for a past session.
 #: Not a footnote: a reader comparing two windows has to know that the sector
 #: membership in both is the one assigned after them, because it means the
 #: sector arms were told which names would later be labelled with the theme.
 CURRENT_MEMBERSHIP_LIMITATION = (
     "concept membership is the CURRENT stocks.db:concept_stocks snapshot "
-    "applied to every replayed session (--allow-current-membership). No dated "
+    "applied to every replayed session (the default without "
+    "--sector-membership). No dated "
     "membership source is available at this account's API tier, so a concept "
     "assigned after the window still appears in it; sector-level conclusions "
     "from this run are exploratory, not promotion-grade")
@@ -390,8 +377,7 @@ def _limitations(ctx) -> tuple[str, ...]:
         ]
         extra = [
             item for item in extra
-            if "fixed panel of the previous session's movers" not in item
-            and "one sampled model call per day" not in item
+            if "one sampled model call per day" not in item
         ]
         if ctx.selection_architecture == "sector_first_simple_selector":
             stage_note = (
@@ -403,11 +389,14 @@ def _limitations(ctx) -> tuple[str, ...]:
                 f"{ctx.selection_architecture} uses three sampled model stages "
                 "at 09:00: direction selection, stock selection and the shared "
                 "trade planner; one replay is not a distribution over them")
+        extra.append(stage_note)
+        if _membership_is_strict(ctx):
+            extra.append(
+                "sector membership came from the dated PIT archive supplied "
+                "to this run; the contract prevents current-only leakage "
+                "but does not itself prove the provider's historical "
+                "semantics")
         extra.extend((
-            stage_note,
-            "sector membership is accepted only from the explicit PIT archive "
-            "supplied to this run; the contract prevents current-only leakage "
-            "but does not itself prove the provider's historical semantics",
             "selected directions are seeded into the existing theme gate "
             "without an independent trend score, so this window tests "
             "sector-first opportunity construction, not theme-gate alpha",
@@ -418,8 +407,6 @@ def _limitations(ctx) -> tuple[str, ...]:
                 "direction news mentioning flow terms is removed; stock-level "
                 "evidence remains unchanged so D isolates direction discovery",
             )
-    if ctx.decider == "llm" and not getattr(ctx, "concepts", True):
-        extra.append(CONCEPTS_ABLATED_LIMITATION)
     return tuple(base + extra)
 
 
@@ -801,229 +788,6 @@ def _resolve_concepts(ctx, prev_day: str, code: str) -> list[str]:
         return []
 
 
-def _legacy_pool_rows(by_change: list[tuple], by_turnover: list[tuple],
-                      *, lane_depth: int) -> list[dict]:
-    """The frozen pre-panel world of the legacy whole-market control.
-
-    Moved here from the deleted ``data/selection_policy`` on 2026-09-21.
-    It lives beside its only caller because it is a control, not a policy:
-    the A arm must replay the same ordering it always did, and a shared
-    helper would let it drift with the target selection logic.
-
-    Persist the two ordinal ranks as well as their values. Equal values must
-    replay in the same order as the live stable sort; reconstructing a tie
-    from values alone can choose a different security and turn a tie-break
-    into an apparent policy effect.
-    """
-    change_rank = {
-        code: rank for rank, (_score, code, _row)
-        in enumerate(by_change[:lane_depth])
-    }
-    turnover_rank = {
-        code: rank for rank, (_score, code, _row)
-        in enumerate(by_turnover[:lane_depth])
-    }
-    raw = {}
-    for _score, code, row in [
-            *by_change[:lane_depth], *by_turnover[:lane_depth]]:
-        raw.setdefault(code, row)
-
-    rows = []
-    for code in dict.fromkeys([
-            *[x[1] for x in by_change[:lane_depth]],
-            *[x[1] for x in by_turnover[:lane_depth]]]):
-        row = raw[code]
-        rows.append({
-            "code": code,
-            "change_pct": (
-                float(row["change_pct"])
-                if row.get("change_pct") is not None else None),
-            "turnover_rate": (
-                float(row.get("turnover_rate"))
-                if row.get("turnover_rate") is not None else None),
-            "change_rank": change_rank.get(code),
-            "turnover_rank": turnover_rank.get(code),
-        })
-    return rows
-
-
-def _legacy_lane_mix(rows: list[dict], *, limit: int, eligible) -> list[str]:
-    """Strict change/turnover alternation over a legacy pool. 0.5 share.
-
-    This is the exact sequence the old ``change_share=0.5`` produced:
-    change, turnover, change, turnover, ... Kept as a literal so the control
-    stays byte-for-byte what it was, now that the gene that parameterised it
-    is gone.
-    """
-    if limit <= 0:
-        return []
-    usable = [
-        row for row in rows
-        if row.get("code")
-        and row.get("change_pct") is not None
-        and row.get("turnover_rate") is not None
-    ]
-    if all(row.get("change_rank") is not None for row in usable):
-        by_change = sorted(usable, key=lambda row: int(row["change_rank"]))
-    else:
-        by_change = sorted(
-            usable, key=lambda row: float(row["change_pct"]), reverse=True)
-    if all(row.get("turnover_rank") is not None for row in usable):
-        by_turnover = sorted(usable, key=lambda row: int(row["turnover_rank"]))
-    else:
-        by_turnover = sorted(
-            usable, key=lambda row: float(row["turnover_rate"]), reverse=True)
-
-    merged = []
-    ci = ti = 0
-    total = max(limit * 4, limit)
-    while len(merged) < total and (
-            ci < len(by_change) or ti < len(by_turnover)):
-        prefer_change = len(merged) % 2 == 0
-        if prefer_change and ci < len(by_change):
-            merged.append(by_change[ci]); ci += 1
-        elif not prefer_change and ti < len(by_turnover):
-            merged.append(by_turnover[ti]); ti += 1
-        elif ci < len(by_change):
-            merged.append(by_change[ci]); ci += 1
-        elif ti < len(by_turnover):
-            merged.append(by_turnover[ti]); ti += 1
-
-    chosen, seen = [], set()
-    for row in merged:
-        code = str(row["code"])
-        if code in seen:
-            continue
-        seen.add(code)
-        if not eligible(code):
-            continue
-        chosen.append(code)
-        if len(chosen) >= limit:
-            break
-    return chosen
-
-
-def _build_panel(ctx, day: str, prev_day: str, limit: int) -> list[dict]:
-    """The securities the decision may order, and the only ones.
-
-    Drawn from the previous session's bars, so listing and suspension are
-    satisfied by construction rather than by a later check — a security with
-    no bar on T-1 cannot be ranked or priced, so it is not in the pool. What
-    the panel adds is that the pool is now *stated to the model and enforced
-    on its answer*: a model asked about a 2020 window has read 2026 and will
-    name a security that had not listed, and the panel is what turns that
-    into a counted refusal instead of a purchase.
-
-    The candidate set is the **whole instrument table**, not the previous
-    session's bars. A set drawn from T-1 bars can only contain listed names,
-    so a gate applied to it would be unreachable — and this repository has
-    paid for declared-but-unreachable three times. Iterating instruments
-    changes nothing about which names are *rankable* (a name with no T-1 bar
-    has no change to rank on either way); what it changes is that every
-    exclusion is counted, so "the universe shrank" is a number rather than
-    an absence.
-
-    ADV20 is computed only for the top ``limit * 3`` by change, because it
-    costs a history read per code and most of the pool is never shown.
-    """
-    bars_prev = ctx.corpus.bars(prev_day)
-    minimal_no_flow = getattr(ctx, "selection_architecture", "") == (
-        "dual_rank_price_v1")
-    concepts = {} if minimal_no_flow else _concepts_map(ctx)
-    #: Both arms read the map: the ablation arm needs it to count what
-    #: it removed, and the read touches no decision data.
-    show_concepts = getattr(ctx, "concepts", True)
-    limit_pool = {} if minimal_no_flow else _limit_pool_map(ctx, day)
-    fund_flow = {} if minimal_no_flow else _fund_flow_map(ctx, prev_day)
-    ranked = []
-    for code in ctx.corpus.instruments:
-        reason = _eligibility(ctx, code, day, prev_day)
-        if reason is not None:
-            ctx.counters[f"eligibility:{reason}"] += 1
-            continue
-        # The gate above already proved this code has a bar on ``prev_day``.
-        row = bars_prev[code]
-        chg = row.get("change_pct")
-        close = row.get("close")
-        if chg is None or not close or float(close) <= 0:
-            continue
-        if float(chg) >= LIMIT_UP_SKIP_PCT:
-            continue
-        ranked.append((float(chg), code, row))
-
-    if not ranked:
-        ctx.last_panel_candidate_pool = []
-        return []
-
-    # Ranked by change, as before — but the *pool* is widened before the cut
-    # so the cut is no longer the only decision. Selection used to be
-    # `top-N by T-1 change`, which meant the model could only ever pick
-    # yesterday's biggest movers and the ranking, not the model, chose the
-    # strategy. The pool is now the union of that ranking with the session's
-    # most-traded names, so a quiet name with real turnover is offerable.
-    by_change = sorted(ranked, key=lambda t: t[0], reverse=True)
-    by_turnover = sorted(
-        ranked, key=lambda t: (t[2].get("turnover_rate") or 0.0), reverse=True)
-
-    # **Legacy whole-market control, not the target strategy.** This lane mix
-    # was briefly exposed as the policy gene ``selection_rank.change_share``,
-    # which was removed on 2026-09-21: no trading path ever read it, and the
-    # live trader selects by concept fund flow and a within-sector multi-factor
-    # score instead (``tools/sector_beta``). It is kept here only because the
-    # A arm of the preregistered comparison needs a frozen incumbent baseline.
-    #
-    # The merge is inlined rather than imported so that the control cannot
-    # drift when the target selection logic changes — a control that moves
-    # with the treatment measures nothing.
-    ctx.last_panel_candidate_pool = _legacy_pool_rows(
-        by_change, by_turnover, lane_depth=limit * 4)
-    chosen_codes = _legacy_lane_mix(
-        ctx.last_panel_candidate_pool,
-        limit=limit,
-        eligible=lambda code: (
-            (ctx.corpus.adv20(code, prev_day) or 0) > 0),
-    )
-    ctx.counters["panel_pool"] += min(
-        limit * 4, len(by_change) + len(by_turnover))
-
-    ranked_by_code = {
-        code: (chg, row) for chg, code, row in ranked
-    }
-    panel: list[dict] = []
-    for code in chosen_codes:
-        chg, row = ranked_by_code[code]
-        adv = ctx.corpus.adv20(code, prev_day)
-        if not show_concepts and concepts.get(code):
-            ctx.counters["concepts_ablated_rows"] += 1
-        board = limit_pool.get(code) or {}
-        panel.append({
-            "code": code,
-            "name": ctx.corpus.instruments[code]["name"],
-            "close": float(row["close"]),
-            "change_pct": round(chg, 2),
-            "adv20": adv,
-            "turnover_rate": round(float(row.get("turnover_rate") or 0.0), 2),
-            # The ablation empties the column, not the explanation: the
-            # header and the prompt still describe concepts, so the arms
-            # differ by the data alone.
-            "concepts": (concepts.get(code, []) if show_concepts else []),
-            # Only present for names that were on the previous session's
-            # 涨停 list. The column is blank for everything else, which is
-            # the fact — not every name has a limit history.
-            "consecutive_limits": board.get("consecutive_limits"),
-            "limit_sector": board.get("sector"),
-            "net_amount": (fund_flow.get(code) or {}).get("net_amount"),
-        })
-    ctx.counters["panel_ranked"] += len(by_change)
-    # Names offered from *outside* the top `limit` by change. This is the
-    # number that says the mix is real; it read 0 when the pool was
-    # concatenated, which is how the defect above was found.
-    top_by_change = {c for _, c, _ in by_change[:limit]}
-    ctx.counters["panel_offered_beyond_top_change"] += sum(
-        1 for p in panel if p["code"] not in top_by_change)
-    return panel
-
-
 def _fund_flow_map(ctx, prev_day: str) -> dict[str, dict]:
     """Whole-market fund flow by code, cumulative over the theme window.
 
@@ -1074,28 +838,6 @@ def _limit_pool_map(ctx, day: str) -> dict[str, dict]:
         ctx.counters["limit_pool_unavailable"] += 1
         logger.debug("%s: limit pool unavailable: %s", day, exc)
         return {}
-
-
-def _concepts_map(ctx) -> dict[str, list[str]]:
-    """Concept membership for the panel, read once per run.
-
-    Cached on the context because the file does not change inside a window and
-    a read per day would be a query per simulated session for data that is
-    ~3.7k rows. Read through the corpus (read-only when shared) like every
-    other corpus file.
-    """
-    cached = getattr(ctx, "_concepts", None)
-    if cached is None:
-        from alpha_agents.data import stock_meta
-        cached = stock_meta.concepts_by_code()
-        ctx._concepts = cached
-        if cached:
-            logger.info("Concept membership: %d code(s) tagged", len(cached))
-        else:
-            logger.warning(
-                "Concept membership is empty — the panel's 概念 column will "
-                "be blank. stocks.db may not be shared into this replay.")
-    return cached
 
 
 def _news_window_label(day: str, prev_day: str, phase: str) -> str:
@@ -1253,7 +995,7 @@ def _require_thesis_prompt(args, prompt: str | None,
         f"或者去掉 --autonomous 把机械护栏留着。")
 
 
-def _load_prompt_text(selection_architecture: str = "dual_rank_v0") -> str:
+def _load_prompt_text(selection_architecture: str = "sector_first_v0") -> str:
     """The stock decider prompt, frozen once per replay window."""
     from alpha_agents.agents import t1_decider
     if selection_architecture in {
@@ -2506,9 +2248,8 @@ def _decision_world_read_set(
             strict_replay_eligible=False,
         ))
 
-    minimal_mode = getattr(ctx, "selection_architecture", "") in {
-        "dual_rank_price_v1", "sector_rank_price_v1",
-    }
+    minimal_mode = getattr(ctx, "selection_architecture", "") == (
+        "sector_rank_price_v1")
     event_refs = [] if minimal_mode else [
         {
             **dict(ref),
@@ -2668,14 +2409,13 @@ def _decide_llm(ctx, day: str, prev_day: str,
     """Model-backed buy decision through the declared selection architecture."""
     from alpha_agents.agents import t1_decider
 
-    ranking_day = day if phase == "close" else prev_day
-    market = _market_state(ctx, prev_day)
-    minimal_mode = ctx.selection_architecture in {
-        "dual_rank_price_v1", "sector_rank_price_v1",
-    }
-    if minimal_mode and phase != "open":
+    if phase != "open":
         raise RuntimeError(
-            "nf_discovery_v1 supports the reproducible 09:00 buy path only")
+            f"{ctx.selection_architecture} supports the strict 09:00 buy "
+            "path only")
+    ranking_day = prev_day
+    market = _market_state(ctx, prev_day)
+    minimal_mode = ctx.selection_architecture == "sector_rank_price_v1"
     news = (
         [] if minimal_mode
         else _news_window(day, prev_day, ctx.news_limit, phase)
@@ -2685,41 +2425,15 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
     ctx.last_sector_context = {}
     shared_budget = None
-    sector_mode = ctx.selection_architecture in {
-        "sector_first_v0", "sector_first_simple_selector",
-        "sector_first_no_flow",
-    }
+    sector_mode = not minimal_mode
     if minimal_mode:
-        if ctx.selection_architecture == "sector_rank_price_v1":
-            discovered = _price_sector_stage(ctx, day, ranking_day)
-        else:
-            discovered = _build_panel(
-                ctx, day, ranking_day, ctx.panel_size)
+        discovered = _price_sector_stage(ctx, day, ranking_day)
         panel = _minimal_planner_panel(
             discovered,
             limit=ctx.picks if ctx.picks is not None else len(discovered))
-    elif sector_mode:
-        if phase != "open":
-            raise RuntimeError(
-                f"{ctx.selection_architecture} currently supports the strict "
-                "09:00 buy path only")
+    else:
         panel, shared_budget = _sector_first_stage(
             ctx, day, ranking_day, market, news)
-    else:
-        panel = _build_panel(ctx, day, ranking_day, ctx.panel_size)
-        # A formal A/B/C/D comparison promises one shared research budget.
-        # The incumbent path historically ran without one; keep that behavior
-        # for ordinary dual_rank_v0 runs, but bind the preregistered A arm to
-        # the same finite budget used by the Sector-First stock selector.
-        if getattr(ctx, "experiment_manifest", None) is not None:
-            from alpha_agents.tools.budget import ResearchBudget
-            shared_budget = ResearchBudget()
-
-    if phase == "close":
-        unavailable = _unavailable_codes(ctx)
-        before = len(panel)
-        panel = [row for row in panel if row["code"] not in unavailable]
-        ctx.counters["close_panel_held_removed"] += before - len(panel)
 
     runtime_state, runtime_context, runtime_watch_rows = (
         _trader_runtime_prepare(ctx, day, prev_day, phase, panel, market))
@@ -2966,10 +2680,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "panel_limit": ctx.panel_size,
                 "selection_architecture": ctx.selection_architecture,
                 # ``selection_rank`` was removed 2026-09-21 with the gene it
-                # recorded. It named a whole-market change/turnover mix that
-                # no trading path read; the legacy control still runs that
-                # mix, but as a frozen baseline rather than a tunable policy,
-                # so there is no in-force parameter left to journal.
+                # recorded, and the change/turnover control that still ran
+                # it was removed 2026-09-26. Kept as a null key so journals
+                # written before and after read the same shape.
                 "selection_rank": None,
                 "sector_first": getattr(
                     ctx, "last_sector_context", {}),
@@ -3386,110 +3099,6 @@ def _settle_entries(ctx, day: str, pending: list[dict]) -> dict:
     return {"counts": counts, "events": events, "fills": fills,
             "cancels": Counter(cancels)}
 
-
-def _close_buys(ctx, day: str, prev_day: str, orders: list[dict]) -> list[dict]:
-    """Fill today's close-time buys at today's close.
-
-    The missing quadrant. The other three existed: an open buy rests a limit
-    and settles at the open; open and close sells fill at their own moment.
-    Buying *into the close* had no path at all, so a model that spotted a
-    setup at 14:55 could only write it down for tomorrow — a different trade
-    at a different price.
-
-    Booked as an already-filled position rather than a pending order. A
-    pending order settles at the **next** open, which is precisely the price
-    this decision does not get: the whole point of the close decision is that
-    it already knows today.
-
-    The two levels are still honoured, read as the range the trader will
-    accept rather than as a resting limit: the close must fall inside
-    ``[entry_low, entry_high]``. A buy at a close outside its own stated zone
-    would be the system accepting a price the trader said no to.
-    """
-    from alpha_agents.data import market_rules
-    from alpha_agents.data import portfolio_intent as PI
-    from alpha_agents.data import t1_execution as X
-
-    bars = ctx.corpus.bars(day)
-    prow = ctx.corpus.bars(prev_day) if prev_day else {}
-    # The **same** panel the close decision was shown. It is rebuilt rather
-    # than threaded through because `_decide_llm` is also called by the
-    # placeholder path and by tests; the two calls have to agree on the
-    # ranking day, and they do (`day` for a close decision) — a mismatch was
-    # the first bug here, where the buy panel ranked on T-1 and the orders
-    # were then validated against a panel ranked on T.
-    #
-    # Names already held or pending are dropped here **and** from the panel
-    # the agent is shown, so the two agree. They used to be offered and then
-    # refused: measured with an instrumented run, **every** close-buy refusal
-    # was a duplicate — the agent ordered at the close the same name it had
-    # ordered that morning, and `portfolio` correctly refused a second
-    # position on one name. The rule is real; asking a question whose only
-    # answer is "no" was the defect, exactly as with the T+1 filter above.
-    held = _unavailable_codes(ctx)
-    by_code = {row["code"]: row for row in
-               _build_panel(ctx, day, day, ctx.panel_size)
-               if row["code"] not in held}
-    fills = []
-    for order in orders:
-        code = order["code"]
-        if code in held:
-            # The panel the agent was shown already excluded these, so this
-            # is a model naming something it was not offered. Counted apart
-            # from "not offerable" so the two cannot be read as one number:
-            # one is a held name, the other a name with no bar today.
-            ctx.counters["close_buy_already_held"] += 1
-            continue
-        row = bars.get(code)
-        panel_row = by_code.get(code)
-        if row is None or panel_row is None:
-            # Not offerable today: no bar, or outside the panel. The intent
-            # door records the refusal for the panel case; here it is counted.
-            ctx.counters["close_buy_not_offerable"] += 1
-            continue
-        close = float(row["close"])
-        name = ctx.corpus.instruments[code]["name"]
-        try:
-            rule = market_rules.market_rules(code, day, name=name)
-        except ValueError:
-            continue
-        day_bar = X.DayBar(date=day, open=float(row["open"]),
-                           high=float(row["high"]), low=float(row["low"]),
-                           close=close)
-        prev_close = (prow.get(code) or {}).get("close")
-        got = X.market_at_close(day_bar, side="buy",
-                                prev_close=(float(prev_close)
-                                            if prev_close else None),
-                                limit_pct=rule.price_limit_pct,
-                                limit_rule=rule.reason)
-        if got.status != "filled":
-            # A close at the up limit has no seller. Counted rather than
-            # silently dropped: "it wanted to buy and could not" is a fact
-            # about the window.
-            ctx.counters["close_buy_limit_blocked"] += 1
-            logger.info("%s: close buy of %s blocked — %s", day, code,
-                        got.reason)
-            continue
-        low, high = order.get("entry_low"), order.get("entry_high")
-        if low is not None and close < low or high is not None and close > high:
-            ctx.counters["close_buy_outside_zone"] += 1
-            continue
-        position_id = PI.open_position(
-            code=code, name=name, theme=ctx.theme, open_date=day,
-            open_price=close, stop_loss=order.get("stop_loss"),
-            target_price=order.get("target_price"),
-            source="walk_forward_close", reason=order.get("reason", ""),
-            trader_id=ctx.trader)
-        if position_id is None:
-            ctx.counters["close_buy_refused"] += 1
-            continue
-        fills.append({
-            "date": day, "side": "buy", "code": code, "name": name,
-            "shares": None, "price": close, "amount": None,
-            "capacity_shares": ctx.capacity.get(code),
-            "capacity_oversize": False,
-            "reason": "bought at the close"})
-    return fills
 
 
 def _fill_replay_peak_fields(ctx, positions: list[dict], day: str,
@@ -4284,56 +3893,16 @@ def _experiment_contract(args, *, architecture: str,
             f"experiment arm {arm} requires {expected}, got {architecture}")
     if args.decider != "llm":
         raise SystemExit(
-            "A/B/C/D architecture experiments require --decider llm")
+            "B/C/D architecture experiments require --decider llm")
     if not membership_archive:
         raise SystemExit(
-            "A/B/C/D architecture experiments require the same "
+            "B/C/D architecture experiments require the same "
             "--sector-membership archive for cluster-risk attribution")
     return manifest, digest
 
 
-_SELECTION_EXPERIMENT_ARMS = frozenset({"CONTROL", "SECTOR"})
-
-
-def _selection_experiment_contract(
-        args, *, architecture: str,
-        membership_archive) -> tuple[dict | None, str | None]:
-    path = getattr(args, "selection_experiment_manifest", None)
-    arm = getattr(args, "selection_experiment_arm", None)
-    if (path is None) != (arm is None):
-        raise SystemExit(
-            "--selection-experiment-manifest and "
-            "--selection-experiment-arm must be supplied together")
-    if path is None:
-        return None, None
-    if getattr(args, "experiment_manifest", None) is not None:
-        raise SystemExit(
-            "legacy A/B/C/D and nf_discovery_v1 manifests are mutually exclusive")
-    if arm not in _SELECTION_EXPERIMENT_ARMS:
-        raise SystemExit(f"unknown selection experiment arm {arm!r}")
-
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    try:
-        digest = selection_experiment.require_valid(manifest)
-    except selection_experiment.SelectionExperimentError as exc:
-        raise SystemExit(str(exc)) from exc
-    expected = manifest["arms"][arm]["architecture"]
-    if architecture != expected:
-        raise SystemExit(
-            f"selection experiment arm {arm} requires {expected}, "
-            f"got {architecture}")
-    if args.decider != "llm":
-        raise SystemExit(
-            "nf_discovery_v1 uses one shared LLM planner; --decider must be llm")
-    if not membership_archive:
-        raise SystemExit(
-            "nf_discovery_v1 requires the same --sector-membership archive "
-            "for both arms, even when CONTROL does not use it for discovery")
-    return manifest, digest
-
-
 def _experiment_runtime_contract(args) -> dict:
-    """Behavioral runtime facts a formal A/B/C/D run must freeze.
+    """Behavioral runtime facts a formal B/C/D run must freeze.
 
     A manifest that names costs/model/budget but does not bind them to the
     process is decoration. Keep this separate from the arm contract so tests
@@ -4383,68 +3952,10 @@ def _experiment_runtime_contract(args) -> dict:
             "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
             "mechanical_target": autonomy_flags(args)["mechanical_target"],
             "agent_exits": autonomy_flags(args)["agent_exits"],
-            "close_buys": bool(getattr(args, "close_buys", False)),
+            "close_buys": False,
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
     }
-
-
-def _selection_experiment_runtime_contract(args) -> dict:
-    """Effective runtime facts for the minimal no-flow experiment."""
-    from alpha_agents.data import portfolio, portfolio_exit
-    from alpha_agents.model_factory import model_identity
-
-    return {
-        "decision_config": {
-            "trader": str(args.trader),
-            "picks_per_day": (int(args.picks) if args.picks is not None
-                              else None),
-            "panel_size": int(args.panel_size),
-            "participation": float(args.participation),
-            "max_turns_per_decision": 1,
-            "model_timeout_seconds": float(args.model_timeout),
-            "pace_seconds": float(args.pace_seconds),
-            "news_limit": 0,
-            "trader_tools_enabled": False,
-            "direction_limit": 3,
-            "learning_input": "frozen",
-            "run_theme": str(args.theme),
-        },
-        "model": model_identity(),
-        "cost_model": {
-            "name": "virtual_a_share_v1",
-            "commission_rate": portfolio_exit.COMMISSION_RATE,
-            "min_commission_rmb": portfolio_exit.MIN_COMMISSION,
-            "stamp_duty_sell_rate": portfolio_exit.STAMP_DUTY_SELL_RATE,
-            "transfer_fee_rate": portfolio_exit.TRANSFER_FEE_RATE,
-            "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
-        },
-        "exit_policy": {
-            # Effective, not as argparse left them: an llm run ignores the
-            # exit flags, and a contract that froze the flags would bind a
-            # behaviour the run does not have.
-            "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
-            "mechanical_target": autonomy_flags(args)["mechanical_target"],
-            "agent_exits": autonomy_flags(args)["agent_exits"],
-            "close_buys": bool(getattr(args, "close_buys", False)),
-            "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
-        },
-    }
-
-
-def _verify_selection_experiment_runtime(args, manifest: dict | None) -> None:
-    if manifest is None:
-        return
-    actual = _selection_experiment_runtime_contract(args)
-    mismatches = {}
-    for field, observed in actual.items():
-        frozen = manifest.get(field)
-        if frozen != observed:
-            mismatches[field] = {"manifest": frozen, "runtime": observed}
-    if mismatches:
-        raise SystemExit(
-            "nf_discovery_v1 runtime does not match its manifest: "
-            + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
 
 
 def _verify_experiment_identity(
@@ -4501,13 +4012,6 @@ def _verify_experiment_window(ctx, window: list[str]) -> None:
         raise SystemExit(
             f"run window {actual['start']}..{actual['end']} is not one of "
             "the preregistered validation windows")
-    if getattr(ctx, "experiment_family", None) == selection_experiment.FAMILY:
-        expected = int(
-            ctx.experiment_manifest.get("expected_days_per_window") or 0)
-        if len(window) != expected:
-            raise SystemExit(
-                f"nf_discovery_v1 window has {len(window)} trading days; "
-                f"expected exactly {expected}")
 
 
 class Context:
@@ -4523,8 +4027,13 @@ class Context:
         self.trader = args.trader
         self.picks = args.picks
         self.theme = args.theme
-        self.selection_architecture = getattr(
-            args, "selection_architecture", "dual_rank_v0")
+        #: Sector-First is the only selection path (2026-09-26). The
+        #: placeholder decider selects nothing — it exists to put orders
+        #: through the ledger without a model — so it carries no
+        #: architecture rather than the name of one it did not run.
+        self.selection_architecture = (
+            getattr(args, "selection_architecture", "sector_first_v0")
+            if args.decider == "llm" else None)
         membership_path = getattr(args, "sector_membership", None)
         allow_current = bool(getattr(args, "allow_current_membership", False))
         if membership_path is not None and allow_current:
@@ -4536,11 +4045,14 @@ class Context:
         if membership_path is not None:
             self.sector_membership_archive = sector_membership.load(
                 membership_path)
-        elif allow_current:
-            # Today's membership applied to every replayed session. A real
-            # lookahead, opted into by a line the operator wrote. The snapshot
-            # carries point_in_time=False, which is what makes every consumer
-            # below run non-strict rather than silently strict.
+        elif allow_current or args.decider == "llm":
+            # Today's membership applied to every replayed session: the
+            # default when no dated archive is supplied, because no PIT
+            # membership source exists at this account's API tier and the
+            # selection path cannot run without one. A real lookahead, and
+            # stated: the snapshot carries point_in_time=False, which makes
+            # every consumer below run non-strict rather than silently strict,
+            # and the report prints CURRENT_MEMBERSHIP_LIMITATION.
             self.sector_membership_archive = (
                 sector_membership.current_from_corpus())
         else:
@@ -4561,9 +4073,7 @@ class Context:
                 identity_paths["sector_membership"] = membership_path
             self.input_identity = world_read_set.file_identity(identity_paths)
         formal_manifest_requested = (
-            getattr(args, "experiment_manifest", None) is not None
-            or getattr(args, "selection_experiment_manifest", None) is not None
-        )
+            getattr(args, "experiment_manifest", None) is not None)
         self.code_ref = (
             world_read_set.git_code_ref(_PROJECT_ROOT)
             if formal_manifest_requested else None
@@ -4579,20 +4089,11 @@ class Context:
             architecture=self.selection_architecture,
             membership_archive=self.sector_membership_archive,
         )
-        selection_arm = getattr(args, "selection_experiment_arm", None)
-        selection_manifest, selection_hash = _selection_experiment_contract(
-            args,
-            architecture=self.selection_architecture,
-            membership_archive=self.sector_membership_archive,
-        )
-        self.experiment_arm = legacy_arm or selection_arm
+        self.experiment_arm = legacy_arm
         self.experiment_family = (
-            selection_experiment.FAMILY
-            if selection_manifest is not None else
-            ("sector_abcd_v0" if legacy_manifest is not None else None)
-        )
-        self.experiment_manifest = legacy_manifest or selection_manifest
-        self.experiment_manifest_hash = legacy_hash or selection_hash
+            "sector_abcd_v0" if legacy_manifest is not None else None)
+        self.experiment_manifest = legacy_manifest
+        self.experiment_manifest_hash = legacy_hash
         _verify_experiment_identity(
             self.experiment_manifest,
             code_ref=self.code_ref,
@@ -4600,20 +4101,12 @@ class Context:
             input_hash=self.input_identity["input_hash"],
         )
         _verify_experiment_runtime(args, legacy_manifest)
-        _verify_selection_experiment_runtime(args, selection_manifest)
-        if self.selection_architecture in {
-                "sector_first_v0", "sector_first_simple_selector",
-                "sector_first_no_flow", "sector_rank_price_v1"}:
-            if args.decider != "llm":
-                raise SystemExit(
-                    f"{self.selection_architecture} requires --decider llm")
+        if args.decider == "llm":
             if not self.sector_membership_archive:
                 raise SystemExit(
-                    f"{self.selection_architecture} requires either "
-                    "--sector-membership (a dated PIT archive) or "
-                    "--allow-current-membership (today's concept_stocks, "
-                    "applied to every replayed session, which is a stated "
-                    "lookahead)")
+                    f"{self.selection_architecture} has no sector membership: "
+                    "concept_stocks in stocks.db is empty and no "
+                    "--sector-membership archive was supplied")
             if (getattr(self, "experiment_manifest", None) is not None
                     and not all(item.point_in_time
                                 for item in self.sector_membership_archive)):
@@ -4631,9 +4124,6 @@ class Context:
                 raise SystemExit(
                     "--frozen-directions is only valid for "
                     "sector_first_simple_selector")
-            _validate_close_buy_support(
-                self.selection_architecture,
-                bool(getattr(args, "close_buys", False)))
         self.participation = args.participation
         self.stop_pct = args.stop_pct
         self.entry_zone = ENTRY_ZONES.get(args.trader, ENTRY_ZONES["pullback"])
@@ -4645,10 +4135,6 @@ class Context:
         _rails = autonomy_flags(args)
         self.autonomous = _rails["autonomous"]
         self.agent_exits = _rails["agent_exits"]
-        #: Whether the buy-side gets an additional synthetic close decision.
-        #: Independent from sell-side agent exits: enabling one must not
-        #: silently add the other decision point.
-        self.close_buys = getattr(args, "close_buys", False)
         #: Whether the mechanical **stop** is enforced. Off means nothing
         #: closes a position for being down: the agent has to decide.
         #:
@@ -4674,11 +4160,6 @@ class Context:
         #: configurations can be compared on one window — the tool-using
         #: trader against the bare picker, same panel, same days.
         self.trader_tools = getattr(args, "trader_tools", True)
-        #: Ablation arm for the panel concept column, from --no-concepts.
-        #: Default on, and read through getattr rather than assumed:
-        #: hand-built Contexts in tests predate the flag and must keep the
-        #: behaviour they were written against.
-        self.concepts = getattr(args, "concepts", True)
         #: Turns allowed per decision. ``None`` means "the decider's own
         #: default" — see the note on ``--max-turns``; the number has one
         #: owner, and it is not this file.
@@ -4781,26 +4262,6 @@ def _decider_note(ctx) -> str:
         return (f"（模型读 as-of 面板选股，最多 {ctx.picks} 单；"
                 f"面板 {ctx.panel_size} 只，新闻窗口截至当日 09:00）")
     return "（**占位用途，不代表任何策略**）"
-
-
-_CLOSE_BUY_UNSUPPORTED = frozenset({
-    "sector_first_v0", "sector_first_simple_selector",
-    "sector_first_no_flow", "sector_rank_price_v1",
-})
-
-
-def _validate_close_buy_support(architecture: str, enabled: bool) -> None:
-    if enabled and architecture in _CLOSE_BUY_UNSUPPORTED:
-        raise SystemExit(
-            f"{architecture} does not support --close-buys; "
-            "its reproducible buy path is 09:00 only")
-
-
-def _close_buy_enabled(ctx) -> bool:
-    return (
-        getattr(ctx, "decider", None) == "llm"
-        and bool(getattr(ctx, "close_buys", False))
-    )
 
 
 def _run_decider(ctx, day: str, prev_day: str,
@@ -5045,25 +4506,6 @@ def _run_window(ctx, args) -> dict:
                         "%s: agent exit step (%s) failed (%s: %s) — holding",
                         day, phase, type(exc).__name__, exc)
                     errors.append({"date": day, "stage": f"agent_exit:{phase}",
-                                   "error": f"{type(exc).__name__}: {exc}"})
-            # The close-time **buy**, which is the second of the day's two
-            # decisions on the buy side. Runs after the close exits so a
-            # position sold at the close frees its capital for one bought at
-            # the same close.
-            if _close_buy_enabled(ctx):
-                try:
-                    with replay_as_of(f"{day} 14:55"):
-                        close_orders = _run_decider(ctx, day, prev_day,
-                                                    phase="close")
-                        close_fills = _close_buys(ctx, day, prev_day,
-                                                  close_orders)
-                    if close_fills:
-                        logger.info("%s: close buys %d", day, len(close_fills))
-                    fill_rows.extend(close_fills)
-                except Exception as exc:              # noqa: BLE001
-                    logger.warning("%s: close buy step failed (%s: %s)",
-                                   day, type(exc).__name__, exc)
-                    errors.append({"date": day, "stage": "close_buy",
                                    "error": f"{type(exc).__name__}: {exc}"})
             with replay_as_of(f"{day} 14:55"):
                 _sync_replay_positions(ctx, day, "close")
@@ -5404,7 +4846,6 @@ def write_report(result: dict, out_dir: Path) -> dict:
         "agent_tool_calls": model.get("tool_calls"),
         "max_turns_per_decision": ctx.max_turns,
         "trader_tools_enabled": bool(getattr(ctx, "trader_tools", False)),
-        "concepts_ablated": not getattr(ctx, "concepts", True),
         "model_usage_ok": model_usage_ok,
         "model_usage_detail": model_usage_detail,
         "decider_counters": dict(ctx.counters),
@@ -5994,42 +5435,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None,
                         help="names the run and the exit command ids.")
     parser.add_argument("--decider", choices=("placeholder", "llm"),
-                        default="placeholder",
-                        help="placeholder: rank T-1 change, no model (default). "
-                             "llm: the model chooses from an as-of panel.")
+                        default="llm",
+                        help="llm (default): the Sector-First trader decides. "
+                             "placeholder: a ledger-kernel test harness that "
+                             "ranks T-1 change and calls no model; it is not "
+                             "a strategy and has no selection architecture.")
     parser.add_argument(
         "--selection-architecture",
         choices=(
-            "dual_rank_v0", "sector_first_v0",
-            "sector_first_simple_selector", "sector_first_no_flow",
-            "dual_rank_price_v1", "sector_rank_price_v1"),
-        default="dual_rank_v0",
-        help="candidate architecture; sector-first modes are opt-in only")
+            "sector_first_v0", "sector_first_simple_selector",
+            "sector_first_no_flow", "sector_rank_price_v1"),
+        default="sector_first_v0",
+        help="Sector-First variant; sector_first_v0 is the trader, the "
+             "others are its preregistered ablations")
     parser.add_argument(
         "--sector-membership", type=Path, default=None,
-        help="PIT membership archive required by sector-first modes")
+        help="dated PIT membership archive. Without it the run uses "
+             "today's concept_stocks for every replayed session")
     parser.add_argument(
         "--allow-current-membership", action="store_true",
-        help="use today's concept_stocks for every replayed session when no "
-             "dated archive exists. This is a stated lookahead: a concept "
-             "assigned after the window still appears in it. Refused for "
-             "preregistered experiments, which need a real PIT archive.")
+        help="accepted for older command lines; today's concept_stocks is "
+             "now the default when --sector-membership is absent. Either way "
+             "it is a stated lookahead, and preregistered experiments refuse "
+             "it because they need a real PIT archive.")
     parser.add_argument(
         "--frozen-directions", type=Path, default=None,
         help="B-arm frozen direction archive required by C")
     parser.add_argument(
         "--experiment-manifest", type=Path, default=None,
-        help="frozen A/B/C/D preregistration manifest")
+        help="frozen B/C/D preregistration manifest")
     parser.add_argument(
-        "--experiment-arm", choices=("A", "B", "C", "D"), default=None,
+        "--experiment-arm", choices=("B", "C", "D"), default=None,
         help="arm bound to --experiment-manifest")
-    parser.add_argument(
-        "--selection-experiment-manifest", type=Path, default=None,
-        help="frozen nf_discovery_v1 manifest; separate from legacy A/B/C/D")
-    parser.add_argument(
-        "--selection-experiment-arm", choices=("CONTROL", "SECTOR"),
-        default=None,
-        help="arm bound to --selection-experiment-manifest")
     parser.add_argument(
         "--no-stop-loss", dest="mechanical_stop",
         action="store_false", default=True,
@@ -6048,9 +5485,6 @@ def build_parser() -> argparse.ArgumentParser:
              "机械止损会让一笔的结局衡量那条线而不是 agent 的判断，"
              "学习信号因此不可归因")
     parser.add_argument(
-        "--close-buys", action="store_true",
-        help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")
-    parser.add_argument(
         "--no-trader-tools", dest="trader_tools",
         action="store_false", default=True,
         help="不给买入决策器工具（回到'只能从面板里挑'的旧行为；"
@@ -6062,12 +5496,6 @@ def build_parser() -> argparse.ArgumentParser:
              "1 等于没有工具。定义只存在一处，避免 CLI 与函数默认值漂移。")
     parser.add_argument("--panel-size", type=int, default=40,
                         help="securities the model may choose from (llm only).")
-    parser.add_argument(
-        "--no-concepts", dest="concepts", action="store_false", default=True,
-        help="ablation arm: strip the concept column from the panel (llm "
-             "only). The prompt text, the header and every other column stay "
-             "identical between the arms, so an order difference between two "
-             "same-window runs is attributable to this column alone.")
     parser.add_argument("--news-limit", type=int, default=60,
                         help="news items in the 09:00 window (llm only).")
     parser.add_argument("--model-timeout", type=float, default=120.0,

@@ -173,7 +173,7 @@ class TestAutonomousNeedsAPromptThatAsksForTheThesis:
     architecture loads ``t1_decide.md`` — six price fields and nothing else.
     """
 
-    def _check(self, *, autonomous, prompt, arch="dual_rank_v0"):
+    def _check(self, *, autonomous, prompt, arch="sector_rank_price_v1"):
         import walk_forward as wf
         return wf._require_thesis_prompt(
             SimpleNamespace(autonomous=autonomous), prompt, arch)

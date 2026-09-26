@@ -1,4 +1,4 @@
-"""RP-05 runner wiring: the minimal experiment changes discovery only."""
+"""sector_rank_price_v1 wiring: the minimal path changes discovery only."""
 
 from collections import Counter
 import sys
@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import walk_forward as wf  # noqa: E402
 
 from alpha_agents.data import sector_selection as SS  # noqa: E402
-from alpha_agents.evolution import selection_experiment as E  # noqa: E402
 
 
 class _Corpus:
@@ -83,20 +82,6 @@ def _boom(name):
     return inner
 
 
-def test_control_minimal_discovery_never_reads_ablated_sources(monkeypatch):
-    ctx = _Ctx("dual_rank_price_v1")
-    monkeypatch.setattr(wf, "_concepts_map", _boom("concepts"))
-    monkeypatch.setattr(wf, "_limit_pool_map", _boom("limit pool"))
-    monkeypatch.setattr(wf, "_fund_flow_map", _boom("fund flow"))
-
-    panel = wf._build_panel(
-        ctx, "2026-01-30", "2026-01-29", limit=2)
-
-    assert [row["code"] for row in panel] == ["600001", "600002"]
-    assert all(row["concepts"] == [] for row in panel)
-    assert all(row["net_amount"] is None for row in panel)
-
-
 def test_sector_minimal_discovery_never_reads_ablated_sources(monkeypatch):
     ctx = _Ctx("sector_rank_price_v1")
     membership = SS.MembershipSnapshot(
@@ -151,7 +136,7 @@ def test_minimal_planner_uses_transparent_prefix_and_field_whitelist():
 def test_minimal_book_does_not_read_learning_inputs(monkeypatch):
     from alpha_agents.evolution import feedback
 
-    ctx = _Ctx("dual_rank_price_v1")
+    ctx = _Ctx("sector_rank_price_v1")
     monkeypatch.setattr(
         feedback, "inject_portfolio", lambda **kwargs: "BOOK")
     monkeypatch.setattr(
@@ -167,23 +152,3 @@ def test_minimal_book_does_not_read_learning_inputs(monkeypatch):
 
     assert book == "BOOK"
     assert knowledge == ""
-
-
-def test_selection_experiment_window_is_exactly_30_trading_days():
-    days = [f"2026-01-{day:02d}" for day in range(1, 31)]
-    ctx = type("Ctx", (), {
-        "experiment_manifest": {
-            "validation_windows": [{
-                "start": days[0], "end": days[-1],
-            }],
-            "expected_days_per_window": 30,
-        },
-        "experiment_family": E.FAMILY,
-    })()
-
-    wf._verify_experiment_window(ctx, days)
-
-    short = [days[0], *days[2:-1], days[-1]]
-    assert len(short) == 29
-    with pytest.raises(SystemExit, match="expected exactly 30"):
-        wf._verify_experiment_window(ctx, short)

@@ -186,7 +186,7 @@ def test_mismatched_runtime_rejected(monkeypatch):
 
 
 @pytest.mark.parametrize('setting', ['keep_going', 'experiment_manifest',
-                                   'selection_experiment_manifest', 'frozen_directions'])
+                                   'frozen_directions'])
 def test_unsupported_continuations_fail(setting):
     args = SimpleNamespace(days=1, **{setting: True})
     with pytest.raises(CP.CheckpointError):
@@ -298,7 +298,8 @@ def test_real_runner_uninterrupted_equals_checkpoint_suffix(tmp_path):
         isolated = dict(env, ALPHAAGENTS_DATA_DIR=str(path))
         _run_script('scripts/walk_bootstrap.py', ['--target', str(path), '--corpus', str(corpus)], isolated)
         args = ['--target', str(path), '--start', TW._START, '--days', str(count),
-                '--trader', 'pullback', '--picks', '1', '--no-keep-notes']
+                '--trader', 'pullback', '--picks', '1', '--no-keep-notes',
+                '--decider', 'placeholder']
         if path == prefix:
             args += ['--checkpoint-out', str(checkpoint)]
         _run_script('scripts/walk_forward.py', args, isolated)

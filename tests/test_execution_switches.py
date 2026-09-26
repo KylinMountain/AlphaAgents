@@ -1,8 +1,13 @@
-"""RP-08: sell-side agent exits and close-time buys are independent."""
+"""Sell-side agent exits are a switch; close-time buys no longer exist.
+
+The close buy ran only on the change/turnover control panel. With
+Sector-First as the only selection path, and that path 09:00-only, a close
+buy is unreachable, so the flag was removed (2026-09-26) rather than left
+declared and dead.
+"""
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,60 +20,17 @@ def _parse(*extra):
         ["--start", "2026-01-05", *extra])
 
 
-def test_agent_exits_does_not_enable_close_buys():
-    args = _parse("--agent-exits")
-    assert args.agent_exits is True
-    assert args.close_buys is False
+def test_agent_exits_is_its_own_switch():
+    assert _parse("--agent-exits").agent_exits is True
+    assert _parse().agent_exits is False
 
 
-def test_close_buys_does_not_enable_agent_exits():
-    args = _parse("--close-buys")
-    assert args.close_buys is True
-    assert args.agent_exits is False
+def test_close_buys_is_refused_rather_than_ignored():
+    with pytest.raises(SystemExit):
+        _parse("--close-buys")
 
 
-def test_both_flags_can_be_enabled_explicitly():
-    args = _parse("--agent-exits", "--close-buys")
-    assert args.agent_exits is True
-    assert args.close_buys is True
-
-
-@pytest.mark.parametrize(
-    "agent_exits,close_buys,expected",
-    [
-        (False, False, False),
-        (True, False, False),
-        (False, True, True),
-        (True, True, True),
-    ],
-)
-def test_close_buy_routing_depends_only_on_close_buy_switch(
-        agent_exits, close_buys, expected):
-    ctx = SimpleNamespace(
-        decider="llm", agent_exits=agent_exits, close_buys=close_buys)
-    assert wf._close_buy_enabled(ctx) is expected
-
-
-def test_placeholder_never_runs_close_buy_even_when_switch_is_set():
-    ctx = SimpleNamespace(
-        decider="placeholder", agent_exits=False, close_buys=True)
-    assert wf._close_buy_enabled(ctx) is False
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    [
-        "sector_first_v0",
-        "sector_first_simple_selector",
-        "sector_first_no_flow",
-        "sector_rank_price_v1",
-    ],
-)
-def test_sector_reproducible_paths_refuse_close_buy(architecture):
-    with pytest.raises(SystemExit, match="does not support --close-buys"):
-        wf._validate_close_buy_support(architecture, True)
-
-
-def test_supported_open_architecture_accepts_independent_switch():
-    wf._validate_close_buy_support("dual_rank_v0", True)
-    wf._validate_close_buy_support("dual_rank_price_v1", True)
+def test_the_buy_decision_is_09_00_only():
+    ctx = type("Ctx", (), {"selection_architecture": "sector_first_v0"})()
+    with pytest.raises(RuntimeError, match="09:00"):
+        wf._decide_llm(ctx, "2026-01-06", "2026-01-05", phase="close")

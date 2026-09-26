@@ -148,8 +148,6 @@ def _arm(tmp_path, arm, architecture, slope=0.1, *, exposure=True):
 
 def _arms(tmp_path, *, exposure=True):
     return {
-        "A": _arm(tmp_path, "A", "dual_rank_v0", 0.10,
-                  exposure=exposure),
         "B": _arm(tmp_path, "B", "sector_first_v0", 0.20,
                   exposure=exposure),
         "C": _arm(tmp_path, "C", "sector_first_simple_selector", 0.18,
@@ -163,11 +161,11 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
     got = C.compare(manifest=_manifest(), arm_dirs=_arms(tmp_path))
     assert got["status"] == "ready_for_human_review"
     assert got["promotion_eligible"] is False
-    assert got["paired_daily"]["B_minus_A"]["n_days"] == 60
-    assert got["paired_daily"]["B_minus_A"]["expected_trading_days"] == 60
-    assert got["paired_daily"]["B_minus_A"]["left_observed_days"] == 60
-    assert got["paired_daily"]["B_minus_A"]["right_observed_days"] == 60
-    assert got["paired_daily"]["B_minus_A"]["common_trading_days"] == 60
+    assert got["paired_daily"]["C_minus_B"]["n_days"] == 60
+    assert got["paired_daily"]["C_minus_B"]["expected_trading_days"] == 60
+    assert got["paired_daily"]["C_minus_B"]["left_observed_days"] == 60
+    assert got["paired_daily"]["C_minus_B"]["right_observed_days"] == 60
+    assert got["paired_daily"]["C_minus_B"]["common_trading_days"] == 60
     assert got["arms"]["B"]["risk"]["passed"] is True
     assert got["arms"]["B"]["layers"]["direction"]["sets"] == 60
     assert got["arms"]["B"]["layers"]["stock"]["sets"] == 60
@@ -188,7 +186,7 @@ def test_complete_artifacts_produce_reviewable_not_promotable_report(tmp_path):
     assert got["arms"]["B"]["coverage"] == operational["coverage"]
     assert got["evidence_status"]["data"]["B"] == "complete"
     assert got["evidence_status"]["execution"]["B"] == "has_fills"
-    assert got["paired_daily"]["B_minus_A"]["evidence"] in {
+    assert got["paired_daily"]["C_minus_B"]["evidence"] in {
         "positive_beyond_floor", "negative_beyond_floor", "inconclusive",
     }
 
@@ -198,14 +196,14 @@ def test_missing_cluster_exposure_is_insufficient_not_assumed_safe(tmp_path):
         manifest=_manifest(), arm_dirs=_arms(tmp_path, exposure=False))
     assert got["status"] == "insufficient"
     assert "max_theme_cluster_exposure_pct" in (
-        got["arms"]["A"]["risk"]["unverified"])
+        got["arms"]["B"]["risk"]["unverified"])
 
 
 def test_wrong_arm_architecture_is_refused(tmp_path):
     arms = _arms(tmp_path)
     meta_path = arms["B"] / "run.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["selection_architecture"] = "dual_rank_v0"
+    meta["selection_architecture"] = "sector_first_no_flow"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(C.SectorCompareError, match="arm B expected"):
         C.compare(manifest=_manifest(), arm_dirs=arms)
@@ -289,23 +287,23 @@ def test_replay_refuses_an_arm_with_the_wrong_architecture(tmp_path):
     with pytest.raises(SystemExit, match="arm B requires"):
         wf._experiment_contract(
             args,
-            architecture="dual_rank_v0",
+            architecture="sector_first_no_flow",
             membership_archive=(object(),),
         )
 
 
-def test_formal_a_arm_also_requires_the_pit_membership_archive(tmp_path):
+def test_formal_arm_requires_the_pit_membership_archive(tmp_path):
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(_manifest()), encoding="utf-8")
     args = SimpleNamespace(
         experiment_manifest=path,
-        experiment_arm="A",
+        experiment_arm="B",
         decider="llm",
     )
     with pytest.raises(SystemExit, match="same --sector-membership"):
         wf._experiment_contract(
             args,
-            architecture="dual_rank_v0",
+            architecture="sector_first_v0",
             membership_archive=(),
         )
 
@@ -332,7 +330,7 @@ def test_ci_that_does_not_clear_preregistered_floor_is_inconclusive(tmp_path):
         path.write_text(json.dumps(meta), encoding="utf-8")
 
     got = C.compare(manifest=manifest, arm_dirs=arms)
-    assert got["paired_daily"]["B_minus_A"]["evidence"] == "inconclusive"
+    assert got["paired_daily"]["C_minus_B"]["evidence"] == "inconclusive"
     assert got["promotion_eligible"] is False
 
 
@@ -378,7 +376,7 @@ def test_runtime_contract_names_full_virtual_cost_model():
 
 
 def test_load_arm_anchors_return_and_drawdown_to_initial_mark(tmp_path):
-    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    root = _arm(tmp_path, "B", "sector_first_v0", 0.0)
     meta_path = root / "run.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["window"]["trading_days"] = 2
@@ -393,7 +391,7 @@ def test_load_arm_anchors_return_and_drawdown_to_initial_mark(tmp_path):
         ],
     )
 
-    got = C.load_arm(root, "A")
+    got = C.load_arm(root, "B")
     assert got["portfolio"]["net_return_pct"] == 0.0
     assert got["portfolio"]["max_drawdown_pct"] == 5.0
     assert got["daily_returns_pct"]["2026-01-05"] == pytest.approx(
@@ -403,18 +401,18 @@ def test_load_arm_anchors_return_and_drawdown_to_initial_mark(tmp_path):
 
 
 def test_load_arm_refuses_legacy_run_without_initial_mark(tmp_path):
-    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    root = _arm(tmp_path, "B", "sector_first_v0", 0.0)
     meta_path = root / "run.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     del meta["initial_account"]
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
     with pytest.raises(C.SectorCompareError, match="initial_account"):
-        C.load_arm(root, "A")
+        C.load_arm(root, "B")
 
 
 def test_load_arm_refuses_duplicate_days_even_when_declared_count_matches(tmp_path):
-    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    root = _arm(tmp_path, "B", "sector_first_v0", 0.0)
     meta_path = root / "run.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["window"]["trading_days"] = 2
@@ -429,11 +427,11 @@ def test_load_arm_refuses_duplicate_days_even_when_declared_count_matches(tmp_pa
     )
 
     with pytest.raises(C.SectorCompareError, match="duplicate"):
-        C.load_arm(root, "A")
+        C.load_arm(root, "B")
 
 
 def test_load_arm_accepts_one_real_trading_day(tmp_path):
-    root = _arm(tmp_path, "A", "dual_rank_v0", 0.0)
+    root = _arm(tmp_path, "B", "sector_first_v0", 0.0)
     meta_path = root / "run.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["window"]["trading_days"] = 1
@@ -444,7 +442,7 @@ def test_load_arm_accepts_one_real_trading_day(tmp_path):
         [{"date": "2026-01-05", "equity": 99000.0}],
     )
 
-    got = C.load_arm(root, "A")
+    got = C.load_arm(root, "B")
     assert got["portfolio"]["net_return_pct"] == -1.0
     assert got["portfolio"]["max_drawdown_pct"] == 1.0
 

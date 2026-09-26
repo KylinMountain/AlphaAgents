@@ -251,41 +251,6 @@ class TestTheCloseBuyQuadrant:
                             trader_note="", picks=2, template=D.load_prompt(),
                             phase="lunch")
 
-    def test_the_close_buy_checks_the_limit_before_buying(self):
-        """A close at the up limit has no seller. Reused rather than
-        re-implemented, so the close buy cannot drift from the close sell."""
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-        import inspect
-        import walk_forward as wf
-        src = inspect.getsource(wf._close_buys)
-        assert "market_at_close" in src and 'side="buy"' in src
-
-    def test_the_close_buy_honours_the_stated_zone(self):
-        """`entry_low`/`entry_high` are read as the range the trader accepts
-        rather than as a resting limit — a fill outside its own stated zone
-        would be the system accepting a price the trader said no to."""
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-        import inspect
-        import walk_forward as wf
-        src = inspect.getsource(wf._close_buys)
-        assert "close_buy_outside_zone" in src
-
-    def test_the_close_buy_books_a_filled_position_not_a_pending_order(self):
-        """A pending order settles at the *next* open, which is exactly the
-        price this decision does not get."""
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-        import inspect
-        import walk_forward as wf
-        src = inspect.getsource(wf._close_buys)
-        assert "open_position" in src
-        assert "create_pending_order" not in src
-
 
 class TestANameCarriesOnePositionAtATime:
     """`portfolio` refuses a second position on a name that already has one

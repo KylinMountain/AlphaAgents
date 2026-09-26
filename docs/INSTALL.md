@@ -293,10 +293,11 @@ uv run python scripts/walk_bootstrap.py --target /tmp/wf-test
 # 2. 从 2026-01-05 起回放 30 个交易日，用真实模型决策
 ALPHAAGENTS_DATA_DIR=/tmp/wf-test ALPHAAGENTS_LLM_MODE=record \
   uv run python scripts/walk_forward.py --target /tmp/wf-test \
-    --start 2026-01-05 --days 30 --trader default \
-    --autonomous --decider llm --selection-architecture sector_first_v0 \
-    --allow-current-membership --keep-going
+    --start 2026-01-05 --days 30 --trader default --autonomous --keep-going
 ```
+
+不带参数就是 Sector-First 交易员（`--decider llm --selection-architecture sector_first_v0`，
+概念成员用当前 `concept_stocks`，报告里会注明这是前视）。change/turnover 双榜已于 2026-09-26 删除。
 
 - 报告写在 `<沙箱>/walk-reports/<起始日>-<天数>d-<交易员>/`，其中 `summary.txt` 是摘要，
   另有 `equity.csv`、`fills.csv` 等明细。

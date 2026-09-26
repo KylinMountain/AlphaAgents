@@ -214,7 +214,7 @@ def preselection_skill(world: OpportunityDreamWorld, *,
 
 def stock_layer_report(world: OpportunityDreamWorld, *,
                        horizon: int = 5) -> dict:
-    """One stable artifact for A/B/C/D stock-layer comparison."""
+    """One stable artifact for B/C/D stock-layer comparison."""
     architectures = sorted({
         str(group.context.get("selection_architecture") or "unknown")
         for group in world.sets

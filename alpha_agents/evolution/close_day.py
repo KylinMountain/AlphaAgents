@@ -4,6 +4,8 @@
    that was in force while it held them.
 2. Review every persisted TraderDecision and quarantine any concrete
    LessonCandidate; WAIT/HOLD/REJECT are reviewed even without a trade.
+   The review explains; the market grades each decision once its window
+   closes (``decision_outcomes``), and only those grades count as evidence.
 3. Review the day (``market_review``): the market's numbers beside the
    trader's own record of the day (``day_record``) — what it chose at the
    open and why, what it passed on, its orders, fills and holdings — board
@@ -105,6 +107,20 @@ async def review_day(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
             # write() returns None without a model or facts; both are ruled
             # out here, so None is an error or an unreadable reply.
             counts["market_review_failed"] = 1
+
+    try:
+        from alpha_agents.data import trader_session
+        from alpha_agents.evolution import decision_outcomes
+        graded = decision_outcomes.grade(
+            conn, hist, run_id=trader_session.namespace(run_id),
+            trader_id=trader_id, as_of=day)
+        counts["decisions_graded"] = graded["graded"]
+    except Exception as e:                            # noqa: BLE001
+        from alpha_agents.data.clock import LookAheadError
+        if isinstance(e, LookAheadError):
+            raise
+        logger.warning("%s: decision grading failed for %s: %s",
+                       day, trader_id, e)
 
     try:
         learned = trader_learning.advance(

@@ -1526,3 +1526,65 @@ def test_a_placeholder_run_says_its_exits_were_mechanical():
     ctx = argparse.Namespace(agent_exits=False)
     assert (walk_forward._exit_limitation(ctx)
             == walk_forward.MECHANICAL_EXITS_LIMITATION)
+
+
+class TestTheReportShowsHowDeepTheBookWent:
+    """No stop underneath, so the report says how far losses ran."""
+
+    def test_risk_lines(self):
+        equity = [
+            {"date": "d1", "worst_position_return_pct": -3.0,
+             "worst_position_code": "A", "losing_positions": 1,
+             "deep_loss_positions": 0},
+            {"date": "d2", "worst_position_return_pct": -12.5,
+             "worst_position_code": "B", "losing_positions": 2,
+             "deep_loss_positions": 1},
+            {"date": "d3", "worst_position_return_pct": -9.0,
+             "worst_position_code": "B", "losing_positions": 1,
+             "deep_loss_positions": 1},
+        ]
+        text = "\n".join(walk_forward._risk_lines(equity))
+        assert "-12.50%（B，d2）" in text
+        assert "期末亏损持仓        1 只，最深 B -9.00%" in text
+        assert "仓位-日  2" in text
+
+    def test_an_empty_book_says_so(self):
+        text = "\n".join(walk_forward._risk_lines(
+            [{"date": "d1", "worst_position_return_pct": None}]))
+        assert "没有持仓被估值" in text
+
+    def test_valuation_records_the_worst_position(self, tmp_path, monkeypatch):
+        """End to end on the synthetic corpus: a planted position that falls
+        10% shows up as the worst one and as a deep-loss position-day."""
+        import alpha_agents.pipeline.tasks.exit_decision as ED
+
+        async def _hold(positions, price_map, **kw):
+            return [{"code": p["code"], "action": "hold", "reason": "持有"}
+                    for p in positions]
+
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(ED, "decide_for_replay", _hold)
+        series, instruments = _normal()
+        series["600001"][_SESSIONS[21]] = _bar(
+            open_=9.2, high=9.2, low=8.9, close=9.0, change_pct=-10.0)
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        def _plant(ctx, day, prev_day, phase="open"):
+            from alpha_agents.data import portfolio as P
+            if day == _START and not P.get_open_positions(ctx.trader):
+                P.create_pending_order(
+                    code="600001", name="甲", theme=ctx.theme,
+                    order_date=prev_day, entry_low=9.0, entry_high=11.0,
+                    source="test", reason="planted", trader_id=ctx.trader)
+                walk_forward._settle_entries(
+                    ctx, prev_day, P.get_pending_orders(ctx.trader))
+            return []
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _plant)
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None, **kw: object())
+        result = _run(replay, days=1, decider="llm", panel_size=5)
+        row = result["equity"][0]
+        assert row["worst_position_code"] == "600001"
+        assert row["worst_position_return_pct"] == -10.0
+        assert row["deep_loss_positions"] == 1

@@ -4069,6 +4069,10 @@ def _value(ctx, day: str) -> dict:
     bars_today = ctx.corpus.bars(day)
     market_value = unrealized = 0.0
     stale = []
+    # Per-position return from the fill price. There is no stop and no
+    # target, so nothing caps a loss but the agent; the report has to show
+    # how deep the book went rather than let the equity curve average it away.
+    returns: list[tuple[float, str]] = []
     for pos in positions:
         shares = pos.get("shares") or 0
         row = bars_today.get(pos["code"])
@@ -4079,6 +4083,10 @@ def _value(ctx, day: str) -> dict:
             price = float(hist[-1]["close"]) if hist else (pos.get("open_price") or 0)
             stale.append(pos["code"])
         market_value += price * shares
+        open_price = pos.get("open_price") or 0
+        if open_price > 0:
+            returns.append(
+                (round((price / open_price - 1) * 100, 2), pos["code"]))
         # Cost basis, not the raw fill price: what the position cost is what
         # the account paid, and unrealized P&L has to be measured from that
         # or it credits back the slippage the fill already charged.
@@ -4087,6 +4095,7 @@ def _value(ctx, day: str) -> dict:
     total = P.get_total_capital(ctx.trader)
     cash = P.get_available_capital(ctx.trader) + reservations.unconsumed_total(
         P._get_conn(), ctx.trader)
+    worst = min(returns) if returns else None
     return {
         "date": day,
         "cash": cash,
@@ -4098,7 +4107,69 @@ def _value(ctx, day: str) -> dict:
         "open_positions": len(positions),
         "pending_orders": len(P.get_pending_orders(ctx.trader)),
         "valued_at_a_stale_price": ",".join(sorted(stale)),
+        "losing_positions": sum(1 for r, _ in returns if r < 0),
+        "deep_loss_positions": sum(
+            1 for r, _ in returns if r <= -DEEP_LOSS_PCT),
+        "worst_position_code": worst[1] if worst else "",
+        "worst_position_return_pct": worst[0] if worst else None,
     }
+
+
+def _grading_lines(ctx) -> list[str]:
+    """What the market said about each kind of decision, not the reviewer."""
+    from alpha_agents.data import trader_learning as TLD, trader_session
+    from alpha_agents.evolution import decision_outcomes as DO
+    from alpha_agents.evolution import trader_learning as TL
+    run = trader_session.namespace(getattr(ctx, "run_id", None))
+    try:
+        rows = TLD.decision_outcomes(run_id=run, trader_id=ctx.trader)
+        lessons = TLD.lessons(run_id=run, trader_id=ctx.trader)
+        rules = TLD.rules(run_id=run, trader_id=ctx.trader)
+    except sqlite3.Error as exc:
+        return ["— 行情判定 —", f"读取失败：{exc}"]
+    lines = [f"— 行情判定（{DO.DEFAULT_HORIZON} 日前瞻收益 − 全市场中位数；"
+             f"|超额| < {DO.FLAT_PP}pp 记 flat）—"]
+    if not rows:
+        return lines + ["窗口内还没有闭合的决策窗口"]
+    for action, cell in sorted(DO.summary(rows).items()):
+        n = cell["right"] + cell["wrong"]
+        rate = f"{cell['right'] / n:.0%}" if n else "—"
+        lines.append(f"  {action:<7} right {cell['right']:>3}  wrong "
+                     f"{cell['wrong']:>3}  flat {cell['flat']:>3}  判对率 {rate}")
+    lines.append(
+        f"Lesson {len({r['lesson_key'] for r in lessons})} 条 / "
+        f"Rule {len({r['rule_key'] for r in rules})} 条"
+        f"（格子 = 动作 × 情形标签；Lesson n≥{TL.LESSON_MIN_N}、"
+        f"Rule n≥{TL.RULE_MIN_N}，判对率 ≥{TL.LEAN:.0%} 或 ≤{1 - TL.LEAN:.0%}）")
+    return lines
+
+
+#: A loss this deep is counted in the report. It closes nothing: it is the
+#: line the system used to enforce, kept only as a yardstick for how often the
+#: agent now holds past it.
+DEEP_LOSS_PCT = 8.0
+
+
+def _risk_lines(equity: list[dict]) -> list[str]:
+    """How deep the book went, with no stop underneath it."""
+    marked = [row for row in equity
+              if row.get("worst_position_return_pct") is not None]
+    if not marked:
+        return ["— 风险暴露（没有止损：只记录，不平仓）—", "窗口内没有持仓被估值"]
+    deepest = min(marked, key=lambda r: r["worst_position_return_pct"])
+    last = equity[-1]
+    last_worst = (f"，最深 {last['worst_position_code']} "
+                  f"{last['worst_position_return_pct']:+.2f}%"
+                  if last.get("worst_position_return_pct") is not None else "")
+    return [
+        "— 风险暴露（没有止损：只记录，不平仓）—",
+        f"窗口内最深单票浮亏  {deepest['worst_position_return_pct']:+.2f}%"
+        f"（{deepest['worst_position_code']}，{deepest['date']}）",
+        f"期末亏损持仓        {last.get('losing_positions', 0)} 只{last_worst}",
+        f"浮亏 ≤ −{DEEP_LOSS_PCT:.0f}% 的仓位-日  "
+        f"{sum(row.get('deep_loss_positions', 0) for row in equity)}"
+        "（agent 每天被询问后仍选择持有）",
+    ]
 
 
 def _initial_account(ctx, first_session: str) -> dict:
@@ -5303,7 +5374,8 @@ def write_report(result: dict, out_dir: Path) -> dict:
     _write_csv(out_dir / "equity.csv", result["equity"], [
         "date", "cash", "invested", "market_value", "realized", "unrealized",
         "equity", "open_positions", "pending_orders", "ordered",
-        "valued_at_a_stale_price"])
+        "valued_at_a_stale_price", "losing_positions", "deep_loss_positions",
+        "worst_position_code", "worst_position_return_pct"])
     _write_csv(out_dir / "fills.csv", result["fills"], [
         "date", "side", "code", "name", "shares", "price", "amount",
         "capacity_shares", "capacity_oversize", "reason"])
@@ -5433,6 +5505,10 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"{last['unrealized']:,.0f} unreal",
         f"期末持仓/挂单 {last['open_positions']} / {last['pending_orders']}",
         *_benchmark_lines(ctx, result, start_capital),
+        "",
+        *_risk_lines(equity),
+        "",
+        *_grading_lines(ctx),
         "",
         "— 成交 —",
         f"买入 {len(buys)} 笔 {sum(b['amount'] or 0 for b in buys):,.0f} 元 / "

@@ -251,3 +251,37 @@ def test_trade_review_next_time_becomes_candidate_not_rule(conn, monkeypatch):
     assert row["source_type"] == "trade_review"
     assert row["claim"] == "强主题里等待条件不要过深"
     assert row["evidence_timeframe"] == "1d"
+
+
+def test_the_models_grades_and_counts_are_dropped(conn, monkeypatch):
+    """The reviewing model explains; the market grades. Whatever quality or
+    count the model still writes is not stored as evidence."""
+    persisted_state(conn, [decision("buy-1", Action.BUY)])
+    patch_model(monkeypatch, {"reviews": [{
+        "decision_id": "buy-1",
+        "decision_quality": "good",
+        "execution_quality": "good",
+        "outcome_quality": "good",
+        "reason": "当时条件满足",
+        "lesson": {"claim": "突破时追入", "action": "buy",
+                   "applicable_context": "突破",
+                   "support_count": 999, "counterexample_count": 0,
+                   "confidence": 1.0},
+    }]})
+    asyncio.run(R.review_decisions(
+        conn, trader_id="default", day="2026-09-25", model="stub",
+        run_id="live"))
+    [review] = L.decision_reviews(run_id="live", trader_id="default",
+                                  conn=conn)
+    assert {review["decision_quality"], review["execution_quality"],
+            review["outcome_quality"]} == {R.UNGRADED}
+    [candidate] = L.lesson_candidates(run_id="live", trader_id="default",
+                                      conn=conn)
+    assert candidate["support_count"] == 0
+    assert candidate["confidence"] == 0.0
+
+
+def test_the_prompt_asks_for_no_grade():
+    for field in ("decision_quality", "outcome_quality", "support_count",
+                  "counterexample_count", "confidence"):
+        assert field not in R._INSTRUCTIONS

@@ -1,9 +1,21 @@
-"""Evidence-gated Trader learning: Candidate -> Lesson -> Rule.
+"""Evidence-gated Trader learning: graded decisions -> Lesson -> Rule.
 
-The unit of support is a distinct reviewed experience (source_ref), not a number
-the reviewing model claims. A single review can therefore never manufacture a
-Lesson by writing support_count=100. Rules are versioned, expiring and
-reversibly retired through append-only events.
+The unit of evidence is a decision the market has graded
+(``decision_outcomes``), grouped by what the Trader did and the situation it
+did it in — (action, situation tag, timeframe, horizon, scope). Nothing a
+model writes enters the count: not a support number, not a confidence, and
+not the wording of a claim.
+
+It used to group candidates by the exact claim text a reviewing model wrote,
+with the counts that model also wrote. Over a 30-day replay that produced 343
+candidates and no Lesson — no two reviews ever phrased a finding the same way
+— and the counts it would have promoted on were the model grading itself.
+
+A cell becomes a Lesson once it has ``LESSON_MIN_N`` right/wrong verdicts and
+leans clearly one way; a Rule once it has ``RULE_MIN_N`` (``AGENTS.md``:
+n < 50 does not ship). A cell that is mostly *wrong* is a lesson too — "this
+is usually a mistake" — and is phrased as one. Rules are versioned, expiring
+and reversibly retired through append-only events.
 """
 from __future__ import annotations
 
@@ -12,135 +24,110 @@ from datetime import date, timedelta
 import hashlib
 import json
 import sqlite3
+import statistics
 
 from alpha_agents.data import trader_learning as D, trader_session
 
-LESSON_SUPPORT_FLOOR = 3
-RULE_SUPPORT_FLOOR = 5
-RULE_CONFIDENCE_FLOOR = 0.60
-RULE_MAX_COUNTER_RATIO = 0.40
+LESSON_MIN_N = 10
+RULE_MIN_N = 50
+#: How far from a coin flip a cell must lean, in either direction.
+LEAN = 0.60
 RULE_TTL_DAYS = 90
 
-
-def _key(row: dict) -> str:
-    identity = [
-        str(row["claim"]).strip(),
-        str(row["action"]).strip().lower(),
-        str(row["applicable_context"]).strip(),
-        str(row["evidence_timeframe"]).strip(),
-        str(row["decision_horizon"]).strip(),
-        str(row["evidence_scope"]).strip(),
-    ]
-    return hashlib.sha256(
-        json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
-        .encode("utf-8")).hexdigest()
+_ACTION_WORDS = {
+    "buy": "买入", "add": "加仓", "hold": "持有", "sell": "卖出",
+    "reduce": "减仓", "reject": "放弃", "wait": "等待",
+}
 
 
-def _group_candidates(rows: list[dict]) -> list[dict]:
-    grouped: dict[str, dict[str, dict]] = defaultdict(dict)
-    meta: dict[str, dict] = {}
-    for row in rows:
-        key = _key(row)
-        # One reviewed experience is one vote. Exact retries or multiple
-        # candidate rows pointing at the same decision/trade do not multiply it.
-        grouped[key][str(row["source_ref"])] = row
-        meta[key] = row
+def _cells(outcomes: list[dict]) -> dict[tuple, list[dict]]:
+    cells: dict[tuple, list[dict]] = defaultdict(list)
+    for row in outcomes:
+        if row["verdict"] == "flat":
+            continue
+        for tag in json.loads(row["tags_json"] or "[]"):
+            cells[(row["action"], tag, row["evidence_timeframe"],
+                   row["decision_horizon"], row["evidence_scope"])].append(row)
+    return cells
 
-    out = []
-    for key, by_ref in grouped.items():
-        rows_for_key = list(by_ref.values())
-        example = meta[key]
-        support = len(rows_for_key)
-        counter = sum(
-            1 for row in rows_for_key
-            if int(row.get("counterexample_count") or 0) > 0)
-        confidence = (
-            sum(float(row.get("confidence") or 0) for row in rows_for_key)
-            / support if support else 0.0)
-        out.append({
-            "key": key,
-            "example": example,
-            "support": support,
-            "counter": counter,
-            "confidence": confidence,
-            "candidate_ids": sorted(int(row["id"]) for row in rows_for_key),
-        })
-    return out
+
+def _key(cell: tuple, polarity: str) -> str:
+    return hashlib.sha256(json.dumps(
+        [*cell, polarity], ensure_ascii=False,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _claim(action: str, tag: str, right: int, n: int, median_excess: float,
+           favorable: bool) -> str:
+    from alpha_agents.evolution.decision_outcomes import TAGS
+    situation = TAGS.get(tag, tag)
+    verb = _ACTION_WORDS.get(action, action)
+    if favorable:
+        return (f"{situation}时{verb}：行情判对 {right}/{n}，"
+                f"中位超额 {median_excess:+.2f}pp")
+    return (f"{situation}时{verb}：行情判错 {n - right}/{n}，"
+            f"中位超额 {median_excess:+.2f}pp——这类决策多数时候是错的")
 
 
 def advance(
     *, trader_id: str, as_of: str, run_id: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> dict:
-    """Materialize Lessons/Rules from repeated, independent candidates."""
+    """Materialize Lessons/Rules from market-graded decision cells."""
     run = trader_session.namespace(run_id)
-    candidates = D.lesson_candidates(
+    outcomes = D.decision_outcomes(
         run_id=run, trader_id=trader_id, up_to=as_of, conn=conn)
-    made_lessons = 0
-    made_rules = 0
-    lesson_ids = []
-    rule_ids = []
+    made_lessons = made_rules = 0
+    lesson_ids: list[int] = []
+    rule_ids: list[int] = []
 
-    for group in _group_candidates(candidates):
-        if group["support"] < LESSON_SUPPORT_FLOOR:
+    for cell, rows in sorted(_cells(outcomes).items()):
+        n = len(rows)
+        if n < LESSON_MIN_N:
             continue
-        row = group["example"]
+        right = sum(1 for row in rows if row["verdict"] == "right")
+        rate = right / n
+        if (1 - LEAN) < rate < LEAN:
+            continue
+        favorable = rate >= LEAN
+        polarity = "favorable" if favorable else "unfavorable"
+        action, tag, timeframe, horizon, scope = cell
+        median_excess = statistics.median(
+            float(row["excess_pct"]) for row in rows)
+        claim = _claim(action, tag, right, n, median_excess, favorable)
+        support = right if favorable else n - right
+        counter = n - support
+        confidence = support / n
+        refs = [int(row["id"]) for row in rows]
+        key = _key(cell, polarity)
         lesson_id, created = D.save_lesson_version(
-            run_id=run,
-            trader_id=trader_id,
-            lesson_key=group["key"],
-            source_date=as_of,
-            claim=row["claim"],
-            action=row["action"],
-            applicable_context=row["applicable_context"],
-            evidence_timeframe=row["evidence_timeframe"],
-            decision_horizon=row["decision_horizon"],
-            evidence_scope=row["evidence_scope"],
-            support_count=group["support"],
-            counterexample_count=group["counter"],
-            confidence=group["confidence"],
-            evidence_refs=group["candidate_ids"],
-            conn=conn,
-        )
+            run_id=run, trader_id=trader_id, lesson_key=key,
+            source_date=as_of, claim=claim, action=action,
+            applicable_context=tag, evidence_timeframe=timeframe,
+            decision_horizon=horizon, evidence_scope=scope,
+            support_count=support, counterexample_count=counter,
+            confidence=confidence, evidence_refs=refs, conn=conn)
         lesson_ids.append(lesson_id)
         made_lessons += int(created)
-
-        ratio = (
-            group["counter"] / group["support"]
-            if group["support"] else 1.0)
-        if (group["support"] < RULE_SUPPORT_FLOOR
-                or group["confidence"] < RULE_CONFIDENCE_FLOOR
-                or ratio > RULE_MAX_COUNTER_RATIO):
+        if n < RULE_MIN_N:
             continue
-        expires = (
-            date.fromisoformat(as_of) + timedelta(days=RULE_TTL_DAYS)
-        ).isoformat()
+        expires = (date.fromisoformat(as_of)
+                   + timedelta(days=RULE_TTL_DAYS)).isoformat()
         rule_id, created = D.save_rule_version(
-            run_id=run,
-            trader_id=trader_id,
-            rule_key=group["key"],
-            lesson_id=lesson_id,
-            source_date=as_of,
-            claim=row["claim"],
-            action=row["action"],
-            applicable_context=row["applicable_context"],
-            evidence_timeframe=row["evidence_timeframe"],
-            decision_horizon=row["decision_horizon"],
-            evidence_scope=row["evidence_scope"],
-            support_count=group["support"],
-            counterexample_count=group["counter"],
-            confidence=group["confidence"],
-            evidence_refs=group["candidate_ids"],
-            expires_on=expires,
-            conn=conn,
-        )
+            run_id=run, trader_id=trader_id, rule_key=key,
+            lesson_id=lesson_id, source_date=as_of, claim=claim,
+            action=action, applicable_context=tag,
+            evidence_timeframe=timeframe, decision_horizon=horizon,
+            evidence_scope=scope, support_count=support,
+            counterexample_count=counter, confidence=confidence,
+            evidence_refs=refs, expires_on=expires, conn=conn)
         rule_ids.append(rule_id)
         made_rules += int(created)
 
     if conn is not None:
         conn.commit()
     return {
-        "candidates": len(candidates),
+        "candidates": len(outcomes),
         "lessons_created": made_lessons,
         "rules_created": made_rules,
         "lesson_ids": lesson_ids,

@@ -7,15 +7,11 @@ call at all, which is both cheaper and — more importantly — *consistent*:
 the same market cannot produce hold at 09:35 and sell at 09:40 because
 the model happened to weight a sentence differently.
 
-The model is called back in exactly two situations:
-
-  1. a ``narrative`` condition exists and the review slot has arrived —
-     the agent said something that cannot be mechanised and it has to
-     re-read it itself;
-  2. the hard floor closed a position with no condition fired — a
-     ``blind_spot``. Nothing to decide there, but the agent is asked what
-     it missed, and that answer is the learning signal the whole design
-     exists to produce.
+Nothing here closes a position. A crossed invalidation and a run-out
+horizon both **wake** the agent instead of closing on it: the plan is
+evaluated in code for free, but what to do about it stays the trader's
+answer. See
+docs/exec-plans/active/2026-09-26-thesis-horizon-wakes-the-agent.md.
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ from datetime import datetime, time as dtime
 
 from alpha_agents.data import thesis as T
 from alpha_agents.data.memory_store import get_theme_by_name
-from alpha_agents.data.portfolio import close_position, get_open_positions
+from alpha_agents.data.portfolio import get_open_positions
 
 logger = logging.getLogger(__name__)
 
@@ -66,19 +62,6 @@ def build_view(pos: dict, price: float,
     )
 
 
-def _horizon_verdict(th: T.Thesis, mv: T.MarketView) -> str:
-    """Did a thesis that ran its full horizon actually play out?
-
-    ``validated`` is deliberately not "made money". A thesis that drifted
-    up 0.4% over five days did not play out; it just failed to break. The
-    ±1% band matches ``no_progress_by_day`` so the two agree about what
-    counts as movement.
-    """
-    if mv.current_return_pct >= 1.0:
-        return T.VALIDATED
-    return T.EXPIRED
-
-
 def _wake(th: T.Thesis, fired: T.Condition, mv: T.MarketView) -> dict:
     """The signal a crossed invalidation hands to the exit agent.
 
@@ -116,20 +99,49 @@ def _wake(th: T.Thesis, fired: T.Condition, mv: T.MarketView) -> dict:
     }
 
 
+def _horizon_wake(th: T.Thesis, mv: T.MarketView) -> dict:
+    """The signal a run-out horizon hands to the exit agent.
+
+    Distinct from an invalidation wake in what it says: no line was
+    crossed, the agent's own deadline simply arrived without proving the
+    claim. It carries the return the horizon ended on and how long the
+    position ran, so the trader answers from its own numbers rather than
+    from a calendar.
+
+    The thesis stays active. Whether it "played out" is a fact the review
+    and the market grading record — closing on the horizon would let the
+    close action define the verdict instead.
+    """
+    evidence = (f"浮动{mv.current_return_pct:+.2f}% "
+                f"峰值{mv.peak_return_pct:+.1f}% "
+                f"持仓{mv.holding_days}天/期限{th.horizon_days}天")
+    logger.info("Thesis #%d horizon due (not closed): %s %s — %s",
+                th.id, th.code, th.name, evidence)
+    return {
+        "type": "signal",
+        "code": th.code,
+        "reason": (f"你买入时写的期限（{th.horizon_days}天）到了，到期时 "
+                   f"{evidence}。没有触发你声明的任何失效条件。"
+                   "现在怎么处理？"),
+        "thesis_id": th.id,
+        "kind": "horizon_due",
+    }
+
+
 def check_all(price_map: dict[str, float],
               sector_ranks: dict[str, int] | None = None,
               sector_flows: dict[str, float] | None = None,
               breadth_ratio: float | None = None,
               now: datetime | None = None,
               trader_id: str | None = None) -> dict:
-    """Evaluate every live thesis. Closes what ran its horizon.
+    """Evaluate every live thesis. Close nothing; wake the agent instead.
 
     Returns {"closed": [...], "narrative_due": [...], "signals": [...]}.
-    The caller pushes the closes, hands ``narrative_due`` to the LLM
-    re-read, and **must pass ``signals`` to the exit agent** — a crossed
-    invalidation no longer closes anything by itself. A caller that drops
-    them silently reverts the position to being held with no one asked.
-
+    ```closed``` is kept for caller compatibility and is now always empty.
+    The caller hands ``narrative_due`` to the LLM re-read, and **must pass
+    ``signals`` to the exit agent** — neither a crossed invalidation nor a
+    run-out horizon closes anything by itself. A caller that drops them
+    silently reverts the position to being held with no one asked.
     ``trader_id`` scopes it to one book, so the narrative re-read that
     follows goes to that trader's own prompt rather than to whichever
     trader happened to run the cycle.
@@ -164,18 +176,16 @@ def check_all(price_map: dict[str, float],
             continue
 
         if mv.holding_days >= th.horizon_days:
-            status = _horizon_verdict(th, mv)
-            label = "论点兑现" if status == T.VALIDATED else "到期未兑现"
-            reason = f"{label}（{th.horizon_days}天期限）"
-            if close_position(pos["id"], close_price=price, close_reason=reason):
-                T.close(th.id, status, close_note=reason)
-                logger.info("Thesis #%d %s: %s %s %+.2f%%",
-                            th.id, status, th.code, th.name,
-                            mv.current_return_pct)
-                closed.append({"type": f"thesis_{status}", "code": th.code,
-                               "name": th.name, "reason": reason,
-                               "close_price": price,
-                               "return_pct": mv.current_return_pct})
+            # Wake the agent; do not close. The horizon is a number the
+            # agent wrote on entry day, and closing on it makes the trade's
+            # outcome measure that constant instead of the trader's
+            # judgement — the same reason an agent-placed stop is not
+            # executed. Expiry is the other half of the invalidation
+            # commitment: one is "I now know I was wrong early", the other
+            # is "my own deadline ran out without me being right". Both are
+            # questions the trader answers. See
+            # docs/exec-plans/active/2026-09-26-thesis-horizon-wakes-the-agent.md
+            signals.append(_horizon_wake(th, mv))
             continue
 
         if T.needs_narrative_review(th.conditions) and _narrative_due(now):

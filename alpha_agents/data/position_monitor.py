@@ -6,10 +6,11 @@ decides, while the other half creates and resizes them. Nothing here
 opens an order or picks a size.
 
 What lives here is the rule layer that runs underneath the trading agent
-— the trailing stop, the bearish-signal tightening, the theme exit, the
-regime holding cap, and the hard floor the agent may not overrule. With
-``AGENT_EXIT_DECISIONS`` on these are demoted to evidence; with it off
-they are the whole exit policy.
+— the trailing stop, the bearish-signal tightening, the theme exit and the
+regime holding cap. None of them closes a position: with the trader
+deciding exits (always, since 2026-09-26) every trigger is demoted to
+evidence, and there is no stop or target price of any kind — the trader
+learns when to sell from its own results.
 """
 
 import logging
@@ -145,22 +146,6 @@ def _check_bearish_signals(
     return tightest_stop, reasons
 
 
-def _is_hard_exit(pos: dict, current_return: float) -> bool:
-    """Would this position close even if the trading agent said hold?
-
-    Two lines only: the maximum loss from cost basis, and a theme that has
-    been archived — at which point the reason the position was opened no
-    longer exists in the system at all.
-    """
-    if current_return <= -HARD_STOP_PCT:
-        return True
-    if pos.get("theme"):
-        theme = get_theme_by_name(pos["theme"])
-        if theme and theme.get("status") == "archived":
-            return True
-    return False
-
-
 def check_positions(
     realtime_prices: dict[str, float],
     today: str,
@@ -175,7 +160,7 @@ def check_positions(
     ``hard_only`` is what makes room for a trading agent. Left False, every
     trigger below closes the position, which is the behaviour that leaves
     the agent nothing to learn about selling — it picks the stock and the
-    rules dispose of it. Set True, only ``_is_hard_exit`` closes anything;
+    rules dispose of it. Set True, nothing here closes anything;
     every other trigger comes back as ``type="signal"`` for the agent to
     weigh, alongside the news and the theme state it already sees.
 
@@ -403,7 +388,9 @@ def check_positions(
         # open and the agent is told why the rules wanted it closed — a
         # trailing stop that fired on an intraday wick reads very
         # differently next to a theme that is still taking inflow.
-        if alert and hard_only and not _is_hard_exit(pos, current_return):
+        # Nothing closes a position on the trader's behalf — no stop, no
+        # target, no theme rule. Every trigger is evidence it reads.
+        if alert and hard_only:
             alerts.append({
                 "type": "signal", "code": code, "name": pos.get("name", ""),
                 "reason": alert["reason"], "would_have": alert["type"],

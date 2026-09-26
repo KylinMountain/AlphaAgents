@@ -1183,14 +1183,17 @@ class TestTheHardStopIsOutsideTheAgentsReach:
 
         monkeypatch.setattr(walk_forward, "_settle_exits", _settle)
         monkeypatch.setattr(walk_forward, "_agent_exits", _agent)
-        # A model object, so the placeholder-decider guard does not skip the
-        # step: this test is about order, not about the model.
-        monkeypatch.setattr(walk_forward.Context, "model",
-                            object(), raising=False)
+        # An llm run, because only an llm run has an agent sell side; the
+        # buy side and the client are stubbed — this test is about order.
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None, **kw: object())
+        monkeypatch.setattr(walk_forward, "_run_decider",
+                            lambda ctx, day, prev_day, phase="open": [])
 
         series, instruments = _normal()
         replay, _ = _prepare(tmp_path, series, instruments)
-        _run(replay, days=2, agent_exits=True)
+        _run(replay, days=2, decider="llm", panel_size=5)
 
         assert calls, "neither settlement nor the exit step ran"
         for day in {c.split(":")[1] for c in calls}:
@@ -1436,3 +1439,152 @@ class TestAReplaySaysWhetherItIsComplete:
         assert "不能和完整的轮次比较" in text
         assert "决策失败 1/3 个交易日（01-06）" in text
         assert "守则改写失败 1 次（01-05）" in text
+
+
+# ── no price exits: the agent decides every sell ────────────────────────────
+
+
+class TestAnLlmRunHasNoPriceExits:
+    """No stop and no target (2026-09-26). The 30-day T8 acceptance window
+    sold 31 times and every sell was an entry stop or target; the Trader
+    never managed a position it held. Now a model-backed run is asked about
+    every sellable position and nothing else closes one — even an order that
+    still carries levels, and even a gap straight through them.
+    """
+
+    def _run_llm(self, tmp_path, monkeypatch):
+        import alpha_agents.pipeline.tasks.exit_decision as ED
+
+        asked: list[tuple[str, str, tuple[str, ...]]] = []
+
+        async def _fake_hold(positions, price_map, **kw):
+            asked.append((kw.get("day"), kw.get("phase"),
+                          tuple(p["code"] for p in positions)))
+            return [{"code": p["code"], "action": "hold", "reason": "持有"}
+                    for p in positions]
+
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(ED, "decide_for_replay", _fake_hold)
+        monkeypatch.setattr(ED, "decide", _fake_hold)
+
+        series, instruments = _normal()
+        # Day 1 crosses both levels intraday; day 2 gaps straight below the
+        # stop (−7%). Neither may sell: only the agent sells, and it holds.
+        series["600001"][_SESSIONS[21]] = _bar(
+            open_=9.8, high=10.8, low=9.4, close=9.9, change_pct=-1.0)
+        series["600001"][_SESSIONS[22]] = _bar(
+            open_=9.3, high=9.35, low=9.1, close=9.2, change_pct=-7.1)
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        def _plant_then_decide(ctx, day, prev_day, phase="open"):
+            from alpha_agents.data import portfolio as P
+            if day == _START and not P.get_open_positions(ctx.trader):
+                P.create_pending_order(
+                    code="600001", name="甲", theme=ctx.theme,
+                    order_date=prev_day, entry_low=9.0, entry_high=11.0,
+                    stop_loss=9.5, target_price=10.5, source="test",
+                    reason="planted", trader_id=ctx.trader)
+                settled = walk_forward._settle_entries(
+                    ctx, prev_day, P.get_pending_orders(ctx.trader))
+                assert settled["fills"], "the planted order did not fill"
+            return []
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _plant_then_decide)
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None, **kw: object())
+        result = _run(replay, days=3, decider="llm", panel_size=5)
+        return result, asked
+
+    def test_nothing_but_the_agent_sells(self, tmp_path, monkeypatch):
+        result, _ = self._run_llm(tmp_path, monkeypatch)
+        sells = [f for f in _fills(result, "600001") if f["side"] == "sell"]
+        assert sells == [], (
+            "a price closed the position while the agent held it: " + str(sells))
+
+    def test_the_agent_is_asked_and_its_hold_is_sealed(
+            self, tmp_path, monkeypatch):
+        result, asked = self._run_llm(tmp_path, monkeypatch)
+        assert (_SESSIONS[21], "open", ("600001",)) in asked, (
+            "the agent was not asked about a sellable position it held")
+        from alpha_agents.data import trader_state_store
+        ctx = result["ctx"]
+        state = trader_state_store.load_latest(
+            trader_id=ctx.trader, run_id=ctx.run_id)
+        actions = [str(getattr(d, "action", "")).lower()
+                   for d in state.recent_decisions]
+        assert any("hold" in a for a in actions), (
+            "the HOLD was not sealed into the run's TraderState: " + str(actions))
+
+    def test_the_report_says_the_agent_decides(self, tmp_path, monkeypatch):
+        result, _ = self._run_llm(tmp_path, monkeypatch)
+        notes = walk_forward._limitations(result["ctx"])
+        assert walk_forward.AGENT_EXITS_LIMITATION in notes
+        assert walk_forward.MECHANICAL_EXITS_LIMITATION not in notes
+
+
+def test_a_placeholder_run_says_its_exits_were_mechanical():
+    ctx = argparse.Namespace(agent_exits=False)
+    assert (walk_forward._exit_limitation(ctx)
+            == walk_forward.MECHANICAL_EXITS_LIMITATION)
+
+
+class TestTheReportShowsHowDeepTheBookWent:
+    """No stop underneath, so the report says how far losses ran."""
+
+    def test_risk_lines(self):
+        equity = [
+            {"date": "d1", "worst_position_return_pct": -3.0,
+             "worst_position_code": "A", "losing_positions": 1,
+             "deep_loss_positions": 0},
+            {"date": "d2", "worst_position_return_pct": -12.5,
+             "worst_position_code": "B", "losing_positions": 2,
+             "deep_loss_positions": 1},
+            {"date": "d3", "worst_position_return_pct": -9.0,
+             "worst_position_code": "B", "losing_positions": 1,
+             "deep_loss_positions": 1},
+        ]
+        text = "\n".join(walk_forward._risk_lines(equity))
+        assert "-12.50%（B，d2）" in text
+        assert "期末亏损持仓        1 只，最深 B -9.00%" in text
+        assert "仓位-日  2" in text
+
+    def test_an_empty_book_says_so(self):
+        text = "\n".join(walk_forward._risk_lines(
+            [{"date": "d1", "worst_position_return_pct": None}]))
+        assert "没有持仓被估值" in text
+
+    def test_valuation_records_the_worst_position(self, tmp_path, monkeypatch):
+        """End to end on the synthetic corpus: a planted position that falls
+        10% shows up as the worst one and as a deep-loss position-day."""
+        import alpha_agents.pipeline.tasks.exit_decision as ED
+
+        async def _hold(positions, price_map, **kw):
+            return [{"code": p["code"], "action": "hold", "reason": "持有"}
+                    for p in positions]
+
+        monkeypatch.setenv("ALPHAAGENTS_LLM_MODE", "replay-recorded")
+        monkeypatch.setattr(ED, "decide_for_replay", _hold)
+        series, instruments = _normal()
+        series["600001"][_SESSIONS[21]] = _bar(
+            open_=9.2, high=9.2, low=8.9, close=9.0, change_pct=-10.0)
+        replay, _ = _prepare(tmp_path, series, instruments)
+
+        def _plant(ctx, day, prev_day, phase="open"):
+            from alpha_agents.data import portfolio as P
+            if day == _START and not P.get_open_positions(ctx.trader):
+                P.create_pending_order(
+                    code="600001", name="甲", theme=ctx.theme,
+                    order_date=prev_day, entry_low=9.0, entry_high=11.0,
+                    source="test", reason="planted", trader_id=ctx.trader)
+                walk_forward._settle_entries(
+                    ctx, prev_day, P.get_pending_orders(ctx.trader))
+            return []
+
+        monkeypatch.setattr(walk_forward, "_run_decider", _plant)
+        monkeypatch.setattr(walk_forward, "_build_model",
+                            lambda timeout=None, **kw: object())
+        result = _run(replay, days=1, decider="llm", panel_size=5)
+        row = result["equity"][0]
+        assert row["worst_position_code"] == "600001"
+        assert row["worst_position_return_pct"] == -10.0
+        assert row["deep_loss_positions"] == 1

@@ -139,6 +139,34 @@ def _condition_vocabulary() -> str:
     return prompt_vocabulary()
 
 
+def _tool_guidance(enabled: bool) -> str:
+    """State whether this decision can ask questions before it answers."""
+    if not enabled:
+        return (
+            "## 本轮信息边界\n\n"
+            "本轮没有可调用工具。上面的面板、新闻、账本和经验就是全部事实；"
+            "不要输出工具调用或声称查过未提供的数据，直接给出最终 JSON 决策。")
+    return """## 你可以先查
+
+上面的面板是一个快照，不是全部。**你可以调用工具去查你还想知道的事**，
+查完再决定。有七个工具，每个回答一个问题：
+
+- `get_market_regime` — 今天这个市场能不能做（宽度、炸板率、最高连板、
+  昨日涨停股今日表现）
+- `get_theme_state` — 这条线还有没有资金在做（梯队、龙头、板块资金流）
+- `get_stock_context` — 这只票的波动有多大、已经涨了多少（ATR、20/60 日结构）
+- `get_intraday_shape` — 今天分时是真的走强还是冲高回落（VWAP、上下半场量）
+- `get_event_context` — 事件前市场知道什么、当时预期是什么、落地后如何反应
+- `get_stock_memory` — 我以前买过它吗，那次结果如何
+- `get_my_state` — 我今天手顺不顺（连亏几笔、已经做了几个决策、当前敞口）
+
+**值得查的情形**：面板里有两只票拿不准选哪只；一只票已经涨了很多但你看不出
+它还能不能拿；你怀疑自己今天出手太频繁。**不值得查的情形**：面板信息已经够
+支撑一个判断——查工具要花时间，不是查得越多越好。
+
+回放/实盘都由系统按你的决策时刻截断数据，你查到的都是当时能看到的东西。"""
+
+
 def load_prompt(path: Path | None = None) -> str:
     """The decision prompt template."""
     return (path or (PROMPTS_DIR / PROMPT_FILE)).read_text(encoding="utf-8")
@@ -299,8 +327,10 @@ def _trailing_json_object(text: str) -> str:
 _WAIT_METRICS = frozenset({"price", "change_pct"})
 
 
-def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict], str | None]:
-    """Normalize WAIT decisions into the Trader Runtime condition grammar."""
+def _parse_watch_items(
+    payload: dict, panel_codes: set[str], refused: list[dict],
+) -> tuple[list[dict], str | None]:
+    """Normalize WAIT decisions without discarding unrelated valid decisions."""
     raw_watch = payload.get("watch", [])
     if not isinstance(raw_watch, list):
         return [], "watch must be a list"
@@ -309,7 +339,9 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
     seen: set[str] = set()
     for item in raw_watch:
         if not isinstance(item, dict):
-            return [], "watch entries must be objects"
+            refused.append({"code": "", "why": "invalid_watch",
+                            "detail": "watch entry must be an object"})
+            continue
         code = item.get("code")
         reason = item.get("reason")
         next_check = item.get("next_check")
@@ -318,9 +350,13 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
                 or not isinstance(reason, str) or not reason.strip()
                 or not isinstance(next_check, list) or not next_check
                 or not isinstance(invalidations, list)):
-            return [], (
-                "watch needs a unique panel code, non-empty reason, "
-                "non-empty next_check list and cancel_if list")
+            refused.append({
+                "code": code if isinstance(code, str) else "",
+                "why": "invalid_watch",
+                "detail": ("watch needs a unique panel code, non-empty reason, "
+                           "non-empty next_check list and cancel_if list"),
+            })
+            continue
         try:
             parsed_checks = [Condition.from_dict(value) for value in next_check]
             parsed_invalid = [Condition.from_dict(value) for value in invalidations]
@@ -331,9 +367,13 @@ def _parse_watch_items(payload: dict, panel_codes: set[str]) -> tuple[list[dict]
             invalid = [cond.as_dict() for cond in parsed_invalid]
             confidence = float(item.get("confidence", 0.5))
         except (KeyError, TypeError, ValueError, TraderRuntimeError):
-            return [], "watch contains an invalid condition or confidence"
+            refused.append({"code": code, "why": "invalid_watch",
+                            "detail": "invalid condition or confidence"})
+            continue
         if not 0 <= confidence <= 1:
-            return [], "watch confidence must be in [0, 1]"
+            refused.append({"code": code, "why": "invalid_watch",
+                            "detail": "confidence must be in [0, 1]"})
+            continue
         seen.add(code)
         watch.append({
             "code": code,
@@ -371,7 +411,7 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
     if explanation is None:
         explanation = payload.get("reason")  # Legacy top-level spelling.
     explanation = explanation.strip() if isinstance(explanation, str) else ""
-    watch, watch_error = _parse_watch_items(payload, panel_codes)
+    watch, watch_error = _parse_watch_items(payload, panel_codes, refused)
     rejected = []
     raw_rejected = payload.get("rejected", [])
     explanation_error = watch_error
@@ -381,16 +421,22 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         seen = set()
         for item in raw_rejected:
             if not isinstance(item, dict):
-                explanation_error = "rejected entries must be objects"
-                break
+                refused.append({"code": "", "why": "invalid_rejected",
+                                "detail": "rejected entry must be an object"})
+                continue
             code, reason = item.get("code"), item.get("reason")
             ids = item.get("rule_ids", [])
             if (not isinstance(code, str) or code not in panel_codes or code in seen
                     or not isinstance(reason, str) or not reason.strip()
                     or not isinstance(ids, list)
                     or any(not isinstance(rid, str) or not rid.strip() for rid in ids)):
-                explanation_error = "rejected needs a unique panel code, reason and rule_ids list"
-                break
+                refused.append({
+                    "code": code if isinstance(code, str) else "",
+                    "why": "invalid_rejected",
+                    "detail": ("rejected needs a unique panel code, reason "
+                               "and rule_ids list"),
+                })
+                continue
             seen.add(code)
             rejected.append({"code": code, "reason": reason.strip(),
                              "rule_ids": [rid.strip() for rid in ids]})
@@ -399,7 +445,7 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         explanation_error = (
             "empty orders without watch require a non-empty no_trade_reason")
     if explanation_error:
-        return {"orders": [], "watch": watch, "refused": [],
+        return {"orders": [], "watch": watch, "refused": refused,
                 "parse_error": explanation_error,
                 "decision_status": "incomplete", "no_trade_reason": explanation,
                 "rejected": rejected}
@@ -425,7 +471,6 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             low = (None if raw_low is None or raw_low == ""
                    else float(raw_low))
             high = float(raw["entry_high"])
-            stop = float(raw["stop_loss"])
         except (KeyError, TypeError, ValueError) as exc:
             refused.append({"code": code, "why": "bad_prices",
                             "detail": f"{type(exc).__name__}: {exc}"})
@@ -435,41 +480,21 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
                             "detail": f"{low} !< {high}"})
             continue
         floor = low if low is not None else high
-        if not stop < floor:
-            refused.append({"code": code, "why": "stop_not_below_entry",
-                            "detail": f"{stop} !< {floor}"})
-            continue
-        if min(floor, high) <= 0 or stop <= 0:
+        if min(floor, high) <= 0:
             refused.append({"code": code, "why": "non_positive_price",
                             "detail": str(floor)})
             continue
-        # ``target_price`` is optional, and its absence is meaningful rather
-        # than an error: a position with no target has exactly one exit, the
-        # stop. That is what every order in the first 20-day replay looked
-        # like, and it is why all 11 exits were stops.
-        target = raw.get("target_price")
-        if target is not None and target != "":
-            try:
-                target = float(target)
-            except (TypeError, ValueError):
-                refused.append({"code": code, "why": "bad_target",
-                                "detail": str(target)[:40]})
-                continue
-            if not target > high:
-                # A target at or below the entry ceiling is not a target: the
-                # order would exit at a price it could have been filled at,
-                # which is a stop with a different name.
-                refused.append({"code": code, "why": "target_not_above_entry",
-                                "detail": f"{target} !> {high}"})
-                continue
-            target = round(target, 2)
-        else:
-            target = None
+        # No stop and no target. A price that sells on the trader's behalf
+        # makes the trade's outcome a measurement of that price, not of the
+        # trader; when to sell is decided at each position decision and
+        # learned from reviewed results. Fields a model still emits are
+        # ignored rather than refused — they are not a malformed order.
         orders.append({
             "code": code,
             "entry_low": round(low, 2) if low is not None else None,
-            "entry_high": round(high, 2), "stop_loss": round(stop, 2),
-            "target_price": target,
+            "entry_high": round(high, 2),
+            "stop_loss": None,
+            "target_price": None,
             # Whole. This string becomes the Thesis ``claim`` — the thing a
             # later exit declares falsified and the review scores the
             # reasoning of. Cut at 200 it stopped mid-clause: the 002230
@@ -734,7 +759,8 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
                   trader_note: str, picks: int, template: str,
                   market: dict | None = None, phase: str = "open",
                   research_packet: dict | None = None,
-                  decision_time: str | None = None) -> str:
+                  decision_time: str | None = None,
+                  tools_enabled: bool = True) -> str:
     """Fill the prompt. Every placeholder must be consumed.
 
     The ``{VOCAB}`` lesson from ``agents/morning.py`` applies: a template
@@ -779,6 +805,7 @@ def build_message(*, day: str, prev_day: str, panel: list[dict],
                       research_packet, ensure_ascii=False, sort_keys=True,
                       indent=2)
                   if research_packet else "（无共享研究包）"),
+              "tool_guidance": _tool_guidance(tools_enabled),
               # A rendered field rather than a replace() on the loaded file:
               # the guard below only protects what the renderer supplies, and
               # a template hole that bypasses it is exactly the failure this
@@ -812,6 +839,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
                   model=None, template: str | None = None,
                   max_turns: int | None = None, market: dict | None = None,
                   phase: str = "open", tools: list | None = None,
+                  timeout: float | None = None,
                   research_budget=None, research_packet: dict | None = None,
                   knowledge_intervention: dict | None = None,
                   trader_id: str | None = None, run_id: str | None = None,
@@ -856,7 +884,7 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
         knowledge=knowledge, trader_note=trader_note, picks=picks,
         template=chosen_template,
         market=market, phase=phase, research_packet=research_packet,
-        decision_time=information_cutoff)
+        decision_time=information_cutoff, tools_enabled=bool(tools))
 
     # A tool-less stage may still carry the shared decision budget.
     from alpha_agents.tools.budget import ResearchBudget, use_research_budget
@@ -878,7 +906,9 @@ async def propose(*, day: str, prev_day: str, panel: list[dict],
     if knowledge_intervention is not None:
         frame = frame.change_knowledge(**knowledge_intervention)
     with Capture(frame, enabled=trader_id is not None) as captured:
-        parsed = await _run_frame(frame, model=model, tools=tools or [], budget=budget)
+        parsed = await _run_frame(
+            frame, model=model, tools=tools or [], budget=budget,
+            timeout=timeout)
         parsed["frame_hash"] = frame.frame_hash
         parsed["decision_id"] = captured.invocation_id
         captured.output = parsed

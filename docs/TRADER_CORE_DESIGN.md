@@ -287,7 +287,7 @@ These are future acceptance requirements, not executed tests or measured pass ra
 - Candidate rejection, insufficient n, evaluator failure, and unapproved knowledge changes leave active behavioral hashes unchanged.
 - Shadow orders, capital, outcomes, and derived learning cannot mutate the main account or contaminate candidate development.
 - Promotion and rollback preserve historical fills and ledger entries, retain complete approval audit, and resolve outstanding version ownership.
-- Disabling reports or an LLM does not stop deterministic risk protection, order processing, accounting, reconciliation, or label maturation.
+- Disabling reports or an LLM does not stop deterministic execution constraints (T+1, price limits, cash, capacity), order processing, accounting, reconciliation, or label maturation. There is no price-based exit: no stop and no target, system- or trader-authored, closes a position; the trader decides every exit and learns when to sell from its reviewed results (2026-09-26, [plan](exec-plans/active/2026-09-26-no-system-exit-lines.md)).
 - Phase-specific implementation must later satisfy the repository's regression, architecture, and documentation checks without expanding lint exemptions; none were run for this document.
 
 ## 16. Non-goals

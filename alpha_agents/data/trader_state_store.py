@@ -105,3 +105,24 @@ def save(
     except Exception:
         db.rollback()
         raise
+
+
+def snapshot_payloads(
+    *, run_id: str, trader_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict]:
+    """Every sealed state for one run/trader, oldest first, as raw payloads.
+
+    For readers that need the whole history rather than the latest state —
+    TraderState keeps a bounded tail of decisions, so only the union of the
+    append-only snapshots holds all of them.
+    """
+    run = _identity(run_id, "run_id")
+    trader = _identity(trader_id, "trader_id")
+    db, _ = _connection(conn)
+    rows = db.execute(
+        "SELECT payload_json FROM trader_state_snapshots "
+        "WHERE run_id=? AND trader_id=? ORDER BY version",
+        (run, trader)).fetchall()
+    return [json.loads(row["payload_json"] if isinstance(row, sqlite3.Row)
+                       else row[0]) for row in rows]

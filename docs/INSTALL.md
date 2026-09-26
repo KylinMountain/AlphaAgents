@@ -115,9 +115,8 @@ uv run python main.py llm-roles
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `AGENT_EXIT_DECISIONS` | 关 | `1` 表示卖出由 agent 决定（sell / trim / hold，必须写理由）。**建议开**：关掉时只有机械规则卖出，复盘能学的东西少得多 |
 | `AGENT_ENTRY_PRICING` | 开 | 由 agent 自己定挂单价 |
-| `HARD_STOP_PCT` | `8.0` | 成本价下跌超过这个百分比就强制止损，agent 不能否决 |
+| `HARD_STOP_PCT` | `8.0` | 仅供风险预算定仓估算单笔风险；**不触发卖出**。没有止损也没有止盈，卖出全部由 agent 决定 |
 | `TOTAL_CAPITAL` | `1000000` | 默认交易员的本金（每个交易员可以在 YAML 里单独设置） |
 | `DEFAULT_POSITION_PCT` | `0.03` | agent 没写仓位时用的默认值 |
 | `MAX_POSITION_PCT` | `0.10` | 单只股票的仓位上限（兜底，不是目标） |

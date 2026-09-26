@@ -34,14 +34,11 @@ def block(payload: str) -> str:
 
 
 class TestEnabled:
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
-    def test_toggle_spellings(self, monkeypatch, value):
-        monkeypatch.setenv("AGENT_EXIT_DECISIONS", value)
+    def test_always_on(self, monkeypatch):
+        """Off meant the rule layer closed every position — a stop by another
+        name. There is no such mode any more."""
+        monkeypatch.setenv("AGENT_EXIT_DECISIONS", "0")
         assert exit_decision.enabled()
-
-    def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("AGENT_EXIT_DECISIONS", raising=False)
-        assert not exit_decision.enabled()
 
 
 class TestParsing:
@@ -129,7 +126,7 @@ class TestApply:
 
 
 class TestContext:
-    def test_names_the_hard_line_and_the_buy_reason(self):
+    def test_says_there_is_no_system_line_and_names_the_buy_reason(self):
         pos = [{"code": "600835", "name": "上海机电", "shares": 800,
                 "open_price": 18.40, "peak_return_pct": 3.2,
                 "holding_days": 4, "theme": "国企改革",
@@ -139,7 +136,8 @@ class TestContext:
              patch.object(exit_decision, "_news_for_theme", return_value=[]):
             out = exit_decision.build_context(pos, {"600835": 18.56}, [])
 
-        assert "风控硬线" in out
+        assert "风控硬线" not in out and "没有止损也没有止盈" in out
+        assert "自设价位" not in out
         assert "买入理由: 低涨幅+流动性好" in out
         assert "18.40" in out and "18.56" in out
         assert "无相关快讯" in out or "无（主线无新消息" in out
@@ -151,35 +149,6 @@ class TestContext:
         with patch.object(exit_decision, "_news_for_theme", return_value=[]):
             out = exit_decision.build_context(pos, {"600835": 18.56}, signals)
         assert "规则信号: 移动止损触发" in out
-
-
-class TestHardFloor:
-    def test_a_big_loss_is_hard(self, store):
-        assert portfolio._is_hard_exit({"theme": ""}, -8.5)
-
-    def test_a_survivable_loss_is_not(self, store):
-        assert not portfolio._is_hard_exit({"theme": ""}, -7.9)
-
-    def test_an_archived_theme_is_hard(self, store):
-        from alpha_agents.data.memory_store import upsert_theme
-        upsert_theme("旧主线", status="archived", strength=0)
-        assert portfolio._is_hard_exit({"theme": "旧主线"}, 2.0)
-
-    def test_a_weak_but_live_theme_is_not(self, store):
-        from alpha_agents.data.memory_store import upsert_theme
-        upsert_theme("国企改革", status="watching", strength=2)
-        assert not portfolio._is_hard_exit({"theme": "国企改革"}, -3.0)
-
-    def test_threshold_is_configurable(self, monkeypatch):
-        """A tighter account wants a tighter floor without a code change.
-
-        Patched on position_monitor: _is_hard_exit lives there since the
-        split and binds HARD_STOP_PCT at import, so patching the name on
-        portfolio no longer reaches it."""
-        from alpha_agents.data import position_monitor
-        monkeypatch.setattr(position_monitor, "HARD_STOP_PCT", 5.0)
-        assert portfolio._is_hard_exit({"theme": ""}, -5.1)
-        assert not portfolio._is_hard_exit({"theme": ""}, -4.9)
 
 
 POS = [{"id": 1, "code": "600835", "name": "上海机电",

@@ -15,12 +15,12 @@ that mention that theme, and the mechanical signals that *would* have
 closed it. It answers 卖 / 持有 / 减仓 with a reason, and the reason is
 what gets stored on the trade and read back at review.
 
-Two lines stay mechanical and the agent cannot argue with them — see
-``portfolio._is_hard_exit``. Discretion above the floor, not instead of
-it.
+There is nothing underneath: no stop, no target, no floor. A position is
+closed by the trader or not at all, and when to sell is something it learns
+from its own reviewed results rather than a price the system holds for it.
 
-Off by default: set ``AGENT_EXIT_DECISIONS=1``. With it off, every
-trigger closes as before.
+Always on since 2026-09-26. ``AGENT_EXIT_DECISIONS`` used to switch it off,
+and off meant the rule layer closed every position — a stop by another name.
 """
 
 from __future__ import annotations
@@ -35,14 +35,15 @@ from zoneinfo import ZoneInfo
 
 from alpha_agents.data.memory_store import get_theme_by_name
 from alpha_agents.data.portfolio import (
-    HARD_STOP_PCT, close_position, get_open_positions,
+    close_position, get_open_positions,
 )
 # A-share board lot. Imported from the module that already owns the constant
 # rather than re-declared, so a market-rule change moves one place.
 from alpha_agents.data.portfolio_exit import LOT_SIZE
+from alpha_agents.evolution.trader_positions import position_observations
 from alpha_agents.trader import (
-    Action, DecisionContext, DecisionHorizon, EvidenceScope, Observation,
-    ObservationType, Session, Timeframe, TraderDecision, TraderRuntime,
+    Action, DecisionContext, DecisionHorizon, EvidenceScope, Session,
+    Timeframe, TraderDecision, TraderRuntime,
     TraderRuntimeError, TraderState,
 )
 
@@ -76,8 +77,8 @@ DEFAULT_TRIM_FRACTION = 0.5
 
 
 def enabled() -> bool:
-    return os.environ.get("AGENT_EXIT_DECISIONS", "").lower() in (
-        "1", "true", "yes", "on")
+    """The trader decides every exit; there is no rule-driven alternative."""
+    return True
 
 
 def _theme_line(theme_name: str) -> str:
@@ -116,7 +117,6 @@ def _news_for_theme(theme_name: str) -> list[str] | None:
 def build_context(positions: list[dict], price_map: dict[str, float],
                   signals: list[dict],
                   news_by_theme: dict[str, list[str]] | None = None,
-                  mechanical_stops: bool = True,
                   phase: str = "open") -> str:
     """Everything the agent needs to decide, as one block of text.
 
@@ -142,18 +142,12 @@ def build_context(positions: list[dict], price_map: dict[str, float],
         lines = ["【现在是开盘前】你能看到的最后一根日线是**昨日**收盘，"
                  "今日的开盘、最高、最低、收盘、成交量**你还不知道**。"
                  "你的卖出以**今日开盘价**成交。", ""]
-    if mechanical_stops:
-        lines.append(f"【风控硬线】亏损达 -{HARD_STOP_PCT:.0f}% 或主线归档时系统强制平仓，"
-                     f"你的判断不能覆盖这两条。以下持仓都还没触及硬线。")
-    else:
-        # The experiment arm, and it must be stated rather than implied: if
-        # the agent believes a stop sits underneath, it will answer as
-        # though something else will save it, and the answer stops being a
-        # judgement about selling.
-        lines.append("【没有安全网】本次运行**关闭了机械止损与止盈**："
-                     "系统不会替你平仓，不会在 -"
-                     f"{HARD_STOP_PCT:.0f}% 兜底。**卖不卖完全由你决定**，"
-                     "如果你不卖，这个仓位会一直持有到窗口结束或被你自己卖掉。")
+    # Stated rather than implied: if the agent believes a floor sits
+    # underneath, it answers as though something else will save it, and the
+    # answer stops being a judgement about selling.
+    lines.append("【没有止损也没有止盈】系统不会在任何价位替你平仓，也没有挂着的"
+                 "止损/止盈单。**卖不卖完全由你决定**：你不卖，这个仓位就一直"
+                 "持有。什么时候该走，要从你自己过去的交易结果里学。")
     lines.append("")
 
     for pos in positions:
@@ -218,7 +212,7 @@ _INSTRUCTIONS = """你是这个虚拟组合的交易员，负责卖出决策。�
 
 ## 不要做的事
 - 不要因为"还没到止损"就一律持有——那是规则的活，不是你的
-- 不要因为浮亏就恐慌卖出——硬线在 -{hard}% ，那之前是你的判断空间
+- 不要因为浮亏就恐慌卖出，也不要指望系统兜底——没有止损也没有止盈，只有你能决定卖
 - 不要给买入建议，不要推荐新股票
 - 不要为了做决定而做决定：大多数时候正确答案是 hold
 
@@ -290,7 +284,7 @@ async def decide(context: str, trader=None, *, model=None,
         )
         tools = [search_news, get_stock_fund_flow, get_sector_data]
 
-    instructions = _INSTRUCTIONS.format(hard=HARD_STOP_PCT)
+    instructions = _INSTRUCTIONS.format()
     if trader is not None and getattr(trader, "extra_prompt", ""):
         instructions += f"\n\n## 你是谁\n\n{trader.extra_prompt.strip()}\n"
     agent = Agent(
@@ -433,65 +427,6 @@ def _runtime_context(cutoff: datetime) -> DecisionContext:
     )
 
 
-def _position_observations(
-    state: TraderState, positions: list[dict], cutoff: datetime,
-    timeframe: Timeframe,
-) -> list[Observation]:
-    """Emit only actual book changes, never infer a fill from a quote."""
-    before = {item.code: item for item in state.positions}
-    now = {str(pos.get("code") or ""): pos for pos in positions
-           if pos.get("code")}
-    observations: list[Observation] = []
-
-    for code, pos in sorted(now.items()):
-        shares = int(pos.get("shares") or 0)
-        avg_price = float(
-            pos.get("avg_price") or pos.get("open_price") or 0)
-        thesis_id = pos.get("thesis_id")
-        previous = before.get(code)
-        if (previous is not None and previous.shares == shares
-                and abs(previous.avg_price - avg_price) < 1e-12
-                and previous.thesis_id == (
-                    str(thesis_id) if thesis_id is not None else None)):
-            continue
-        observations.append(Observation.create(
-            observed_at=cutoff,
-            available_at=cutoff,
-            type=ObservationType.POSITION_CHANGED,
-            subjects=[code],
-            data={
-                "code": code,
-                "shares": shares,
-                "avg_price": avg_price,
-                "thesis_id": thesis_id,
-            },
-            source="portfolio_book",
-            evidence_refs=[
-                f"position:{pos.get('id', code)}:{shares}:{avg_price}"
-            ],
-            timeframe=timeframe,
-        ))
-
-    for code, previous in sorted(before.items()):
-        if code in now:
-            continue
-        observations.append(Observation.create(
-            observed_at=cutoff,
-            available_at=cutoff,
-            type=ObservationType.POSITION_CHANGED,
-            subjects=[code],
-            data={
-                "code": code, "shares": 0,
-                "avg_price": previous.avg_price,
-                "thesis_id": previous.thesis_id,
-            },
-            source="portfolio_book",
-            evidence_refs=[f"position-closed:{code}:{cutoff.isoformat()}"],
-            timeframe=timeframe,
-        ))
-    return observations
-
-
 def _confidence(value: str) -> float:
     return {
         "high": 0.8, "medium": 0.6, "low": 0.4,
@@ -547,18 +482,19 @@ def to_runtime_decisions(
 async def commit_runtime_decisions(
     decisions: list[dict], positions: list[dict], *,
     trader_id: str, decision_key: str | None = None,
+    run_id: str | None = None,
 ) -> tuple[TraderDecision, ...]:
     """Seal position observations and decisions before execution is attempted."""
     from alpha_agents.data import trader_session, trader_state_store
 
     cutoff = _runtime_cutoff()
     context = _runtime_context(cutoff)
-    run_id = trader_session.namespace()
+    run = trader_session.namespace(run_id)
     state = trader_state_store.load_latest(
-        run_id=run_id, trader_id=trader_id)
+        run_id=run, trader_id=trader_id)
     if state is None:
         state = TraderState.create(trader_id=trader_id, as_of=cutoff)
-        trader_state_store.save(state, run_id=run_id)
+        trader_state_store.save(state, run_id=run)
     if state.as_of > cutoff:
         raise TraderRuntimeError(
             "persisted TraderState is ahead of position decision cutoff")
@@ -566,23 +502,23 @@ async def commit_runtime_decisions(
     runtime = TraderRuntime()
     observed = await runtime.step(
         state,
-        _position_observations(
+        position_observations(
             state, positions, cutoff, context.observation_resolution),
         context,
     )
     state = observed.state
     if observed.changed:
-        trader_state_store.save(state, run_id=run_id)
+        trader_state_store.save(state, run_id=run)
 
     key = decision_key or (
-        f"position:{run_id}:{cutoff.isoformat(timespec='seconds')}")
+        f"position:{run}:{cutoff.isoformat(timespec='seconds')}")
     runtime_decisions = to_runtime_decisions(
         decisions, context, decision_key=key)
     if not runtime_decisions:
         return ()
     committed = await runtime.commit_decisions(
         state, runtime_decisions, context)
-    trader_state_store.save(committed.state, run_id=run_id)
+    trader_state_store.save(committed.state, run_id=run)
     return runtime_decisions
 
 
@@ -830,7 +766,7 @@ def note_unanswered(signals: list[dict] | None,
 async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                             *, day: str, news_by_theme: dict[str, list[str]]
                             | None = None, trader=None,
-                            model=None, mechanical_stops: bool = True,
+                            model=None,
                             phase: str = "open",
                             signals: list[dict] | None = None) -> list[dict]:
     """The sell side, for a historical replay.
@@ -867,7 +803,7 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
         raise ValueError(f"phase must be 'open' or 'close', not {phase!r}")
     context = build_context(positions, price_map, signals=signals or [],
                            news_by_theme=news_by_theme,
-                           mechanical_stops=mechanical_stops,
+
                            phase=phase)
     context = _with_reviews(context, getattr(trader, "id", None), before=day)
     # Every exit from here notes the wake-ups that got no answer, including

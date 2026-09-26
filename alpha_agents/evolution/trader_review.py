@@ -1,9 +1,15 @@
 """Review the continuous Trader's decisions without activating rules.
 
-The review grades the decision at its own information boundary, execution
-separately, and outcome separately. A useful "next time" statement becomes a
-quarantined LessonCandidate carrying the decision's original timeframe,
-horizon and evidence scope. Nothing in this module writes handbook/rules.
+The reviewing model explains; it does not grade. Whether a decision was right
+is decided by the market once its window closes (``decision_outcomes``), and
+Lessons/Rules are counted from those grades (``trader_learning``). A model
+asked "were today's decisions good?" said yes 319 times out of 326 over a
+window the account lost to the market — it was grading its own output.
+
+What the model still writes is the reason and, optionally, a "next time"
+note, stored as a quarantined LessonCandidate carrying the decision's
+timeframe, horizon and evidence scope. The note carries no counts: support,
+counterexamples and confidence come from graded decisions only.
 """
 from __future__ import annotations
 
@@ -17,33 +23,29 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 120
 
+#: Stored in the legacy quality columns: the market grades, not this review.
+UNGRADED = "market_pending"
+
 _INSTRUCTIONS = """你正在复盘同一个交易员今天已经封存的决策。
 
-严格分开三件事：
-1. decision_quality：只按决策当时已经可见的信息，评价判断是否合理；
-2. execution_quality：评价挂单/成交/仓位执行，缺少执行事实就写 unknown；
-3. outcome_quality：评价后来实际结果，缺少结果就写 unknown。
+你不给决策打分——对错由之后的行情判定，不由你判定。你的工作是说清楚每个
+决策当时依据了什么事实、这些事实之后怎样验证它。
 
-禁止用后来涨跌反写当时动机；禁止补造未记录的事实。WAIT/HOLD/REJECT 也是
-决策，不能因为没有成交就跳过。若有一条具体、以后可检验的经验，可以给
-lesson；否则 lesson=null。lesson 只能是候选经验，不是永久规则。
+只引用已给出的事实；禁止用后来涨跌反写当时动机；禁止补造未记录的事实。
+WAIT/HOLD/REJECT 也是决策，不能因为没有成交就跳过。若有一条具体、以后可
+检验的经验，可以给 lesson；否则 lesson=null。lesson 只是候选文字，
+它是否成立由行情计数决定，不由你给的任何数字决定。
 
 只输出 JSON：
 {
   "reviews": [
     {
       "decision_id": "...",
-      "decision_quality": "good|bad|uncertain",
-      "execution_quality": "good|bad|unknown",
-      "outcome_quality": "good|bad|unknown",
       "reason": "引用已给事实",
       "lesson": null 或 {
         "claim": "下次可检验的一句话",
         "action": "wait|buy|hold|reduce|sell|reject|adjust",
-        "applicable_context": "适用场景",
-        "support_count": 1,
-        "counterexample_count": 0,
-        "confidence": 0.5
+        "applicable_context": "适用场景"
       }
     }
   ]
@@ -93,6 +95,7 @@ async def review_decisions(
     facts: str = "",
     record: str = "",
     run_id: str | None = None,
+    timeout: float | None = None,
 ) -> dict:
     """Review today's persisted TraderDecisions and quarantine lessons."""
     run = trader_session.namespace(run_id)
@@ -117,7 +120,7 @@ async def review_decisions(
             ),
             _review_message(decisions, facts=facts, record=record),
             max_turns=2,
-            timeout=_TIMEOUT,
+            timeout=timeout if timeout is not None else _TIMEOUT,
             label="trader_decision_review",
         )
     except Exception as exc:  # noqa: BLE001
@@ -140,27 +143,21 @@ async def review_decisions(
             continue
         seen.add(decision_id)
 
-        decision_quality = str(row.get("decision_quality") or "").strip()
-        execution_quality = str(row.get("execution_quality") or "").strip()
-        outcome_quality = str(row.get("outcome_quality") or "").strip()
         reason = str(row.get("reason") or "").strip()
-        if decision_quality not in {"good", "bad", "uncertain"}:
-            continue
-        if execution_quality not in {"good", "bad", "unknown"}:
-            continue
-        if outcome_quality not in {"good", "bad", "unknown"}:
-            continue
         if not reason:
             continue
+        # Any grade the model still writes is dropped here. The columns
+        # record that the market has not graded this yet; the grade lives in
+        # ``trader_decision_outcomes`` once the window closes.
 
         saved = trader_learning.save_decision_review(
             run_id=run,
             trader_id=trader_id,
             decision=decision,
             review_date=day,
-            decision_quality=decision_quality,
-            execution_quality=execution_quality,
-            outcome_quality=outcome_quality,
+            decision_quality=UNGRADED,
+            execution_quality=UNGRADED,
+            outcome_quality=UNGRADED,
             reason=reason,
             payload={
                 "facts": facts,
@@ -179,12 +176,6 @@ async def review_decisions(
         applicable = str(lesson.get("applicable_context") or "").strip()
         if not claim or not action or not applicable:
             continue
-        try:
-            support = int(lesson.get("support_count", 1))
-            oppose = int(lesson.get("counterexample_count", 0))
-            confidence = float(lesson.get("confidence", 0.5))
-        except (TypeError, ValueError):
-            continue
         trader_learning.save_lesson_candidate(
             run_id=run,
             trader_id=trader_id,
@@ -197,17 +188,13 @@ async def review_decisions(
             evidence_timeframe=decision["timeframe"],
             decision_horizon=decision["decision_horizon"],
             evidence_scope=decision["evidence_scope"],
-            support_count=support,
-            counterexample_count=oppose,
-            confidence=confidence,
+            # Words only. Counts come from graded decisions, never from here.
+            support_count=0,
+            counterexample_count=0,
+            confidence=0.0,
             evidence={
                 "decision_id": decision_id,
                 "decision": decision,
-                "qualities": {
-                    "decision": decision_quality,
-                    "execution": execution_quality,
-                    "outcome": outcome_quality,
-                },
             },
             conn=conn,
         )
@@ -258,9 +245,9 @@ def lessons_from_trade_reviews(
             evidence_timeframe="1d",
             decision_horizon="3-5d",
             evidence_scope=scope,
-            support_count=1,
+            support_count=0,
             counterexample_count=0,
-            confidence=0.5,
+            confidence=0.0,
             evidence={
                 "position_id": position_id,
                 "return_pct": facts.get("return_pct"),
@@ -321,9 +308,9 @@ def lessons_from_market_review(
             evidence_timeframe="1d",
             decision_horizon="3-5d",
             evidence_scope=scope,
-            support_count=1,
+            support_count=0,
             counterexample_count=0,
-            confidence=0.5,
+            confidence=0.0,
             evidence={"board": board},
             conn=conn,
         )

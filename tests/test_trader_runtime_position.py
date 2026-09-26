@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from alpha_agents.data import memory_store, trader_state_store
 from alpha_agents.pipeline.tasks import exit_decision as E
 from alpha_agents.trader import (
     Action, DecisionContext, DecisionHorizon, EvidenceScope, Observation,
@@ -125,6 +126,29 @@ def test_reduce_fraction_and_add_size_are_preserved():
         ctx(), decision_key="exit-a")[0]
     assert reduce.fraction == 0.35
     assert add.size_pct == 1.2
+
+
+def test_position_commit_honors_explicit_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        memory_store, "MEMORY_DB_PATH", tmp_path / "memory.db",
+        raising=False)
+    monkeypatch.setattr(memory_store._local, "conn", None, raising=False)
+    try:
+        asyncio.run(E.commit_runtime_decisions(
+            [], [{
+                "id": 1, "code": "600001", "shares": 1000,
+                "open_price": 10.0, "thesis_id": 7,
+            }], trader_id="default", run_id="replay-1"))
+        state = trader_state_store.load_latest(
+            run_id="replay-1", trader_id="default")
+        assert state is not None and state.positions[0].code == "600001"
+        assert trader_state_store.load_latest(
+            run_id="live", trader_id="default") is None
+    finally:
+        conn = getattr(memory_store._local, "conn", None)
+        if conn is not None:
+            conn.close()
+        memory_store._local.conn = None
 
 
 def test_runtime_commit_happens_before_discretionary_execution(monkeypatch):

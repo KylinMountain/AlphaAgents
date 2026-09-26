@@ -61,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from alpha_agents import llm_journal  # noqa: E402
 from alpha_agents.config import PROJECT_ROOT  # noqa: E402
 from alpha_agents.data.memory_store import _SCHEMA  # noqa: E402
+from alpha_agents.data import opportunity_journal, theme_opportunity_journal  # noqa: E402
 
 logger = logging.getLogger("walk_bootstrap")
 
@@ -108,6 +109,10 @@ def _create_fresh(db: Path) -> None:
     con = sqlite3.connect(db)
     try:
         con.executescript(_SCHEMA)
+        # Review reads both journals from its first day.  Reuse their schema
+        # owners so replay state matches the live database without copying DDL.
+        opportunity_journal.init_schema(con)
+        theme_opportunity_journal.init_schema(con)
         con.commit()
     finally:
         con.close()

@@ -47,8 +47,8 @@
 1. **不得重新做候选发现。** 只能处理面板里的代码。
 2. entry_high 是你最多愿意付的价。entry_low 可以写 null：想要的就是"不高于这个价就买"。
    只有在低于某个价就说明你的判断不成立时（比如只认突破），才写 entry_low，且 entry_low < entry_high。
-3. stop_loss 必须严格低于你的买入下沿（没写 entry_low 就低于 entry_high）；它表达论点失效后的风险边界。
-4. target_price 可为 null；如果填写，必须高于 entry_high。
+3. 没有止损也没有止盈：不写 stop_loss / target_price，系统不会在任何价位替你卖。
+4. 买进之后何时离场，由你在每次持仓决策里判断，并从自己的交易结果里学。
 5. 不允许因为“方向已选中”就强行给出交易计划；价格位置或失效边界不合理时直接不下单。
 6. 这里没有研究工具。不要声称重新查过任何数据，只使用本消息已经给出的事实。
 7. {fills_how}
@@ -76,8 +76,6 @@
       "code": "必须来自已选股票",
       "entry_low": null,
       "entry_high": 10.20,
-      "stop_loss": 9.50,
-      "target_price": 12.00,
       "size_pct": 0.05,
       "prob": 0.55,
       "conviction": 0.6,

@@ -52,7 +52,14 @@ def test_legacy_top_level_reason_is_preserved():
     [{"code": "600001", "reason": "x", "rule_ids": "R2"}]])
 def test_malformed_rejections_are_named(rejected):
     result = D.parse_orders(json.dumps({"orders": [], "no_trade_reason": "x", "rejected": rejected}), {"600001"})
-    assert result["parse_error"] and result["orders"] == []
+    assert result["orders"] == []
+    if isinstance(rejected, list):
+        assert result["parse_error"] is None
+        assert result["decision_status"] == "refused"
+        assert result["refused"][0]["why"] == "invalid_rejected"
+    else:
+        # A malformed collection has no per-item boundary at which to recover.
+        assert result["parse_error"]
 
 
 def test_a_code_cannot_be_ordered_and_rejected():

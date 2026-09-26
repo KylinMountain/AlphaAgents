@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Continue independent accounts from a runner-created sealed checkpoint.
 
-A knowledge intervention perturbs the first open plan on the first branch day
-only. It is NOT a permanent handbook edit: subsequent accounts and learning
-advance on their own. The existing runner performs every fill and review.
+Two kinds of arm. A knowledge intervention (``old``/``new``) perturbs the
+first open plan on the first branch day only; it is NOT a permanent handbook
+edit. A rule arm (``rule``) puts one human-approved Trader Rule in force for
+the whole branch — the T9 question "does a Rule change what the same Trader,
+from the same state, does?". The Rule is approved by the operator who wrote
+the arms file, never by a model, and is recorded as such in its activation
+event. The existing runner performs every fill and review.
 """
 from __future__ import annotations
 
@@ -46,13 +50,18 @@ def prepare(args) -> tuple[dict, list[dict]]:
         raise CheckpointError("A mechanical trader cannot test a knowledge-text intervention")
     arms, names = [("control", None)], {"control"}
     for change in changes:
-        if not isinstance(change, dict) or set(change) != {"name", "old", "new"}:
-            raise CheckpointError("Each intervention must contain exactly name, old, new")
+        if not isinstance(change, dict) or not (
+                set(change) == {"name", "old", "new"}
+                or set(change) == {"name", "rule"}):
+            raise CheckpointError(
+                "Each arm must contain exactly name, old, new — or name, rule")
         name = change["name"]
         if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name)
                 or name in names):
             raise CheckpointError("Invalid/duplicate/reserved arm name")
-        if (not isinstance(change["old"], str) or not change["old"]
+        if "rule" in change:
+            validate_rule(change["rule"])
+        elif (not isinstance(change["old"], str) or not change["old"]
                 or not isinstance(change["new"], str) or change["old"] == change["new"]):
             raise CheckpointError("Intervention must change a nonempty exact knowledge fragment")
         names.add(name)
@@ -70,7 +79,9 @@ def prepare(args) -> tuple[dict, list[dict]]:
     if len(dates) != args.days or dates[0] != value["next_session"]:
         raise CheckpointError("Pinned corpus does not cover the full requested branch window")
     experiment_id = uuid4().hex
-    tasks = [{"arm": arm, "trial": trial + 1, "intervention": change,
+    tag = next((c["rule"]["applicable_context"] for _, c in arms
+                if c and "rule" in c), None)
+    tasks = [{"arm": arm, "trial": trial + 1, "intervention": change, "tag": tag,
               "branch_id": f"fork-{experiment_id[:12]}-{arm}-{trial + 1}"}
              for trial in range(args.trials) for arm, change in arms]
     random.Random(args.seed).shuffle(tasks)
@@ -89,6 +100,77 @@ def prepare(args) -> tuple[dict, list[dict]]:
                            "No historical corpus or training-data point-in-time certification",
                            "Failed branches stay in the report; interrupted usage may be incomplete"]}
     return manifest, tasks
+
+
+RULE_FIELDS = {"claim", "action", "applicable_context", "approved_by"}
+
+
+def validate_rule(rule) -> None:
+    """A rule arm names the Rule and the human who approved it."""
+    if not isinstance(rule, dict) or not RULE_FIELDS <= set(rule):
+        raise CheckpointError(
+            "A rule arm needs claim, action, applicable_context, approved_by")
+    extra = set(rule) - RULE_FIELDS - {
+        "decision_horizon", "evidence_timeframe", "evidence_scope"}
+    if extra:
+        raise CheckpointError(f"Unknown rule fields: {sorted(extra)}")
+    for field in RULE_FIELDS:
+        if not isinstance(rule[field], str) or not rule[field].strip():
+            raise CheckpointError(f"Rule field {field} must be nonempty text")
+    if rule["approved_by"].strip().lower() in {"model", "llm", "agent"}:
+        raise CheckpointError("A Rule is approved by a person, not a model")
+
+
+def install_rule(conn, *, branch_id: str, rule: dict, source_date: str) -> int:
+    """Put one approved Rule in force for this branch only."""
+    from datetime import date, timedelta
+    from alpha_agents.data import trader_learning as TLD
+    from alpha_agents.evolution import trader_learning as TL
+    horizon = rule.get("decision_horizon", "3-5d")
+    common = dict(
+        run_id=branch_id, trader_id="default", source_date=source_date,
+        claim=rule["claim"], action=rule["action"],
+        applicable_context=rule["applicable_context"],
+        evidence_timeframe=rule.get("evidence_timeframe", "1d"),
+        decision_horizon=horizon,
+        evidence_scope=rule.get("evidence_scope", "replay_daily"),
+        support_count=0, counterexample_count=0, confidence=0.0,
+        evidence_refs=[], conn=conn)
+    key = f"t9:{rule['action']}:{rule['applicable_context']}"
+    lesson_id, _ = TLD.save_lesson_version(lesson_key=key, **common)
+    rule_id, _ = TLD.save_rule_version(
+        rule_key=key, lesson_id=lesson_id,
+        expires_on=(date.fromisoformat(source_date)
+                    + timedelta(days=TL.RULE_TTL_DAYS)).isoformat(),
+        activation_reason=f"T9 experiment arm approved by {rule['approved_by']}",
+        **common)
+    conn.commit()
+    return rule_id
+
+
+def decision_profile(conn, hist, *, branch_id: str, sessions: list[str],
+                     tag: str | None) -> dict:
+    """What the Trader did during the branch suffix, by action.
+
+    ``tagged_buys`` counts BUYs whose base session carries ``tag`` — the
+    situation a rule arm's Rule is about, measured identically in every arm.
+    """
+    from datetime import datetime
+    from alpha_agents.evolution import decision_outcomes as DO
+    actions: dict[str, int] = {}
+    tagged = 0
+    first, last = sessions[0], sessions[-1]
+    for item in DO.sealed_decisions(conn, run_id=branch_id, trader_id="default"):
+        made = datetime.fromisoformat(str(item["made_at"]))
+        if not first <= made.date().isoformat() <= last:
+            continue
+        action = str(item.get("action") or "").lower()
+        actions[action] = actions.get(action, 0) + 1
+        if tag and action == "buy" and item.get("code"):
+            base = DO._base_date(hist, made)
+            if base and tag in DO.situation_tags(hist, item["code"], base):
+                tagged += 1
+    return {"actions": actions, "tagged_buys": tagged, "tag": tag}
 
 
 def _deny_network(event, args):
@@ -145,6 +227,13 @@ def worker(args) -> int:
         if runtime_identity() != value["runtime_hash"]:
             raise CheckpointError("Branch runtime/model configuration differs from prefix")
         materialize(args.checkpoint, storage, branch_id=task["branch_id"])
+        rule = (task.get("intervention") or {}).get("rule")
+        rule_id = None
+        if rule:
+            from alpha_agents.data.memory_store import _get_conn as _book
+            rule_id = install_rule(_book(), branch_id=task["branch_id"],
+                                   rule=rule,
+                                   source_date=value["completed_through"])
         from scripts import walk_forward as WF
         from alpha_agents.evolution.replay_mode import mark_replay_process
         from alpha_agents.evolution.performance import equity_metrics
@@ -156,14 +245,30 @@ def worker(args) -> int:
         saved.update(target=storage, start=value["next_session"], days=args.days,
                      run_id=task["branch_id"], out=workspace / "report", checkpoint_out=None,
                      no_keep_notes=True, keep_going=False, continuation=value,
-                     branch_intervention=task["intervention"])
+                     branch_intervention=(None if rule else task["intervention"]))
         run_args = argparse.Namespace(**saved)
         got = WF.run(run_args)
         report = WF.write_report(got, run_args.out)
         health = WF.integrity(got)
         from alpha_agents.data.memory_store import _get_conn
-        evidence = intervention_evidence(_get_conn(), task, value["next_session"])
-        applied = evidence is not None
+        if rule:
+            shown = got["ctx"].counters.get("trader_rule_contexts", 0)
+            evidence = {"rule_id": rule_id, "decision_contexts_with_rule": shown}
+            applied = shown > 0
+        else:
+            evidence = intervention_evidence(
+                _get_conn(), task, value["next_session"])
+            applied = evidence is not None
+        import sqlite3 as _sq
+        hist = _sq.connect(f"file:{storage / 'market_history.db'}?mode=ro", uri=True)
+        hist.row_factory = _sq.Row
+        try:
+            profile = decision_profile(
+                _get_conn(), hist, branch_id=task["branch_id"],
+                sessions=task["sessions"],
+                tag=(task.get("tag") or (rule or {}).get("applicable_context")))
+        finally:
+            hist.close()
         full_dates = [r["date"] for r in got["equity"]] == task["sessions"]
         if abs(got["initial_account"]["equity"] - value["end_account"]["equity"]) > 0.01:
             raise CheckpointError("Branch starting equity differs from checkpoint ending equity")
@@ -181,9 +286,12 @@ def worker(args) -> int:
                       intervention_attempted=getattr(got["ctx"], "branch_intervention_used", False),
                       intervention_evidence=evidence, intervention_applied=applied,
                       intervention=task["intervention"],
+                      decisions=profile,
                       note="Metrics cover the branch suffix only; parent history is not new evidence")
         if task["intervention"] and not applied:
-            result["incomplete_reason"] = "No eligible first-day open plan consumed the intervention"
+            result["incomplete_reason"] = (
+                "The rule never reached a decision context" if rule else
+                "No eligible first-day open plan consumed the intervention")
         # State/learning remains in this storage; WF.main's production merge is never called.
     except (Exception, SystemExit) as exc:
         import traceback

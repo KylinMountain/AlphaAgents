@@ -68,16 +68,12 @@ class TestAMalformedOrderIsNamedNotDropped:
     @pytest.mark.parametrize("body,why", [
         ('{"orders":[{"code":"600001","entry_low":10.2,"entry_high":9.8,'
          '"stop_loss":9.2}]}', "inverted_zone"),
-        ('{"orders":[{"code":"600001","entry_low":10.0,"entry_high":11.0,'
-         '"stop_loss":10.5}]}', "stop_not_below_entry"),
         ('{"orders":[{"code":"600001","entry_low":0,"entry_high":1.0,'
          '"stop_loss":-1.0}]}', "non_positive_price"),
         # entry_high is the one price an order cannot do without: it is the
         # most the trader will pay. (entry_low became optional on 2026-09-23.)
         ('{"orders":[{"code":"600001","entry_low":10.0,"stop_loss":9.2}]}',
          "bad_prices"),
-        ('{"orders":[{"code":"600001","entry_low":null,"entry_high":10.0,'
-         '"stop_loss":10.0}]}', "stop_not_below_entry"),
         ('{"orders":["600001"]}', "not_an_object"),
     ])
     def test_the_reason_is_returned(self, body, why):
@@ -163,6 +159,37 @@ class TestThePromptCannotShipAHole:
         # the prompt can tell "nothing" from "we forgot to fill it in".
         assert "没有读到任何快讯" in message
         assert "空仓" in message
+
+    def test_a_toolless_decision_does_not_advertise_unavailable_tools(self):
+        message = D.build_message(
+            day="2025-07-01", prev_day="2025-06-30", panel=PANEL, news=[],
+            book="", knowledge="", trader_note="", picks=2,
+            template=D.load_prompt(), tools_enabled=False)
+
+        assert "本轮没有可调用工具" in message
+        assert "get_market_regime" not in message
+
+    def test_the_runner_timeout_reaches_the_decision_call(self, monkeypatch):
+        seen = {}
+
+        async def fake_run(frame, *, model, tools, budget, timeout=None,
+                           attempts=None):
+            seen["timeout"] = timeout
+            return {"orders": [], "watch": [], "rejected": [],
+                    "refused": [], "parse_error": None,
+                    "no_trade_reason": "没有足够的入场证据"}
+
+        monkeypatch.setattr(D, "_run_frame", fake_run)
+        import asyncio
+        from types import SimpleNamespace
+
+        asyncio.run(D.propose(
+            day="2025-07-01", prev_day="2025-06-30", panel=PANEL, news=[],
+            book="", knowledge="", trader_note="", picks=2,
+            template=D.load_prompt(), model=SimpleNamespace(model="stub"),
+            timeout=17.5))
+
+        assert seen["timeout"] == 17.5
 
     def test_the_news_actually_reaches_the_prompt(self):
         """The template claimed "news up to 09:00 today" and then did not
@@ -314,64 +341,35 @@ class TestTheCallingLoopOutlivesTheClient:
         assert seen[1] is not loop
 
 
-class TestATargetIsOptionalButChecked:
-    """`target_price` is the difference between one exit and two.
+class TestThereIsNoStopAndNoTarget:
+    """No price sells on the trader's behalf (2026-09-26). An order is where to
+    buy; when to sell is decided at each position turn and learned."""
 
-    Every order in the first 20-day replay had a stop and no target, so the
-    only way out of a position was the stop — and all 11 trades took it. The
-    field was accepted by the order layer and dropped by the runner, so this
-    is about the parser's half of that seam.
-    """
-
-    def test_a_target_above_the_entry_is_kept(self):
+    def test_an_order_without_either_is_whole(self):
         v = D.parse_orders(
             '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":12.0,"reason":"主线"}]}', CODES)
-        assert v["orders"][0]["target_price"] == 12.0
-
-    def test_omitting_it_is_allowed_and_recorded_as_none(self):
-        """Optional, and its absence is a fact worth carrying rather than an
-        error: it says the position has exactly one exit."""
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"reason":"主线"}]}', CODES)
+            '"reason":"主线"}]}', CODES)
+        assert v["refused"] == []
+        assert v["orders"][0]["stop_loss"] is None
         assert v["orders"][0]["target_price"] is None
 
-    def test_a_target_below_the_entry_ceiling_is_refused(self):
-        """A target at or under the fill ceiling is not a target: the order
-        would exit at a price it could have been filled at."""
+    @pytest.mark.parametrize("extra", [
+        '"stop_loss":9.0,"target_price":12.0',
+        '"stop_loss":10.4,"target_price":10.2',     # would once be refused
+        '"stop_loss":"跌破就走","target_price":"涨一倍"',
+    ])
+    def test_levels_a_model_still_writes_are_ignored_not_refused(self, extra):
         v = D.parse_orders(
             '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":10.2,"reason":"x"}]}', CODES)
-        assert v["orders"] == []
-        assert v["refused"][0]["why"] == "target_not_above_entry"
-
-    def test_a_target_equal_to_the_ceiling_is_refused(self):
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":10.5,"reason":"x"}]}', CODES)
-        assert v["refused"][0]["why"] == "target_not_above_entry"
-
-    def test_an_unparseable_target_is_refused_by_name(self):
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":"涨一倍","reason":"x"}]}', CODES)
-        assert v["refused"][0]["why"] == "bad_target"
-
-    def test_an_empty_string_means_no_target(self):
-        """Some models emit `""` for an absent optional field rather than
-        omitting it; that is an omission, not a bad number."""
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":"","reason":"x"}]}', CODES)
+            f'{extra},"reason":"x"}}]}}', CODES)
+        assert v["refused"] == []
+        assert v["orders"][0]["stop_loss"] is None
         assert v["orders"][0]["target_price"] is None
 
-    def test_the_prompt_asks_for_a_target(self):
-        """The template is part of the contract: a field the runner reads but
-        the prompt never mentions is one the model will not emit."""
+    def test_the_prompt_says_there_is_neither(self):
         text = D.load_prompt()
-        assert "target_price" in text
-        assert "日均波动" in text
+        assert "没有止损，也没有止盈" in text
+        assert '"stop_loss"' not in text and '"target_price"' not in text
 
 
 class TestTheBookShowsWhetherAPositionIsUp:
@@ -456,7 +454,7 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
-        assert "next_check" in verdict["parse_error"]
+        assert verdict["refused"][0]["why"] == "invalid_watch"
 
     def test_wait_condition_operator_is_validated(self):
         verdict = D.parse_orders(
@@ -466,7 +464,10 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
-        assert "invalid condition" in verdict["parse_error"]
+        assert verdict["refused"] == [{
+            "code": "600001", "why": "invalid_watch",
+            "detail": "invalid condition or confidence",
+        }]
 
     def test_wait_cannot_name_a_stock_outside_the_panel(self):
         verdict = D.parse_orders(
@@ -476,6 +477,43 @@ class TestWaitIsAFirstClassDecision:
             CODES,
         )
         assert verdict["decision_status"] == "incomplete"
+        assert verdict["refused"][0]["why"] == "invalid_watch"
+
+    def test_invalid_wait_does_not_discard_a_valid_buy(self):
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_high":10.2,'
+            '"stop_loss":9.2,"reason":"买"}],'
+            '"watch":[{"code":"600002","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":19}],'
+            '"cancel_if":[{"metric":"net_flow","op":"<","value":0}]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert [order["code"] for order in verdict["orders"]] == ["600001"]
+        assert verdict["watch"] == []
+        assert verdict["refused"] == [{
+            "code": "600002", "why": "invalid_watch",
+            "detail": "invalid condition or confidence",
+        }]
+
+    def test_invalid_rejection_does_not_discard_other_valid_actions(self):
+        verdict = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_high":10.2,'
+            '"stop_loss":9.2,"reason":"买"}],'
+            '"watch":[{"code":"600002","reason":"等",'
+            '"next_check":[{"metric":"price","op":"<=","value":19}],'
+            '"cancel_if":[]}],'
+            '"rejected":[{"code":"300999","reason":"面板外","rule_ids":[]}]}',
+            CODES,
+        )
+        assert verdict["parse_error"] is None
+        assert [order["code"] for order in verdict["orders"]] == ["600001"]
+        assert [item["code"] for item in verdict["watch"]] == ["600002"]
+        assert verdict["rejected"] == []
+        assert verdict["refused"] == [{
+            "code": "300999", "why": "invalid_rejected",
+            "detail": "rejected needs a unique panel code, reason and rule_ids list",
+        }]
 
     @pytest.mark.parametrize("other", ["orders", "rejected"])
     def test_same_code_cannot_be_wait_and_another_action(self, other):
@@ -510,6 +548,7 @@ class TestWaitIsAFirstClassDecision:
         assert "WAIT" in text
         assert "next_check" in text
         assert "orders / watch / rejected" in text
+        assert "\"net_flow\"" not in text
 
 
 class TestRuntimeDecisionTranslation:
@@ -595,4 +634,4 @@ def test_wait_rejects_a_metric_the_runtime_cannot_observe_yet():
         '"cancel_if":[]}]}',
         CODES)
     assert verdict["decision_status"] == "incomplete"
-    assert "invalid condition" in verdict["parse_error"]
+    assert verdict["refused"][0]["why"] == "invalid_watch"

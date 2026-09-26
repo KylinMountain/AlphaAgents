@@ -85,7 +85,8 @@ _INSTRUCTIONS = """你是这个账户的交易员。现在是收盘后。下面�
 只输出一个 JSON 对象：
 {"market": "...", "themes": "...",
  "boards": [{"name": "...", "kind": "错过", "driver": "...", "evidence": "...",
-             "morning": "...", "verdict": "...", "lesson": "..."}]}"""
+             "morning": "...", "verdict": "...", "lesson": "..."}]}
+不要输出 markdown 围栏。文本字段里的英文双引号必须写成 JSON 转义 `\\"`，或改用中文引号。"""
 
 
 def board_name(raw: str) -> str:
@@ -105,14 +106,53 @@ def board_name(raw: str) -> str:
 
 def _parse(text: str) -> dict | None:
     t = (text or "").strip()
-    start, end = t.find("{"), t.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        raw = json.loads(t[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, dict):
+    payloads = []
+    start = None
+    depth = 0
+    quoted = False
+    escaped = False
+    for index, char in enumerate(t):
+        if start is None:
+            if char == "{":
+                start, depth = index, 1
+            continue
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                payloads.append(t[start:index + 1])
+                start = None
+
+    raw = None
+    for payload in payloads:
+        try:
+            candidate = json.loads(payload)
+        except json.JSONDecodeError:
+            # The close review is prose-heavy.  A model occasionally leaves a
+            # quotation mark inside one text field unescaped.  Repair only the
+            # already-delimited object, then keep the same schema filter below;
+            # prose still cannot become a stored review.
+            from json_repair import repair_json
+
+            try:
+                candidate = repair_json(payload, return_objects=True)
+            except Exception as exc:                  # noqa: BLE001
+                logger.debug("Could not repair market review JSON (%s)", exc)
+                continue
+        if isinstance(candidate, dict) and isinstance(candidate.get("boards"), list):
+            raw = candidate
+    if raw is None:
         return None
     boards = []
     for b in raw.get("boards") or []:
@@ -130,7 +170,8 @@ def _parse(text: str) -> dict | None:
 
 
 async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: str,
-                model, record: str = "", context: str = "") -> dict | None:
+                model, record: str = "", context: str = "",
+                timeout: float | None = None) -> dict | None:
     """Ask the trader to review its day and store it. Never raises."""
     ensure(conn)
     if model is None or not facts.strip():
@@ -144,7 +185,8 @@ async def write(conn: sqlite3.Connection, *, trader_id: str, date: str, facts: s
     try:
         agent = Agent(name="market_review", instructions=_INSTRUCTIONS,
                       model=model, tools=[])
-        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+        result = await run_agent(agent, message, max_turns=2,
+                                 timeout=timeout if timeout is not None else _TIMEOUT,
                                   label="market_review")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Market review for %s failed (%s: %s)", trader_id,

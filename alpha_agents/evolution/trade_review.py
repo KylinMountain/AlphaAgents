@@ -181,7 +181,8 @@ def _parse(text: str) -> dict:
     return out
 
 
-async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
+async def write_words(f: dict, *, model, trader=None, rules: str = "",
+                      timeout: float | None = None) -> dict:
     """Ask for an interpretation; only temporal-integrity faults propagate.
 
     ``rules`` is the handbook that was in force while it held the trade, so
@@ -203,7 +204,8 @@ async def write_words(f: dict, *, model, trader=None, rules: str = "") -> dict:
     try:
         agent = Agent(name="trade_review", instructions=instructions,
                       model=model, tools=[])
-        result = await run_agent(agent, message, max_turns=2, timeout=_TIMEOUT,
+        result = await run_agent(agent, message, max_turns=2,
+                                 timeout=timeout if timeout is not None else _TIMEOUT,
                                   label="trade_review")
     except Exception as e:                            # noqa: BLE001
         logger.warning("Trade review for %s failed (%s) — facts only",
@@ -239,7 +241,8 @@ def save(conn: sqlite3.Connection, f: dict, words: dict, trader_id: str, *,
 async def review_closed(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                         trader_id: str, as_of: str, model, trader=None,
                         handbook_before: str | None = None,
-                        stats: dict | None = None) -> int:
+                        stats: dict | None = None,
+                        timeout: float | None = None) -> int:
     """Persist facts first. Return COMPLETED interpretations, not processed rows.
 
     Availability is conservative at day granularity. The claim is committed
@@ -273,7 +276,10 @@ async def review_closed(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
                 before = handbook_before
             rules = handbook.load(trader_id, before=before)
             versions = handbook.bindings(trader_id, before=before)
-            words = dict(await write_words(f, model=model, trader=trader, rules=rules))
+            word_options = {"model": model, "trader": trader, "rules": rules}
+            if timeout is not None:
+                word_options["timeout"] = timeout
+            words = dict(await write_words(f, **word_options))
             words["rule_versions"] = versions
             for field in ("followed", "broke"):
                 words[field] = [rid for rid in words.get(field) or [] if rid in versions]

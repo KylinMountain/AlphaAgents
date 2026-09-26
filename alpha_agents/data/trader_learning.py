@@ -132,6 +132,38 @@ CREATE TRIGGER IF NOT EXISTS trader_rule_events_no_delete
 BEFORE DELETE ON trader_rule_events BEGIN
   SELECT RAISE(ABORT,'trader_rule_events is append-only');
 END;
+CREATE TABLE IF NOT EXISTS trader_decision_outcomes (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    trader_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    code TEXT NOT NULL,
+    decided_on TEXT NOT NULL,
+    base_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    forward_pct REAL NOT NULL,
+    market_median_pct REAL NOT NULL,
+    excess_pct REAL NOT NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('right','wrong','flat')),
+    tags_json TEXT NOT NULL,
+    evidence_timeframe TEXT NOT NULL,
+    decision_horizon TEXT NOT NULL,
+    evidence_scope TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(run_id,trader_id,decision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trader_decision_outcomes_end
+  ON trader_decision_outcomes(run_id,trader_id,end_date);
+CREATE TRIGGER IF NOT EXISTS trader_decision_outcomes_no_update
+BEFORE UPDATE ON trader_decision_outcomes BEGIN
+  SELECT RAISE(ABORT,'trader_decision_outcomes is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trader_decision_outcomes_no_delete
+BEFORE DELETE ON trader_decision_outcomes BEGIN
+  SELECT RAISE(ABORT,'trader_decision_outcomes is append-only');
+END;
 CREATE INDEX IF NOT EXISTS idx_trader_decision_reviews_day
   ON trader_decision_reviews(run_id,trader_id,review_date);
 CREATE INDEX IF NOT EXISTS idx_trader_lesson_candidates_day
@@ -389,8 +421,13 @@ def save_rule_version(
     support_count: int, counterexample_count: int, confidence: float,
     evidence_refs: list[int], expires_on: str,
     conn: sqlite3.Connection | None = None,
+    activation_reason: str = "evidence threshold reached",
 ) -> tuple[int, bool]:
-    """Append a Rule version; a new version starts active via an event."""
+    """Append a Rule version; a new version starts active via an event.
+
+    ``activation_reason`` names who put it in force: the evidence threshold,
+    or a human approving an experiment — never the model.
+    """
     db = init_schema(conn)
     run_id = _text(run_id, "run_id")
     trader_id = _text(trader_id, "trader_id")
@@ -428,7 +465,58 @@ def save_rule_version(
     db.execute(
         "INSERT INTO trader_rule_events (rule_id,event,reason,at) "
         "VALUES (?,?,?,?)",
-        (rule_id, "activate", "evidence threshold reached", source_date))
+        (rule_id, "activate", _text(activation_reason, "activation_reason"),
+         source_date))
     if conn is None:
         db.commit()
     return rule_id, True
+
+
+def save_decision_outcome(
+    *, run_id: str, trader_id: str, decision_id: str, action: str, code: str,
+    decided_on: str, base_date: str, end_date: str, horizon: int,
+    forward_pct: float, market_median_pct: float, excess_pct: float,
+    verdict: str, tags: list[str], evidence_timeframe: str,
+    decision_horizon: str, evidence_scope: str,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Append the market's grade of one decision; each decision is graded once."""
+    db = init_schema(conn)
+    if verdict not in ("right", "wrong", "flat"):
+        raise ValueError("verdict must be right, wrong or flat")
+    cur = db.execute(
+        "INSERT OR IGNORE INTO trader_decision_outcomes "
+        "(run_id,trader_id,decision_id,action,code,decided_on,base_date,"
+        "end_date,horizon,forward_pct,market_median_pct,excess_pct,verdict,"
+        "tags_json,evidence_timeframe,decision_horizon,evidence_scope) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (_text(run_id, "run_id"), _text(trader_id, "trader_id"),
+         _text(decision_id, "decision_id"), _text(action, "action"),
+         _text(code, "code"), _text(decided_on, "decided_on"),
+         _text(base_date, "base_date"), _text(end_date, "end_date"),
+         int(horizon), float(forward_pct), float(market_median_pct),
+         float(excess_pct), verdict,
+         json.dumps(sorted(set(tags)), ensure_ascii=False,
+                    separators=(",", ":")),
+         _text(evidence_timeframe, "evidence_timeframe"),
+         _text(decision_horizon, "decision_horizon"),
+         _text(evidence_scope, "evidence_scope")))
+    if conn is None:
+        db.commit()
+    return bool(cur.rowcount)
+
+
+def decision_outcomes(
+    *, run_id: str, trader_id: str, up_to: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict]:
+    """Graded decisions whose window closed at or before ``up_to``."""
+    db = init_schema(conn)
+    sql = ("SELECT * FROM trader_decision_outcomes "
+           "WHERE run_id=? AND trader_id=?")
+    args: list[object] = [run_id, trader_id]
+    if up_to is not None:
+        sql += " AND end_date<=?"
+        args.append(up_to)
+    sql += " ORDER BY end_date,id"
+    return [dict(row) for row in db.execute(sql, tuple(args)).fetchall()]

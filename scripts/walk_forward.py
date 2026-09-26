@@ -259,18 +259,32 @@ LIMITATIONS = (
     "capacity is measured from pre-decision ADV20 and enforced as a hard "
     "share cap on open-time fills; close-time synthetic buys remain a separate "
     "execution path and are reported separately",
-    "every order now carries the agent's own thesis and its own "
-    "invalidations, and a crossed invalidation wakes the agent rather than "
-    "closing the position — so an exit here is the agent's decision and the "
-    "run says nothing about what a mechanical rule would have done. A "
-    "position still open after its stated line was crossed is a choice the "
-    "agent made, not an oversight, and the checkpoint records it",
     "the learning step **records** observations, it does not promote them: "
     "every candidate stays in the ``observation`` state because n is far below "
     "the 50 this repository requires, and ``advance_candidate`` is deliberately "
     "not called by the pipeline — so 'the agent learned something' here means "
     "'a dated note stating its n was written and cited', not 'behaviour changed'",
 )
+
+#: Who closed positions, stated for the mode that actually ran. It was one
+#: unconditional sentence claiming the agent decided every exit, printed over
+#: a 30-day window in which the agent had sold nothing and every one of its
+#: 31 sells was an entry stop or target.
+AGENT_EXITS_LIMITATION = (
+    "the agent decides every sell and there is no stop or target of any kind: "
+    "a crossed invalidation or rule signal wakes it rather than closing the "
+    "position, so a position still open after its stated line was crossed is "
+    "a choice the agent made, not an oversight")
+MECHANICAL_EXITS_LIMITATION = (
+    "sells are the placeholder's stop and target levels, executed "
+    "mechanically; no agent was asked about open positions")
+
+
+def _exit_limitation(ctx) -> str:
+    if getattr(ctx, "agent_exits", False):
+        return AGENT_EXITS_LIMITATION
+    return MECHANICAL_EXITS_LIMITATION
+
 
 #: What a placeholder run additionally cannot show.
 PLACEHOLDER_LIMITATIONS = (
@@ -329,6 +343,7 @@ CURRENT_MEMBERSHIP_LIMITATION = (
 
 def _limitations(ctx) -> tuple[str, ...]:
     base = list(LIMITATIONS)
+    base.append(_exit_limitation(ctx))
     extra = list(
         LLM_LIMITATIONS if ctx.decider == "llm" else PLACEHOLDER_LIMITATIONS)
     if not _membership_is_strict(ctx) and getattr(
@@ -1152,6 +1167,26 @@ def _book_and_knowledge(
         except Exception as exc:                          # noqa: BLE001
             logger.warning("%s unavailable: %s", fn.__name__, exc)
     parts.append(_knowledge_block(ctx, day))
+    try:
+        from alpha_agents.evolution import trader_replay
+        learn_as_of = (
+            ctx.corpus.previous(day) if phase == "open" else day)
+        if learn_as_of:
+            block = trader_replay.learning_block(
+                run_id=str(ctx.run_id),
+                trader_id=ctx.trader,
+                day=learn_as_of,
+                decision_horizon="3-5d",
+            )
+            parts.append(block)
+            # Evidence that a Rule actually reached a decision, not only that
+            # one existed: T9 compares arms by what each Trader was shown.
+            rules_shown = block.count("• RULE ")
+            if rules_shown:
+                ctx.counters["trader_rule_contexts"] += 1
+                ctx.counters["trader_rules_shown"] += rules_shown
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("Trader Runtime learning unavailable: %s", exc)
     return book, "\n\n".join(p for p in parts if p)
 
 
@@ -1446,7 +1481,8 @@ def _review_trades(ctx, day: str, conn) -> int:
             conn, hist, trader_id=ctx.trader, trader=get_trader(ctx.trader),
             day=day, model=ctx.model, facts_text=SF.render(facts),
             exposure_text=exposure, record_text=_day_record(ctx, day, conn, hist),
-            handbook_before=day))
+            handbook_before=day, run_id=getattr(ctx, "run_id", None),
+            model_timeout=getattr(ctx, "model_timeout", None)))
     except Exception as exc:                          # noqa: BLE001
         from alpha_agents.data.clock import LookAheadError
         if isinstance(exc, LookAheadError):
@@ -2308,7 +2344,8 @@ def _plan_intervention(ctx, day: str, phase: str) -> dict | None:
 def _sector_trade_plan(ctx, *, day: str, prev_day: str,
                        panel: list[dict], news: list[dict],
                        market: dict, book: str, knowledge: str,
-                       research_packet_payload: dict) -> dict:
+                       research_packet_payload: dict,
+                       information_cutoff: str | None = None) -> dict:
     """Shared B/C/D order planner. It cannot research or widen the stock set."""
     from alpha_agents.agents import t1_decider
 
@@ -2335,8 +2372,10 @@ def _sector_trade_plan(ctx, *, day: str, prev_day: str,
         phase="open",
         tools=[],
         max_turns=ctx.max_turns,
+        timeout=getattr(ctx, "model_timeout", None),
         research_budget=None,
         research_packet=research_packet_payload,
+        information_cutoff=information_cutoff,
     )
 
 def _validate_sector_order_relations(
@@ -2483,6 +2522,116 @@ def _decision_world_read_set(
     return read_set
 
 
+def _runtime_watch_rows(ctx, state, codes: tuple[str, ...], *,
+                        day: str, prev_day: str, phase: str) -> list[dict]:
+    """Rebuild triggered WAIT names from their sealed candidate evidence."""
+    if not codes:
+        return []
+    mark_day = day if phase == "close" else prev_day
+    bars = ctx.corpus.bars(mark_day)
+    unavailable = _unavailable_codes(ctx) if phase == "close" else set()
+    out = []
+    for code in codes:
+        if code in unavailable or code not in ctx.corpus.instruments:
+            continue
+        bar = bars.get(code)
+        if not bar or not bar.get("close"):
+            continue
+        adv = ctx.corpus.adv20(code, prev_day)
+        if not adv or adv <= 0:
+            continue
+        prior = {}
+        for observation in reversed(state.recent_observations):
+            if (observation.type.value == "candidate"
+                    and code in observation.subjects):
+                prior = observation.data
+                break
+        if not prior:
+            continue
+        row = {
+            "code": code,
+            "name": prior.get("name")
+                    or ctx.corpus.instruments[code]["name"],
+            "close": float(bar["close"]),
+            "change_pct": round(float(bar.get("change_pct") or 0), 2),
+            "adv20": adv,
+            "turnover_rate": round(
+                float(bar.get("turnover_rate") or 0), 2),
+            "consecutive_limits": prior.get("consecutive_limits"),
+            "net_amount": prior.get("net_amount"),
+            "concepts": prior.get("concepts") or [],
+        }
+        for key in (
+            "primary_theme", "supporting_themes",
+            "membership_snapshot_id", "membership_hash",
+            "primary_theme_relation_evidence_id",
+            "supporting_theme_relation_evidence_ids",
+        ):
+            if prior.get(key) is not None:
+                row[key] = prior[key]
+        out.append(row)
+    return out
+
+
+def _merge_runtime_rows(panel: list[dict], extra: list[dict]) -> list[dict]:
+    out = list(panel)
+    seen = {row["code"] for row in out}
+    for row in extra:
+        if row["code"] not in seen:
+            out.append(row)
+            seen.add(row["code"])
+    return out
+
+
+def _trader_runtime_prepare(ctx, day: str, prev_day: str, phase: str,
+                            panel: list[dict], market: dict):
+    """Persist the same Trader observations live uses, before the model call."""
+    from alpha_agents.evolution import trader_replay
+
+    if ctx.loop is None:
+        raise RuntimeError("LLM replay Trader Runtime requires the window loop")
+    mark_day = day if phase == "close" else prev_day
+    marks = {
+        code: {
+            "price": float(row["close"]),
+            "change_pct": row.get("change_pct"),
+        }
+        for code, row in ctx.corpus.bars(mark_day).items()
+        if row.get("close")
+    }
+    state, dctx, recheck = ctx.loop.run_until_complete(
+        trader_replay.prepare(
+            run_id=str(ctx.run_id),
+            trader_id=ctx.trader,
+            day=day,
+            phase=phase,
+            panel=panel,
+            market=market,
+            marks=marks,
+        ))
+    watch_rows = _runtime_watch_rows(
+        ctx, state, recheck, day=day, prev_day=prev_day, phase=phase)
+    return state, dctx, watch_rows
+
+
+def _trader_runtime_commit(ctx, state, dctx, verdict: dict) -> None:
+    """Seal the Trader's raw decision before execution filters or fills."""
+    if state is None or dctx is None or verdict.get("parse_error"):
+        return
+    if not verdict.get("decision_id"):
+        return
+    from alpha_agents.agents import t1_decider
+    from alpha_agents.evolution import trader_replay
+
+    decisions = t1_decider.to_runtime_decisions(verdict, dctx)
+    ctx.loop.run_until_complete(trader_replay.commit(
+        state, decisions,
+        run_id=str(ctx.run_id),
+        context=dctx,
+    ))
+    ctx.counters["trader_runtime_decisions"] += len(decisions)
+
+
 def _decide_llm(ctx, day: str, prev_day: str,
                 phase: str = "open") -> list[dict]:
     """Model-backed buy decision through the declared selection architecture."""
@@ -2541,9 +2690,12 @@ def _decide_llm(ctx, day: str, prev_day: str,
         panel = [row for row in panel if row["code"] not in unavailable]
         ctx.counters["close_panel_held_removed"] += before - len(panel)
 
+    runtime_state, runtime_context, runtime_watch_rows = (
+        _trader_runtime_prepare(ctx, day, prev_day, phase, panel, market))
+    ctx.counters["trader_runtime_watch_rechecks"] += len(runtime_watch_rows)
     ctx.counters["panel_size"] += len(panel)
-    if not panel:
-        logger.info("%s: empty panel, nothing to decide", day)
+    if not panel and not runtime_watch_rows:
+        logger.info("%s: empty panel and no pending watch, nothing to decide", day)
         return []
 
     book, knowledge = _book_and_knowledge(
@@ -2664,6 +2816,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         row for row in planner_panel
                         if row.get("code") not in blocked
                     ]
+                    planner_allowed = _merge_runtime_rows(
+                        planner_allowed, runtime_watch_rows)
                     if planner_allowed:
                         verdict = _sector_trade_plan(
                             ctx,
@@ -2675,6 +2829,8 @@ def _decide_llm(ctx, day: str, prev_day: str,
                             book=book,
                             knowledge=knowledge,
                             research_packet_payload=packet,
+                            information_cutoff=runtime_context.information_cutoff.isoformat(
+                                sep=" ", timespec="seconds"),
                         )
                     else:
                         verdict = {
@@ -2693,6 +2849,7 @@ def _decide_llm(ctx, day: str, prev_day: str,
                         + list(verdict.get("refused") or [])
                     )
     else:
+        panel = _merge_runtime_rows(panel, runtime_watch_rows)
         verdict = t1_decider.propose_sync(
             knowledge_intervention=_plan_intervention(ctx, day, phase),
             trader_id=ctx.trader, run_id=ctx.run_id, origin="walk_forward",
@@ -2711,12 +2868,23 @@ def _decide_llm(ctx, day: str, prev_day: str,
             phase=phase,
             tools=[] if minimal_mode else _trader_tools(ctx),
             max_turns=1 if minimal_mode else ctx.max_turns,
+            timeout=getattr(ctx, "model_timeout", None),
             research_budget=None if minimal_mode else shared_budget,
+            information_cutoff=runtime_context.information_cutoff.isoformat(
+                sep=" ", timespec="seconds"),
         )
 
+    # Commit the Trader's raw cognition before deterministic execution guards
+    # can refuse capacity/relation/fill. A refused execution is an outcome of
+    # a BUY decision, not a reason to rewrite the decision as HOLD.
+    _trader_runtime_commit(
+        ctx, runtime_state, runtime_context, verdict)
+
     if sector_mode and not verdict.get("parse_error"):
+        relation_panel = _merge_runtime_rows(
+            planner_panel, runtime_watch_rows)
         valid_orders, relation_refusals = _validate_sector_order_relations(
-            ctx, planner_panel, verdict.get("orders") or [])
+            ctx, relation_panel, verdict.get("orders") or [])
         verdict["orders"] = valid_orders
         if relation_refusals:
             verdict["refused"] = (
@@ -2783,6 +2951,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                 "planner_panel": [
                     row["code"] for row in planner_panel
                 ] if sector_mode else None,
+                "trader_runtime_watch_rechecks": [
+                    row["code"] for row in runtime_watch_rows
+                ],
                 "event_snapshot_refs": (
                     [] if minimal_mode
                     else _event_snapshot_refs(panel, cutoff)
@@ -2851,7 +3022,9 @@ def _decide_llm(ctx, day: str, prev_day: str,
                     day, refusal.get("code") or "", why,
                     refusal.get("detail") or "")
 
-    execution_panel = planner_panel if sector_mode else panel
+    execution_panel = (
+        _merge_runtime_rows(planner_panel, runtime_watch_rows)
+        if sector_mode else panel)
     by_code = {row["code"]: row for row in execution_panel}
     placed = []
     for order in verdict["orders"]:
@@ -2931,30 +3104,28 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
 
 def autonomy_flags(args) -> dict:
-    """Who decides each thing this run: the agent, or a rule.
+    """Who decides each exit this run: the agent, or a price.
 
-    ``--autonomous`` adds no behaviour of its own; it turns the mechanical
-    rails off and agent exits on. It is one switch rather than three because
-    the three are only meaningful together — agent exits with a stop still
-    running means the stop takes the hard cases and the agent takes the easy
-    ones, and the window then measures a mixture nobody chose.
+    For a model-backed run the answer is always the agent. There is no stop
+    and no target — not a system floor and not a level the agent wrote on its
+    own order — because a position closed by a price has an outcome that
+    measures the price, and the learning step would attribute to the agent a
+    result it did not produce. When to sell is decided at each position turn
+    and learned from reviewed results (2026-09-26).
 
-    That mixture is also why a stop is not a neutral safety net here. A
-    position closed by a rule the agent could not overrule has an outcome
-    that measures the rule, so the learning step attributes to the agent a
-    result it did not produce.
-
-    The default is unchanged: earlier runs stay comparable, and this is a new
-    arm rather than a replacement for the old one.
+    ``--autonomous``, ``--agent-exits``, ``--no-stop-loss`` and
+    ``--no-take-profit`` are still accepted so older commands parse, and have
+    no effect on an llm run. Only the placeholder decider, which has no agent
+    to ask, keeps its mechanical stop and target.
     """
-    autonomous = bool(getattr(args, "autonomous", False))
+    if getattr(args, "decider", "llm") == "llm":
+        return {"autonomous": True, "agent_exits": True,
+                "mechanical_stop": False, "mechanical_target": False}
     return {
-        "autonomous": autonomous,
-        "agent_exits": bool(getattr(args, "agent_exits", False)) or autonomous,
-        "mechanical_stop": (bool(getattr(args, "mechanical_stop", True))
-                            and not autonomous),
-        "mechanical_target": (bool(getattr(args, "mechanical_target", True))
-                              and not autonomous),
+        "autonomous": False,
+        "agent_exits": False,
+        "mechanical_stop": bool(getattr(args, "mechanical_stop", True)),
+        "mechanical_target": bool(getattr(args, "mechanical_target", True)),
     }
 
 
@@ -3478,6 +3649,21 @@ def _check_theses(ctx, day: str) -> list[dict]:
             for row in closed]
 
 
+def _sync_replay_positions(ctx, day: str, phase: str) -> None:
+    """Append the booked replay position snapshot to its Trader Runtime."""
+    if ctx.decider != "llm":
+        return
+    from alpha_agents.evolution import trader_replay
+
+    ctx.loop.run_until_complete(trader_replay.sync_positions(
+        run_id=ctx.run_id,
+        trader_id=ctx.trader,
+        day=day,
+        phase=phase,
+        positions=P.get_open_positions(ctx.trader),
+    ))
+
+
 def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
     """Ask the agent what to do with the positions the rules left open.
 
@@ -3604,11 +3790,26 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             mechanical_stops=(ctx.mechanical_stop
-                                               and ctx.mechanical_target),
                              phase=phase,
                              signals=ctx.pending_signals))
     if not decisions:
+        return []
+
+    # Seal the position decision against the same run-local state before its
+    # executor can change the book. A failed state write holds rather than
+    # silently executing a decision the replay cannot later review.
+    try:
+        ctx.loop.run_until_complete(ED.commit_runtime_decisions(
+            decisions,
+            positions,
+            trader_id=ctx.trader,
+            decision_key=f"walk:{ctx.run_id}:{day}:{phase}",
+            run_id=ctx.run_id,
+        ))
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning(
+            "%s: could not seal agent exit decisions (%s: %s) — holding",
+            day, type(exc).__name__, exc)
         return []
 
     # `apply` is the live executor and is reused deliberately: the buy side
@@ -3875,6 +4076,10 @@ def _value(ctx, day: str) -> dict:
     bars_today = ctx.corpus.bars(day)
     market_value = unrealized = 0.0
     stale = []
+    # Per-position return from the fill price. There is no stop and no
+    # target, so nothing caps a loss but the agent; the report has to show
+    # how deep the book went rather than let the equity curve average it away.
+    returns: list[tuple[float, str]] = []
     for pos in positions:
         shares = pos.get("shares") or 0
         row = bars_today.get(pos["code"])
@@ -3885,6 +4090,10 @@ def _value(ctx, day: str) -> dict:
             price = float(hist[-1]["close"]) if hist else (pos.get("open_price") or 0)
             stale.append(pos["code"])
         market_value += price * shares
+        open_price = pos.get("open_price") or 0
+        if open_price > 0:
+            returns.append(
+                (round((price / open_price - 1) * 100, 2), pos["code"]))
         # Cost basis, not the raw fill price: what the position cost is what
         # the account paid, and unrealized P&L has to be measured from that
         # or it credits back the slippage the fill already charged.
@@ -3893,6 +4102,7 @@ def _value(ctx, day: str) -> dict:
     total = P.get_total_capital(ctx.trader)
     cash = P.get_available_capital(ctx.trader) + reservations.unconsumed_total(
         P._get_conn(), ctx.trader)
+    worst = min(returns) if returns else None
     return {
         "date": day,
         "cash": cash,
@@ -3904,7 +4114,69 @@ def _value(ctx, day: str) -> dict:
         "open_positions": len(positions),
         "pending_orders": len(P.get_pending_orders(ctx.trader)),
         "valued_at_a_stale_price": ",".join(sorted(stale)),
+        "losing_positions": sum(1 for r, _ in returns if r < 0),
+        "deep_loss_positions": sum(
+            1 for r, _ in returns if r <= -DEEP_LOSS_PCT),
+        "worst_position_code": worst[1] if worst else "",
+        "worst_position_return_pct": worst[0] if worst else None,
     }
+
+
+def _grading_lines(ctx) -> list[str]:
+    """What the market said about each kind of decision, not the reviewer."""
+    from alpha_agents.data import trader_learning as TLD, trader_session
+    from alpha_agents.evolution import decision_outcomes as DO
+    from alpha_agents.evolution import trader_learning as TL
+    run = trader_session.namespace(getattr(ctx, "run_id", None))
+    try:
+        rows = TLD.decision_outcomes(run_id=run, trader_id=ctx.trader)
+        lessons = TLD.lessons(run_id=run, trader_id=ctx.trader)
+        rules = TLD.rules(run_id=run, trader_id=ctx.trader)
+    except sqlite3.Error as exc:
+        return ["— 行情判定 —", f"读取失败：{exc}"]
+    lines = [f"— 行情判定（{DO.DEFAULT_HORIZON} 日前瞻收益 − 全市场中位数；"
+             f"|超额| < {DO.FLAT_PP}pp 记 flat）—"]
+    if not rows:
+        return lines + ["窗口内还没有闭合的决策窗口"]
+    for action, cell in sorted(DO.summary(rows).items()):
+        n = cell["right"] + cell["wrong"]
+        rate = f"{cell['right'] / n:.0%}" if n else "—"
+        lines.append(f"  {action:<7} right {cell['right']:>3}  wrong "
+                     f"{cell['wrong']:>3}  flat {cell['flat']:>3}  判对率 {rate}")
+    lines.append(
+        f"Lesson {len({r['lesson_key'] for r in lessons})} 条 / "
+        f"Rule {len({r['rule_key'] for r in rules})} 条"
+        f"（格子 = 动作 × 情形标签；Lesson n≥{TL.LESSON_MIN_N}、"
+        f"Rule n≥{TL.RULE_MIN_N}，判对率 ≥{TL.LEAN:.0%} 或 ≤{1 - TL.LEAN:.0%}）")
+    return lines
+
+
+#: A loss this deep is counted in the report. It closes nothing: it is the
+#: line the system used to enforce, kept only as a yardstick for how often the
+#: agent now holds past it.
+DEEP_LOSS_PCT = 8.0
+
+
+def _risk_lines(equity: list[dict]) -> list[str]:
+    """How deep the book went, with no stop underneath it."""
+    marked = [row for row in equity
+              if row.get("worst_position_return_pct") is not None]
+    if not marked:
+        return ["— 风险暴露（没有止损：只记录，不平仓）—", "窗口内没有持仓被估值"]
+    deepest = min(marked, key=lambda r: r["worst_position_return_pct"])
+    last = equity[-1]
+    last_worst = (f"，最深 {last['worst_position_code']} "
+                  f"{last['worst_position_return_pct']:+.2f}%"
+                  if last.get("worst_position_return_pct") is not None else "")
+    return [
+        "— 风险暴露（没有止损：只记录，不平仓）—",
+        f"窗口内最深单票浮亏  {deepest['worst_position_return_pct']:+.2f}%"
+        f"（{deepest['worst_position_code']}，{deepest['date']}）",
+        f"期末亏损持仓        {last.get('losing_positions', 0)} 只{last_worst}",
+        f"浮亏 ≤ −{DEEP_LOSS_PCT:.0f}% 的仓位-日  "
+        f"{sum(row.get('deep_loss_positions', 0) for row in equity)}"
+        "（agent 每天被询问后仍选择持有）",
+    ]
 
 
 def _initial_account(ctx, first_session: str) -> dict:
@@ -4068,9 +4340,12 @@ def _experiment_runtime_contract(args) -> dict:
             "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
         },
         "exit_policy": {
-            "mechanical_stop": bool(args.mechanical_stop),
-            "mechanical_target": bool(args.mechanical_target),
-            "agent_exits": bool(args.agent_exits),
+            # Effective, not as argparse left them: an llm run ignores the
+            # exit flags, and a contract that froze the flags would bind a
+            # behaviour the run does not have.
+            "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
+            "mechanical_target": autonomy_flags(args)["mechanical_target"],
+            "agent_exits": autonomy_flags(args)["agent_exits"],
             "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
@@ -4108,9 +4383,12 @@ def _selection_experiment_runtime_contract(args) -> dict:
             "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
         },
         "exit_policy": {
-            "mechanical_stop": bool(args.mechanical_stop),
-            "mechanical_target": bool(args.mechanical_target),
-            "agent_exits": bool(args.agent_exits),
+            # Effective, not as argparse left them: an llm run ignores the
+            # exit flags, and a contract that froze the flags would bind a
+            # behaviour the run does not have.
+            "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
+            "mechanical_target": autonomy_flags(args)["mechanical_target"],
+            "agent_exits": autonomy_flags(args)["agent_exits"],
             "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
@@ -4670,6 +4948,7 @@ def _run_window(ctx, args) -> dict:
                             dict(entries["counts"]))
                 exits = _settle_exits(ctx, day)
                 logger.info("%s: settled exits %s", day, dict(exits["counts"]))
+                _sync_replay_positions(ctx, day, "settle")
             # The conditions the agent itself wrote, checked before it is
             # asked anything. A replay created theses and then never evaluated
             # them: `thesis.evaluate` had three callers — thesis_monitor,
@@ -4743,6 +5022,8 @@ def _run_window(ctx, args) -> dict:
                                    day, type(exc).__name__, exc)
                     errors.append({"date": day, "stage": "close_buy",
                                    "error": f"{type(exc).__name__}: {exc}"})
+            with replay_as_of(f"{day} 14:55"):
+                _sync_replay_positions(ctx, day, "close")
             with replay_as_of(day):
                 equity = _value(ctx, day)
                 close_marks = {
@@ -5100,7 +5381,8 @@ def write_report(result: dict, out_dir: Path) -> dict:
     _write_csv(out_dir / "equity.csv", result["equity"], [
         "date", "cash", "invested", "market_value", "realized", "unrealized",
         "equity", "open_positions", "pending_orders", "ordered",
-        "valued_at_a_stale_price"])
+        "valued_at_a_stale_price", "losing_positions", "deep_loss_positions",
+        "worst_position_code", "worst_position_return_pct"])
     _write_csv(out_dir / "fills.csv", result["fills"], [
         "date", "side", "code", "name", "shares", "price", "amount",
         "capacity_shares", "capacity_oversize", "reason"])
@@ -5230,6 +5512,10 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         f"{last['unrealized']:,.0f} unreal",
         f"期末持仓/挂单 {last['open_positions']} / {last['pending_orders']}",
         *_benchmark_lines(ctx, result, start_capital),
+        "",
+        *_risk_lines(equity),
+        "",
+        *_grading_lines(ctx),
         "",
         "— 成交 —",
         f"买入 {len(buys)} 笔 {sum(b['amount'] or 0 for b in buys):,.0f} 元 / "

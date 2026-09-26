@@ -1,4 +1,4 @@
-"""T7: repeated evidence, not one review, creates Trader Lessons/Rules."""
+"""T7: market-graded decisions, not a model's words or counts, create Lessons/Rules."""
 from __future__ import annotations
 
 import sqlite3
@@ -22,194 +22,163 @@ def conn(tmp_path, monkeypatch):
     memory_store._local.conn = None
 
 
-def candidate(conn, index: int, *, confidence=.7, counter=0,
-              timeframe="1d", scope="replay_daily",
-              claim="强主题突破时不要只等深回踩"):
-    return D.save_lesson_candidate(
-        run_id="run-a", trader_id="default",
-        source_type="decision_review",
-        source_ref=f"decision:{index}",
-        source_date=f"2026-09-{10 + index:02d}",
-        claim=claim,
-        action="adjust",
-        applicable_context="强主题突破",
-        evidence_timeframe=timeframe,
-        decision_horizon="3-5d",
-        evidence_scope=scope,
-        support_count=999,  # must NOT let one model response self-promote
-        counterexample_count=counter,
-        confidence=confidence,
-        evidence={"decision": index},
-        conn=conn)
+def graded(conn, index: int, *, verdict="wrong", action="buy",
+           tags=("t1_up_big",), timeframe="1d", scope="replay_daily",
+           horizon="3-5d", run="run-a", end="2026-09-10"):
+    excess = {"right": 3.0, "wrong": -3.0, "flat": 0.1}[verdict]
+    return D.save_decision_outcome(
+        run_id=run, trader_id="default", decision_id=f"d{index}",
+        action=action, code="600001", decided_on="2026-09-01",
+        base_date="2026-09-01", end_date=end, horizon=5,
+        forward_pct=excess, market_median_pct=0.0, excess_pct=excess,
+        verdict=verdict, tags=list(tags), evidence_timeframe=timeframe,
+        decision_horizon=horizon, evidence_scope=scope, conn=conn)
 
 
-def test_one_candidate_cannot_self_promote_even_if_it_claims_999_support(conn):
-    candidate(conn, 1)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert got["lessons_created"] == 0
-    assert got["rules_created"] == 0
-    assert D.lessons(run_id="run-a", trader_id="default", conn=conn) == []
-    assert D.rules(run_id="run-a", trader_id="default", conn=conn) == []
+def advance(conn, as_of="2026-09-20", run="run-a"):
+    return L.advance(trader_id="default", as_of=as_of, run_id=run, conn=conn)
 
 
-def test_three_independent_experiences_create_lesson_not_rule(conn):
-    for i in range(1, 4):
-        candidate(conn, i)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert got["lessons_created"] == 1
-    assert got["rules_created"] == 0
-    [lesson] = D.lessons(run_id="run-a", trader_id="default", conn=conn)
-    assert lesson["support_count"] == 3
-    assert lesson["counterexample_count"] == 0
+def test_a_model_claiming_999_support_creates_nothing(conn):
+    """Candidates are words; their counts are not evidence."""
+    for i in range(20):
+        D.save_lesson_candidate(
+            run_id="run-a", trader_id="default",
+            source_type="decision_review", source_ref=f"decision:{i}",
+            source_date="2026-09-10", claim="强主题突破时不要只等深回踩",
+            action="adjust", applicable_context="强主题突破",
+            evidence_timeframe="1d", decision_horizon="3-5d",
+            evidence_scope="replay_daily", support_count=999,
+            counterexample_count=0, confidence=1.0, conn=conn)
+    got = advance(conn)
+    assert got["lessons_created"] == 0 and got["rules_created"] == 0
 
 
-def test_five_independent_experiences_create_expiring_active_rule(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
+def test_below_the_lesson_floor_nothing_is_created(conn):
+    for i in range(L.LESSON_MIN_N - 1):
+        graded(conn, i)
+    assert advance(conn)["lessons_created"] == 0
+
+
+def test_a_mostly_wrong_cell_becomes_a_lesson_saying_so(conn):
+    for i in range(8):
+        graded(conn, i, verdict="wrong")
+    for i in range(8, 10):
+        graded(conn, i, verdict="right")
+    got = advance(conn)
+    assert got["lessons_created"] == 1 and got["rules_created"] == 0
+    lesson = D.lessons(run_id="run-a", trader_id="default", conn=conn)[0]
+    assert lesson["support_count"] == 8 and lesson["counterexample_count"] == 2
+    assert lesson["confidence"] == pytest.approx(0.8)
+    assert "判错 8/10" in lesson["claim"] and "多数时候是错的" in lesson["claim"]
+    assert lesson["applicable_context"] == "t1_up_big"
+
+
+def test_a_coin_flip_cell_teaches_nothing(conn):
+    for i in range(12):
+        graded(conn, i, verdict="right" if i % 2 else "wrong")
+    assert advance(conn)["lessons_created"] == 0
+
+
+def test_flat_verdicts_are_not_evidence(conn):
+    for i in range(30):
+        graded(conn, i, verdict="flat")
+    assert advance(conn)["lessons_created"] == 0
+
+
+def test_a_rule_needs_fifty_graded_decisions(conn):
+    for i in range(L.RULE_MIN_N - 1):
+        graded(conn, i, verdict="right")
+    assert advance(conn)["rules_created"] == 0
+    graded(conn, 999, verdict="right")
+    got = advance(conn, as_of="2026-09-21")
     assert got["rules_created"] == 1
-    [rule] = D.rules(run_id="run-a", trader_id="default", conn=conn)
-    assert rule["support_count"] == 5
-    assert rule["expires_on"] == "2026-12-19"
-    assert D.rule_events(rule["id"], conn=conn)[-1]["event"] == "activate"
+    rule = D.rules(run_id="run-a", trader_id="default", conn=conn)[0]
+    assert rule["expires_on"] == "2026-12-20"
+    assert [e["event"] for e in D.rule_events(rule["id"], conn=conn)] == [
+        "activate"]
 
 
-def test_counterevidence_blocks_rule_but_not_lesson(conn):
-    for i in range(1, 6):
-        candidate(conn, i, counter=1 if i <= 3 else 0)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert got["lessons_created"] == 1
-    assert got["rules_created"] == 0
+def test_cells_are_split_by_action_and_tag(conn):
+    for i in range(10):
+        graded(conn, i, action="buy", tags=("t1_up_big",))
+    for i in range(10, 20):
+        graded(conn, i, action="wait", tags=("t1_up_big",))
+    for i in range(20, 30):
+        graded(conn, i, action="buy", tags=("below_ma5",))
+    assert advance(conn)["lessons_created"] == 3
 
 
-def test_low_confidence_blocks_rule(conn):
-    for i in range(1, 6):
-        candidate(conn, i, confidence=.4)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert got["lessons_created"] == 1
-    assert got["rules_created"] == 0
+def test_ungraded_windows_are_not_read(conn):
+    """A window that closes after ``as_of`` is not evidence on ``as_of``."""
+    for i in range(10):
+        graded(conn, i, end="2026-09-25")
+    assert advance(conn, as_of="2026-09-20")["lessons_created"] == 0
 
 
 def test_same_evidence_is_idempotent_and_new_evidence_versions(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    first = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    second = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert first["lessons_created"] == first["rules_created"] == 1
-    assert second["lessons_created"] == second["rules_created"] == 0
-
-    candidate(conn, 6)
-    third = L.advance(
-        trader_id="default", as_of="2026-09-21",
-        run_id="run-a", conn=conn)
-    assert third["lessons_created"] == third["rules_created"] == 1
-    lessons = D.lessons(run_id="run-a", trader_id="default", conn=conn)
-    rules = D.rules(run_id="run-a", trader_id="default", conn=conn)
-    assert [row["version"] for row in lessons] == [1, 2]
-    assert [row["version"] for row in rules] == [1, 2]
-    assert lessons[1]["supersedes_id"] == lessons[0]["id"]
-    assert rules[1]["supersedes_id"] == rules[0]["id"]
+    for i in range(10):
+        graded(conn, i)
+    assert advance(conn)["lessons_created"] == 1
+    assert advance(conn, as_of="2026-09-21")["lessons_created"] == 0
+    graded(conn, 50)
+    assert advance(conn, as_of="2026-09-22")["lessons_created"] == 1
+    versions = D.lessons(run_id="run-a", trader_id="default", conn=conn)
+    assert [row["version"] for row in versions] == [1, 2]
 
 
-def test_daily_replay_evidence_stays_labelled_daily_when_read_intraday(conn):
-    for i in range(1, 6):
-        candidate(conn, i, timeframe="1d", scope="replay_daily")
-    L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    text = L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-09-21", run_id="run-a", conn=conn)
-    assert "RULE" in text
-    assert "[1d / replay_daily" in text
-    assert "5m" not in text
-    assert "live_intraday" not in text
+def _make_rule(conn):
+    for i in range(L.RULE_MIN_N):
+        graded(conn, i, verdict="wrong")
+    return advance(conn)["rule_ids"][0]
+
+
+def test_daily_replay_evidence_stays_labelled_daily(conn):
+    _make_rule(conn)
+    text = L.inject(trader_id="default", decision_horizon="3-5d",
+                    as_of="2026-09-21", run_id="run-a", conn=conn)
+    assert "RULE" in text and "[1d / replay_daily" in text
 
 
 def test_rule_retirement_is_reversible_and_append_only(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    got = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    rule_id = got["rule_ids"][0]
-
-    assert "RULE" in L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-09-21", run_id="run-a", conn=conn)
-    L.retire_rule(
-        rule_id, reason="new counterevidence", at="2026-09-22", conn=conn)
+    rule_id = _make_rule(conn)
+    L.retire_rule(rule_id, reason="counterevidence", at="2026-09-22",
+                  conn=conn)
     assert "RULE" not in L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-09-23", run_id="run-a", conn=conn)
-    L.reinstate_rule(
-        rule_id, reason="counterevidence resolved", at="2026-09-24", conn=conn)
+        trader_id="default", decision_horizon="3-5d", as_of="2026-09-23",
+        run_id="run-a", conn=conn)
+    L.reinstate_rule(rule_id, reason="resolved", at="2026-09-24", conn=conn)
     assert "RULE" in L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-09-25", run_id="run-a", conn=conn)
-    assert [row["event"] for row in D.rule_events(rule_id, conn=conn)] == [
-        "activate", "retire", "reinstate"]
+        trader_id="default", decision_horizon="3-5d", as_of="2026-09-25",
+        run_id="run-a", conn=conn)
 
 
 def test_expired_rule_is_not_injected(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
+    _make_rule(conn)
     assert "RULE" not in L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-12-20", run_id="run-a", conn=conn)
+        trader_id="default", decision_horizon="3-5d", as_of="2026-12-30",
+        run_id="run-a", conn=conn)
 
 
 def test_runs_do_not_share_lessons(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    assert L.inject(
-        trader_id="default", decision_horizon="3-5d",
-        as_of="2026-09-21", run_id="run-b", conn=conn) == ""
-
-
-def test_version_tables_are_append_only(conn):
-    for i in range(1, 4):
-        candidate(conn, i)
-    L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
-        conn.execute("UPDATE trader_lessons SET claim='edited'")
-    conn.rollback()
+    _make_rule(conn)
+    assert L.inject(trader_id="default", decision_horizon="3-5d",
+                    as_of="2026-09-21", run_id="run-b", conn=conn) == ""
 
 
 def test_same_evidence_next_day_does_not_extend_rule_expiry(conn):
-    for i in range(1, 6):
-        candidate(conn, i)
-    first = L.advance(
-        trader_id="default", as_of="2026-09-20",
-        run_id="run-a", conn=conn)
-    rule_id = first["rule_ids"][0]
-    second = L.advance(
-        trader_id="default", as_of="2026-09-21",
-        run_id="run-a", conn=conn)
-    assert second["rules_created"] == 0
+    rule_id = _make_rule(conn)
+    assert advance(conn, as_of="2026-09-21")["rules_created"] == 0
     rows = D.rules(run_id="run-a", trader_id="default", conn=conn)
-    assert len(rows) == 1
-    assert rows[0]["id"] == rule_id
+    assert [row["id"] for row in rows] == [rule_id]
     assert rows[0]["expires_on"] == "2026-12-19"
+
+
+def test_version_and_outcome_tables_are_append_only(conn):
+    for i in range(10):
+        graded(conn, i)
+    advance(conn)
+    for table in ("trader_lessons", "trader_decision_outcomes"):
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            conn.execute(f"UPDATE {table} SET run_id='edited'")
+        conn.rollback()

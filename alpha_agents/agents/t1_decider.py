@@ -471,7 +471,12 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             low = (None if raw_low is None or raw_low == ""
                    else float(raw_low))
             high = float(raw["entry_high"])
-            stop = float(raw["stop_loss"])
+            # Optional, like the target. A stop is an order the trader may
+            # choose to leave; the system no longer demands one, because a
+            # demanded stop is the system's exit written in the trader's hand.
+            raw_stop = raw.get("stop_loss")
+            stop = (None if raw_stop is None or raw_stop == ""
+                    else float(raw_stop))
         except (KeyError, TypeError, ValueError) as exc:
             refused.append({"code": code, "why": "bad_prices",
                             "detail": f"{type(exc).__name__}: {exc}"})
@@ -481,18 +486,17 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
                             "detail": f"{low} !< {high}"})
             continue
         floor = low if low is not None else high
-        if not stop < floor:
+        if stop is not None and not stop < floor:
             refused.append({"code": code, "why": "stop_not_below_entry",
                             "detail": f"{stop} !< {floor}"})
             continue
-        if min(floor, high) <= 0 or stop <= 0:
+        if min(floor, high) <= 0 or (stop is not None and stop <= 0):
             refused.append({"code": code, "why": "non_positive_price",
                             "detail": str(floor)})
             continue
         # ``target_price`` is optional, and its absence is meaningful rather
-        # than an error: a position with no target has exactly one exit, the
-        # stop. That is what every order in the first 20-day replay looked
-        # like, and it is why all 11 exits were stops.
+        # than an error: a position without it is sold at a profit only when
+        # the trader decides to sell it.
         target = raw.get("target_price")
         if target is not None and target != "":
             try:
@@ -514,7 +518,8 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
         orders.append({
             "code": code,
             "entry_low": round(low, 2) if low is not None else None,
-            "entry_high": round(high, 2), "stop_loss": round(stop, 2),
+            "entry_high": round(high, 2),
+            "stop_loss": round(stop, 2) if stop is not None else None,
             "target_price": target,
             # Whole. This string becomes the Thesis ``claim`` — the thing a
             # later exit declares falsified and the review scores the

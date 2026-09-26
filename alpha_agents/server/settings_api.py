@@ -74,8 +74,9 @@ GROUPS = [
         _f("AGENT_EXIT_DECISIONS", "卖出由 agent 决定", BOOL, default="0",
            help="开启后 sell / trim / hold 由 agent 决定并写理由；关闭时只有机械规则卖出，复盘能学的少得多。建议开"),
         _f("AGENT_ENTRY_PRICING", "挂单价由 agent 决定", BOOL, default="1"),
-        _f("HARD_STOP_PCT", "硬止损（%）", NUMBER, default="8.0",
-           help="成本价下跌超过这个百分比强制卖出，agent 不能否决"),
+        _f("HARD_STOP_PCT", "定仓风险距离下限（%）", NUMBER, default="8.0",
+           help="只在风险预算定仓开启时用于估算单笔风险；不会触发任何卖出——"
+                "系统没有止损线，止损/止盈只来自 agent 自己的订单"),
         _f("TOTAL_CAPITAL", "默认交易员本金（元）", NUMBER, default="1000000"),
         _f("DEFAULT_POSITION_PCT", "默认仓位（比例）", NUMBER, default="0.03",
            help="agent 没写仓位时使用，0.03 = 3%"),

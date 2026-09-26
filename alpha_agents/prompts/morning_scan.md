@@ -126,7 +126,7 @@ POSITIONS-->
 - action: 操作建议文字描述
 - entry_low: 介入区间下限（突破型：价格涨到此处才买入）
 - entry_high: 介入区间上限（回调型：价格跌到此处才买入）
-- stop_loss: 止损价（必填）
+- stop_loss: 止损价（可选，写 null 就是不设）。系统没有任何止损线；设了就是你自己挂的单，到价自动执行
 - **两个都要填，除非你真的只想设单边。** 只填 entry_high 等于说
   "跌多少我都买"；只填 entry_low 等于说"涨多少我都追"。两边都填才是
   一个区间，区间宽度参考 get_price_levels 的 atr_pct

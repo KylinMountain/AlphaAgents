@@ -397,12 +397,40 @@ class TestATargetIsOptionalButChecked:
             '"stop_loss":9.0,"target_price":"","reason":"x"}]}', CODES)
         assert v["orders"][0]["target_price"] is None
 
-    def test_the_prompt_asks_for_a_target(self):
+    def test_the_prompt_offers_both_levels_as_optional(self):
         """The template is part of the contract: a field the runner reads but
-        the prompt never mentions is one the model will not emit."""
+        the prompt never mentions is one the model will not emit. Both levels
+        are the trader's choice, and the prompt must not promise a system line
+        that does not exist."""
         text = D.load_prompt()
-        assert "target_price" in text
-        assert "日均波动" in text
+        assert "target_price" in text and "stop_loss" in text
+        assert "可选" in text
+        assert "系统没有任何止损或止盈线" in text
+
+
+class TestAStopIsTheTradersChoice:
+    """The system no longer demands a stop: a demanded stop is the system's
+    exit written in the trader's hand."""
+
+    def test_an_order_without_a_stop_is_accepted(self):
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"reason":"主线"}]}', CODES)
+        assert v["refused"] == []
+        assert v["orders"][0]["stop_loss"] is None
+
+    def test_null_and_empty_mean_no_stop(self):
+        for raw in ('null', '""'):
+            v = D.parse_orders(
+                '{"orders":[{"code":"600001","entry_high":10.5,'
+                f'"stop_loss":{raw},"reason":"x"}}]}}', CODES)
+            assert v["orders"][0]["stop_loss"] is None, raw
+
+    def test_a_stop_it_does_write_is_still_checked(self):
+        v = D.parse_orders(
+            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
+            '"stop_loss":10.2,"reason":"x"}]}', CODES)
+        assert v["refused"][0]["why"] == "stop_not_below_entry"
 
 
 class TestTheBookShowsWhetherAPositionIsUp:

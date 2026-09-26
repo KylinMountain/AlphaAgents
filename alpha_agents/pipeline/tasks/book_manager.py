@@ -67,10 +67,10 @@ async def manage_book(trader, price_map: dict, today_str: str,
                     logger.warning("Notification failed: %s", e)
 
         if open_pos:
-            # With the trading agent on, the rules run as a floor
-            # only: they close what would breach the hard stop and
-            # hand everything else to the agent as evidence. Off, they
-            # close on every trigger as they always did.
+            # With the trading agent on, the rules close nothing of
+            # their own: only the agent's own stop/target execute, and
+            # every other trigger reaches the agent as evidence. Off,
+            # they close on every trigger as they always did.
             agent_exits = exit_decision.enabled()
             pos_alerts = check_positions(realtime_prices=price_map,
                                          today=today_str,

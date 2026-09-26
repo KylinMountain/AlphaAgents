@@ -492,21 +492,23 @@ class TestTheNoSafetyNetExperiment:
 
     def test_the_context_says_there_is_no_safety_net(self):
         ctx = ED.build_context(POSITIONS, PRICES, signals=[],
-                               news_by_theme={}, mechanical_stops=False)
+                               news_by_theme={}, own_orders=False)
         assert "没有安全网" in ctx
         assert "卖不卖完全由你决定" in ctx
 
     def test_it_does_not_claim_a_hard_line_it_will_not_enforce(self):
         ctx = ED.build_context(POSITIONS, PRICES, signals=[],
-                               news_by_theme={}, mechanical_stops=False)
+                               news_by_theme={}, own_orders=False)
         assert "系统强制平仓" not in ctx
 
-    def test_the_default_context_still_promises_the_hard_line(self):
-        """The complement, so the test above cannot pass by the wording
-        having simply been deleted."""
+    def test_the_default_context_says_only_own_levels_execute(self):
+        """There is no system line any more, in either arm. The default says
+        the agent's own stop/target execute and nothing else does."""
         ctx = ED.build_context(POSITIONS, PRICES, signals=[],
                                news_by_theme={})
-        assert "风控硬线" in ctx and "系统强制平仓" in ctx
+        assert "没有系统止损" in ctx and "自己设的" in ctx
+        assert "风控硬线" not in ctx and "系统强制平仓" not in ctx
+        assert "自设价位" in ctx
 
     def test_the_flag_reaches_the_context(self, monkeypatch):
         seen = {}
@@ -518,7 +520,7 @@ class TestTheNoSafetyNetExperiment:
         monkeypatch.setattr(ED, "decide", _fake_decide)
         asyncio.run(ED.decide_for_replay(
             POSITIONS, PRICES, day="2026-01-05", news_by_theme={},
-            model=object(), mechanical_stops=False))
+            model=object(), own_orders=False))
         assert "没有安全网" in seen["context"]
 
 

@@ -275,10 +275,11 @@ AGENT_EXITS_LIMITATION = (
     "closing the position, so a position still open after its stated line "
     "was crossed is a choice the agent made, not an oversight")
 LIVE_EXITS_LIMITATION = (
-    "sell side as in production (--live-exits): the agent decides every sell; "
-    "entry stops and targets are shown to it but not executed, and only the "
-    "HARD_STOP_PCT floor below cost closes a position on its own (counted as "
-    "硬止损). The theme-archived hard exit does not occur in a replay")
+    "sell side as in production (--live-exits): the agent decides every sell "
+    "and there is no system exit line; the only levels executed are the "
+    "stop/target the agent chose to write on its own order (counted as "
+    "自设止损 / 自设止盈). A position without them is closed by the agent or "
+    "not at all")
 MECHANICAL_EXITS_LIMITATION = (
     "sells are the entry stop and target levels, executed mechanically; the "
     "agent was not asked about open positions, so this run says nothing about "
@@ -287,7 +288,7 @@ MECHANICAL_EXITS_LIMITATION = (
 
 
 def _exit_limitation(ctx) -> str:
-    if getattr(ctx, "hard_floor", False):
+    if getattr(ctx, "live_exits", False):
         return LIVE_EXITS_LIMITATION
     if getattr(ctx, "agent_exits", False):
         return AGENT_EXITS_LIMITATION
@@ -3122,26 +3123,26 @@ def autonomy_flags(args) -> dict:
     arm rather than a replacement for the old one.
 
     ``--live-exits`` is the production arrangement (``AGENT_EXIT_DECISIONS=1``):
-    the agent owns every sell, the entry stop and target are not executed, and
-    only the hard floor — ``HARD_STOP_PCT`` below cost — closes a position on
-    its own. It is the one mode in which a replay's sell side is the live one.
+    the agent owns every sell and there is no system exit line. The only
+    levels executed are the stop and target the agent itself chose to write on
+    the order — its own standing orders, which production executes the same
+    way. It is the one mode in which a replay's sell side is the live one.
     """
     autonomous = bool(getattr(args, "autonomous", False))
     live = bool(getattr(args, "live_exits", False))
     if live and autonomous:
         raise SystemExit(
-            "--live-exits 与 --autonomous 互斥：前者保留实盘的 HARD_STOP_PCT 硬线，"
-            "后者连硬线也关闭")
-    rails_off = autonomous or live
+            "--live-exits 与 --autonomous 互斥：前者执行 agent 自设的止损/止盈价，"
+            "后者连它们也不执行")
     return {
         "autonomous": autonomous,
         "agent_exits": (bool(getattr(args, "agent_exits", False))
-                        or rails_off),
+                        or autonomous or live),
         "mechanical_stop": (bool(getattr(args, "mechanical_stop", True))
-                            and not rails_off),
+                            and not autonomous) or live,
         "mechanical_target": (bool(getattr(args, "mechanical_target", True))
-                              and not rails_off),
-        "hard_floor": live,
+                              and not autonomous) or live,
+        "live_exits": live,
     }
 
 
@@ -3806,10 +3807,8 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             mechanical_stops=(
-                                 getattr(ctx, "hard_floor", False)
-                                 or (ctx.mechanical_stop
-                                     and ctx.mechanical_target)),
+                             own_orders=(ctx.mechanical_stop
+                                         or ctx.mechanical_target),
                              phase=phase,
                              signals=ctx.pending_signals))
     if not decisions:
@@ -4048,17 +4047,10 @@ def _settle_exits(ctx, day: str) -> dict:
         #
         # Note what this does NOT touch: `portfolio.position_monitor`'s hard
         # exit, which is a production path the replay does not call.
-        stop_level = pos.get("stop_loss") if ctx.mechanical_stop else None
-        floor = _hard_floor_price(pos) if getattr(ctx, "hard_floor", False) else None
-        if floor is not None:
-            # Production's `_is_hard_exit` line, as a price. It replaces the
-            # entry stop rather than joining it: under live exits the entry
-            # stop is evidence for the agent, not an order.
-            stop_level = floor
         verdict = S.exit_verdict(
             bar=S.bar_from_row(bars_today.get(code)), prev_close=prev_close,
             rule=rule,
-            stop_loss=stop_level,
+            stop_loss=(pos.get("stop_loss") if ctx.mechanical_stop else None),
             target_price=(pos.get("target_price")
                           if ctx.mechanical_target else None))
         counts[verdict.status] += 1
@@ -4068,7 +4060,9 @@ def _settle_exits(ctx, day: str) -> dict:
             continue
         if verdict.status != S.FILLED_AT_OPEN:
             continue
-        label = HARD_FLOOR_REASON if floor is not None else ""
+        # Under live exits these levels are the agent's own orders, and the
+        # report says so rather than counting them as a system rule.
+        label = OWN_ORDER_REASON if getattr(ctx, "live_exits", False) else ""
         booked = portfolio_exit.close_position(
             pos["id"], close_price=verdict.price,
             close_reason=f"walk_forward {label}开盘{verdict.reason[:60]}",
@@ -4087,24 +4081,8 @@ def _settle_exits(ctx, day: str) -> dict:
     return {"counts": counts, "events": events, "fills": fills}
 
 
-#: Prefix on every close the hard floor made, so the report can count it
-#: apart from the agent's sells and from an entry stop.
-HARD_FLOOR_REASON = "硬止损: "
-
-
-def _hard_floor_price(pos: dict) -> float | None:
-    """The price at which the loss from cost reaches ``HARD_STOP_PCT``.
-
-    Same line as production's ``position_monitor._is_hard_exit``
-    (``current_return <= -HARD_STOP_PCT`` against ``open_price``), expressed
-    as a level so the daily-bar settlement can decide it — including a gap
-    through it, which fills at the open. ``None`` when the cost is unknown:
-    no floor is invented for a position whose cost the book does not hold.
-    """
-    open_price = pos.get("open_price")
-    if not open_price or open_price <= 0:
-        return None
-    return round(float(open_price) * (1 - P.HARD_STOP_PCT / 100), 4)
+#: Prefix on every close made by a level the agent itself wrote on the order.
+OWN_ORDER_REASON = "自设价位: "
 
 
 def _value(ctx, day: str) -> dict:
@@ -4606,10 +4584,9 @@ class Context:
         #: number. The user asked to disable the take-profit as its own
         #: experiment.
         self.mechanical_target = _rails["mechanical_target"]
-        #: Whether ``HARD_STOP_PCT`` below cost closes a position without
-        #: asking the agent — the floor production keeps under
-        #: ``AGENT_EXIT_DECISIONS=1``. Only ``--live-exits`` turns it on.
-        self.hard_floor = _rails["hard_floor"]
+        #: The production sell side: agent exits, and the stop/target levels
+        #: executed are the agent's own orders. There is no system line.
+        self.live_exits = _rails["live_exits"]
         #: Whether the buy-side decider may **call tools**. On by default for
         #: the llm decider: a trader that cannot ask a question is a scorer,
         #: and the whole point of the last review's finding was that the
@@ -5819,8 +5796,13 @@ def _exit_attribution(result: dict) -> list[str]:
     if not sells:
         return []
     agent = [f for f in sells if str(f.get("reason", "")).startswith("agent")]
-    mechanical = [f for f in sells if f not in agent]
+    own = [f for f in sells
+           if str(f.get("reason", "")).startswith(OWN_ORDER_REASON)]
+    mechanical = [f for f in sells if f not in agent and f not in own]
     out = [f"机械 {len(mechanical)} 笔", f"agent {len(agent)} 笔"]
+    if own:
+        # The agent's own standing orders: decided by it, executed by code.
+        out.append(f"agent 自设价位 {len(own)} 笔")
 
     def _kind(reason: str) -> str:
         r = str(reason or "")
@@ -5846,8 +5828,12 @@ def _exit_attribution(result: dict) -> list[str]:
         # X was touched". The first version of this classifier looked for
         # "stop"/"止损" only, so seven real exits landed in 其他 — the split
         # was reporting 止损 1 when the truth was 止损 5 / 止盈 2.
-        if r.startswith(HARD_FLOOR_REASON):
-            return "硬止损"
+        if r.startswith(OWN_ORDER_REASON):
+            if "lower level" in low or "stop" in low or "止损" in r:
+                return "自设止损"
+            if "upper level" in low or "target" in low or "止盈" in r:
+                return "自设止盈"
+            return "自设价位"
         if "lower level" in low or "止损" in r or "stop" in low:
             return "止损"
         if "upper level" in low or "止盈" in r or "target" in low:
@@ -5977,8 +5963,8 @@ def build_parser() -> argparse.ArgumentParser:
              "学习信号因此不可归因")
     parser.add_argument(
         "--live-exits", action="store_true",
-        help="与实盘 AGENT_EXIT_DECISIONS=1 一致：卖出由 agent 决定，不执行入场"
-             "止损/止盈价，只在成本亏损达 HARD_STOP_PCT 时硬平仓")
+        help="与实盘 AGENT_EXIT_DECISIONS=1 一致：卖出由 agent 决定，没有系统"
+             "止损线；只执行 agent 自己在订单上写的止损/止盈价")
     parser.add_argument(
         "--close-buys", action="store_true",
         help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")

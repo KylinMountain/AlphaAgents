@@ -1442,16 +1442,16 @@ class TestAReplaySaysWhetherItIsComplete:
 
 
 class TestLiveExitsMatchProduction:
-    """Production runs ``AGENT_EXIT_DECISIONS=1``: the agent owns every sell
-    and only ``HARD_STOP_PCT`` below cost closes a position on its own.
+    """Production runs ``AGENT_EXIT_DECISIONS=1``: the agent owns every sell,
+    there is no system exit line, and only the stop/target the agent wrote on
+    its own order execute.
 
     The 30-day T8 acceptance window ran without it. All 335 Runtime decisions
-    were BUY / WAIT / REJECT and all 31 sells were entry stops or targets, so
-    the Trader never managed a position it held. This pins the mode that
-    makes the replay's sell side the live one.
+    were BUY / WAIT / REJECT and all 31 sells were entry levels, so the
+    Trader never managed a position it held.
     """
 
-    def _run_live(self, tmp_path, monkeypatch):
+    def _run_live(self, tmp_path, monkeypatch, *, stop):
         import alpha_agents.pipeline.tasks.exit_decision as ED
 
         asked: list[tuple[str, str, tuple[str, ...]]] = []
@@ -1467,12 +1467,12 @@ class TestLiveExitsMatchProduction:
         monkeypatch.setattr(ED, "decide", _fake_hold)
 
         series, instruments = _normal()
-        # Day 1 crosses both the entry stop (9.5) and the target (10.5) but
-        # not the floor (10 × 0.92 = 9.2). Day 2 gaps through the floor.
+        # Day 1 touches nothing. Day 2 gaps to 9.3: below an own stop of 9.5,
+        # and −7%, a loss the system used to have an opinion about.
         series["600001"][_SESSIONS[21]] = _bar(
-            open_=9.6, high=10.8, low=9.4, close=9.7, change_pct=-3.0)
+            open_=9.8, high=10.0, low=9.6, close=9.9, change_pct=-1.0)
         series["600001"][_SESSIONS[22]] = _bar(
-            open_=9.0, high=9.1, low=8.8, close=8.9, change_pct=-8.2)
+            open_=9.3, high=9.35, low=9.1, close=9.2, change_pct=-7.1)
         replay, _ = _prepare(tmp_path, series, instruments)
 
         def _plant_then_decide(ctx, day, prev_day, phase="open"):
@@ -1481,7 +1481,7 @@ class TestLiveExitsMatchProduction:
                 P.create_pending_order(
                     code="600001", name="甲", theme=ctx.theme,
                     order_date=prev_day, entry_low=9.0, entry_high=11.0,
-                    stop_loss=9.5, target_price=10.5, source="test",
+                    stop_loss=stop, target_price=10.5, source="test",
                     reason="planted", trader_id=ctx.trader)
                 settled = walk_forward._settle_entries(
                     ctx, prev_day, P.get_pending_orders(ctx.trader))
@@ -1500,28 +1500,17 @@ class TestLiveExitsMatchProduction:
             live_exits=True, autonomous=False, agent_exits=False,
             mechanical_stop=True, mechanical_target=True))
         assert flags == {"autonomous": False, "agent_exits": True,
-                         "mechanical_stop": False, "mechanical_target": False,
-                         "hard_floor": True}
+                         "mechanical_stop": True, "mechanical_target": True,
+                         "live_exits": True}
 
     def test_it_refuses_autonomous_too(self):
         with pytest.raises(SystemExit, match="互斥"):
             walk_forward.autonomy_flags(argparse.Namespace(
                 live_exits=True, autonomous=True))
 
-    def test_the_floor_is_hard_stop_pct_below_cost(self):
-        pct = walk_forward.P.HARD_STOP_PCT
-        assert walk_forward._hard_floor_price({"open_price": 10.0}) == round(
-            10.0 * (1 - pct / 100), 4)
-        assert walk_forward._hard_floor_price({"open_price": None}) is None
-
-    def test_entry_levels_do_not_close_and_the_agent_is_asked(
+    def test_the_agent_is_asked_and_its_hold_is_sealed(
             self, tmp_path, monkeypatch):
-        result, asked = self._run_live(tmp_path, monkeypatch)
-        day1 = [f for f in _fills(result, "600001")
-                if f["side"] == "sell" and f["date"] == _SESSIONS[21]]
-        assert not day1, (
-            "the entry stop or target closed the position; under live exits "
-            "they are evidence for the agent, not orders")
+        result, asked = self._run_live(tmp_path, monkeypatch, stop=9.5)
         assert (_SESSIONS[21], "open", ("600001",)) in asked, (
             "the agent was not asked about a sellable position it held")
         from alpha_agents.data import trader_state_store
@@ -1533,25 +1522,32 @@ class TestLiveExitsMatchProduction:
         assert any("hold" in a for a in actions), (
             "the HOLD was not sealed into the run's TraderState: " + str(actions))
 
-    def test_the_gap_through_the_floor_is_a_hard_stop(
+    def test_the_agents_own_stop_executes_at_the_gap(
             self, tmp_path, monkeypatch):
-        result, _ = self._run_live(tmp_path, monkeypatch)
+        result, _ = self._run_live(tmp_path, monkeypatch, stop=9.5)
         sells = [f for f in _fills(result, "600001") if f["side"] == "sell"]
         assert len(sells) == 1
         assert sells[0]["date"] == _SESSIONS[22]
-        assert sells[0]["price"] == 9.0, "a gap through the floor fills at the open"
-        assert sells[0]["reason"].startswith(walk_forward.HARD_FLOOR_REASON)
-        line = " ".join(wf_exit_attribution(result))
-        assert "硬止损 1" in line
+        assert sells[0]["price"] == 9.3, "a gap through the stop fills at the open"
+        assert sells[0]["reason"].startswith(walk_forward.OWN_ORDER_REASON)
+        assert "自设止损 1" in " ".join(wf_exit_attribution(result))
+
+    def test_without_an_own_stop_nothing_but_the_agent_sells(
+            self, tmp_path, monkeypatch):
+        result, _ = self._run_live(tmp_path, monkeypatch, stop=None)
+        sells = [f for f in _fills(result, "600001") if f["side"] == "sell"]
+        assert sells == [], (
+            "a position with no stop of its own was closed by something other "
+            "than the agent, which held")
 
     def test_the_report_names_the_mode_that_ran(self, tmp_path, monkeypatch):
-        result, _ = self._run_live(tmp_path, monkeypatch)
+        result, _ = self._run_live(tmp_path, monkeypatch, stop=9.5)
         notes = walk_forward._limitations(result["ctx"])
         assert walk_forward.LIVE_EXITS_LIMITATION in notes
         assert walk_forward.MECHANICAL_EXITS_LIMITATION not in notes
 
 
 def test_a_default_run_says_its_exits_were_mechanical():
-    ctx = argparse.Namespace(agent_exits=False, hard_floor=False)
+    ctx = argparse.Namespace(agent_exits=False, live_exits=False)
     assert (walk_forward._exit_limitation(ctx)
             == walk_forward.MECHANICAL_EXITS_LIMITATION)

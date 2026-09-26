@@ -103,20 +103,20 @@ def test_autonomous_turns_off_every_mechanical_rail():
     the stop takes the hard cases and the agent takes the easy ones."""
     assert _flags(autonomous=True) == {
         "agent_exits": True, "mechanical_stop": False,
-        "mechanical_target": False, "hard_floor": False}
+        "mechanical_target": False, "live_exits": False}
 
 
 def test_the_old_default_is_unchanged():
     """Comparability of earlier runs depends on the default not moving."""
     assert _flags() == {
         "agent_exits": False, "mechanical_stop": True,
-        "mechanical_target": True, "hard_floor": False}
+        "mechanical_target": True, "live_exits": False}
 
 
 def test_agent_exits_alone_still_keeps_the_rails():
     assert _flags(agent_exits=True) == {
         "agent_exits": True, "mechanical_stop": True,
-        "mechanical_target": True, "hard_floor": False}
+        "mechanical_target": True, "live_exits": False}
 
 
 class TestThePromptDoesNotAnchorTheThreshold:

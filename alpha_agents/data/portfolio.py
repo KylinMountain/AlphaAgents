@@ -1146,6 +1146,6 @@ from alpha_agents.data.portfolio_add import (  # noqa: E402
 # Re-exported so callers keep importing check_positions from portfolio.
 # The split is about file size, not about the API.
 from alpha_agents.data.position_monitor import (  # noqa: E402
-    _check_add_position, _check_bearish_signals, _is_hard_exit,
+    _check_add_position, _check_bearish_signals, _own_order_exit,
     _is_phase_bearish, check_positions,
 )

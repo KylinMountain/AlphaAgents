@@ -516,6 +516,7 @@ class TestTheAmbiguousCountIsEmitted:
 
         assert report["meta"]["placeholder_decider_called_no_model"] is True
         assert report["meta"]["production_db_unchanged"] is True
+        assert report["meta"]["production_untouched"] is True
         assert report["meta"]["corpus_read_only"] is True
 
 
@@ -1588,3 +1589,32 @@ class TestTheReportShowsHowDeepTheBookWent:
         assert row["worst_position_code"] == "600001"
         assert row["worst_position_return_pct"] == -10.0
         assert row["deep_loss_positions"] == 1
+
+
+class TestTheProductionVerdictIsAboutThisRun:
+    """A live scheduler writes the production file all day. Its hash moving
+    is not evidence the replay touched it; what this process opened is."""
+
+    def test_another_writer_does_not_fail_the_run(self, tmp_path, monkeypatch):
+        series, instruments = _normal()
+        replay, _ = _prepare(tmp_path, series, instruments)
+        hashes = iter(["before", "after-a-live-scheduler-wrote"])
+        real = walk_forward._sha256
+
+        def _moving(path):
+            if path == walk_forward._PRODUCTION_DIR / "memory.db":
+                return next(hashes)
+            return real(path)
+
+        monkeypatch.setattr(walk_forward, "_sha256", _moving)
+        result = _run(replay, days=1)
+        assert result["production"]["unchanged"] is False
+        assert result["production"]["untouched"] is True
+
+    def test_a_writable_open_of_production_is_caught(self):
+        prod = walk_forward._PRODUCTION_DIR / "memory.db"
+        opened = [":memory:", f"file:{prod}?mode=ro", str(tmp := prod)]
+        assert walk_forward._production_writes(opened) == [str(tmp)]
+        assert walk_forward._production_writes(
+            [f"file:{prod}?mode=ro&immutable=1"]) == []
+        assert walk_forward._production_writes(["/elsewhere/memory.db"]) == []

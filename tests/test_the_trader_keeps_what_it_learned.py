@@ -140,7 +140,7 @@ class TestTheAgentReadsItAsItsOwn:
         assert "if not args.no_keep_notes" in src, "opt out, not opt in"
 
     def test_the_merge_runs_after_the_isolation_check(self):
-        """production_db_unchanged proves the fills touched nothing real.
+        """production_untouched proves the fills touched nothing real.
         Merging inside the run would have destroyed that proof."""
         import inspect
         import sys
@@ -148,5 +148,5 @@ class TestTheAgentReadsItAsItsOwn:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
         import walk_forward as wf
         src = inspect.getsource(wf.main)
-        assert src.index("production_db_unchanged") < src.index("merge_from")
+        assert src.index("production_untouched") < src.index("merge_from")
         assert "merge_from" not in inspect.getsource(wf.run)

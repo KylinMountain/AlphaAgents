@@ -97,6 +97,37 @@ _EARLY = argparse.ArgumentParser(add_help=False)
 _EARLY.add_argument("--target", type=Path)
 
 
+#: Every SQLite database this process opened while a window ran, as the
+#: connect string. Recorded by an audit hook rather than inferred from the
+#: production file's hash: a live scheduler on the same machine writes that
+#: file all day, so "the hash moved" said nothing about this run and failed
+#: every branch of a T9 experiment while the book was untouched (D39's cousin).
+_OPENED_DATABASES: list[str] = []
+_RECORDING = False
+
+
+def _record_sqlite_opens(event: str, args: tuple) -> None:
+    if _RECORDING and event == "sqlite3.connect" and args:
+        _OPENED_DATABASES.append(str(args[0]))
+
+
+def _production_writes(opened: list[str]) -> list[str]:
+    """Connect strings that opened a production database for writing."""
+    production = _PRODUCTION_DIR.resolve()
+    hits = []
+    for target in opened:
+        path, _, query = target.removeprefix("file:").partition("?")
+        if not path or path == ":memory:" or "mode=ro" in query:
+            continue
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved == production or production in resolved.parents:
+            hits.append(target)
+    return hits
+
+
 def _choose_data_dir(argv: list[str]) -> Path | None:
     """The replay directory, resolved before anything imports ``config``.
 
@@ -4888,6 +4919,12 @@ def _run_window(ctx, args) -> dict:
     #: counter kept beside it can disagree with it.
     tools_before = _journal_tool_calls(_REPLAY_DIR)
     prod_hash_before = _sha256(_PRODUCTION_DIR / "memory.db")
+    global _RECORDING
+    if not getattr(_record_sqlite_opens, "installed", False):
+        sys.addaudithook(_record_sqlite_opens)
+        _record_sqlite_opens.installed = True
+    _OPENED_DATABASES.clear()
+    _RECORDING = True
     #: The verdict (did the replay get read-only handles) and the diagnostic
     #: (what moved) are separate readings, because only the first is about us.
     corpus_access_before = _corpus_access_check(_REPLAY_DIR)
@@ -5115,6 +5152,8 @@ def _run_window(ctx, args) -> dict:
     journal_after = _journal_records(_REPLAY_DIR)
     tools_after = _journal_tool_calls(_REPLAY_DIR)
     prod_hash_after = _sha256(_PRODUCTION_DIR / "memory.db")
+    _RECORDING = False
+    production_writes = _production_writes(list(_OPENED_DATABASES))
     corpus_after = _corpus_fingerprint(_REPLAY_DIR)
 
     return {
@@ -5131,7 +5170,11 @@ def _run_window(ctx, args) -> dict:
             "tool_calls": max(0, tools_after - tools_before)},
         "production": {"hash_before": prod_hash_before,
                        "hash_after": prod_hash_after,
-                       "unchanged": prod_hash_before == prod_hash_after},
+                       # Diagnostic: another process (a live scheduler) may
+                       # own the change. The verdict is ``untouched``.
+                       "unchanged": prod_hash_before == prod_hash_after,
+                       "writes_by_this_run": production_writes,
+                       "untouched": not production_writes},
         "corpus": {"access": corpus_access_before,
                    "before": corpus_before, "after": corpus_after,
                    "changes": _corpus_changes(corpus_before, corpus_after)},
@@ -5364,6 +5407,7 @@ def write_report(result: dict, out_dir: Path) -> dict:
             (model["journal_after"] - model["journal_before"]) == 0
             if ctx.decider != "llm" else None),
         "production_db_unchanged": result["production"]["unchanged"],
+        "production_untouched": result["production"]["untouched"],
         "corpus_read_only": result["corpus"]["access"]["read_only"],
         "corpus_files": result["corpus"]["access"]["files"],
         #: Diagnostic, and named file-by-file on purpose: D39's first two
@@ -5554,7 +5598,8 @@ def _summary(result: dict, out_dir: Path, model_usage_ok: bool,
         "tests/test_t1_settlement.py 与 test_walk_forward.py 钉住）",
         "",
         "— 口径检查 —",
-        f"生产库内容 hash 未变        {'是' if result['production']['unchanged'] else '**否**'}",
+        f"本次运行未写生产库        {'是' if result['production']['untouched'] else '**否**：' + '，'.join(result['production']['writes_by_this_run'])}",
+        f"生产库内容 hash 未变（诊断）{'是' if result['production']['unchanged'] else '否——本机其他进程（如实盘调度）也在写这个文件，这一行不是对回放的判定'}",
         f"回放对语料只读              {'是' if result['corpus']['access']['read_only'] else '**否**'}"
         f"（{_corpus_access_line(result['corpus']['access'])}）",
         f"共享语料 size+mtime（诊断） {_corpus_changes_line(result['corpus']['changes'])}",
@@ -6066,12 +6111,12 @@ def main(argv: list[str] | None = None) -> int:
     # readings that are about this run. ``corpus_read_only`` (did we get
     # read-only handles) is ours; "did a file another process owns move" is not,
     # and gating on it made every long run on a live box return 1 (D39).
-    ok = (report["meta"]["production_db_unchanged"]
+    ok = (report["meta"]["production_untouched"]
           and report["meta"]["corpus_read_only"]
           and report["meta"]["model_usage_ok"])
 
     # The trader keeps what it learned. Deliberately **after** the checks
-    # above and outside `run`: `production_db_unchanged` is the proof that
+    # above and outside `run`: `production_untouched` is the proof that
     # the replay's fills never touched a real position, and merging inside
     # the run would have destroyed that proof to save a function call. The
     # book stays isolated; the notes do not, because a trader that forgets

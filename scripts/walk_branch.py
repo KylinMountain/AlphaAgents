@@ -274,7 +274,7 @@ def worker(args) -> int:
             raise CheckpointError("Branch starting equity differs from checkpoint ending equity")
         complete = (health["complete"] and not got["errors"] and full_dates
                     and report["meta"]["model_usage_ok"]
-                    and report["meta"]["production_db_unchanged"]
+                    and report["meta"]["production_untouched"]
                     and report["meta"]["corpus_read_only"]
                     and not got["corpus"]["changes"]
                     and (task["intervention"] is None or applied))

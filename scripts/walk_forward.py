@@ -3669,11 +3669,16 @@ def _check_theses(ctx, day: str) -> list[dict]:
     except Exception as exc:                          # noqa: BLE001
         logger.warning("%s: orphan settle failed: %s", day, exc)
 
-    # Signals, not closes. A crossed invalidation is handed to the agent on
-    # this day's exit turn; only the horizon still closes on its own, and
-    # that is a different claim — "my window ended", not "I was wrong".
+    # Signals, not closes. A crossed invalidation and a run-out horizon are
+    # both handed to the agent on this day's exit turn — the horizon is the
+    # agent's own deadline arriving, which is a question for it, not a
+    # close the code performs. See
+    # docs/exec-plans/active/2026-09-26-thesis-horizon-wakes-the-agent.md
     ctx.pending_signals = result.get("signals") or []
+    horizon_wakes = sum(1 for s in ctx.pending_signals
+                        if s.get("kind") == "horizon_due")
     ctx.counters["thesis_triggered"] += len(ctx.pending_signals)
+    ctx.counters["thesis_horizon_wakes"] += horizon_wakes
     closed = result.get("closed") or []
     ctx.counters["thesis_closed_on_horizon"] += len(closed)
     return [{"code": row.get("code"), "kind": row.get("reason", "")[:40]}

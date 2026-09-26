@@ -564,3 +564,64 @@ class TestAWindowWithNoExitIsRefused:
         assert with_levels.status == S.FILLED_AT_OPEN
         assert without.status == S.NO_FILL
         assert "no stop and no target" in without.reason
+
+
+
+class TestWhichPositionsReachTheModel:
+    """The live `run` decides *which* positions are worth a model call.
+
+    A wake-up carrying a thesis id — a crossed invalidation, or the
+    horizon the agent wrote arriving — must reach the model even though
+    the thesis is still active. The old rule ("a rule signal on a
+    position with no thesis") would have swallowed exactly the wake-ups
+    the design exists to deliver.
+    """
+
+    def _run(self, monkeypatch, *, signals, theses_active=True):
+        seen = {}
+
+        async def _fake_decide(context, trader=None, **kw):
+            seen["context"] = context
+            return []
+
+        async def _fake_commit(*a, **kw):
+            return None
+
+        def _fake_active(code=None, trader_id=None):
+            return theses_active
+
+        monkeypatch.setattr(ED, "decide", _fake_decide)
+        monkeypatch.setattr(ED, "commit_runtime_decisions", _fake_commit)
+        monkeypatch.setattr(ED, "get_open_positions",
+                            lambda trader_id=None: [dict(POSITIONS[0])])
+        monkeypatch.setattr(ED, "_with_reviews",
+                            lambda ctx, trader_id, **kw: ctx)
+        monkeypatch.setattr(ED, "_with_learning",
+                            lambda ctx, trader_id, **kw: ctx)
+        import alpha_agents.data.thesis as TD
+        monkeypatch.setattr(TD, "get_active", _fake_active)
+        asyncio.run(ED.run(PRICES, signals))
+        return seen.get("context")
+
+    def test_a_horizon_due_wake_reaches_the_model_despite_an_active_thesis(
+            self, monkeypatch):
+        sig = {"type": "signal", "code": "600001", "kind": "horizon_due",
+               "thesis_id": 7, "reason": "期限到了"}
+        ctx = self._run(monkeypatch, signals=[sig], theses_active=True)
+        assert ctx is not None and "600001" in ctx
+
+    def test_a_crossed_invalidation_wake_reaches_the_model_too(
+            self, monkeypatch):
+        sig = {"type": "signal", "code": "600001", "kind": "price_below",
+               "thesis_id": 7, "reason": "失效"}
+        ctx = self._run(monkeypatch, signals=[sig], theses_active=True)
+        assert ctx is not None and "600001" in ctx
+
+    def test_a_rule_signal_with_an_active_thesis_is_not_a_candidate(
+            self, monkeypatch):
+        """A plain rule signal on a position that has a plan on file stays
+        quiet — the plan's own conditions are evaluated every cycle."""
+        sig = {"type": "signal", "code": "600001",
+               "reason": "移动止损想平仓"}
+        ctx = self._run(monkeypatch, signals=[sig], theses_active=True)
+        assert ctx is None

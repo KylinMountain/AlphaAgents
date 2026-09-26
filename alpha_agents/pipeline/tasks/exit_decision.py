@@ -15,14 +15,12 @@ that mention that theme, and the mechanical signals that *would* have
 closed it. It answers 卖 / 持有 / 减仓 with a reason, and the reason is
 what gets stored on the trade and read back at review.
 
-There is no system exit line underneath. The only levels that close a
-position without asking are the ones the trader itself wrote on the order —
-its own stop and target, executed by ``position_monitor._own_order_exit`` so
-they hold when the model is down. A position without them is closed by the
-trader or not at all.
+There is nothing underneath: no stop, no target, no floor. A position is
+closed by the trader or not at all, and when to sell is something it learns
+from its own reviewed results rather than a price the system holds for it.
 
-Off by default: set ``AGENT_EXIT_DECISIONS=1``. With it off, every
-trigger closes as before.
+Always on since 2026-09-26. ``AGENT_EXIT_DECISIONS`` used to switch it off,
+and off meant the rule layer closed every position — a stop by another name.
 """
 
 from __future__ import annotations
@@ -79,8 +77,8 @@ DEFAULT_TRIM_FRACTION = 0.5
 
 
 def enabled() -> bool:
-    return os.environ.get("AGENT_EXIT_DECISIONS", "").lower() in (
-        "1", "true", "yes", "on")
+    """The trader decides every exit; there is no rule-driven alternative."""
+    return True
 
 
 def _theme_line(theme_name: str) -> str:
@@ -119,7 +117,6 @@ def _news_for_theme(theme_name: str) -> list[str] | None:
 def build_context(positions: list[dict], price_map: dict[str, float],
                   signals: list[dict],
                   news_by_theme: dict[str, list[str]] | None = None,
-                  own_orders: bool = True,
                   phase: str = "open") -> str:
     """Everything the agent needs to decide, as one block of text.
 
@@ -148,14 +145,9 @@ def build_context(positions: list[dict], price_map: dict[str, float],
     # Stated rather than implied: if the agent believes a floor sits
     # underneath, it answers as though something else will save it, and the
     # answer stops being a judgement about selling.
-    if own_orders:
-        lines.append("【没有系统止损】系统不会在任何亏损幅度替你平仓。只有你下单时"
-                     "**自己设的**止损/止盈价会作为挂单自动执行（见每个持仓的"
-                     "「自设价位」）；没设的仓位，卖不卖完全由你决定。")
-    else:
-        lines.append("【没有安全网】本次运行**不执行任何止损/止盈价**，包括你自己设的："
-                     "系统不会替你平仓。**卖不卖完全由你决定**，"
-                     "如果你不卖，这个仓位会一直持有到窗口结束或被你自己卖掉。")
+    lines.append("【没有止损也没有止盈】系统不会在任何价位替你平仓，也没有挂着的"
+                 "止损/止盈单。**卖不卖完全由你决定**：你不卖，这个仓位就一直"
+                 "持有。什么时候该走，要从你自己过去的交易结果里学。")
     lines.append("")
 
     for pos in positions:
@@ -173,7 +165,6 @@ def build_context(positions: list[dict], price_map: dict[str, float],
             f"持仓{pos.get('holding_days', 0)}天"
         )
         lines.append(f"  买入理由: {pos.get('reason') or '未记录'}")
-        lines.append(f"  自设价位: {_own_levels_line(pos, own_orders)}")
         lines.append(f"  主线: {_theme_line(pos.get('theme', ''))}")
         if news_by_theme is not None:
             news = news_by_theme.get(pos.get("theme", "")) or []
@@ -207,27 +198,6 @@ def build_context(positions: list[dict], price_map: dict[str, float],
     return "\n".join(lines)
 
 
-def _own_levels_line(pos: dict, execute: bool) -> str:
-    """The stop and target this trader wrote on the order, or that it wrote none.
-
-    ``initial_stop_loss`` rather than ``stop_loss``: the latter is rewritten by
-    the trailing and bearish-tightening rules, and showing it here would
-    present the system's number as the trader's own.
-    """
-    stop = (pos.get("initial_stop_loss") if "initial_stop_loss" in pos
-            else pos.get("stop_loss"))
-    target = pos.get("target_price")
-    parts = []
-    if stop:
-        parts.append(f"止损 {float(stop):.2f}")
-    if target:
-        parts.append(f"止盈 {float(target):.2f}")
-    if not parts:
-        return "未设（没有任何价位会替你平仓）"
-    tail = "（到价自动执行）" if execute else "（本次运行不执行）"
-    return " / ".join(parts) + tail
-
-
 _INSTRUCTIONS = """你是这个虚拟组合的交易员，负责卖出决策。买入不归你管——\
 这些仓位是早盘或盘中选出来的，你要决定的是现在该不该走。
 
@@ -242,8 +212,7 @@ _INSTRUCTIONS = """你是这个虚拟组合的交易员，负责卖出决策。�
 
 ## 不要做的事
 - 不要因为"还没到止损"就一律持有——那是规则的活，不是你的
-- 不要因为浮亏就恐慌卖出，也不要指望系统兜底——系统没有止损线，除了你自设的价位，\
-只有你能决定卖
+- 不要因为浮亏就恐慌卖出，也不要指望系统兜底——没有止损也没有止盈，只有你能决定卖
 - 不要给买入建议，不要推荐新股票
 - 不要为了做决定而做决定：大多数时候正确答案是 hold
 
@@ -797,7 +766,7 @@ def note_unanswered(signals: list[dict] | None,
 async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                             *, day: str, news_by_theme: dict[str, list[str]]
                             | None = None, trader=None,
-                            model=None, own_orders: bool = True,
+                            model=None,
                             phase: str = "open",
                             signals: list[dict] | None = None) -> list[dict]:
     """The sell side, for a historical replay.
@@ -834,7 +803,7 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
         raise ValueError(f"phase must be 'open' or 'close', not {phase!r}")
     context = build_context(positions, price_map, signals=signals or [],
                            news_by_theme=news_by_theme,
-                           own_orders=own_orders,
+
                            phase=phase)
     context = _with_reviews(context, getattr(trader, "id", None), before=day)
     # Every exit from here notes the wake-ups that got no answer, including

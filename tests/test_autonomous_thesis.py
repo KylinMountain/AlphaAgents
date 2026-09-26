@@ -90,7 +90,7 @@ def test_no_readable_condition_means_no_key_at_all():
 def _flags(**kw):
     """The real derivation, not a copy of it."""
     import walk_forward as wf
-    base = dict(autonomous=False, agent_exits=False,
+    base = dict(decider="llm", autonomous=False, agent_exits=False,
                 mechanical_stop=True, mechanical_target=True)
     base.update(kw)
     out = wf.autonomy_flags(SimpleNamespace(**base))
@@ -98,25 +98,23 @@ def _flags(**kw):
     return out
 
 
-def test_autonomous_turns_off_every_mechanical_rail():
-    """Agent exits with a stop still running measures a mixture nobody chose:
-    the stop takes the hard cases and the agent takes the easy ones."""
-    assert _flags(autonomous=True) == {
-        "agent_exits": True, "mechanical_stop": False,
-        "mechanical_target": False, "live_exits": False}
+_AGENT_ONLY = {"agent_exits": True, "mechanical_stop": False,
+               "mechanical_target": False}
 
 
-def test_the_old_default_is_unchanged():
-    """Comparability of earlier runs depends on the default not moving."""
-    assert _flags() == {
+def test_an_llm_run_has_no_stop_and_no_target():
+    """No price sells on the trader's behalf (2026-09-26), whatever flags an
+    older command line still passes."""
+    assert _flags() == _AGENT_ONLY
+    assert _flags(agent_exits=True) == _AGENT_ONLY
+    assert _flags(autonomous=True) == _AGENT_ONLY
+
+
+def test_only_the_placeholder_keeps_mechanical_levels():
+    """It has no agent to ask, so without levels nothing could ever exit."""
+    assert _flags(decider="placeholder") == {
         "agent_exits": False, "mechanical_stop": True,
-        "mechanical_target": True, "live_exits": False}
-
-
-def test_agent_exits_alone_still_keeps_the_rails():
-    assert _flags(agent_exits=True) == {
-        "agent_exits": True, "mechanical_stop": True,
-        "mechanical_target": True, "live_exits": False}
+        "mechanical_target": True}
 
 
 class TestThePromptDoesNotAnchorTheThreshold:

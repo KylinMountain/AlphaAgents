@@ -471,12 +471,6 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
             low = (None if raw_low is None or raw_low == ""
                    else float(raw_low))
             high = float(raw["entry_high"])
-            # Optional, like the target. A stop is an order the trader may
-            # choose to leave; the system no longer demands one, because a
-            # demanded stop is the system's exit written in the trader's hand.
-            raw_stop = raw.get("stop_loss")
-            stop = (None if raw_stop is None or raw_stop == ""
-                    else float(raw_stop))
         except (KeyError, TypeError, ValueError) as exc:
             refused.append({"code": code, "why": "bad_prices",
                             "detail": f"{type(exc).__name__}: {exc}"})
@@ -486,41 +480,21 @@ def parse_orders(text: str, panel_codes: set[str]) -> dict:
                             "detail": f"{low} !< {high}"})
             continue
         floor = low if low is not None else high
-        if stop is not None and not stop < floor:
-            refused.append({"code": code, "why": "stop_not_below_entry",
-                            "detail": f"{stop} !< {floor}"})
-            continue
-        if min(floor, high) <= 0 or (stop is not None and stop <= 0):
+        if min(floor, high) <= 0:
             refused.append({"code": code, "why": "non_positive_price",
                             "detail": str(floor)})
             continue
-        # ``target_price`` is optional, and its absence is meaningful rather
-        # than an error: a position without it is sold at a profit only when
-        # the trader decides to sell it.
-        target = raw.get("target_price")
-        if target is not None and target != "":
-            try:
-                target = float(target)
-            except (TypeError, ValueError):
-                refused.append({"code": code, "why": "bad_target",
-                                "detail": str(target)[:40]})
-                continue
-            if not target > high:
-                # A target at or below the entry ceiling is not a target: the
-                # order would exit at a price it could have been filled at,
-                # which is a stop with a different name.
-                refused.append({"code": code, "why": "target_not_above_entry",
-                                "detail": f"{target} !> {high}"})
-                continue
-            target = round(target, 2)
-        else:
-            target = None
+        # No stop and no target. A price that sells on the trader's behalf
+        # makes the trade's outcome a measurement of that price, not of the
+        # trader; when to sell is decided at each position decision and
+        # learned from reviewed results. Fields a model still emits are
+        # ignored rather than refused — they are not a malformed order.
         orders.append({
             "code": code,
             "entry_low": round(low, 2) if low is not None else None,
             "entry_high": round(high, 2),
-            "stop_loss": round(stop, 2) if stop is not None else None,
-            "target_price": target,
+            "stop_loss": None,
+            "target_price": None,
             # Whole. This string becomes the Thesis ``claim`` — the thing a
             # later exit declares falsified and the review scores the
             # reasoning of. Cut at 200 it stopped mid-clause: the 002230

@@ -35,7 +35,7 @@ from alpha_agents.agents.trader_runtime import plan_morning
 from alpha_agents.notify import notify_all
 from alpha_agents.config import DATA_DIR
 from alpha_agents.data import clock, research_packet
-from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone, parse_stop_loss
+from alpha_agents.data.portfolio import create_pending_order, parse_entry_zone
 from alpha_agents.data.thesis import from_recommendation
 from alpha_agents.data.trader import load_traders
 
@@ -790,7 +790,8 @@ def _save_recommendations_list(
                 # Prefer structured JSON fields, fallback to regex parsing
                 entry_low = r.get("entry_low")
                 entry_high = r.get("entry_high")
-                stop_loss_val = r.get("stop_loss")
+                # No stop: nothing sells on the trader's behalf.
+                stop_loss_val = None
                 if entry_low is None and entry_high is None:
                     entry_low, entry_high = parse_entry_zone(r.get("action", ""))
                 if entry_low is None and entry_high is None:
@@ -803,8 +804,6 @@ def _save_recommendations_list(
                                    "调用 get_price_levels 自己定价）",
                                    code, r.get("name", ""))
                     continue
-                if stop_loss_val is None:
-                    stop_loss_val = parse_stop_loss(r.get("action", ""))
                 # Thesis before order. The order is the mechanism; the
                 # thesis is what the position is *for*, and the monitor
                 # evaluates it every cycle. Written first so the fill can

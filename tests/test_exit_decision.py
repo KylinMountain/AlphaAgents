@@ -34,14 +34,11 @@ def block(payload: str) -> str:
 
 
 class TestEnabled:
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
-    def test_toggle_spellings(self, monkeypatch, value):
-        monkeypatch.setenv("AGENT_EXIT_DECISIONS", value)
+    def test_always_on(self, monkeypatch):
+        """Off meant the rule layer closed every position — a stop by another
+        name. There is no such mode any more."""
+        monkeypatch.setenv("AGENT_EXIT_DECISIONS", "0")
         assert exit_decision.enabled()
-
-    def test_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("AGENT_EXIT_DECISIONS", raising=False)
-        assert not exit_decision.enabled()
 
 
 class TestParsing:
@@ -139,8 +136,8 @@ class TestContext:
              patch.object(exit_decision, "_news_for_theme", return_value=[]):
             out = exit_decision.build_context(pos, {"600835": 18.56}, [])
 
-        assert "风控硬线" not in out and "没有系统止损" in out
-        assert "自设价位: 未设" in out
+        assert "风控硬线" not in out and "没有止损也没有止盈" in out
+        assert "自设价位" not in out
         assert "买入理由: 低涨幅+流动性好" in out
         assert "18.40" in out and "18.56" in out
         assert "无相关快讯" in out or "无（主线无新消息" in out

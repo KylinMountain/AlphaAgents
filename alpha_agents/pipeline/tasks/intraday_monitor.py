@@ -946,7 +946,7 @@ async def _save_intraday_recommendations(
 def _order_fields(d: dict) -> dict:
     """The trader's own numbers, in the shape the order path reads."""
     return {"entry_low": d["entry_low"], "entry_high": d["entry_high"],
-            "stop_loss": d["stop_loss"], "size_pct": d.get("size_pct"),
+            "stop_loss": None, "size_pct": d.get("size_pct"),
             "confidence": d["confidence"],
             "reason": d["reason"]}
 

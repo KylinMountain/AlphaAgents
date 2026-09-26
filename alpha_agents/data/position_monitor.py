@@ -7,10 +7,10 @@ opens an order or picks a size.
 
 What lives here is the rule layer that runs underneath the trading agent
 — the trailing stop, the bearish-signal tightening, the theme exit and the
-regime holding cap. There is no floor the agent may not overrule. With
-``AGENT_EXIT_DECISIONS`` on these are demoted to evidence and only the
-trader's own stop and target execute; with it off they are the whole exit
-policy.
+regime holding cap. None of them closes a position: with the trader
+deciding exits (always, since 2026-09-26) every trigger is demoted to
+evidence, and there is no stop or target price of any kind — the trader
+learns when to sell from its own results.
 """
 
 import logging
@@ -146,30 +146,6 @@ def _check_bearish_signals(
     return tightest_stop, reasons
 
 
-def _own_order_exit(pos: dict, price: float) -> dict | None:
-    """Did the price reach a level the trader itself put on this position?
-
-    There is no system exit line. The 8% floor and the archived-theme exit
-    that used to sit here were decisions the system made for the trader, and
-    a position they closed has an outcome that measures the rule. What stays
-    is the trader's own standing orders: a stop and a target it chose to
-    write on the order, executed here so they hold even when the model is
-    down. A position without them is closed only by the trader.
-
-    Reads ``initial_stop_loss`` — written once at the fill — and never
-    ``stop_loss``: that column is where the trailing and bearish-tightening
-    rules write their own output, so reading it would execute the system's
-    stop under the trader's name.
-    """
-    own_stop = pos.get("initial_stop_loss") or 0
-    if own_stop > 0 and price <= own_stop:
-        return {"type": "stopped", "reason": f"自设止损触发（{own_stop:.2f}）"}
-    target = pos.get("target_price") or 0
-    if target > 0 and price >= target:
-        return {"type": "target_hit", "reason": f"自设止盈触发（{target:.2f}）"}
-    return None
-
-
 def check_positions(
     realtime_prices: dict[str, float],
     today: str,
@@ -184,8 +160,7 @@ def check_positions(
     ``hard_only`` is what makes room for a trading agent. Left False, every
     trigger below closes the position, which is the behaviour that leaves
     the agent nothing to learn about selling — it picks the stock and the
-    rules dispose of it. Set True, only ``_own_order_exit`` — the trader's
-    own stop and target — closes anything;
+    rules dispose of it. Set True, nothing here closes anything;
     every other trigger comes back as ``type="signal"`` for the agent to
     weigh, alongside the news and the theme state it already sees.
 
@@ -413,10 +388,9 @@ def check_positions(
         # open and the agent is told why the rules wanted it closed — a
         # trailing stop that fired on an intraday wick reads very
         # differently next to a theme that is still taking inflow.
-        own = _own_order_exit(pos, price) if hard_only else None
-        if own:
-            alert = own
-        elif alert and hard_only:
+        # Nothing closes a position on the trader's behalf — no stop, no
+        # target, no theme rule. Every trigger is evidence it reads.
+        if alert and hard_only:
             alerts.append({
                 "type": "signal", "code": code, "name": pos.get("name", ""),
                 "reason": alert["reason"], "would_have": alert["type"],

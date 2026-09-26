@@ -68,16 +68,12 @@ class TestAMalformedOrderIsNamedNotDropped:
     @pytest.mark.parametrize("body,why", [
         ('{"orders":[{"code":"600001","entry_low":10.2,"entry_high":9.8,'
          '"stop_loss":9.2}]}', "inverted_zone"),
-        ('{"orders":[{"code":"600001","entry_low":10.0,"entry_high":11.0,'
-         '"stop_loss":10.5}]}', "stop_not_below_entry"),
         ('{"orders":[{"code":"600001","entry_low":0,"entry_high":1.0,'
          '"stop_loss":-1.0}]}', "non_positive_price"),
         # entry_high is the one price an order cannot do without: it is the
         # most the trader will pay. (entry_low became optional on 2026-09-23.)
         ('{"orders":[{"code":"600001","entry_low":10.0,"stop_loss":9.2}]}',
          "bad_prices"),
-        ('{"orders":[{"code":"600001","entry_low":null,"entry_high":10.0,'
-         '"stop_loss":10.0}]}', "stop_not_below_entry"),
         ('{"orders":["600001"]}', "not_an_object"),
     ])
     def test_the_reason_is_returned(self, body, why):
@@ -345,92 +341,35 @@ class TestTheCallingLoopOutlivesTheClient:
         assert seen[1] is not loop
 
 
-class TestATargetIsOptionalButChecked:
-    """`target_price` is the difference between one exit and two.
+class TestThereIsNoStopAndNoTarget:
+    """No price sells on the trader's behalf (2026-09-26). An order is where to
+    buy; when to sell is decided at each position turn and learned."""
 
-    Every order in the first 20-day replay had a stop and no target, so the
-    only way out of a position was the stop — and all 11 trades took it. The
-    field was accepted by the order layer and dropped by the runner, so this
-    is about the parser's half of that seam.
-    """
-
-    def test_a_target_above_the_entry_is_kept(self):
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":12.0,"reason":"主线"}]}', CODES)
-        assert v["orders"][0]["target_price"] == 12.0
-
-    def test_omitting_it_is_allowed_and_recorded_as_none(self):
-        """Optional, and its absence is a fact worth carrying rather than an
-        error: it says the position has exactly one exit."""
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"reason":"主线"}]}', CODES)
-        assert v["orders"][0]["target_price"] is None
-
-    def test_a_target_below_the_entry_ceiling_is_refused(self):
-        """A target at or under the fill ceiling is not a target: the order
-        would exit at a price it could have been filled at."""
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":10.2,"reason":"x"}]}', CODES)
-        assert v["orders"] == []
-        assert v["refused"][0]["why"] == "target_not_above_entry"
-
-    def test_a_target_equal_to_the_ceiling_is_refused(self):
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":10.5,"reason":"x"}]}', CODES)
-        assert v["refused"][0]["why"] == "target_not_above_entry"
-
-    def test_an_unparseable_target_is_refused_by_name(self):
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":"涨一倍","reason":"x"}]}', CODES)
-        assert v["refused"][0]["why"] == "bad_target"
-
-    def test_an_empty_string_means_no_target(self):
-        """Some models emit `""` for an absent optional field rather than
-        omitting it; that is an omission, not a bad number."""
-        v = D.parse_orders(
-            '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":9.0,"target_price":"","reason":"x"}]}', CODES)
-        assert v["orders"][0]["target_price"] is None
-
-    def test_the_prompt_offers_both_levels_as_optional(self):
-        """The template is part of the contract: a field the runner reads but
-        the prompt never mentions is one the model will not emit. Both levels
-        are the trader's choice, and the prompt must not promise a system line
-        that does not exist."""
-        text = D.load_prompt()
-        assert "target_price" in text and "stop_loss" in text
-        assert "可选" in text
-        assert "系统没有任何止损或止盈线" in text
-
-
-class TestAStopIsTheTradersChoice:
-    """The system no longer demands a stop: a demanded stop is the system's
-    exit written in the trader's hand."""
-
-    def test_an_order_without_a_stop_is_accepted(self):
+    def test_an_order_without_either_is_whole(self):
         v = D.parse_orders(
             '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
             '"reason":"主线"}]}', CODES)
         assert v["refused"] == []
         assert v["orders"][0]["stop_loss"] is None
+        assert v["orders"][0]["target_price"] is None
 
-    def test_null_and_empty_mean_no_stop(self):
-        for raw in ('null', '""'):
-            v = D.parse_orders(
-                '{"orders":[{"code":"600001","entry_high":10.5,'
-                f'"stop_loss":{raw},"reason":"x"}}]}}', CODES)
-            assert v["orders"][0]["stop_loss"] is None, raw
-
-    def test_a_stop_it_does_write_is_still_checked(self):
+    @pytest.mark.parametrize("extra", [
+        '"stop_loss":9.0,"target_price":12.0',
+        '"stop_loss":10.4,"target_price":10.2',     # would once be refused
+        '"stop_loss":"跌破就走","target_price":"涨一倍"',
+    ])
+    def test_levels_a_model_still_writes_are_ignored_not_refused(self, extra):
         v = D.parse_orders(
             '{"orders":[{"code":"600001","entry_low":10.0,"entry_high":10.5,'
-            '"stop_loss":10.2,"reason":"x"}]}', CODES)
-        assert v["refused"][0]["why"] == "stop_not_below_entry"
+            f'{extra},"reason":"x"}}]}}', CODES)
+        assert v["refused"] == []
+        assert v["orders"][0]["stop_loss"] is None
+        assert v["orders"][0]["target_price"] is None
+
+    def test_the_prompt_says_there_is_neither(self):
+        text = D.load_prompt()
+        assert "没有止损，也没有止盈" in text
+        assert '"stop_loss"' not in text and '"target_price"' not in text
 
 
 class TestTheBookShowsWhetherAPositionIsUp:

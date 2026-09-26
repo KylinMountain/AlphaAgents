@@ -271,25 +271,16 @@ LIMITATIONS = (
 #: a 30-day window in which the agent had sold nothing and every one of its
 #: 31 sells was an entry stop or target.
 AGENT_EXITS_LIMITATION = (
-    "the agent decides sells: a crossed invalidation wakes it rather than "
-    "closing the position, so a position still open after its stated line "
-    "was crossed is a choice the agent made, not an oversight")
-LIVE_EXITS_LIMITATION = (
-    "sell side as in production (--live-exits): the agent decides every sell "
-    "and there is no system exit line; the only levels executed are the "
-    "stop/target the agent chose to write on its own order (counted as "
-    "自设止损 / 自设止盈). A position without them is closed by the agent or "
-    "not at all")
+    "the agent decides every sell and there is no stop or target of any kind: "
+    "a crossed invalidation or rule signal wakes it rather than closing the "
+    "position, so a position still open after its stated line was crossed is "
+    "a choice the agent made, not an oversight")
 MECHANICAL_EXITS_LIMITATION = (
-    "sells are the entry stop and target levels, executed mechanically; the "
-    "agent was not asked about open positions, so this run says nothing about "
-    "how the Trader manages a position (production runs AGENT_EXIT_DECISIONS=1 "
-    "— use --live-exits to replay that)")
+    "sells are the placeholder's stop and target levels, executed "
+    "mechanically; no agent was asked about open positions")
 
 
 def _exit_limitation(ctx) -> str:
-    if getattr(ctx, "live_exits", False):
-        return LIVE_EXITS_LIMITATION
     if getattr(ctx, "agent_exits", False):
         return AGENT_EXITS_LIMITATION
     return MECHANICAL_EXITS_LIMITATION
@@ -3106,43 +3097,28 @@ def _decide_llm(ctx, day: str, prev_day: str,
 
 
 def autonomy_flags(args) -> dict:
-    """Who decides each thing this run: the agent, or a rule.
+    """Who decides each exit this run: the agent, or a price.
 
-    ``--autonomous`` adds no behaviour of its own; it turns the mechanical
-    rails off and agent exits on. It is one switch rather than three because
-    the three are only meaningful together — agent exits with a stop still
-    running means the stop takes the hard cases and the agent takes the easy
-    ones, and the window then measures a mixture nobody chose.
+    For a model-backed run the answer is always the agent. There is no stop
+    and no target — not a system floor and not a level the agent wrote on its
+    own order — because a position closed by a price has an outcome that
+    measures the price, and the learning step would attribute to the agent a
+    result it did not produce. When to sell is decided at each position turn
+    and learned from reviewed results (2026-09-26).
 
-    That mixture is also why a stop is not a neutral safety net here. A
-    position closed by a rule the agent could not overrule has an outcome
-    that measures the rule, so the learning step attributes to the agent a
-    result it did not produce.
-
-    The default is unchanged: earlier runs stay comparable, and this is a new
-    arm rather than a replacement for the old one.
-
-    ``--live-exits`` is the production arrangement (``AGENT_EXIT_DECISIONS=1``):
-    the agent owns every sell and there is no system exit line. The only
-    levels executed are the stop and target the agent itself chose to write on
-    the order — its own standing orders, which production executes the same
-    way. It is the one mode in which a replay's sell side is the live one.
+    ``--autonomous``, ``--agent-exits``, ``--no-stop-loss`` and
+    ``--no-take-profit`` are still accepted so older commands parse, and have
+    no effect on an llm run. Only the placeholder decider, which has no agent
+    to ask, keeps its mechanical stop and target.
     """
-    autonomous = bool(getattr(args, "autonomous", False))
-    live = bool(getattr(args, "live_exits", False))
-    if live and autonomous:
-        raise SystemExit(
-            "--live-exits 与 --autonomous 互斥：前者执行 agent 自设的止损/止盈价，"
-            "后者连它们也不执行")
+    if getattr(args, "decider", "llm") == "llm":
+        return {"autonomous": True, "agent_exits": True,
+                "mechanical_stop": False, "mechanical_target": False}
     return {
-        "autonomous": autonomous,
-        "agent_exits": (bool(getattr(args, "agent_exits", False))
-                        or autonomous or live),
-        "mechanical_stop": (bool(getattr(args, "mechanical_stop", True))
-                            and not autonomous) or live,
-        "mechanical_target": (bool(getattr(args, "mechanical_target", True))
-                              and not autonomous) or live,
-        "live_exits": live,
+        "autonomous": False,
+        "agent_exits": False,
+        "mechanical_stop": bool(getattr(args, "mechanical_stop", True)),
+        "mechanical_target": bool(getattr(args, "mechanical_target", True)),
     }
 
 
@@ -3807,8 +3783,6 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
         ED.decide_for_replay(priced, mark_map, day=day,
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
-                             own_orders=(ctx.mechanical_stop
-                                         or ctx.mechanical_target),
                              phase=phase,
                              signals=ctx.pending_signals))
     if not decisions:
@@ -4060,12 +4034,9 @@ def _settle_exits(ctx, day: str) -> dict:
             continue
         if verdict.status != S.FILLED_AT_OPEN:
             continue
-        # Under live exits these levels are the agent's own orders, and the
-        # report says so rather than counting them as a system rule.
-        label = OWN_ORDER_REASON if getattr(ctx, "live_exits", False) else ""
         booked = portfolio_exit.close_position(
             pos["id"], close_price=verdict.price,
-            close_reason=f"walk_forward {label}开盘{verdict.reason[:60]}",
+            close_reason=f"walk_forward 开盘{verdict.reason[:60]}",
             command_id=f"walk:{ctx.run_id}:{day}:{pos['id']}")
         if not booked:
             counts["close_refused"] += 1
@@ -4077,12 +4048,8 @@ def _settle_exits(ctx, day: str) -> dict:
             "shares": pos.get("shares"), "price": verdict.price,
             "amount": (pos.get("shares") or 0) * verdict.price,
             "capacity_shares": None, "capacity_oversize": False,
-            "reason": f"{label}{verdict.reason}"})
+            "reason": verdict.reason})
     return {"counts": counts, "events": events, "fills": fills}
-
-
-#: Prefix on every close made by a level the agent itself wrote on the order.
-OWN_ORDER_REASON = "自设价位: "
 
 
 def _value(ctx, day: str) -> dict:
@@ -4295,9 +4262,12 @@ def _experiment_runtime_contract(args) -> dict:
             "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
         },
         "exit_policy": {
-            "mechanical_stop": bool(args.mechanical_stop),
-            "mechanical_target": bool(args.mechanical_target),
-            "agent_exits": bool(args.agent_exits),
+            # Effective, not as argparse left them: an llm run ignores the
+            # exit flags, and a contract that froze the flags would bind a
+            # behaviour the run does not have.
+            "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
+            "mechanical_target": autonomy_flags(args)["mechanical_target"],
+            "agent_exits": autonomy_flags(args)["agent_exits"],
             "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
@@ -4335,9 +4305,12 @@ def _selection_experiment_runtime_contract(args) -> dict:
             "slippage_rate": portfolio_exit.SLIPPAGE_RATE,
         },
         "exit_policy": {
-            "mechanical_stop": bool(args.mechanical_stop),
-            "mechanical_target": bool(args.mechanical_target),
-            "agent_exits": bool(args.agent_exits),
+            # Effective, not as argparse left them: an llm run ignores the
+            # exit flags, and a contract that froze the flags would bind a
+            # behaviour the run does not have.
+            "mechanical_stop": autonomy_flags(args)["mechanical_stop"],
+            "mechanical_target": autonomy_flags(args)["mechanical_target"],
+            "agent_exits": autonomy_flags(args)["agent_exits"],
             "close_buys": bool(getattr(args, "close_buys", False)),
             "hard_stop_pct": float(portfolio.HARD_STOP_PCT),
         },
@@ -4513,13 +4486,6 @@ class Context:
         )
         _verify_experiment_runtime(args, legacy_manifest)
         _verify_selection_experiment_runtime(args, selection_manifest)
-        if (getattr(args, "live_exits", False)
-                and self.experiment_manifest is not None):
-            # The runtime contract freezes mechanical_stop/target/agent_exits
-            # as argparse left them; --live-exits changes all three without
-            # touching those args, so a manifest could not tell the arms apart.
-            raise SystemExit("--live-exits 不能与实验 manifest 同用：runtime 契约"
-                             "未记录该模式")
         if self.selection_architecture in {
                 "sector_first_v0", "sector_first_simple_selector",
                 "sector_first_no_flow", "sector_rank_price_v1"}:
@@ -4584,9 +4550,6 @@ class Context:
         #: number. The user asked to disable the take-profit as its own
         #: experiment.
         self.mechanical_target = _rails["mechanical_target"]
-        #: The production sell side: agent exits, and the stop/target levels
-        #: executed are the agent's own orders. There is no system line.
-        self.live_exits = _rails["live_exits"]
         #: Whether the buy-side decider may **call tools**. On by default for
         #: the llm decider: a trader that cannot ask a question is a scorer,
         #: and the whole point of the last review's finding was that the
@@ -5796,13 +5759,8 @@ def _exit_attribution(result: dict) -> list[str]:
     if not sells:
         return []
     agent = [f for f in sells if str(f.get("reason", "")).startswith("agent")]
-    own = [f for f in sells
-           if str(f.get("reason", "")).startswith(OWN_ORDER_REASON)]
-    mechanical = [f for f in sells if f not in agent and f not in own]
+    mechanical = [f for f in sells if f not in agent]
     out = [f"机械 {len(mechanical)} 笔", f"agent {len(agent)} 笔"]
-    if own:
-        # The agent's own standing orders: decided by it, executed by code.
-        out.append(f"agent 自设价位 {len(own)} 笔")
 
     def _kind(reason: str) -> str:
         r = str(reason or "")
@@ -5828,12 +5786,6 @@ def _exit_attribution(result: dict) -> list[str]:
         # X was touched". The first version of this classifier looked for
         # "stop"/"止损" only, so seven real exits landed in 其他 — the split
         # was reporting 止损 1 when the truth was 止损 5 / 止盈 2.
-        if r.startswith(OWN_ORDER_REASON):
-            if "lower level" in low or "stop" in low or "止损" in r:
-                return "自设止损"
-            if "upper level" in low or "target" in low or "止盈" in r:
-                return "自设止盈"
-            return "自设价位"
         if "lower level" in low or "止损" in r or "stop" in low:
             return "止损"
         if "upper level" in low or "止盈" in r or "target" in low:
@@ -5961,10 +5913,6 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-take-profit，并在回放内不执行 HARD_STOP_PCT。"
              "机械止损会让一笔的结局衡量那条线而不是 agent 的判断，"
              "学习信号因此不可归因")
-    parser.add_argument(
-        "--live-exits", action="store_true",
-        help="与实盘 AGENT_EXIT_DECISIONS=1 一致：卖出由 agent 决定，没有系统"
-             "止损线；只执行 agent 自己在订单上写的止损/止盈价")
     parser.add_argument(
         "--close-buys", action="store_true",
         help="显式启用 14:55 synthetic-close 买入；日线数据不构成严格盘中证据")

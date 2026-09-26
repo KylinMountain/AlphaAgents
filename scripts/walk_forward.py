@@ -3791,7 +3791,8 @@ def _agent_exits(ctx, day: str, phase: str = "open") -> list[dict]:
                              news_by_theme=news_by_theme, trader=trader,
                              model=ctx.model,
                              phase=phase,
-                             signals=ctx.pending_signals))
+                             signals=ctx.pending_signals,
+                             run_id=str(ctx.run_id)))
     if not decisions:
         return []
 

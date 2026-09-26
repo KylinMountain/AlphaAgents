@@ -668,6 +668,8 @@ async def run(price_map: dict[str, float], signals: list[dict],
 
     context = _with_reviews(build_context(positions, price_map, signals),
                             trader_id)
+    from alpha_agents.data import clock
+    context = _with_learning(context, trader_id, as_of=clock.today())
     trader = None
     if trader_id:
         from alpha_agents.data.trader import get_trader
@@ -723,6 +725,30 @@ def _with_reviews(context: str, trader_id: str | None,
     return f"{block}\n\n{context}" if block else context
 
 
+def _with_learning(context: str, trader_id: str | None, *, as_of: str,
+                   run_id: str | None = None) -> str:
+    """The Trader's market-graded Lessons/Rules about holding and selling.
+
+    Buy-side decisions received ``trader_learning.inject`` and this one did
+    not, so a cell like "held after giving back the gain: wrong 14/20" could
+    be learned and never reach the only decision it is about. The horizon is
+    ``position`` — the horizon every HOLD/REDUCE/SELL decision is sealed and
+    graded under — so buy lessons do not leak in here, nor these into buys.
+    """
+    from alpha_agents.data import trader_session
+    from alpha_agents.data.trader import DEFAULT_TRADER
+    from alpha_agents.evolution import trader_learning
+    try:
+        block = trader_learning.inject(
+            trader_id=trader_id or DEFAULT_TRADER,
+            decision_horizon="position", as_of=as_of,
+            run_id=trader_session.namespace(run_id))
+    except Exception as e:                            # noqa: BLE001
+        logger.warning("Trader learning unavailable for the exit: %s", e)
+        return context
+    return f"{block}\n\n{context}" if block else context
+
+
 def note_unanswered(signals: list[dict] | None,
                     decisions: list[dict] | None) -> list[str]:
     """Woken positions the agent's reply never mentions.
@@ -768,7 +794,8 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
                             | None = None, trader=None,
                             model=None,
                             phase: str = "open",
-                            signals: list[dict] | None = None) -> list[dict]:
+                            signals: list[dict] | None = None,
+                            run_id: str | None = None) -> list[dict]:
     """The sell side, for a historical replay.
 
     A separate entry point rather than a flag on :func:`run`, because the two
@@ -806,6 +833,10 @@ async def decide_for_replay(positions: list[dict], price_map: dict[str, float],
 
                            phase=phase)
     context = _with_reviews(context, getattr(trader, "id", None), before=day)
+    # Sequential replay: at this moment only Lessons/Rules materialized by an
+    # earlier close exist, so reading up to ``day`` cannot see the future.
+    context = _with_learning(context, getattr(trader, "id", None),
+                             as_of=day, run_id=run_id)
     # Every exit from here notes the wake-ups that got no answer, including
     # the failure paths — those are the cases where *nothing* was answered,
     # and "the model timed out" must not settle into the book as "the agent

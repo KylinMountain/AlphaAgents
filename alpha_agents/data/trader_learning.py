@@ -421,8 +421,13 @@ def save_rule_version(
     support_count: int, counterexample_count: int, confidence: float,
     evidence_refs: list[int], expires_on: str,
     conn: sqlite3.Connection | None = None,
+    activation_reason: str = "evidence threshold reached",
 ) -> tuple[int, bool]:
-    """Append a Rule version; a new version starts active via an event."""
+    """Append a Rule version; a new version starts active via an event.
+
+    ``activation_reason`` names who put it in force: the evidence threshold,
+    or a human approving an experiment — never the model.
+    """
     db = init_schema(conn)
     run_id = _text(run_id, "run_id")
     trader_id = _text(trader_id, "trader_id")
@@ -460,7 +465,8 @@ def save_rule_version(
     db.execute(
         "INSERT INTO trader_rule_events (rule_id,event,reason,at) "
         "VALUES (?,?,?,?)",
-        (rule_id, "activate", "evidence threshold reached", source_date))
+        (rule_id, "activate", _text(activation_reason, "activation_reason"),
+         source_date))
     if conn is None:
         db.commit()
     return rule_id, True

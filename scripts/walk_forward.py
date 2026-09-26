@@ -1172,12 +1172,19 @@ def _book_and_knowledge(
         learn_as_of = (
             ctx.corpus.previous(day) if phase == "open" else day)
         if learn_as_of:
-            parts.append(trader_replay.learning_block(
+            block = trader_replay.learning_block(
                 run_id=str(ctx.run_id),
                 trader_id=ctx.trader,
                 day=learn_as_of,
                 decision_horizon="3-5d",
-            ))
+            )
+            parts.append(block)
+            # Evidence that a Rule actually reached a decision, not only that
+            # one existed: T9 compares arms by what each Trader was shown.
+            rules_shown = block.count("• RULE ")
+            if rules_shown:
+                ctx.counters["trader_rule_contexts"] += 1
+                ctx.counters["trader_rules_shown"] += rules_shown
     except Exception as exc:                          # noqa: BLE001
         logger.warning("Trader Runtime learning unavailable: %s", exc)
     return book, "\n\n".join(p for p in parts if p)

@@ -2716,3 +2716,22 @@ hash 未变，3 个共享语料文件均以只读方式打开。121 次模型调
 这个窗口的账户收益 +2.818%、相对等权市场 -4.002%，**不是**策略有效性结论。所有学习都停在
 observation（最高 n=31，小于仓库的 n≥50 门槛），而且 replay 自身的 observation context 不等同于
 生产环境中经批准知识快照注入的 Rule。
+
+**复核更正（同日）。** 上一段的 30 日窗口没有验证 T5：335 个 Runtime 决策全部是
+BUY / WAIT / REJECT，31 笔卖出全部由入场止损/止盈价机械触发（报告"机械 31、agent 0"），
+因为验收命令没有开启 agent 卖出。"13 个 LessonCandidate"实为 13 条 observation，库中
+`trader_lesson_candidates` 为 343 条、Lesson/Rule 为 0。
+
+## 16. 无价位出场与行情打分的学习闭环（2026-09-26）
+
+- **没有止损也没有止盈**（`0c5636a`，[计划](exec-plans/active/2026-09-26-no-system-exit-lines.md)）：
+  实盘与回放都不在任何价位平仓，`AGENT_EXIT_DECISIONS` 移除，卖出全部由 Trader 决定。
+  4 日真实模型回放 `nostop4-20260105`：机械 0 笔、agent 4 笔（清仓 2、减仓 2），HOLD 9。
+- **行情打分**（`606a200`，[计划](exec-plans/active/2026-09-26-trader-runtime-completion.md)）：
+  `decision_outcomes` 在 5 日窗口闭合后，以前瞻收益减全市场中位数判定每个封存决策；复盘模型
+  不再打分。学习按 (动作 × 代码计算的情形标签) 聚合，Lesson n≥10、Rule n≥50。
+  对上节 30 日窗口的已录决策离线重算：buy 判对 18/48、reject 107/160、wait 42/76；生成
+  9 条 Lesson、3 条 Rule。同窗口决策共享交易日与持有期，n 不是独立样本数。
+- **风险可见**：回放报告写出最深单票浮亏、期末亏损持仓与浮亏 ≤ −8% 的仓位-日数。
+- **T9**（`3aa2be9`）：`walk_branch` 的 rule arm 在同一检查点上对比"注入一条人工批准的
+  Rule"与对照组；实测结果见收尾计划。

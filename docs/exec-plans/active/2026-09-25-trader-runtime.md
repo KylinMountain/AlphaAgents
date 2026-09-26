@@ -351,7 +351,8 @@ alpha_agents/trader/
 
 ### T3 — 持久化 TraderState + Morning 接管
 
-**状态：in progress.**
+**状态：completed and merged to main (9a62917 T3a, 835d819 T3b, 306716b T3c).**
+生产 Morning Scan 以 `place_orders=False` 只产出研究/候选，BUY/WAIT/REJECT 由 Runtime 决定。
 
 先建立 run/trader 隔离、append-only、CAS 的 TraderState 持久化；没有可靠恢复前不切生产 Morning。
 
@@ -371,6 +372,9 @@ Trader 决定：
 
 ### T4 — Intraday 接管
 
+**状态：completed and merged to main (dd8c30e, PR #43).** 盘中事件唤醒同一个持续 Trader；
+Runtime 失败时不回退到旧的下单路径。
+
 Intraday Monitor 变成 Significant Observation Detector：
 
 - 监控既有 watchlist / thesis / position；
@@ -378,6 +382,9 @@ Intraday Monitor 变成 Significant Observation Detector：
 - 删除独立的“盘中选股→定价→下单”策略 owner。
 
 ### T5 — Position Management
+
+**状态：completed (PR #48).** 2026-09-26 起再无任何价位出场：没有 `HARD_STOP_PCT`、
+没有订单止损/止盈，卖出全部由 Trader 决定（[无止损止盈](2026-09-26-no-system-exit-lines.md)）。
 
 策略动作统一：
 
@@ -393,6 +400,9 @@ Intraday Monitor 变成 Significant Observation Detector：
 
 ### T6 — Review
 
+**状态：completed (PR #45)，2026-09-26 修订。** 复盘模型只写理由与候选文字；决策对错由
+行情判定（`evolution/decision_outcomes.py`），不再由模型自评。
+
 新增 `Trader.review_day()`：
 
 输入 Observation / Decision / Fill / Position / Outcome，输出：
@@ -404,6 +414,10 @@ Review 不直接写 Rule。
 
 ### T7 — Learning
 
+**状态：completed (PR #49)，2026-09-26 修订。** 证据单位改为行情判定的决策格子
+（动作 × 情形标签）；Lesson n≥10、Rule n≥50。见
+[收尾计划](2026-09-26-trader-runtime-completion.md)。
+
 实现：
 
 ```text
@@ -414,6 +428,9 @@ Memory → LessonCandidate → Lesson → Rule
 
 ### T8 — Replay 切到 Trader Runtime
 
+**状态：completed on PR #50.** 回放与实盘共用同一 Runtime、同一卖出口径（LLM 回放一律由
+Trader 卖出，无价位出场）。
+
 HistoricalObservationAdapter → Trader.step()。
 
 验收：
@@ -423,6 +440,9 @@ HistoricalObservationAdapter → Trader.step()。
 - 差异仅来自 Observation stream 与 execution environment。
 
 ### T9 — 重新启用已有实验工具
+
+**状态：in progress.** `walk_branch` 新增 rule arm：同一检查点、同一 TraderState 起点，
+对照组与"注入一条人工批准 Rule"的实验组对比行为。
 
 届时 M2-A/M2-B 才用于回答：
 

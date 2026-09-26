@@ -137,7 +137,17 @@ def _base_date(hist: sqlite3.Connection, made_at: datetime) -> str | None:
 def grade(conn: sqlite3.Connection, hist: sqlite3.Connection, *,
           run_id: str, trader_id: str, as_of: str,
           horizon: int = DEFAULT_HORIZON) -> dict:
-    """Grade every sealed decision whose window closed by ``as_of``."""
+    """Grade every sealed decision whose window closed by ``as_of``.
+
+    The market helpers below read rows by name (row``date``), which
+    requires ``sqlite3.Row``. Both callers hand in a bare
+    ``sqlite3.connect`` — the live close-review task and the replay
+    runner — whose default factory is a tuple, so grade sets the factory
+    itself rather than trusting whoever opened the file. Without it every
+    decision lands in "pending" behind a caught TypeError: the day's
+    learning is zero and the only trace is one warning line.
+    """
+    hist.row_factory = sqlite3.Row
     graded = {row["decision_id"] for row in D.decision_outcomes(
         run_id=run_id, trader_id=trader_id, conn=conn)}
     medians: dict[tuple[str, str], float | None] = {}

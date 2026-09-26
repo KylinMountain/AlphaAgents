@@ -1,6 +1,6 @@
 # 论点到期不平仓：到期与失效一样，只唤醒交易员
 
-状态：active
+状态：active（horizon 部分已随 #54 合入；打分修复见追加节）
 创建：2026-09-26
 上游：[无止损止盈](2026-09-26-no-system-exit-lines.md) · [Runtime 收尾](2026-09-26-trader-runtime-completion.md)
 
@@ -63,3 +63,35 @@
 - 2026-09-26：不改 thesis 状态、不加自动 checkpoint。到期是否"兑现"由行情判定
   （C2 的 5 日前瞻）与复盘记账，不由平仓事件定义——否则又造出一个由代码写的结论。
 - 2026-09-26：`settle_orphans` 的 blind_spot 语义不受影响（它只认"仓位没了"）。
+
+
+## 追加：回放行情打分为零的根因与修复（2026-09-26）
+
+horizon30 回放（30/30 完整）的"行情判定"栏为空：505 个可判决策一条未写。
+根因不在数据：离线对同一库跑 `decision_outcomes.grade()` 505 条全部成功。
+真正根因是 `grade()` 的行情辅助函数按列名读行（`row["date"]`），需要
+`sqlite3.Row`；而两个调用方（实盘 `close_review.py:198` 与回放
+`walk_forward.py:1483`）都是裸 `sqlite3.connect`，默认元组工厂——第一次
+`_sessions_from` 抛 TypeError，被 `close_day` 的 except 吃掉，计为 pending，
+当天学习归零，日志只有一行 warning。
+
+**这不止是回放的 bug**：实盘第一次 `close_review`（周一 19:00）也会同样静默归零。
+
+修复：`grade()` 自己设 `hist.row_factory = sqlite3.Row`，不再信任开连接的一方。
+回归测试 `test_grading_works_with_a_bare_connection`（已验证：去掉修复行该测试失败）。
+
+### horizon30-20260105 打分结果（修复后离线重算，505 判定 / 60 未闭合）
+
+| 动作 | right | wrong | flat | 判对率 | 中位超额 |
+|---|---|---|---|---|---|
+| buy | 17 | 22 | 0 | 44% | −1.22pp |
+| hold | 59 | 64 | 8 | 48% | −0.17pp |
+| reduce | 27 | 22 | 2 | 55% | −1.11pp |
+| reject | 99 | 71 | 10 | 58% | −3.11pp |
+| sell | 18 | 14 | 2 | 56% | −0.97pp |
+| wait | 35 | 33 | 2 | 51% | −0.47pp |
+
+读法：买入判对率 <50% 且 reject 的中位超额 −3.11pp（拒掉的票后来跑赢大盘 3.1pp）
+——在 +6.8% 的窗口里大量拒绝/等待就是超额 −7pp 的直接来源，学习信号清晰。
+格子已聚合（如 reject·off_5d_high+run_up_5d n=36），满足 Lesson n≥10 门槛。
+**限定**：同窗口决策共享交易日，n 不是独立样本；单窗口，不是前向验证。

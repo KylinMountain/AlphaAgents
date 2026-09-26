@@ -142,6 +142,26 @@ def test_grading_is_idempotent(book):
                                    conn=book)) == 1
 
 
+def test_grading_works_with_a_bare_connection(book):
+    """The callers open market history with plain sqlite3.connect and no
+    row factory — the live close-review task and the replay runner both
+    do. The helpers read rows by name, so grade must set the Row factory
+    itself. Before that, a bare connection turned every decision into
+    "pending" behind a caught TypeError: thirty replay days, 505 decisions
+    gradeable, zero graded, and the report's only symptom was "窗口内还没
+    有闭合的决策窗口" (found 2026-09-26 on run horizon30-20260105)."""
+    rising = [10, 10, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4, 11.6, 11.8, 12]
+    bare = _hist({"600001": rising})
+    bare.row_factory = None                       # what the callers do
+    _seal(book, [_decision("buy", i=1)])
+    got = O.grade(book, bare, run_id="run", trader_id="default",
+                  as_of=DAYS[-1])
+    assert got["graded"] == 1, "a tuple-factory history must still grade"
+    row = D.decision_outcomes(run_id="run", trader_id="default",
+                              conn=book)[0]
+    assert row["verdict"] == "right"
+
+
 def test_situation_tags_come_from_the_base_session():
     closes = [10, 10, 10, 10, 10, 12, 11]
     hist = _hist({"600001": closes},

@@ -7,15 +7,9 @@ import json
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 ARMS = {
-    "A": {
-        "name": "dual_rank_v0",
-        "direction_selection": "incumbent",
-        "stock_selection": "same_trader",
-        "fund_flow_visible": True,
-    },
     "B": {
         "name": "sector_first_v0",
         "direction_selection": "sector_first",
@@ -116,7 +110,7 @@ def validate(manifest: dict) -> list[str]:
     if manifest.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"schema_version must be {SCHEMA_VERSION}")
     if manifest.get("architecture_arms") != ARMS:
-        errors.append("architecture_arms must match the frozen A/B/C/D contract")
+        errors.append("architecture_arms must match the frozen B/C/D contract")
 
     for field in (
             "capabilities_hash", "decision_config", "model",

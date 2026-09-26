@@ -25,7 +25,6 @@ class SectorCompareError(ValueError):
 
 
 _ARM_ARCHITECTURES = {
-    "A": "dual_rank_v0",
     "B": "sector_first_v0",
     "C": "sector_first_simple_selector",
     "D": "sector_first_no_flow",
@@ -296,13 +295,13 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
         for value in arms.values()
     }
     if len(windows) != 1:
-        raise SectorCompareError("A/B/C/D do not share one validation window")
+        raise SectorCompareError("B/C/D do not share one validation window")
     observed_calendars = {
         tuple(value["observed_days"]) for value in arms.values()
     }
     if len(observed_calendars) != 1:
         raise SectorCompareError(
-            "A/B/C/D do not share the same observed trading-day calendar")
+            "B/C/D do not share the same observed trading-day calendar")
     actual_window = next(iter(arms.values()))["window"]
     if not _registered_window(manifest, actual_window):
         raise SectorCompareError(
@@ -327,7 +326,7 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
     block = manifest["block_method"]
     seed = int(manifest_hash[:16], 16)
     pairings = {}
-    for left, right in (("A", "B"), ("B", "C"), ("B", "D")):
+    for left, right in (("B", "C"), ("B", "D")):
         aligned = _aligned(
             arms[left]["daily_returns_pct"],
             arms[right]["daily_returns_pct"])
@@ -358,7 +357,6 @@ def compare(*, manifest: dict, arm_dirs: dict[str, Path]) -> dict:
 
     risk = {arm: _risk_check(value, manifest) for arm, value in arms.items()}
     required_layers = {
-        "A": ("stock",),
         "B": ("direction", "stock"),
         "C": ("direction", "stock"),
         "D": ("direction", "stock"),

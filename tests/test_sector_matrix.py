@@ -1,4 +1,4 @@
-"""Formal four-arm Sector-First runner stays isolated and preregistered."""
+"""Formal three-arm (B/C/D) Sector-First runner stays isolated and preregistered."""
 
 from __future__ import annotations
 
@@ -139,11 +139,11 @@ def test_matrix_command_carries_all_frozen_decision_knobs(tmp_path):
         manifest=manifest,
         manifest_path=tmp_path / "manifest.json",
         membership_path=tmp_path / "membership.json",
-        target=tmp_path / "state" / "A",
-        out=tmp_path / "arms" / "A",
+        target=tmp_path / "state" / "B",
+        out=tmp_path / "arms" / "B",
         start="2026-01-01",
         days=20,
-        arm="A",
+        arm="B",
         run_id="matrix-A",
     )
     expected = manifest["decision_config"]
@@ -170,11 +170,11 @@ def test_a_manifest_naming_a_cap_still_passes_it(tmp_path):
         manifest=manifest,
         manifest_path=tmp_path / "manifest.json",
         membership_path=tmp_path / "membership.json",
-        target=tmp_path / "state" / "A",
-        out=tmp_path / "arms" / "A",
+        target=tmp_path / "state" / "B",
+        out=tmp_path / "arms" / "B",
         start="2026-01-01",
         days=20,
-        arm="A",
+        arm="B",
         run_id="matrix-A",
     )
     assert cmd[cmd.index("--picks") + 1] == "3"

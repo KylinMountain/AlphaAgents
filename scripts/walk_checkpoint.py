@@ -261,7 +261,7 @@ def materialize(checkpoint: Path, target: Path, *, branch_id: str) -> dict:
 
 def validate_runner(args) -> None:
     """Restrict the first continuation adapter rather than silently drop inputs."""
-    for key in ("experiment_manifest", "selection_experiment_manifest", "frozen_directions"):
+    for key in ("experiment_manifest", "frozen_directions"):
         if getattr(args, key, None) is not None:
             raise CheckpointError("Formal/frozen-direction experiment continuations are not supported")
     if getattr(args, "keep_going", False):

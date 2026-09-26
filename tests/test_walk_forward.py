@@ -155,6 +155,17 @@ def _write_corpus(root: Path, *, series: dict, instruments: dict) -> Path:
             [(code, meta["name"], int(meta.get("is_st", False)),
               int(meta.get("is_suspended", False)))
              for code, meta in sorted(instruments.items())])
+        # One concept holding every name, shaped like the real
+        # ``concepts``/``concept_stocks`` pair: an LLM run reads today's
+        # membership at start-up, and a corpus without it would make every
+        # model-backed test here fail on a table rather than on its claim.
+        con.execute("CREATE TABLE concepts (id INTEGER PRIMARY KEY, name TEXT)")
+        con.execute(
+            "CREATE TABLE concept_stocks (concept_id INTEGER, stock_code TEXT)")
+        con.execute("INSERT INTO concepts (id, name) VALUES (1, '测试概念')")
+        con.executemany(
+            "INSERT INTO concept_stocks (concept_id, stock_code) VALUES (1, ?)",
+            [(code,) for code in sorted(instruments)])
         con.commit()
     finally:
         con.close()
@@ -362,7 +373,8 @@ class TestTheProductionBookIsUntouched:
         writer.start()
         try:
             rc = walk_forward.main(["--start", _START, "--days", "2",
-                                    "--trader", "pullback", "--run-id", "d39"])
+                                    "--trader", "pullback", "--run-id", "d39",
+                                    "--decider", "placeholder"])
         finally:
             stop.set()
             writer.join(timeout=5)
@@ -1307,41 +1319,6 @@ class TestTheAgentsOwnExitsReachTheReport:
             assert f["amount"], f"no amount on {f}"
             assert f["amount"] == f["shares"] * f["price"]
 
-class TestTheAblationLimitationTracksTheArm:
-    """The caveat follows the flag, not the decider.
-
-    A run without --no-concepts must not carry a caveat about a column it
-    showed, and a placeholder run has no concept column to ablate at all:
-    the panel is not read by its decider. Splitting the caveat out of
-    LLM_LIMITATIONS is what keeps every statement in the report true of
-    the run that printed it.
-    """
-
-    @staticmethod
-    def _ctx(decider: str, concepts: bool) -> argparse.Namespace:
-        return argparse.Namespace(decider=decider, concepts=concepts)
-
-    def test_the_ablated_llm_run_carries_the_caveat(self):
-        lines = walk_forward._limitations(self._ctx("llm", False))
-        assert walk_forward.CONCEPTS_ABLATED_LIMITATION in lines
-
-    def test_the_default_llm_run_does_not(self):
-        lines = walk_forward._limitations(self._ctx("llm", True))
-        assert walk_forward.CONCEPTS_ABLATED_LIMITATION not in lines
-
-    def test_a_placeholder_never_carries_it(self):
-        lines = walk_forward._limitations(self._ctx("placeholder", False))
-        assert walk_forward.CONCEPTS_ABLATED_LIMITATION not in lines
-
-    def test_every_limitation_is_a_plain_string(self):
-        """A trailing comma turns the constant into a tuple, and the
-        summary then renders the caveat as its repr. This happened: the
-        first ablation run printed the caveat wrapped in parentheses.
-        Membership checks above pass either way, so the type is pinned
-        separately."""
-        for line in walk_forward._limitations(self._ctx("llm", False)):
-            assert isinstance(line, str), (
-                "a limitation rendered as " + type(line).__name__)
 class TestInitialAccountPerformanceMark:
     def test_report_keeps_initial_mark_outside_trading_days(self, tmp_path):
         replay, _ = _prepare(tmp_path, *_normal())

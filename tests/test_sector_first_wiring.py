@@ -150,51 +150,56 @@ def test_sector_first_order_uses_stock_primary_theme(monkeypatch):
         primary_relation]
 
 
-def test_dual_rank_default_keeps_run_theme(monkeypatch):
-    ctx = _Ctx()
-    ctx.selection_architecture = "dual_rank_v0"
-    panel = [{
-        "code": "600001",
-        "name": "甲",
-        "adv20": 100000,
-    }]
-    monkeypatch.setattr(wf, "_build_panel", lambda *a, **k: panel)
-    _wire_common(monkeypatch)
+def test_an_unflagged_run_is_the_sector_first_trader():
+    """No flag means the target strategy, not a control arm (2026-09-26).
 
-    captured = {}
-    monkeypatch.setattr(
-        wf,
-        "create_pending_order",
-        lambda **kwargs: captured.update(kwargs) or 8,
-    )
-
-    got = wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
-    assert got[0]["theme"] == "RUN-THEME"
-    assert captured["theme"] == "RUN-THEME"
-    assert captured["risk_themes"] == []
-
-
-def test_cli_default_does_not_change_incumbent_architecture():
+    Every Trader Runtime replay from 09-25 to 09-26 ran the change/turnover
+    control because nobody passed ``--selection-architecture``.
+    """
     args = wf.build_parser().parse_args(["--start", "2026-01-30"])
-    assert args.selection_architecture == "dual_rank_v0"
+    assert args.selection_architecture == "sector_first_v0"
+    assert args.decider == "llm"
     assert args.sector_membership is None
 
 
-def test_sector_first_context_requires_pit_archive(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gone", ["dual_rank_v0", "dual_rank_price_v1"])
+def test_the_change_turnover_architectures_are_refused(gone):
+    with pytest.raises(SystemExit):
+        wf.build_parser().parse_args([
+            "--start", "2026-01-30", "--selection-architecture", gone])
+
+
+def test_without_an_archive_the_run_uses_current_membership(monkeypatch):
+    class _Corpus:
+        def __init__(self, _data_dir):
+            pass
+
+    calls = []
+    monkeypatch.setattr(wf, "Corpus", _Corpus)
+    monkeypatch.setattr(
+        SM, "current_from_corpus", lambda: calls.append(1) or ())
+    args = wf.build_parser().parse_args(["--start", "2026-01-30"])
+    args.run_id = "x"
+    with pytest.raises(SystemExit, match="no sector membership"):
+        wf.Context(args)
+    assert calls == [1]
+
+
+def test_the_placeholder_harness_carries_no_architecture(monkeypatch):
     class _Corpus:
         def __init__(self, _data_dir):
             pass
 
     monkeypatch.setattr(wf, "Corpus", _Corpus)
-    args = wf.build_parser().parse_args([
-        "--start", "2026-01-30",
-        "--decider", "llm",
-        "--selection-architecture", "sector_first_v0",
-    ])
+    monkeypatch.setattr(
+        SM, "current_from_corpus",
+        lambda: (_ for _ in ()).throw(AssertionError("read membership")))
+    args = wf.build_parser().parse_args(
+        ["--start", "2026-01-30", "--decider", "placeholder"])
     args.run_id = "x"
-    with pytest.raises(SystemExit, match="sector-membership"):
-        wf.Context(args)
-
+    ctx = wf.Context(args)
+    assert ctx.selection_architecture is None
+    assert ctx.sector_membership_archive == ()
 
 
 def test_no_flow_arm_filters_direction_flow_news_only():
@@ -279,66 +284,6 @@ def test_sector_stock_card_renders_leave_one_out_peer_strength():
     assert "主方向去自身5日相对" in rendered
     assert "+1.23% (3/4)" in rendered
 
-
-
-def test_formal_dual_rank_arm_uses_the_preregistered_research_budget(monkeypatch):
-    from alpha_agents.tools.budget import ResearchBudget
-
-    ctx = _Ctx()
-    ctx.selection_architecture = "dual_rank_v0"
-    ctx.experiment_manifest = {"bound": True}
-    panel = [{
-        "code": "600001",
-        "name": "甲",
-        "adv20": 100000,
-    }]
-    monkeypatch.setattr(wf, "_build_panel", lambda *a, **k: panel)
-    _wire_common(monkeypatch)
-
-    captured = {}
-    monkeypatch.setattr(
-        t1_decider,
-        "propose_sync",
-        lambda **kwargs: captured.update(kwargs) or {
-            "orders": [],
-            "refused": [],
-            "parse_error": None,
-            "raw": "{}",
-            "research_budget": kwargs["research_budget"].summary(),
-        },
-    )
-
-    wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
-    assert isinstance(captured["research_budget"], ResearchBudget)
-    assert captured["research_budget"].max_total_calls == 20
-
-
-def test_ordinary_dual_rank_run_keeps_legacy_unbounded_research(monkeypatch):
-    ctx = _Ctx()
-    ctx.selection_architecture = "dual_rank_v0"
-    panel = [{
-        "code": "600001",
-        "name": "甲",
-        "adv20": 100000,
-    }]
-    monkeypatch.setattr(wf, "_build_panel", lambda *a, **k: panel)
-    _wire_common(monkeypatch)
-
-    captured = {}
-    monkeypatch.setattr(
-        t1_decider,
-        "propose_sync",
-        lambda **kwargs: captured.update(kwargs) or {
-            "orders": [],
-            "refused": [],
-            "parse_error": None,
-            "raw": "{}",
-            "research_budget": None,
-        },
-    )
-
-    wf._decide_llm(ctx, "2026-01-30", "2026-01-29")
-    assert captured["research_budget"] is None
 
 
 def test_event_snapshot_refs_use_the_decision_cutoff(monkeypatch):
